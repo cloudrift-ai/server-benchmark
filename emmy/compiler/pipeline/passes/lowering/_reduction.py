@@ -42,15 +42,6 @@ class Reduction:
 
     fold: object  # the Fold node (typed loosely — ir.tile imports nothing from here)
 
-    def __post_init__(self) -> None:
-
-        # A bilinear fold node answers through its λ-fold reading (``as_fold`` — the one
-        # place the algebra machinery still derives the flat combine for a stored contraction).
-        from emmy.compiler.ir.tile.ir import is_contraction  # noqa: PLC0415 — avoid an import cycle
-
-        if is_contraction(self.fold):
-            object.__setattr__(self, "fold", self.fold.as_fold())
-
     @property
     def names(self) -> tuple[str, ...]:
         """The carried state's SSA names — the stored combine's results."""

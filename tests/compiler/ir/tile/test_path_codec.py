@@ -16,6 +16,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel
 from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> Fold:
@@ -38,7 +39,7 @@ def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: s
         )
     )
     loop = Loop(axis=Axis(k_name, 512), body=body, role=AxisRole.PLANAR)
-    fold = Fold.from_loop(loop)
+    fold = fold_from_loop(loop)
     assert fold.lift is not None
     return fold
 

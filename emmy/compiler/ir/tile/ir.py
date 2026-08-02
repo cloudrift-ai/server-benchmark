@@ -13,7 +13,7 @@ nodes defined **in this module**, alongside ``ir/stmt/algebra``) directly,
 plus a thin set of **root-global schedule fields** — the
 free-axis → grid :class:`~.schedule.Placement` (``place``), the ONE worker inventory (``work``)
 and the warp-spec split (``workers``). The
-per-node schedule slices live in ``TileOp.schedule`` (1r): ``{codec key → resolved TilePlan /
+per-node schedule slices live in ``TileOp.schedule``: ``{codec key → resolved TilePlan /
 ReducePlan / Stage}``, keyed by the tree-path codec's canonical key and read through
 ``ops.Sched`` — the stored term is pure algebra, IMMUTABLE across the whole schedule search
 (flash is a ``Fold.projection(operands=(Fold(operands=(Fold.contraction(QK), Load(V)), lift, combine),))``
@@ -59,7 +59,7 @@ like a contraction operand.
 The combine lives entirely in the ``op`` wrapper (the :class:`Fold` /
 :class:`Fold` / a bilinear ``Fold``s here + ``ir/stmt/algebra``). A
 fold's role is DERIVED (``Fold.role``), never stored; a contraction is the
-a bilinear ``Fold`` kind itself (1s). ``lower(op)`` flattens the
+a bilinear ``Fold`` kind itself. ``lower(op)`` flattens the
 structural tree back to the loop nest.
 
 The stored nodes hold algebra params only; the contraction's placement/schedule
@@ -147,7 +147,7 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
 def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
     """The synthesized expectation contraction of a twisted fold's DERIVED blocked evaluation —
-    flash's ``Oblk = Σ_j P·V``, a a bilinear ``Fold`` (1s). A is the
+    flash's ``Oblk = Σ_j P·V``, a a bilinear ``Fold``. A is the
     register-resident softmax weight ``P`` — a one-stmt cone node whose one legal capture is the
     running max the same derived merge updates — and B is the fold's own expectation operand edge
     (the value ``Load``).
@@ -208,10 +208,9 @@ def _operand_binding(fold: Fold) -> dict:
 
 
 def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
-    """The DERIVED blocked evaluation of a λ-spelled TWISTED fold (step 7 — the composed ``step``
-    sequence dissolved): the INLINE-NODE operand edges at the head in operand order (flash's
-    ``Σ_dd Q·K`` score — its derived position, ahead of the lift body exactly where the stored
-    step held it), the lift body (the scale / mask stmts), then the generated streaming merge
+    """The DERIVED blocked evaluation of a λ-spelled TWISTED fold: the INLINE-NODE operand edges
+    at the head in operand order (flash's ``Σ_dd Q·K`` score, ahead of the lift body), the lift
+    body (the scale / mask stmts), then the generated streaming merge
     with each Load-bound EXPECTATION operand split out as a synthesized contraction
     (:func:`_split_expect` — flash's PV). Deterministic from the stored params only; the operand
     edges consumed here are excluded from the generic first-use splice
@@ -282,122 +281,6 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     return tuple(out)
 
 
-def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, Lambda] | None:
-    """Read the λ spelling off a reduce ``Loop`` whose body is the dissolved ``[pure lift stmts…,
-    Accum folds]`` sequence — ANNOTATION-FREE: every fact (accumulator names, channel ops, folded
-    values) is read off the body's ``Accum``\\ s themselves, and threads into
-    :func:`~emmy.compiler.ir.stmt.algebra.M` with the loop's REAL accumulator names. Returns
-    ``(lift, init, combine)`` — the flat ⊕ pair — or ``None`` when the shape does not read
-    off cleanly (a composed step, an effectful stmt, an identity-less op) — the caller keeps the
-    raw-loop escape. A TWISTED (exp-family) loop has no self-describing ``Accum`` spelling (its
-    merge interleaves ``base``-``Accum`` folds with ψ rescales), so it extracts only against a
-    ``like`` fold carrying the algebra (:func:`_extract_twisted_lift` — the 030 split-partial
-    path; recognition builds twisted folds directly, never through here). :meth:`Fold.from_loop`
-    re-derives the loop and keeps the λ spelling only on byte-identity, so this extraction can
-    stay shape-strict without a correctness burden."""
-    if like is not None and component_ops(like.combine) is None:
-        return _extract_twisted_lift(loop, like)
-    accums = [s for s in loop.body if isinstance(s, Accum)]
-    prefix = [s for s in loop.body if not isinstance(s, Accum)]
-    if not accums:
-        return None
-    if any(a.base is not None for a in accums):
-        # A ``base``-``Accum`` is the ψ-rescale signature of a dissolved exp-family merge — the
-        # twisted spelling reconstructs from the body alone (the byte-compare is the validator).
-        return _extract_twisted_self(loop)
-    if any(not s.pure for s in prefix):
-        return None  # an effectful / raw-block step is not λ-representable (the flat zero-axis escape)
-    names = tuple(a.name for a in accums)
-    try:
-        lift = Lambda(params=(loop.axis.name,), body=Body(tuple(prefix)), results=tuple(a.value for a in accums))
-        init, combine = M(*(a.op for a in accums), names=names)
-    except ValueError:
-        return None  # an undefined result / identity-less op — not the canonical dissolved shape
-    if any(a.dtype is not None for a in accums):
-        # A typed accumulator is PRECISION, which the λ spelling does not carry — the derived
-        # ``Accum``\\ s come back dtype-free, so the byte-identity gate would reject the fold
-        # anyway. Decline here and keep the raw-loop escape rather than silently dropping it.
-        return None
-    return lift, init, combine
-
-
-def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
-    """Reconstruct the exp-family λ spelling from a TWISTED reduce ``Loop``'s body ALONE — no
-    side-band algebra: the state is ``(the maximum-Accum, the add-Accums in body order)`` (the
-    generator emits them exactly there), the pivot term is the maximum's folded score, and each
-    non-pivot term is either the literal ``1.0`` (a denominator) or an external value name (an
-    expectation) — resolved by regenerating the streaming merge per candidate and BYTE-COMPARING
-    it against the body's tail (``exp_merge`` is deterministic, so equality is proof). The pure
-    prefix ahead of the merge becomes the ``lift`` body. Returns ``None`` when no candidate
-    matches — a composed step (flash's in-step folds) or a foreign merge spelling."""
-    from itertools import product as _product  # noqa: PLC0415
-
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge  # noqa: PLC0415
-
-    body = tuple(loop.body)
-    accums = [s for s in body if isinstance(s, Accum)]
-    maxes = [a for a in accums if a.op.reduce_canon == "maximum"]
-    adds = [a for a in accums if a.op.reduce_canon == "add"]
-    if len(maxes) != 1 or not adds or len(maxes) + len(adds) != len(accums):
-        return None
-    names = (maxes[0].name, *(a.name for a in adds))
-    score = str(maxes[0].value)
-    # A non-pivot term is the literal 1.0 (a denominator) or a value NAME — defined by a prefix
-    # Load/Assign (flash's ``v``) or read from an enclosing scope. Every such name is a candidate;
-    # the byte-compare below is the arbiter, so an over-wide pool costs regenerations, not
-    # correctness (exp_merge embeds the term spelling, so no two candidates collide).
-    defined = {s.name for s in body if isinstance(s, (Load, Assign))}
-    read = {a for s in body for a in (getattr(s, "args", None) or ())}
-    cands = sorted((defined | read) - {score} - set(names))
-    for combo in _product([1.0, *cands], repeat=len(adds)):
-        merge = tuple(exp_merge(names, (score, *combo), key=names[0]))
-        if len(body) < len(merge) or body[-len(merge) :] != merge:
-            continue
-        prefix = body[: -len(merge)]
-        if any(not isinstance(s, (Load, Assign)) for s in prefix):
-            return None  # a composed step keeps the raw-loop escape
-        try:
-            lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=(score, *combo))
-        except ValueError:
-            return None
-        other = tuple(f"{n}__o" for n in names)
-        combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-        return lift, (float("-inf"),) + (0.0,) * len(adds), combine
-    return None
-
-
-def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda] | None:
-    """Read the λ spelling off an exp-family TWISTED reduce ``Loop`` against the ``like`` fold
-    that carries its algebra (the 030 split partial — the sliced loop's state names are the
-    original fold's): the body must be ``[pure score prefix…, the dissolved streaming merge]``
-    verbatim (the merge regenerated from ``like``'s stored combine + injection terms), the prefix
-    becomes the ``lift`` body and the injected terms its results (the singleton — ``(x, 1)``),
-    and the flat ⊕ pair stores ``like``'s combine — the generated cross-partition program over
-    the loop's REAL state names (the formation invariant the consuming ``Fold`` asserts).
-    ``None`` when the shape does not read off cleanly — a composed step (flash's in-step QK / PV
-    folds, which carry their own schedule slices), a foreign merge spelling, a role the singleton
-    shape cannot carry. :meth:`Fold.from_loop`'s byte-identity gate stands behind this extraction
-    like the degenerate one's."""
-    from emmy.compiler.ir.stmt.carrier import exp_merge  # noqa: PLC0415
-
-    names = tuple(like.combine.results)
-    terms = tuple(like.lift.results)
-    merge = tuple(exp_merge(names, terms, key=names[0]))
-    body = tuple(loop.body)
-    if len(body) < len(merge) or body[-len(merge) :] != merge:
-        return None
-    prefix = body[: -len(merge)]
-    if any(not isinstance(s, (Load, Assign)) for s in prefix):
-        return None  # a composed step keeps the step spelling
-    if not terms or not isinstance(terms[0], str):
-        return None
-    try:
-        lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=terms)
-    except ValueError:
-        return None
-    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), like.combine
-
-
 @dataclass(frozen=True)
 class Fold(Stmt):
     """A scheduled reduce — the typed successor of the bare annotated reduce
@@ -439,7 +322,7 @@ class Fold(Stmt):
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
     # needs. ``lower`` splices each edge's body before its first use (:func:`_splice_operands`).
     operands: tuple = ()
-    # NO schedule fields (1r): the ``tile`` / ``reduce`` / ``stage`` slices live in
+    # NO schedule fields: the ``tile`` / ``reduce`` / ``stage`` slices live in
     # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
     # across the whole schedule search (a fork is a different map, never a rebuilt tree).
     # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``030_split_reduce``
@@ -481,7 +364,7 @@ class Fold(Stmt):
         assert len(lam.results) == n, "one lift result per monoid component"
         if component_ops(self.combine) is not None:
             return  # DEGENERATE: the componentwise family — nothing further to validate
-        # TWISTED (1p): the family is selected STRUCTURALLY, never stored — the stored combine
+        # TWISTED: the family is selected STRUCTURALLY, never stored — the stored combine
         # must BE the exp/LSE generator's program over these state names (recognition built it
         # exactly there; a foreign twisted combine has no derivation yet and is rejected loudly).
         # The state-component ROLE decision is shape-derived off the lift's injected singleton,
@@ -496,33 +379,6 @@ class Fold(Stmt):
             "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
         )
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
-
-    @classmethod
-    def from_loop(cls, loop: Loop, like: Fold | None = None) -> Fold | None:
-        """Build a :class:`Fold` from a reduce ``Loop`` — the loop-to-node constructor,
-        ANNOTATION-FREE: every algebra fact reads off the body's own ``Accum``\\ s
-        (:func:`_extract_lift`), so the loop carries no side-band algebra. A TWISTED loop has no
-        self-describing spelling (its merge interleaves ``base``-``Accum`` folds with ψ
-        rescales), so it extracts only against the ``like`` fold that carries its algebra —
-        030's split partial, the sliced loop of a known fold. A canonical loop (the dissolved
-        ``[pure lift stmts…, fold(s)]`` sequence) stores λ-spelled — ``lift`` + the flat
-        ``(init, combine)`` pair threading the loop's real accumulator names — and the
-        byte-identity gate settled at construction. A NON-canonical shape (an effectful /
-        raw-block step, a non-reproducible derivation) returns ``None`` — the caller keeps the
-        raw-loop-IR zero-axis ``Fold`` escape."""
-        lifted = _extract_lift(loop, like)
-        if lifted is None:
-            return None
-        lift, init, combine = lifted
-        fold = cls(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine)
-        # The byte-identity gate — a non-reproducible BODY keeps the raw-loop escape. The role
-        # annotation is the fold's own DERIVED read, deliberately excluded: an unbindable matvec
-        # captures a CONTRACTION-shaped loop and derives PLANAR — the 1l demotion, now a
-        # formation fact (its loads stay inline in the lift).
-        derived = fold.loop
-        if (derived.body, derived.axis, derived.unroll) != (loop.body, loop.axis, loop.unroll):
-            return None
-        return fold
 
     @property
     def role(self) -> AxisRole:
@@ -555,7 +411,7 @@ class Fold(Stmt):
     def _contraction(self) -> tuple[object, tuple[Channel, ...]] | None:
         """The BILINEAR reading — ``(a, channels)`` — or ``None`` when this fold is not a
         contraction. This is the derived successor of the stored bilinear ``Fold``'s ``a`` /
-        ``channels`` fields (1s inverted at the collapse): the shape it recognizes is exactly the
+        ``channels`` fields: the shape it recognizes is exactly the
         one :meth:`Fold.contraction` builds, so ``a`` / ``channels`` / ``b_trans`` read back
         off any fold recognition stored as a contraction.
 
@@ -614,31 +470,25 @@ class Fold(Stmt):
         """The projection body — ``lift.body`` (the stmts live on the lambda)."""
         return self.lift.body
 
-    def with_body(self, body) -> Fold:
-        """A copy with the lambda's body replaced (params / results preserved)."""
-        return replace(self, lift=_loop_ir_fn(self.lift.params, Body.coerce(body), self.lift.results))
-
     @property
     def k_axis(self) -> Axis | None:
-        """The contraction axis — this fold's own ``axis`` (what the retired ``Contraction.k_axis`` was)."""
+        """The contraction axis — this fold's own ``axis`` (what the contraction axis)."""
         return self.axis
 
     @property
     def a(self):
         """The shared M-resident operand edge of the bilinear reading (``operands[1]``)."""
-        return self._contract_view[0]
+        v = self._contraction
+        assert v is not None, f"not a contraction fold (role={self.role.value}) — no `a` reading"
+        return v[0]
 
     @property
     def channels(self) -> tuple[Channel, ...]:
         """The product channels ``(bᵢ, accᵢ)`` of the bilinear reading — arity 1 is a plain
         matmul, arity N the fused gate⊗up edge over ONE shared ``a``."""
-        return self._contract_view[1]
-
-    @property
-    def _contract_view(self):
         v = self._contraction
-        assert v is not None, f"not a contraction fold (role={self.role.value}) — no a / channels reading"
-        return v
+        assert v is not None, f"not a contraction fold (role={self.role.value}) — no `channels` reading"
+        return v[1]
 
     @property
     def b(self):
@@ -668,12 +518,6 @@ class Fold(Stmt):
         return not isinstance(self.a, Load)
 
     @property
-    def b_computed(self) -> bool:
-        """True when the primary B is computed rather than a gmem ``Load``. Every staged tier
-        needs B's gmem address, so each gates on ``isinstance(c.b, Load)`` and declines here."""
-        return not isinstance(self.b, Load)
-
-    @property
     def a_name(self) -> str:
         """The A operand's bound SSA name."""
         return _operand_name(self.a)
@@ -690,14 +534,9 @@ class Fold(Stmt):
         ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``)."""
         return isinstance(self.b, Load) and self.axis.name in self.b.index[-1].free_vars()
 
-    def as_fold(self) -> Fold:
-        """The λ reading — now the node ITSELF. Kept as the name ``Reduction`` and the PLANAR
-        demotion already call, so their spelling does not move with the collapse."""
-        return self
-
     @classmethod
     def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...]) -> Fold:
-        """A BILINEAR fold — the matmul cell (what the retired bilinear ``Fold`` kind named). Unlike
+        """A BILINEAR fold — the matmul cell (what the bilinear fold kind named). Unlike
         :meth:`projection` this constructor GENERATES algebra: operands `(b₀, a, b₁…)`, the lift
         ``λ(k, b, a, b₂…). (b·a, a·b₂, …)`` and the componentwise-additive ⊕ over the channel
         accumulators. That generated shape is exactly what :attr:`_contraction` reads back, so
@@ -729,7 +568,7 @@ class Fold(Stmt):
 
     @classmethod
     def projection(cls, fn: Lambda | None = None, operands: tuple = (), *, body=None, results: tuple[str, ...] | None = None) -> Fold:
-        """A ZERO-AXIS fold — the pointwise / projection cell (what the retired zero-axis ``Fold`` kind was).
+        """A ZERO-AXIS fold — the pointwise / projection cell (what the zero-axis fold kind was).
         No axis and no monoid: ``fn`` becomes the ``lift``, and it IS the per-cell compute, so
         softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over the
         reducing fold rather than a wrapper kind around it.
@@ -851,7 +690,7 @@ class Fold(Stmt):
     def out(self) -> str:
         """The bound output name — the carried state's primary component (the combine's first
         result; a bare reduce's grid ``Write`` is glue). At zero axes there is no carried state,
-        so it is the projection's primary result (what the retired ``Map.out`` read)."""
+        so it is the projection's primary result (what what a projection's ``out`` read)."""
         if self.axis is None:
             r = self.lift.results
             assert r and isinstance(r[0], str), f"zero-axis Fold has no named result: {r!r}"
@@ -901,7 +740,7 @@ def is_contraction(x) -> bool:
     """The BILINEAR reading of ``x`` — the predicate that replaced ``isinstance(_, bilinear fold)``
     when the kind dissolved. A predicate, not a kind: it cannot be constructed, subclassed or
     annotated, and it answers ``False`` for a non-node (a ``Load`` edge, a plain stmt in a step
-    stream) exactly as the retired ``isinstance`` did. Prefer this over a bare
+    stream) exactly as a type test would. Prefer this over a bare
     ``x.role is AxisRole.CONTRACTION`` anywhere ``x`` is not already known to be a ``Fold``."""
     return isinstance(x, Fold) and x._contraction is not None
 
@@ -973,7 +812,7 @@ def _operand_result_names(op) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Store:
-    """One ROOT-STORE decoration at the kernel boundary (1q) — the effect the stored term no
+    """One ROOT-STORE decoration at the kernel boundary — the effect the stored term no
     longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
     names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
     NOT part of the term: ``TileOp.stores`` owns the tuple, and consumers reconstitute the
@@ -1066,7 +905,7 @@ def _loop_ir_fn(params, body, results) -> Lambda:
     flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (``Init``
     seeds + the un-annotated ``StateMerge`` merge ``Loop``), the prologue'd split partial, and
     the coop norm→linear/geglu sibling's composed contraction tail. A PURE body goes through
-    strict :class:`Lambda` formation — every ROOT STORE left the term at 1q (``TileOp.stores``),
+    strict :class:`Lambda` formation — every ROOT STORE left the term (``TileOp.stores``),
     so impurity here is only iteration/seed structure, never an effect on the output. Reached
     exclusively through zero-axis ``Fold``'s legacy ``body=`` construction / ``with_body`` / the rewrite
     handler — never build one by hand; the escape spelling dies when recognition becomes total
@@ -1139,7 +978,7 @@ class TileOp(Op):
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product a bilinear ``Fold``'s arity (see the module docstring), so stored trees are already
     resolved and every walk is a plain tree walk. The per-node schedule SLICES live in
-    ``schedule`` (1r): ``{codec key → resolved TilePlan / ReducePlan / Stage}``, keyed by the
+    ``schedule``: ``{codec key → resolved TilePlan / ReducePlan / Stage}``, keyed by the
     tree-path codec's canonical key (:mod:`~emmy.compiler.ir.tile.path` — a fold may carry all
     three families at once, so the path alone cannot key the map; the family selects the slice
     kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
@@ -1162,7 +1001,7 @@ class TileOp(Op):
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
     # the effectful stmt stream via ``effect_tail`` — never read a ``Write`` out of the term.
     stores: tuple = ()
-    # The ONE worker inventory (1r in-memory — ``ir.schedule.Workers``): the ``w``/``n`` worker
+    # The ONE worker inventory (``ir.schedule.Workers``): the ``w``/``n`` worker
     # tokens factored out of the per-site TILE values, derived at option assembly
     # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
     # pure-reduce forms (derived launch geometry). The wire format still spells the embedded
@@ -1170,47 +1009,11 @@ class TileOp(Op):
     work: object = None
 
     def pretty_body(self) -> str:
-        """Render the kernel structurally (the dump view) — no lowering and nothing derived: the
-        caller facts that live BESIDE the term (``place`` / ``workers`` / ``work``), then the
-        STORED ``op`` tree with each node's schedule slices annotated from ``schedule``, then any
-        schedule entry no stored node carries (``ops.unplaced_slices`` — a slice keyed against
-        DERIVED material, which the term deliberately does not show), then the kernel-boundary
-        ``stores`` (the root ``Write``\\ s live here since 1q, so a dump without them would hide
-        where the kernel's output lands). The regions are the owners — geometry, algebra,
-        schedule, boundary — kept visibly apart."""
-        from emmy.compiler.ir.tile.ops import pretty, unplaced_slices  # noqa: PLC0415
+        """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns
+        every presentation concern in the layer."""
+        from emmy.compiler.ir.tile._dump import tile_body  # noqa: PLC0415 — presentation, loaded on demand
 
-        if self.op is None:
-            return ""
-        lines = [f"    {line}" for line in self._pretty_place()]
-        lines += pretty(self.op, "    ", tile=self)
-        lines += self._pretty_region("schedule", [f"{k} = {v.spell() or '·'}" for k, v in unplaced_slices(self)])
-        stores = [f"{f'sweep({st.sweep.name}) ' if st.sweep else ''}{ln.strip()}" for st in self.stores for ln in st.write.pretty()]
-        lines += self._pretty_region("stores", stores)
-        return "\n".join(lines)
-
-    @staticmethod
-    def _pretty_region(title: str, rows: list[str]) -> list[str]:
-        """One titled region below the term, its rows as tree branches. Empty rows print nothing —
-        an absent region IS the decided-empty, same as an absent schedule key."""
-        if not rows:
-            return []
-        return [f"    {title}", *(f"    {'└─' if i == len(rows) - 1 else '├─'} {r}" for i, r in enumerate(rows))]
-
-    def _pretty_place(self) -> list[str]:
-        """The geometry lines above the term — the placement (free axes and their grid binding,
-        or ``unmapped`` before the schedule decides one) and the kernel's one worker
-        inventory. Omitted entirely when nothing has been decided yet."""
-        out = []
-        axes = lambda a: ", ".join(x.name for x in a)  # noqa: E731
-        if self.place.free or self.place.grid:
-            grid = f"grid=({axes(self.place.grid)})" if self.place.is_mapped else "unmapped"
-            out.append(f"place  free=({axes(self.place.free)})  {grid}")
-        if self.work is not None:
-            out.append(f"work   {self.work.spell()}")
-        if self.workers is not None:
-            out.append(f"wspec  {self.workers.spell()}")
-        return out
+        return tile_body(self)
 
 
 __all__ = [

@@ -18,6 +18,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, component_ops, degenerate
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Channel, Fold
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
@@ -35,7 +36,7 @@ def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
 
 def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     loop = _dissolved_loop()
-    fold = Fold.from_loop(loop)
+    fold = fold_from_loop(loop)
     assert fold is not None and fold.lift is not None
     assert fold.lift.params == ("k",)  # the iteration var; loads stay inline in the lift
     assert fold.lift.results == ("v1",)
@@ -51,7 +52,7 @@ def test_from_loop_declines_a_non_reproducible_shape() -> None:
     # carries axes=(axis,), so the byte-identity gate declines and ``from_loop`` returns ``None``:
     # the raw-loop-IR escape replaced the retired step fallback.
     loop = _dissolved_loop(axes_stamped=False)
-    assert Fold.from_loop(loop) is None
+    assert fold_from_loop(loop) is None
 
 
 def _view(arity: int = 2) -> Fold:
@@ -61,20 +62,6 @@ def _view(arity: int = 2) -> Fold:
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))),
         channels=chans,
     )
-
-
-def test_as_fold_is_lambda_spelled_and_loop_byte_identical() -> None:
-    """``as_fold`` is the node's DERIVED λ reading — the algebra spelling ``Reduction`` (the
-    cross-partition programs) and ``Fold.demoted`` consume. Its derived loop must stay
-    byte-identical to the node's own synthesized loop at every arity."""
-    for arity in (1, 2):
-        view = _view(arity)
-        fold = view.as_fold()
-        assert fold.lift is not None
-        # The derived serial step + operand splice reproduce the node's synthesized product loop
-        # BODY exactly (the same triple ``from_loop``'s byte-identity gate compares; the λ reading
-        # derives PLANAR by design — the demotion's spelling — so the role annotation differs).
-        assert (fold.loop.body, fold.loop.axis, fold.loop.unroll) == (view.loop.body, view.loop.axis, view.loop.unroll)
 
 
 # --- the twisted derivation (1p) — online softmax stores lift (x, 1) + Monoid(init, combine) ---- #
@@ -91,7 +78,7 @@ def _softmax_loop() -> Loop:
 
 def test_twisted_from_loop_stores_the_true_monoid() -> None:
     loop = _softmax_loop()
-    fold = Fold.from_loop(loop)
+    fold = fold_from_loop(loop)
     assert fold is not None and fold.lift is not None
     assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
     assert fold.init == (float("-inf"), 0.0)
@@ -127,7 +114,7 @@ def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> No
 
 
 def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
-    fold = Fold.from_loop(_softmax_loop())
+    fold = fold_from_loop(_softmax_loop())
     ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
     assert out.combine.results == ("m2", "l2")
@@ -137,7 +124,7 @@ def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
 
 
 def test_rewrite_renames_lift_monoid_and_carrier_in_lockstep() -> None:
-    fold = _view(2).as_fold()
+    fold = _view(2)
     ren = {"acc0": "r0", "acc1": "r1", "a_e": "av", "b0_e": "b0v", "b1_e": "b1v", "acc0__v": "r0__v", "acc1__v": "r1__v"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
     assert out.combine.results == ("r0", "r1")
@@ -170,7 +157,7 @@ def test_demoted_edge_algebra_reads_off_the_stored_params() -> None:
     The equivalence is structural: the degenerate arm of the derived step interleaves exactly one
     ``Accum(name=combine.results[i], value=lift.results[i], op=⊕ᵢ)`` per component into the lift
     body, so every field the tier reads has a stored home."""
-    fold = Fold.from_loop(_demoted_edge_loop())
+    fold = fold_from_loop(_demoted_edge_loop())
     assert fold is not None and fold.role is AxisRole.PLANAR
 
     derived = list(fold.step_stmts())
@@ -191,7 +178,7 @@ def test_demoted_edge_algebra_reads_off_the_stored_params() -> None:
 def test_demoted_edge_composes_test_reads_stored_structure() -> None:
     """``_composes`` (the "bare statistic reduce" negation) scans the two places a node can be
     STORED — an operand edge, or inline in the lift body — instead of the derived step."""
-    fold = Fold.from_loop(_demoted_edge_loop())
+    fold = fold_from_loop(_demoted_edge_loop())
     assert fold is not None
     stored = any(isinstance(s, Fold) for s in fold.lift.body) or any(isinstance(e, Fold) for e in fold.operands)
     step = any(isinstance(s, Fold) for s in fold.step_stmts()) or any(isinstance(e, Fold) for e in fold.operands)

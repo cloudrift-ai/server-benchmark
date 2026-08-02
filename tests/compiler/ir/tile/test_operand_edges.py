@@ -97,7 +97,7 @@ def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
 
 
 def test_the_node_walk_covers_inline_operand_edges() -> None:
-    fold = _product().as_fold()
+    fold = _product()
     assert _product().a in [s.node for s in sites(fold)]  # the cone edge, walked off the STORED fold
 
 
@@ -131,7 +131,7 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     updates. Legal to build and lower (its one home is in scope) — just not cuttable, which
     ``_captured_values`` is the predicate for."""
     node = _node(_capturing_cone(), ("acc_g", "Wg"))
-    fold = node.as_fold()
+    fold = node
     assert lower(fold)  # lowers fine — position in the enclosing body is what makes it legal
     cone = node.a
     # The output axes are the CALLER's placement — never on the node — so the cut supplies them

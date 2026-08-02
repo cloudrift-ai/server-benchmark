@@ -27,6 +27,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import Fold, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
 
 
@@ -459,7 +460,7 @@ def _prologue_shape(*, b_layouts):
 
     m, n, k, r = Axis("m", 8), Axis("n", 16), Axis("k", 32), Axis("r", 32)
     fold = Accum(name="sacc", value="sq", op="add", axes=("r",))
-    stat = Fold.from_loop(
+    stat = fold_from_loop(
         Loop(
             axis=r,
             body=Body(

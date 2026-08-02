@@ -65,9 +65,10 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import Sched, head, lower, nodify_reduce, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import Sched, head, lower, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
 
 PATTERN = [Pattern("root", TileOp)]
 

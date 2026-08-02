@@ -20,6 +20,7 @@ from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Fold, ReducePlan, TileOp
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, lower, reduce_loop, reduce_plan
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _sum_loop() -> Loop:
@@ -34,7 +35,7 @@ def _sum_loop() -> Loop:
 
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
     loop = _sum_loop()
-    red = Fold.from_loop(loop)
+    red = fold_from_loop(loop)
     assert red is not None
     # The synthesized loop is byte-identical to the captured one (axis / role / body).
     assert red.loop == loop
@@ -44,7 +45,7 @@ def test_from_loop_reconstructs_the_loop_exactly() -> None:
 
 def test_bare_reduction_lowers_to_just_the_loop() -> None:
     loop = _sum_loop()
-    red = Fold.from_loop(loop)
+    red = fold_from_loop(loop)
     assert red is not None
     assert lower(red) == [loop]
     # A bare reduce's grid ``Write`` is glue — ``out`` is the carried state's primary component.
@@ -54,7 +55,7 @@ def test_bare_reduction_lowers_to_just_the_loop() -> None:
 def test_projected_reduce_is_a_map_over_the_reduction() -> None:
     loop = _sum_loop()
     proj = (Assign(name="rms", op="sqrt", args=("acc",)),)
-    node = Fold.projection(body=Body(proj), operands=(Fold.from_loop(loop),))
+    node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))
     # lower flattens the source's loop then the projection body — the bare-loop ``Map`` body.
     assert lower(node) == [loop, *proj]
     assert node.out == "rms"  # the projection's last def
@@ -68,7 +69,7 @@ def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
     guarantee that keeps ``op_cache_key`` stable across the lift."""
     loop = _sum_loop()
     proj = (Write(output="out", index=(Var("m"),), value="acc"),)
-    node = Fold.projection(body=Body(proj), operands=(Fold.from_loop(loop),))
+    node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))
     legacy = Fold.projection(body=(loop, *proj))
     assert lower(node) == lower(legacy)
     assert reduce_loop(node) == reduce_loop(legacy)
@@ -93,7 +94,7 @@ def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
     from emmy.compiler.ir.tile.ops import sched_of
 
     plan = ReducePlan.of(coop=128)
-    red = Fold.from_loop(_sum_loop())
+    red = fold_from_loop(_sum_loop())
     assert red is not None
     # A bare reduce root and a projecting Map both surface the partition keyed on the fold.
     bare = _tile(red)
@@ -125,7 +126,7 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
         body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x_e", 1.0), key="m_i"))),
         role=AxisRole.TWISTED,
     )
-    red = Fold.from_loop(loop)
+    red = fold_from_loop(loop)
     assert red.role is AxisRole.TWISTED
     assert red.loop == loop  # the derivation reproduces the recognizer's annotation exactly
     assert axis_role(red) is AxisRole.TWISTED
@@ -179,7 +180,8 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
 def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
     """A flat ``Map`` holding just the annotated reduce loop nodifies to a **bare** ``Fold`` node
     carrying the partition — ``lower`` byte-identical, ``reduce_plan`` reading the node."""
-    from emmy.compiler.ir.tile.ops import nodify_reduce, sched_of
+    from emmy.compiler.ir.tile.ops import sched_of
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
 
     loop = _sum_loop()
     flat = Fold.projection(body=(loop,))
@@ -195,7 +197,7 @@ def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
 def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
     """A fused-epilogue reduce (loop then projection) nodifies to ``Fold.projection(body=proj,
     source=Fold)`` — the tail rides the wrapping ``Map``, the partition the ``Fold``."""
-    from emmy.compiler.ir.tile.ops import nodify_reduce
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
 
     loop = _sum_loop()
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"),), value="y"))
@@ -416,7 +418,7 @@ def test_there_is_exactly_one_stored_node_kind_and_it_is_a_stmt() -> None:
     from emmy.compiler.ir.stmt.base import Stmt
 
     assert issubclass(Fold, Stmt)
-    for built in (_contraction(), Fold.projection(body=Body(()), operands=()), Fold.from_loop(_sum_loop())):
+    for built in (_contraction(), Fold.projection(body=Body(()), operands=()), fold_from_loop(_sum_loop())):
         assert type(built) is Fold
 
 
@@ -472,7 +474,7 @@ def test_both_operand_edges_have_the_same_type() -> None:
 
 def test_computed_b_exposes_the_same_accessors_as_a() -> None:
     c = _computed_b_contraction()
-    assert c.b_computed and not c.a_computed
+    assert not isinstance(c.b, Load) and not c.a_computed
     assert c.b_name == "wn"
     assert isinstance(c.b_body[0], Load) and c.b_body[-1].op.name == "exp"
     # Both edges' loaded buffers are external reads; the computed ``wn`` is an internal temp.
@@ -513,7 +515,7 @@ def test_computed_b_factorizes_at_the_scalar_tier() -> None:
 def test_both_edges_may_be_computed_at_once() -> None:
     """Nothing privileges one side: a contraction of two computed operands lowers too."""
     c = _computed_b_contraction(a_load=False)
-    assert c.a_computed and c.b_computed
+    assert c.a_computed and not isinstance(c.b, Load)
     assert any(isinstance(s, Accum) for s in c.loop.body)
 
 

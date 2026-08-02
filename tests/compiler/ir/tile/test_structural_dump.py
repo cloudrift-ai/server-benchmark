@@ -24,6 +24,7 @@ from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Fold, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, pretty, unplaced_slices
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _stat_fold() -> Fold:
@@ -35,7 +36,7 @@ def _stat_fold() -> Fold:
             Accum(name="acc0", value="v1", op="add", axes=("k",)),
         )
     )
-    return Fold.from_loop(Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR))
+    return fold_from_loop(Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR))
 
 
 def _cone() -> Fold:

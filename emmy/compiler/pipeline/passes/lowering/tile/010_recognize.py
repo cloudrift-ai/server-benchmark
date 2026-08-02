@@ -79,6 +79,7 @@ from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
 
@@ -277,7 +278,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
     # a bilinear ``Fold`` right after the free axes are ordered (:func:`_nodify_contraction`).
     # ``lower`` flattens either back identically.
     if annotated.role in (AxisRole.PLANAR, AxisRole.TWISTED):
-        reduction = Fold.from_loop(annotated)
+        reduction = fold_from_loop(annotated)
         if reduction is None:  # not λ-representable — the raw-loop-IR escape (the flat zero-axis fold)
             return Fold.projection(body=(annotated, *projection)), ()
         if bare:
@@ -327,7 +328,7 @@ def _nodify_contraction(node, free: tuple):
             # STORED form is the a bilinear ``Fold`` itself (1s) — pure algebra; the
             # output axes / tile / stage are caller facts, stamped at the point of use.
             return _project(con, epi)
-    red = Fold.from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
+    red = fold_from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
     if red is None:  # not λ-representable — the raw-loop-IR escape (the flat zero-axis fold)
         return Fold.projection(body=(rloop, *projection)), ()
     return _project(red, projection)

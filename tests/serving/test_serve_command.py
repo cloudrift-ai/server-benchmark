@@ -268,3 +268,20 @@ def test_serve_generate_bench_targets_completions(capsys):
     assert "--runner generate" in out[0]
     assert "--backend openai" in out[1] and "/v1/completions" in out[1]
     assert "--random-output-len" in out[1]  # generative bench needs a generation length
+
+
+def test_health_timeout_default():
+    args = _parse(["serve", MODEL, "--bench"])
+    assert args.health_timeout == 1800
+
+
+def test_health_timeout_after_model_is_extracted_not_forwarded(capsys):
+    # A fresh-shape first boot can compile past the 1800 s default; --health-timeout
+    # widens the --bench /health window. Like every emmy flag it must be extracted
+    # from the REMAINDER, not forwarded to vllm serve.
+    args = _parse(["serve", MODEL, "--bench", "--dry-run", "--health-timeout", "5400"])
+    handle_serve(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 2
+    assert "--health-timeout" not in out[0] and "--health-timeout" not in out[1]
+    assert args.health_timeout == 5400

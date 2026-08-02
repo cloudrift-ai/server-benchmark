@@ -273,7 +273,9 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --stock                # raw-vLLM b
 ```
 
 Without `--bench` the process execs `vllm serve` (signals flow to vLLM directly). With `--bench` the server runs as a
-subprocess (logs to a temp file), `/health` is polled (up to 30 min — first boot compiles the model), then
+subprocess (logs to a temp file), `/health` is polled (`--health-timeout` seconds, default 1800 — first boot compiles
+the model; raise it when a fresh-serving-shape compile runs longer, e.g. a new prefill-bucket/max-num-batched-tokens
+combination on a big model, or the kill lands mid-compile and no pack is saved), then
 `vllm bench serve` runs against it (`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and
 the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
 /v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.

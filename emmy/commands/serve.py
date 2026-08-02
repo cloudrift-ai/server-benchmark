@@ -80,6 +80,13 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     parser.add_argument(
         "--bench-seed", type=int, default=d(0), help="Bench prompt-sampling seed (with --bench; `--seed` itself forwards to vllm serve)."
     )
+    parser.add_argument(
+        "--health-timeout",
+        type=int,
+        default=d(_HEALTH_TIMEOUT_S),
+        help="Seconds to wait for /health before killing the server (with --bench; raise it when a "
+        "fresh-shape first boot compiles longer than the default 1800).",
+    )
     parser.add_argument("--dry-run", action="store_true", default=d(False), help="Print the vllm command(s) without running.")
 
 
@@ -363,16 +370,18 @@ def handle_serve(args):
         os.execve(vllm, serve_cmd, env)
 
     bench_cmd[0] = vllm
-    _serve_and_bench(serve_cmd, bench_cmd, port, env=env)
+    _serve_and_bench(serve_cmd, bench_cmd, port, env=env, health_timeout_s=args.health_timeout)
 
 
-def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str, *, env: dict | None = None) -> None:
+def _serve_and_bench(
+    serve_cmd: list[str], bench_cmd: list[str], port: str, *, env: dict | None = None, health_timeout_s: int = _HEALTH_TIMEOUT_S
+) -> None:
     log_file = tempfile.NamedTemporaryFile(mode="wb", prefix="emmy-serve-", suffix=".log", delete=False)
     logger.info("Starting server (logs: %s)...", log_file.name)
     logger.info("  %s", shlex.join(serve_cmd))
     server = subprocess.Popen(serve_cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env)
     try:
-        _wait_for_health(server, port, log_file.name)
+        _wait_for_health(server, port, log_file.name, timeout_s=health_timeout_s)
         logger.info("Server healthy — running benchmark...")
         logger.info("  %s", shlex.join(bench_cmd))
         rc = subprocess.run(bench_cmd, env=env).returncode
@@ -389,12 +398,12 @@ def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str, *, e
         sys.exit(rc)
 
 
-def _wait_for_health(server: subprocess.Popen, port: str, log_path: str) -> None:
+def _wait_for_health(server: subprocess.Popen, port: str, log_path: str, *, timeout_s: int = _HEALTH_TIMEOUT_S) -> None:
     """Poll /health until the server answers; fail fast if it exits first
     (first boot may compile the whole model — be patient)."""
     import httpx
 
-    deadline = time.monotonic() + _HEALTH_TIMEOUT_S
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if server.poll() is not None:
             tail = "".join(open(log_path, errors="replace").readlines()[-15:])
@@ -406,6 +415,6 @@ def _wait_for_health(server: subprocess.Popen, port: str, log_path: str) -> None
         except httpx.HTTPError:
             pass
         time.sleep(3)
-    logger.error("Server did not become healthy within %ds; logs: %s", _HEALTH_TIMEOUT_S, log_path)
+    logger.error("Server did not become healthy within %ds; logs: %s", timeout_s, log_path)
     server.terminate()
     sys.exit(1)

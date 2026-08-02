@@ -59,6 +59,24 @@ def _place_pins() -> dict[str, str]:
     return pins
 
 
+#: The schedule knob families a golden / ``--ab`` row pins. A live pin from any of them marks a
+#: pinned re-record compile, where the pin — not a recorded routing entry — must decide the form.
+_SCHEDULE_FAMILIES = ("TILE", "STAGE", "REDUCE", "WORK", "RASTER", "WSPEC")
+
+
+def _schedule_pins_live() -> bool:
+    """Whether any schedule-family knob pin is live (a bare ``EMMY_<KNOB>`` var or an
+    ``EMMY_KNOBS`` aggregate key). Pins are authoritative over every golden tier — a recorded
+    ROUTING entry must not reroute a pinned compile: the pinned fused row would silently compile
+    the cut's pieces and gate as ``realized (off)`` (the 2026-07-31 fused re-record dead end,
+    where every fused golden replay failed against its own recorded spelling as soon as a
+    same-shape ``.cut`` routing row landed). Bare schedule pins apply compile-wide, so this
+    suppression is compile-wide too — matching ``Knob.narrow``'s bare-pin scope."""
+    if any(config.knob_raw(f) is not None for f in _SCHEDULE_FAMILIES):
+        return True
+    return any(family_of(k) in _SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
+
+
 def _card_has_routing(gpu_name, cap) -> bool:
     """Whether ANY routing golden exists for this card — the cheap gate that keeps the per-kernel
     seam scan off the common compile (no pins, no routing entries → recognition is untouched)."""
@@ -145,7 +163,8 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> S
     """The routing resolution for a freshly-recognized kernel: the cut seam to realize, or
     ``None`` (= fuse, the default — spelled as the ABSENCE of a routing entry). ``PLACE`` pins
     are authoritative over the recorded routing entry (a ``fuse`` pin suppresses a recorded
-    cut); a key that names no seam (or an uncuttable one) on this tree is skipped for a pin (a
+    cut), and so is any live schedule-family pin (a pinned re-record / ``--ab`` compile keeps
+    the recognized form so the pinned row can realize); a key that names no seam (or an uncuttable one) on this tree is skipped for a pin (a
     whole-model pin targets one kernel shape) and falls through with a warning for an entry
     (the drift case — deploy keeps the recognized form). A bare ``PLACE=cut`` pin takes the
     shallowest CUTTABLE seam."""
@@ -168,6 +187,8 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> S
         if site is None or site not in seams:
             continue
         return site if value == _CUT else None  # an explicit fuse pin suppresses any routing entry
+    if _schedule_pins_live():
+        return None  # a pinned compile: the pin decides the form — recorded routing entries do not fire
     entry = _routing_entry(ctx, knobs)
     if entry is None:
         return None

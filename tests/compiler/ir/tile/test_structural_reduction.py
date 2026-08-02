@@ -229,8 +229,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     ksplit = Axis(name=f"{c.k_axis.name}_ks", extent=Dim(2))
     kslice = replace(c.k_axis, extent=Dim(128))
     sigma = Sigma({c.k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(128, "int")), Var(c.k_axis.name))})
-    inner = replace(
-        c,
+    inner = Contraction(
         k_axis=kslice,
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
@@ -408,14 +407,18 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
 # --- composed steps: every structural node is a Stmt, so a body can hold one ---------------------- #
 
 
-def test_stored_node_kinds_are_stmts() -> None:
+def test_there_is_exactly_one_stored_node_kind_and_it_is_a_stmt() -> None:
     """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V
-    contractions in a reduce partial, split-K's sliced node. Uniform ``Stmt``-hood over the STORED
-    kinds — :class:`Fold`, :class:`Map` and the :class:`Contraction` node (1s) — is what makes
-    that legal."""
+    contractions in a reduce partial, split-K's sliced node — and ``Stmt``-hood is what makes that
+    legal. After the collapse there is ONE stored kind to check: ``Map`` and ``Contraction`` are
+    derived READINGS (constructors returning a ``Fold``, ``isinstance`` answering the reading), so
+    everything a term can hold is a ``Fold``."""
     from emmy.compiler.ir.stmt.base import Stmt
 
-    assert all(issubclass(k, Stmt) for k in (Fold, Map, Contraction))
+    assert issubclass(Fold, Stmt)
+    assert not isinstance(Map, type) or not issubclass(Map, Stmt)  # a view, not a stored kind
+    for built in (_contraction(), Map(body=Body(()), sources=()), Fold.from_loop(_sum_loop())):
+        assert type(built) is Fold
 
 
 def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
@@ -460,10 +463,12 @@ def _computed_b_contraction(a_load: bool = True) -> Contraction:
 def test_both_operand_edges_have_the_same_type() -> None:
     """A and B are ONE vocabulary: the algebra is symmetric in them, and the asymmetry that is real
     (A is M-resident and compute-fillable, B is the K×N operand the loop streams) is a SCHEDULE fact
-    that lives in the tier gates, not in the structural type."""
-    from typing import get_type_hints
-
-    assert get_type_hints(Contraction)["a"] == get_type_hints(Channel)["b"]
+    that lives in the tier gates, not in the structural type. After the collapse they are literally
+    the same slot — entries in one ``operands`` tuple — and the A/B split is the stored ORDER,
+    ``(b, a, b₁…)``, read back by the bilinear reading."""
+    c = _contraction()
+    assert c.operands == (c.b, c.a)
+    assert c.a is c.operands[1] and c.channels[0].b is c.operands[0]
 
 
 def test_computed_b_exposes_the_same_accessors_as_a() -> None:

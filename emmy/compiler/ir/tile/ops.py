@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, deep_defines, deep_reads, effect_tail
+from emmy.compiler.ir.tile.ir import Fold, Map, deep_defines, deep_reads, effect_tail
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -36,9 +36,9 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     a prologue whose defs go unread is dropped (nothing to bridge). The ONE seam both sides read:
     the scheduler sizes the stat rows into the sync stage's smem budget, the materializer fills
     them (``sync_stat_fill``)."""
-    if not isinstance(cone, Map) or not cone.sources:
-        return (), tuple(cone.body) if isinstance(cone, Map) else (), ()
-    pro = tuple(lower(cone.sources[0]))
+    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
+        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
+    pro = tuple(lower(cone.operands[0]))
     cell = tuple(cone.body)
     stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
@@ -138,13 +138,13 @@ def axis_names(root) -> set[str]:
     out: set[str] = set()
     for site in sites(root):
         node = site.node
-        if isinstance(node, Fold):
+        if not isinstance(node, Fold):
+            continue
+        if node.axis is None:
+            out |= stmt_axis_names(node.body)
+        else:
             out.add(node.axis.name)
             out |= stmt_axis_names(node.step_stmts())
-        elif isinstance(node, Map):
-            out |= stmt_axis_names(node.body)
-        elif isinstance(node, Contraction):
-            out.add(node.k_axis.name)
     return out
 
 
@@ -156,7 +156,7 @@ def projection_tail(tile) -> list[Stmt]:
     answer identically — e.g. the ``b<n>t`` band's no-sweep-``Loop`` condition keeps excluding
     rms/softmax rows after their sweep moved to a ``Store`` decoration."""
     op = tile.op
-    body = list(op.body) if isinstance(op, Map) else []
+    body = list(op.body) if isinstance(op, Fold) and op.axis is None else []
     return effect_tail(body, tile.stores)
 
 
@@ -200,8 +200,8 @@ def head(op):
     node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns, so a scheduling
     read never needs :func:`reduce_loop` (which synthesizes a whole nest) to reach it."""
-    node = op.sources[0] if isinstance(op, Map) and op.sources else op
-    return node if isinstance(node, (Fold, Contraction)) else None
+    node = op.operands[0] if isinstance(op, Fold) and op.axis is None and op.operands else op
+    return node if isinstance(node, Fold) and node.axis is not None else None
 
 
 def reduce_loop(op):
@@ -217,10 +217,10 @@ def reduce_loop(op):
     For the LOOP NEST itself — a caller that consumes a body. A node-level FACT (the role, the
     reduce axis, the operand edges) is a stored param on :func:`head`'s node: read it there, not
     off a nest synthesized to be thrown away."""
-    if isinstance(op, (Fold, Contraction)):
+    if isinstance(op, Fold) and op.axis is not None:
         return op.loop
-    if isinstance(op, Map) and op.sources:
-        return reduce_loop(op.sources[0])  # a Map projecting over a Fold / Contraction source
+    if isinstance(op, Fold) and op.operands:
+        return reduce_loop(op.operands[0])  # the zero-axis node projecting over its source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
             return s
@@ -304,16 +304,10 @@ def lower(op) -> list[Stmt]:
     are already resolved (computed operands are inline nodes), so there is no name-inlining step;
     a multi-channel contraction lowers through its own derived product loop
     (:attr:`Contraction.loop`)."""
-    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
 
-    if isinstance(op, Map):
-        # A Load source is the CUT TERMINAL (phase 4 — every edge admits Load): the seam value
-        # arrives materialized, so the "nest" is the load itself.
-        prefix = [s for src in op.sources for s in ((src,) if isinstance(src, Load) else lower(src))]
-        return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
-    if isinstance(op, (Fold, Contraction)):
+    if isinstance(op, Fold):
         return op.lower()
-    raise TypeError(f"lower: expected a Map lift wrapper, Fold, or Contraction, got {type(op).__name__}")
+    raise TypeError(f"lower: expected a Fold, got {type(op).__name__}")
 
 
 def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
@@ -342,7 +336,7 @@ def _term_names(root) -> tuple[list[str], list[str]]:
     The order is a function of the stored params only, so the renumber map — and with it
     :func:`term_key` — is α-invariant."""
     from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import Contraction, Fold, Map  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415
 
     names: list[str] = []
     bufs: list[str] = []
@@ -355,7 +349,7 @@ def _term_names(root) -> tuple[list[str], list[str]]:
             names.append(n)
 
     def note_stmt(s) -> None:
-        if isinstance(s, (Fold, Map, Contraction)):
+        if isinstance(s, Fold):
             walk(s)
             return
         if isinstance(s, Load) and s.input not in bseen:
@@ -368,31 +362,30 @@ def _term_names(root) -> tuple[list[str], list[str]]:
                 note_stmt(c)
 
     def walk(node) -> None:
-        if isinstance(node, Map):
-            for p in node.fn.params:
-                note(p)
-            for s in node.fn.body:
-                note_stmt(s)
-            for r in node.fn.results:
-                note(r)
-            for src in node.sources:
-                note_stmt(src)
-        elif isinstance(node, Fold):
-            for e in node.operands:
-                note_stmt(e)
+        if not isinstance(node, Fold):
+            return
+        if node.axis is None:
+            # The zero-axis reading names its binder first, then walks the sources — the order
+            # the projection wrapper always used, so canonical renumbering is unchanged.
             for p in node.lift.params:
                 note(p)
             for s in node.lift.body:
                 note_stmt(s)
             for r in node.lift.results:
                 note(r)
-            for r in node.combine.results:
-                note(r)
-        elif isinstance(node, Contraction):
-            note_stmt(node.a)
-            for ch in node.channels:
-                note_stmt(ch.b)
-                note(ch.acc)
+            for src in node.operands:
+                note_stmt(src)
+            return
+        for e in node.operands:
+            note_stmt(e)
+        for p in node.lift.params:
+            note(p)
+        for s in node.lift.body:
+            note_stmt(s)
+        for r in node.lift.results:
+            note(r)
+        for r in node.combine.results:
+            note(r)
 
     walk(root)
     return names, bufs
@@ -450,29 +443,22 @@ def _canon_tree(node):
 
     from emmy.compiler.ir.stmt import Lambda  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body as _B  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import Channel, Fold, Map  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415
 
     def canon_stmt(s):
-        return _canon_tree(s) if isinstance(s, (Fold, Map, Contraction)) else s
+        return _canon_tree(s) if isinstance(s, Fold) else s
 
-    if isinstance(node, Contraction):
-        return replace(
-            node,
-            a=canon_stmt(node.a),
-            channels=tuple(Channel(b=canon_stmt(ch.b), acc=ch.acc) for ch in node.channels),
-        )
-    if isinstance(node, Map):
-        body = tuple(canon_stmt(s) for s in _canon_order(tuple(node.fn.body)))
-        fn = node.fn
-        if all(st.pure for st in body):
-            fn = Lambda(params=fn.params, body=_B(body), results=fn.results)
-        return Map(fn=fn, sources=tuple(canon_stmt(s) for s in node.sources))
-    if isinstance(node, Fold):
-        body = tuple(canon_stmt(s) for s in _canon_order(tuple(node.lift.body)))
-        lift = Lambda(params=node.lift.params, body=_B(body), results=node.lift.results)
-        ops2 = tuple(canon_stmt(e) for e in node.operands)
-        return replace(node, lift=lift, operands=ops2)
-    return node
+    if not isinstance(node, Fold):
+        return node
+    if node._contraction is not None:
+        # The bilinear reading's lift is generated, so only the EDGES canonicalize (reordering a
+        # contraction's multiply stmts would be meaningless and would move the term key).
+        return replace(node, operands=tuple(canon_stmt(e) for e in node.operands))
+    body = tuple(canon_stmt(s) for s in _canon_order(tuple(node.lift.body)))
+    lift = node.lift
+    if all(st.pure for st in body):
+        lift = Lambda(params=lift.params, body=_B(body), results=lift.results)
+    return replace(node, lift=lift, operands=tuple(canon_stmt(e) for e in node.operands))
 
 
 def term_key(root) -> str:
@@ -489,7 +475,7 @@ def term_key(root) -> str:
 
     if root is None:
         return ""
-    root = _canon_tree(root) if isinstance(root, (Fold, Map, Contraction)) else root
+    root = _canon_tree(root) if isinstance(root, Fold) else root
     names, bufs = _term_names(root)
     ren = {n: f"s{i}" for i, n in enumerate(names)}
     canon = _stmt_rewrite(root, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
@@ -596,14 +582,12 @@ def _head(node, ctx: _Ctx) -> str:
     """One node's header line — its kind and the stored params that fit on a line. A λ-valued
     field is NOT one of them: its signature belongs on its own branch, next to the body it binds
     (``lift:`` / ``combine:`` / ``fn:``), not one screenful above it."""
-    if isinstance(node, Fold):
-        text = f"Fold[{_axis_span(node.axis)}] {node.role.name.lower()}" + (" unroll" if node.unroll else "")
-    elif isinstance(node, Contraction):
-        text = node.pretty()[0].strip()
-    elif isinstance(node, Map):
-        text = "Map" + ("" if node.sources else "  ‹pointwise›")
-    else:
+    if not isinstance(node, Fold):
         return str(node)
+    if node.axis is None:
+        text = "Fold  free" + ("" if node.operands else "  ‹pointwise›")
+    else:
+        text = f"Fold[{_axis_span(node.axis)}] {node.role.name.lower()}" + (" unroll" if node.unroll else "")
     return text + ctx.note(node)
 
 
@@ -616,7 +600,7 @@ def _stmts(stmts, ctx: _Ctx):
     def render(cont: str) -> list[str]:
         out: list[str] = []
         for s in stmts:
-            if isinstance(s, (Fold, Contraction, Map)):
+            if isinstance(s, Fold):
                 out.append(f"{cont}  {_head(s, ctx)}")
                 out.extend(_branch(_items(s, ctx), cont + "  "))
             else:
@@ -642,21 +626,26 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     """A node's STORED children, each a labelled branch. Nothing derived: the step, the
     synthesized nodes inside it and the lowered nest are all consequences of these params."""
     items: list[tuple[str, object]] = []
-    if isinstance(node, Fold):
+    if not isinstance(node, Fold):
+        return items
+    con = node._contraction
+    if con is not None:
+        # The bilinear reading labels its edges ``a`` / ``b`` — the same labels the path codec
+        # spells, so a reader can match a dump line to a ``PLACE@a`` key by eye.
+        a, chans = con
+        items.append(_edge("operand[a]", a, ctx))
+        one = len(chans) == 1
+        items += [_edge("operand[b]" if one else f"operand[b{i}] -> {ch.acc}", ch.b, ctx) for i, ch in enumerate(chans)]
+    else:
+        items += [_edge(f"operand[{i}]", e, ctx) for i, e in enumerate(node.operands)]
+    if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
-        items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
+    # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
+    # binder is storage whether or not it computes anything (an identity projection binds too).
+    items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
+    if node.combine is not None:
         items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
-        items += [_edge(f"operand[{i}]", e, ctx) for i, e in enumerate(node.operands)]
-    elif isinstance(node, Contraction):
-        items.append(_edge("a", node.a, ctx))
-        one = len(node.channels) == 1
-        items += [_edge("b" if one else f"channel[{i}] -> {ch.acc}", ch.b, ctx) for i, ch in enumerate(node.channels)]
-    elif isinstance(node, Map):
-        items += [(f"source[{i}]: {_head(s, ctx)}", _subtree(s, ctx)) for i, s in enumerate(node.sources)]
-        # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
-        # binder is storage whether or not it computes anything (an identity projection binds too).
-        items.append((f"fn: {_lam_sig(node.fn, ctx)}", _stmts(node.fn.body, ctx)))
     return items
 
 
@@ -677,7 +666,7 @@ def pretty(op, indent: str = "", *, tile=None) -> list[str]:
     annotate each node with the schedule slices keyed against it. A bare stmt falls back to its
     own pretty."""
     ctx = _Ctx(tile, root=op)
-    if isinstance(op, (Fold, Contraction, Map)):
+    if isinstance(op, Fold):
         return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
     if isinstance(op, Stmt):
         return list(op.pretty(indent))

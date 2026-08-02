@@ -80,11 +80,11 @@ def test_fold_dump_shows_every_stored_param() -> None:
 
 def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
     text = "\n".join(pretty(_product()))
-    assert "Contraction [Σ k in 0..256]" in text
-    assert "├─ a: a_e = load x[m, k]" in text
+    assert "Fold[k in 0..256] contraction" in text
+    assert "├─ operand[a]: a_e = load x[m, k]" in text
     # Sharing is arity: one ``a``, one branch per channel, each naming its own accumulator.
-    assert "├─ channel[0] -> acc_g: acc_g_b = load Wg[k, n]" in text
-    assert "└─ channel[1] -> acc_u: acc_u_b = load Wu[k, n]" in text
+    assert "├─ operand[b0] -> acc_g: acc_g_b = load Wg[k, n]" in text
+    assert "├─ operand[b1] -> acc_u: acc_u_b = load Wu[k, n]" in text
 
 
 def test_map_dump_shows_the_binder_and_its_sources() -> None:
@@ -93,9 +93,9 @@ def test_map_dump_shows_the_binder_and_its_sources() -> None:
     λ-valued field reads the same way: ``lift:`` / ``combine:`` / ``fn:``, signature then body."""
     m = Map(fn=None, sources=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
     text = "\n".join(pretty(m))
-    assert text.splitlines()[0] == "Map"
-    assert "├─ source[0]: Fold[k in 0..512] planar" in text
-    assert "└─ fn: λ(acc0) -> (o)" in text
+    assert text.splitlines()[0] == "Fold  free"
+    assert "├─ operand[0]: Fold[k in 0..512] planar" in text
+    assert "└─ lift: λ(acc0) -> (o)" in text
     assert "     o = rsqrt(acc0)" in text  # the body, indented two under the signature
 
 
@@ -103,7 +103,7 @@ def test_the_fn_branch_survives_an_empty_body() -> None:
     """The branch carries the SIGNATURE, so it is emitted even with nothing to compute — an
     identity projection still binds, and dropping the branch would lose the binder entirely."""
     text = "\n".join(pretty(Map(fn=None, sources=(_stat_fold(),), body=Body(()))))
-    assert "└─ fn: λ(acc0) -> (acc0)" in text
+    assert "└─ lift: λ(acc0) -> (acc0)" in text
 
 
 def test_a_sourceless_map_is_marked_pointwise() -> None:
@@ -117,8 +117,8 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     """The two inhabitants of an operand edge, told apart in the dump: the cone recurses into its
     own node, the gmem loads do not."""
     lines = pretty(_product(a=_cone()))
-    (a_line,) = [ln for ln in lines if "├─ a:" in ln]
-    assert "‹computed›" in a_line and "Map" in a_line
+    (a_line,) = [ln for ln in lines if "operand[a]:" in ln]
+    assert "‹computed›" in a_line and "Fold  free" in a_line
     assert any("‹materialized›" in ln and "load Wg" in ln for ln in lines)
     # The cone's own body is reached BELOW the a edge — the subtree is really rendered.
     assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
@@ -167,8 +167,8 @@ def test_an_edge_is_rendered_once_not_once_per_derived_position() -> None:
     fold = _split_k()
     assert any(s is fold.operands[0] for s in fold.step_stmts())  # the premise: one object, two positions
     text = "\n".join(pretty(fold))
-    assert text.count("Contraction [Σ kslice in 0..128]") == 1
-    assert text.count("a: a_e = load x[m, kslice]") == 1
+    assert text.count("Fold[kslice in 0..128] contraction") == 1
+    assert text.count("operand[a]: a_e = load x[m, kslice]") == 1
 
 
 def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() -> None:

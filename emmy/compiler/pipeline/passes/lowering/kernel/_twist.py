@@ -43,7 +43,6 @@ Leading ``_`` so the pass loader skips this module."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 from emmy.compiler.dtype import F32
@@ -405,12 +404,12 @@ def _banded_stream(stmts, qk: TilePlan) -> int | None:
     return None
 
 
-def _pv_streamed(pv: Contraction, kv_axis: Axis) -> Contraction:
+def _pv_streamed(pv: Fold, kv_axis: Axis) -> Fold:
     """The expect contraction with its singleton intra-block axis swapped for the STREAM axis — the
-    scalar tree contracts one key per step (``k_axis = pj``, extent 1); the fragment tier contracts
+    scalar tree contracts one key per step (axis ``pj``, extent 1); the fragment tier contracts
     the whole block, whose keys ride the stream axis in the value ``Load``'s index (``tile.bk = 1``:
     the block is one atom-K step)."""
-    return replace(pv, k_axis=kv_axis)
+    return pv.with_axis(kv_axis)
 
 
 def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:

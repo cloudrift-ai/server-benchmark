@@ -290,17 +290,11 @@ def _ancestor_axes(root, child) -> tuple[Axis, ...]:
     def walk(node, acc: tuple[Axis, ...]) -> tuple[Axis, ...] | None:
         if node is child:
             return acc
-        if isinstance(node, Map):
-            edges = node.sources
-        elif isinstance(node, Fold):
-            edges = node.operands
-        elif isinstance(node, Contraction):
-            edges = (node.a, *(ch.b for ch in node.channels))
-        else:
-            edges = ()
-        below = (*acc, node.axis) if isinstance(node, (Fold, Contraction)) else acc
+        edges = node.operands if isinstance(node, Fold) else ()
+        # A ZERO-AXIS node contributes no fold axis to the path (it does not iterate).
+        below = (*acc, node.axis) if isinstance(node, Fold) and node.axis is not None else acc
         for e in edges:
-            if isinstance(e, (Map, Fold, Contraction)):
+            if isinstance(e, Fold):
                 got = walk(e, below)
                 if got is not None:
                     return got
@@ -360,21 +354,15 @@ def _ws_dtype(child, inputs: dict):
 def _replace_edge(node, child, load: Load):
     """The parent tree with the seam child replaced by ``load`` — the cut terminal (every edge
     admits ``Load``). Positional bindings hold: the load defines the child's bound name."""
-    _nodes = (Map, Fold, Contraction)
-    if isinstance(node, Map):
-        if any(s is child for s in node.sources):
-            return Map(fn=node.fn, sources=tuple(load if s is child else s for s in node.sources))
-        return Map(fn=node.fn, sources=tuple(_replace_edge(s, child, load) if isinstance(s, _nodes) else s for s in node.sources))
     from dataclasses import replace as _dc_replace  # noqa: PLC0415
 
-    if isinstance(node, Fold):
-        if any(e is child for e in node.operands):
-            return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
-        return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, _nodes) else e for e in node.operands))
-    if isinstance(node, Contraction):
-        sub = lambda e: load if e is child else (_replace_edge(e, child, load) if isinstance(e, _nodes) else e)  # noqa: E731
-        return _dc_replace(node, a=sub(node.a), channels=tuple(_dc_replace(ch, b=sub(ch.b)) for ch in node.channels))
-    return node
+    if not isinstance(node, Fold):
+        return node
+    # ONE arm for the one stored kind: every reading's edges are ``operands``, so replacing the
+    # seam is the same rewrite whether the node reads as a map, a reduce or a contraction.
+    if any(e is child for e in node.operands):
+        return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
+    return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, Fold) else e for e in node.operands))
 
 
 def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site) -> Graph:

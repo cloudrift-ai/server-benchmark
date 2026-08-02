@@ -41,7 +41,7 @@ import re
 from dataclasses import dataclass
 
 from emmy.compiler.ir.axis import AxisRole
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
+from emmy.compiler.ir.tile.ir import Fold
 
 #: The knob families whose keys address a tree site (``WSPEC`` / ``RASTER`` / ``LOOPIFY`` stay
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
@@ -77,9 +77,10 @@ class Site:
 
 
 def _seg(node) -> str:
-    # A stored Contraction spells the same ``fold`` segment its fold-storage predecessor did —
+    # The ZERO-AXIS reading spells ``map`` and every iterating fold — contraction reading
+    # included — spells ``fold``, exactly as the three stored kinds did before the collapse, so
     # every stored golden/DB key keeps meaning what it always meant.
-    return "map" if isinstance(node, Map) else "fold"
+    return "map" if node.axis is None else "fold"
 
 
 def _stmt_children(stmt):
@@ -87,7 +88,7 @@ def _stmt_children(stmt):
     a ``Loop`` — ``030``'s sliced partials)."""
     for body in stmt.nested():
         for child in body:
-            if isinstance(child, (Map, Fold, Contraction)):
+            if isinstance(child, Fold):
                 yield child
             else:
                 yield from _stmt_children(child)
@@ -95,35 +96,38 @@ def _stmt_children(stmt):
 
 def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...], bool]], derived: bool = False) -> None:
     out.append((node, prefix, derived))
-    if isinstance(node, Map):
-        for src in node.sources:
-            if isinstance(src, (Map, Fold, Contraction)):
+    if not isinstance(node, Fold):
+        return
+    if node._contraction is not None:
+        # The BILINEAR reading's edges carry the view-role labels ``a`` / ``b`` — the A/B split
+        # rides the stored operand order, so the labels are as stable as the term. This branch
+        # must precede the generic operand walk: the stored corpus keys ``PLACE@a`` against it,
+        # and a contraction falling through to ``_seg`` would silently re-spell those rows.
+        for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
+            if isinstance(edge, Fold):
+                _walk(edge, (*prefix, label), out, derived)
+        return
+    if node.axis is None:
+        for src in node.operands:
+            if isinstance(src, Fold):
                 _walk(src, (*prefix, _seg(src)), out, derived)
         for s in node.body:
-            for child in _stmt_children(s) if not isinstance(s, (Map, Fold, Contraction)) else (s,):
+            for child in _stmt_children(s) if not isinstance(s, Fold) else (s,):
                 _walk(child, (*prefix, _seg(child)), out, derived)
-    elif isinstance(node, Fold):
-        for edge in node.operands:
-            if isinstance(edge, (Map, Fold, Contraction)):
-                _walk(edge, (*prefix, _seg(edge)), out, derived)
-        # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the
-        # fold) are real schedule sites, marked ``derived`` (combine material below the seam
-        # lattice; a lift-body inline node — the demoted cone — likewise: un-realizable as a
-        # seam). Operand edges embedded at their derived head position were walked above.
-        edge_ids = {id(e) for e in node.operands}
-        step_derived = True
-        for s in node.step_stmts():
-            if id(s) in edge_ids:
-                continue
-            for child in _stmt_children(s) if not isinstance(s, (Map, Fold, Contraction)) else (s,):
-                _walk(child, (*prefix, _seg(child)), out, step_derived)
-    elif isinstance(node, Contraction):
-        # The stored contraction's operand edges carry the view-role labels directly — the shared
-        # A edge is ``a``, a channel's streamed edge ``b`` (no bilinear parse: the node IS the
-        # binding).
-        for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
-            if isinstance(edge, (Map, Fold, Contraction)):
-                _walk(edge, (*prefix, label), out, derived)
+        return
+    for edge in node.operands:
+        if isinstance(edge, Fold):
+            _walk(edge, (*prefix, _seg(edge)), out, derived)
+    # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the fold)
+    # are real schedule sites, marked ``derived`` (combine material below the seam lattice; a
+    # lift-body inline node — the demoted cone — likewise: un-realizable as a seam). Operand
+    # edges embedded at their derived head position were walked above.
+    edge_ids = {id(e) for e in node.operands}
+    for s in node.step_stmts():
+        if id(s) in edge_ids:
+            continue
+        for child in _stmt_children(s) if not isinstance(s, Fold) else (s,):
+            _walk(child, (*prefix, _seg(child)), out, True)
 
 
 def sites(root) -> tuple[Site, ...]:
@@ -140,7 +144,7 @@ def sites(root) -> tuple[Site, ...]:
     counts: dict[tuple, int] = {}
     result: list[Site] = []
     for node, segments, derived in nodes:
-        axis = node.axis.name if isinstance(node, (Fold, Contraction)) else None
+        axis = node.axis.name if isinstance(node, Fold) and node.axis is not None else None
         key = (segments, axis)
         counts[key] = counts.get(key, 0) + 1
         result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived))
@@ -158,12 +162,14 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     if family == "PLACE":
         return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
-        return tuple(s for s in all_sites if isinstance(s.node, (Fold, Contraction)))
+        return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None)
     out = []
     for s in all_sites:
-        if isinstance(s.node, (Fold, Contraction)) and s.node.role is AxisRole.CONTRACTION:
+        if not isinstance(s.node, Fold):
+            continue
+        if s.node.axis is not None and s.node.role is AxisRole.CONTRACTION:
             out.append(s)
-        elif isinstance(s.node, Map) and not s.node.sources and s.depth == 1:
+        elif s.node.axis is None and not s.node.operands and s.depth == 1:
             out.append(s)
     return tuple(out)
 

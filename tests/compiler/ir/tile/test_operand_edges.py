@@ -106,8 +106,14 @@ def test_external_reads_cover_every_channel() -> None:
 
 
 def test_pretty_prints_the_channels_once() -> None:
-    (line,) = _product().pretty()
-    assert "xhat @ Wg,Wu" in line and "-> acc_g,acc_u" in line
+    """One shared A edge, one branch per channel — the dump names the ``a`` / ``b`` edge labels the
+    path codec spells, so a ``PLACE@a`` key can be matched to a dump line by eye."""
+    from emmy.compiler.ir.tile.ops import pretty
+
+    text = "\n".join(pretty(_product()))
+    assert text.count("operand[a]:") == 1  # the SHARED A edge — printed once, not once per channel
+    assert text.count("xhat = multiply") == 1  # and its cone body with it
+    assert "operand[b0] -> acc_g" in text and "operand[b1] -> acc_u" in text
 
 
 # --- closure: the predicate a placement cut asks ------------------------------------------------- #

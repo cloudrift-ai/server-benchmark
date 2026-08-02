@@ -40,7 +40,7 @@ recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map
 through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient cell environment: the grid axes, operand
 `inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
 `Handle` wire). The reduce binder drives `_emit` off the `Fold` node to
-build its per-cell reduce loop, so a **nested** `Contraction` (flash's Q@K / P@V) is reached AS A NODE. This is the
+build its per-cell reduce loop, so a **nested** contraction (flash's Q@K / P@V) is reached AS A NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `ir/tile/ops.lower(node)` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
 register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
@@ -48,9 +48,10 @@ register value); the **tensor-core seam** is the view arm in `_bind` — an outp
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
-The output-tiled arm travels as **`(node, tile)`** — the stored `Contraction` and its PLACED `TilePlan` slice. There
-is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "a `Contraction` with a TILE slice over a
-grid with an `(m, n)` pair", places the slice on the trailing grid pair (`TilePlan.at`) and threads the two on. It is
+The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `TilePlan`
+slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
+TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
+`Sched.tile_of`, which binds the caller's `(m, n)` through `TilePlan.at`. It is
 binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
@@ -77,7 +78,7 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a `Map`
 with a `source` **recurses** (its projection `body` walked, via `_emit_body`, into the `tail`), and the leaf binds to
 the grid via the **ONE** root binder, `_bind` — a single pipeline that reads WHICH AXES the schedule tiles off the node
-and seals through the one `grid_tile` finalizer. A tiled contraction (`Contraction`) tiles its OUTPUT `(m, n)` axes (register / warp
+and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — read off the
 fold node's `Reduction` view — closing the fold),
@@ -96,14 +97,17 @@ recursion, the binder, the reduce-axis tiling, and the shared-row staging apply 
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is
 where a plan becomes bound `Axis` objects. **There is no
-kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two `Contraction` nodes, so its
+kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two
+contraction-shaped `Fold`s, so its
 Q@K / P@V contractions and its streaming reduce factorize through this one recursion (scalar block=1 today). A
-tensor-core flash tier is a matter of the contractions carrying an mma `TilePlan` (a schedule field on the node) and
+tensor-core flash tier is a matter of the contractions being sliced with an mma `TilePlan` (in `TileOp.schedule`,
+never a node field) and
 routing through the warp view seam like any other mma matmul — **never** a bespoke emitter, which
 would be a divergent codegen path the mandate forbids.
 
 **The contraction factorization — two atoms.** `_bind`'s output-tiled arm is atom-generic — there is no per-atom
-variant, and **no per-atom geometry object**. It expands any `Contraction` by tiling a **leaf atom** four ways through
+variant, and **no per-atom geometry object**. It expands any contraction-shaped `Fold` by tiling a **leaf atom**
+four ways through
 the tiling layer (**`_tiling.py`**):
 `grid_tile(unit_tile(register_tile(atomize(...))))` — **GRID** block / **UNIT** / **REGISTER** / **ATOM**. The tiling
 geometry (the `(m, n)` `Side` pair — `tile` / `mask` / `block` / `unit` per axis — plus `block_threads` / `lanes`) is

@@ -25,9 +25,8 @@ is the one the corpus supports.
 
 ## The IR beneath it — the unified `Fold`
 
-This plan assumes the tile IR has collapsed to ONE stored node kind. The collapse is a **prerequisite, not a
-consequence**: it changes the site walk, the role derivation and the emitter dispatch this design rests on, and doing
-it after the scheduler is rebuilt means rebuilding it twice.
+There is ONE stored node kind. The collapse LANDED (`7ba7468c` … `08c3e524`), so this section records what the term
+IS — the site walk, the role derivation and the emitter dispatch below all read it — not work this plan does.
 
 ```
 Fold(
@@ -35,35 +34,38 @@ Fold(
     operands: tuple[Load | Fold, ...], # the operand EDGES, bound POSITIONALLY to the lift params
     lift:     Lambda,                  # λ(k, v₁…vₙ) → S — the ONE joint stored per-element function
     init:     tuple,                   # the ⊕ seeds; () at zero axes
-    combine:  Lambda,                  # S × S → S — THE ⊕; absent at zero axes
+    combine:  Lambda | None,           # S × S → S — THE ⊕; None at zero axes
 )
 ```
 
-**There is no `Edge` type**, and introducing one is a live question rather than a settled part of this design (see
-"The one open decision"). An operand edge is the union it already is — MATERIALIZED (a gmem `Load`, whose `input` +
-`index` ARE the source/access pair) or COMPUTED (the node itself, stored inline, its one consumer its parent).
+`Map` and `Contraction` are not types: `Fold.projection(...)` / `Fold.contraction(...)` build them and `axis is
+None` / `is_contraction(x)` read them back. The predicate form matters — `isinstance` answered `False` for the
+`Load` edges and plain `Assign`s that a step-stream scan walks, and a bare `x.role is …` raises on them.
 
-Three things move, and each deletes a case this plan otherwise has to carry.
+**There is no `Edge` type**, and the question of adding one dissolved rather than being decided: the only consumer
+that wanted a uniform access on a COMPUTED edge was the A/B derivation, and A/B rides operand order instead (below).
+An operand edge stays the union it always was — MATERIALIZED (a gmem `Load`, whose `input` + `index` ARE the
+source/access pair) or COMPUTED (the node itself, stored inline, its one consumer its parent). Two reasons to keep
+it that way if the question is reopened: every structural node is a `Stmt`, which is what lets an inline node occupy
+a statement position (`_splice_operands` splices an edge's producing stmts straight into a `Body`, `_flatten_nodes`
+lowers it in place), and `term_key` is `repr()`, so a wrapper is a new level in every stored term's key for no
+consumer. Reopen only if a pass appears that genuinely needs a computed edge's index space; today none does.
 
-**The projection stops being a field.** `Map(fn, sources=(Fold,))` becomes a zero-axis `Fold` whose one operand is the
+**The projection is not a field.** `Map(fn, sources=(Fold,))` is a zero-axis `Fold` whose one operand is the
 reducing fold; the projection IS the outer node's `lift`. Composition supplies what the `fn` field did, so RMSNorm's
 normalize, softmax's, the relu epilogue and flash's `divide(O, l)` are the same shape at the same depth. No node
 carries both a per-element and a per-cell lambda.
 
-**The A/B split rides the operand ORDER — not the accesses.** An earlier revision of this plan claimed A is the
-operand whose access omits the N free axis and B the one whose access omits M. **Implementation showed that is
-wrong, and the dump in example 4 shows why:** node-locally `x[a0, a2]` and `w[a2, a1]` are *symmetric* — each carries
-the K axis plus one free axis — so telling M from N requires the PLACEMENT, which is a caller fact on the `TileOp`
-and deliberately absent from the node. The accesses cannot decide it.
-
-So the stored order `(b₀, a, b₁…)` carries the split. That is not a regression: it is the spelling
-`Fold.contraction(...)` generates, it is what the byte-identity gate pins at both arities, and it keeps `a` / `b`
-answerable node-locally,
+**The A/B split rides the operand ORDER — not the accesses.** Node-locally `x[a0, a2]` and `w[a2, a1]` are
+*symmetric* — each carries the K axis plus one free axis (the dump in example 4 shows it) — so telling M from N
+requires the PLACEMENT, a caller fact on the `TileOp` and deliberately absent from the node. The accesses cannot
+decide it, so the stored order `(b₀, a, b₁…)` carries the split: it is the spelling `Fold.contraction(...)`
+generates, it is what the byte-identity gate pins at both arities, and it keeps `a` / `b` answerable node-locally,
 which the path codec requires (`PLACE@a`). The one genuinely access-derived fact stays access-derived: `b_trans`
 reads `Load.index` off the B edge once the edge is known. No stored `a` field, no `shared` index, no bilinear parse
 — but no access-based derivation either.
 
-**The kind derives from arity.** Nothing stores a role:
+**The role derives from arity.** Nothing stores a role (`Fold.role`):
 
 | shape | axis | operands | lift / combine | derived role |
 | --- | --- | --- | --- | --- |
@@ -75,83 +77,62 @@ reads `Load.index` off the B edge once the edge is known. No stored `a` field, n
 | streaming (flash, online softmax) | one | 1+ | any / exp-family | TWISTED |
 | unbindable matvec | one | 0 (loads inline) | any / `add` | PLANAR |
 
-The last two rows are the load-bearing ones and both already hold: the matvec demotion is a FORMATION fact
-(recognition keeps its loads inline in the lift, so there are no edges to parse and the row falls through to PLANAR),
-and the collapse variant below is exactly "move the edges inline", which flips CONTRACTION to PLANAR by the same
-table. The variant mechanism and the role derivation stop being two mechanisms.
+The last two rows are the load-bearing ones and both hold: the matvec demotion is a FORMATION fact (recognition
+keeps its loads inline in the lift, so there are no edges to parse and the row falls through to PLANAR), and the
+collapse variant below is exactly "move the edges inline", which flips CONTRACTION to PLANAR by the same table. The
+variant mechanism and the role derivation are not two mechanisms.
 
-**`Fold.demoted()` no longer exists** — it was dead once the scheduler was deleted (zero callers) and went in the
+**`Fold.demoted()` does not exist** — it was dead once the scheduler was deleted (zero callers) and went in the
 minimization pass. It is ~15 lines and fully specified here: move each operand edge into the lift body before the
 first read of its bound name, ties in operand order. Phase 3 re-adds it as part of the collapse variant.
 
-### What it changes for this plan
+### What it means for this plan
 
-**`type(node)` dispatch stops existing as an option.** The next section argued emitters must key on `AxisRole` rather
-than node type. Under the collapse there is no type key to reach for and the argument is free. The three-arm
-asymmetry named in "The actual defect" loses its last structural excuse: CONTRACTION, TWISTED and FREE are three
-readings of one node, so an arm that builds `TileOp`s eagerly is visibly a special case rather than a different kind.
+**`type(node)` dispatch is not an option.** The next section argued emitters must key on `AxisRole` rather than node
+type; with one node kind there is no type key to reach for and the argument is free. The three-arm asymmetry named in
+"The actual defect" loses its last structural excuse: CONTRACTION, TWISTED and FREE are three readings of one node,
+so an arm that builds `TileOp`s eagerly is visibly a special case rather than a different kind.
 
 **`family_sites` restates without losing a site.** `REDUCE`/`STAGE` take every fold WITH an axis; `TILE` takes the
 `role is CONTRACTION` folds plus the root zero-axis fold with no operands (the register-strip tier — a non-root
 operandless fold, e.g. a one-load demoted cone, is still not a strip target); `PLACE` every non-root, non-derived
 site. `Site.axis` is already `None` for the pointwise node, so the zero-axis fold needs no new case.
 
-**Keys survive — under one hard constraint.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and spelling is
-short-path-canonical (bare → `FAMILY@<axis>` → anchored path subsequence). Checked against the stored corpus: the
-only path-spelled keys anywhere in the golden YAMLs are `TILE@pj` (45), `TILE@dd` (42), `PLACE@cone` (60),
-`PLACE@stat` (4), `PLACE@fin` (1) — all AXIS names, segment-independent — and **`PLACE@a` (9 rows), which is the
-A-edge SEGMENT**. Nothing stored spells `map` or `fold`. So:
+**Keys survive — under one constraint, which holds today.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and
+spelling is short-path-canonical (bare → `FAMILY@<axis>` → anchored path subsequence). Checked against the stored
+corpus: the only path-spelled keys anywhere in the golden YAMLs are `TILE@pj` (45), `TILE@dd` (42), `PLACE@cone`
+(60), `PLACE@stat` (4), `PLACE@fin` (1) — all AXIS names, segment-independent — and **`PLACE@a` (9 rows), which is
+the A-edge SEGMENT**. Nothing stored spells `map` or `fold`. So:
 
-> The frozen-key invariant survives the collapse **iff `path._walk` keeps emitting `a` / `b` edge labels for
-> contraction-role folds**, now derived at walk time from the operands' accesses instead of read off `node.a` /
-> `node.channels`.
+> The frozen-key invariant holds **iff `path._walk` keeps emitting `a` / `b` edge labels for contraction-role
+> folds** — which it does: `_walk` tests the bilinear reading AHEAD of the generic operand walk and labels off the
+> derived `node.a` / `node.channels`, so `PLACE@a` means what it meant.
 
-That is the one constraint the collapse imposes on `path.py`, it is checkable in isolation, and `PLACE@a`'s nine
-golden rows are its test.
+That is the one constraint the one-kind term imposes on `path.py`, it is checkable in isolation, and `PLACE@a`'s
+nine golden rows are its test.
 
 **Per-operand lifts are a DERIVED view, never storage.** "Different lift per operand, one combine" is the right
 reading of a contraction — but the per-operand part is a canonical partition of the existing `lift.body` (a stmt
 reading one operand's bound name belongs to that operand; a stmt reading several is the joint step), not new fields.
-It must stay derived because kernel identity is `repr()` of the stored term (`ops.term_key`): a stored partition
+It must stay derived because kernel identity is the α-invariant `repr()` of the stored term (`ops.term_key`, now in
+`ir/tile/_key.py`): a stored partition
 means two recognitions that split the same algebra differently key apart, splitting cache and evidence for identical
 kernels. Derived, it costs nothing and unlocks the fused per-operand prologue `Fold.contraction`'s docstring already
 anticipates (qk-norm / RoPE folded into a score, on-the-fly dequant) — which is a STAGE-family concern, so phase 2
 should expose `operand_lift(i)` even though no emitter reads it yet.
 
-### The `Edge` question — settled, and settled by not needing it
+**The collapse did not re-spell terms.** Hoisting a load to an operand edge stays recognition's decision — a bare
+sum keeps its load INLINE in the lift, a contraction hoists both operands because the schedule needs their
+addresses. The collapse renamed the node kind and moved the projection down one level; it hoisted nothing. That is
+what bounded its blast radius, and it is why examples 1–3 and 7 below are byte-identical to their pre-collapse dumps
+but for the header word.
 
-An earlier revision left open whether an `Edge(source, access)` wrapper type should exist, so that computed edges
-(the fused cone, flash's `P`) carry an explicit access like materialized ones do. **The collapse landed without
-one, and the question dissolved rather than being decided:** the only consumer that motivated a uniform access was
-the A/B derivation, and A/B turned out to ride operand order instead (above). Nothing else in the layer asks a
-computed edge for an access.
-
-So an operand edge stays the union it always was — `Load | Fold`, MATERIALIZED or COMPUTED. Two reasons to keep it
-that way if the question is reopened:
-
-- **`Stmt`-hood.** Every structural node is a `Stmt`, which is what lets an inline node occupy a statement position:
-  `_splice_operands` splices an edge's producing stmts straight into a `Body` and `_flatten_nodes` lowers it in
-  place. An `Edge` wrapper is not a `Stmt`, so both would unwrap, `path._walk` would recurse through a non-node
-  level, and the `rewrite` registry would need a handler for a thing that is not a term.
-- **`term_key` is `repr()`.** A wrapper is a new level in every stored term's repr — a second wholesale key change
-  on top of the collapse's, for no consumer.
-
-Reopen only if a pass appears that genuinely needs a computed edge's index space; today none does.
-
-### What the collapse does NOT do
-
-**It does not re-spell terms.** Hoisting a load to an operand edge stays recognition's decision, exactly as today —
-a bare sum keeps its load INLINE in the lift, a contraction hoists both operands because the schedule needs their
-addresses. The collapse renames the node kind and moves the projection down one level; it does not hoist anything.
-This is what bounds its blast radius, and it is why examples 1–3 and 7 below are byte-identical to their current
-dumps but for the header word.
-
-**But it does change `term_key`.** `ops.term_key` is `repr()` of the canonically-renumbered term, so a changed class
-name and a changed nesting for the projection change the key for every term — and with it `op_cache_key` and
-`Graph.structural_key`'s op field. Consequence, to be planned for rather than discovered: **the cubin cache and every
-recorded DB / reservoir measurement are orphaned** (they key on `(ctx.structural_key, op_cache_key)`), while the
-golden corpus survives untouched because it keys on knob spellings. That makes the collapse cheap for correctness and
-expensive for evidence — do it BEFORE the phase-2 measurement work, never after.
+**The evidence orphaning is already paid.** `ops.term_key` is the `repr()` of the canonically-renumbered term, so the
+changed class name and the projection's changed nesting changed the key for every term — and with it `op_cache_key`
+and `Graph.structural_key`'s op field. **The cubin cache and every recorded DB / reservoir measurement keyed on
+`(ctx.structural_key, op_cache_key)` are orphaned**; the golden corpus survives untouched because it keys on knob
+spellings. Phase 2's measurement work therefore starts from an empty reservoir — a cost already sunk, not a risk
+still to manage.
 
 ## Design
 
@@ -276,8 +257,10 @@ that is wrong, and the first is fatal:
    knob set stays REACHABLE by the search"* — passes today, against the catalog. Generating the domain dissolves its
    referent.
 
-Note `a602874a` deleted `map_tile_moves` / `reduce_moves` / `wspec_moves` from `space.py`, so the map-tile and
-reduce families have no surviving catalog and must be reconstructed with the rest.
+Note `a602874a` deleted `map_tile_moves` and `wspec_moves` from `space.py` (they went unread the moment the
+scheduler did), so the strip-tile and `+p` producer-band domains must be reconstructed with the rest. The reduce
+catalog SURVIVES — `coop_reduce_moves` / `splitk_moves` — as do `scalar_tile_moves`, `warp_tile_moves`,
+`twisted_warp_moves`, `stage_moves` and `raster_moves`.
 
 ### The constraint table — documentation and assertions, not a space
 
@@ -412,27 +395,37 @@ is "read `git show e27d8fdc^:…/_schedule.py` and rewrite".
 | the loop → term parser | `passes/lowering/tile/_fromloop.py::fold_from_loop` / `nodify_reduce` (moved out of the IR) |
 | the `(m, n)` binding | `ops.Sched.tile_of` returns a PLACED slice; readers state no placement rule (see Placement) |
 
+Three things the deleted scheduler leaned on do NOT exist and must be written, not ported:
+
+- `Fold.demoted()` — the collapse variant. Fully specified above; ~15 lines (phase 3).
+- `Fold.operand_lift(i)` — the per-operand prologue reading (derived; phase 2 exposes it for the fused prologue).
+- any consumer that expected `Map` / `Contraction` as *types*: the readings are `axis is None` and
+  `is_contraction(x)`.
+
 Three tooling facts that decide what a gate can mean:
 
 - **`tests/xfail_registry.py` holds 107 ids**, applied `strict=False` — a restored test passes UNNOTICED. On this
   box the suite reports 605 skips, concentrated in the scheduler-dependent modules (`test_attention_coverage.py`
   120 tests, `test_matmul_coverage.py` 142). "Registry empty" is not a completion criterion.
-- **`scripts/digest_kernels.py` runs green and prints garbage.** At HEAD: exit 0, 24 lines, but only **15 distinct
-  digests** — `matmul_scalar`/`warp_tma`/`splitk` collide, as do `warp_f16acc`/`raster`/`wspec`,
-  `norm_linear`/`_splitk`/`_coop`, `flash_hd128`/`_cp`, `flash_hd256_alt`/`_fm`, and `flash_chain`/`flash_scalar`.
-  The pins are ignored and the un-recognized escape renders. No baseline exists in the tree. At `e27d8fdc^` all 22
-  emitted digests are distinct and four `__partial` kernels appear.
+- **`scripts/digest_kernels.py` runs green and prints garbage.** Measured at HEAD: exit 0, 24 lines, no `<ERROR>`
+  line, but only **15 distinct digests** — `matmul_scalar`/`warp_tma`/`splitk` collide, as do
+  `warp_f16acc`/`raster`/`wspec`, `norm_linear`/`_splitk`/`_coop`, `flash_hd128`/`_cp`, `flash_hd256_alt`/`_fm`, and
+  `flash_chain`/`flash_scalar`. The pins are ignored and the un-recognized escape renders. No baseline exists in the
+  tree. Measured at `e27d8fdc^`: exit 1, 24 kernel lines all with DISTINCT digests, four of them `__partial`, plus
+  four errored cases (next bullet). The script already exits nonzero when a case raises — what it lacks is a
+  liveness check that the pins actually landed, which is the half of P0 that stays open.
 
-  **What that means for the collapse work, measured rather than assumed:** instrumenting `Sched.tile_of` across a
+  **What that means for the rebuild, measured rather than assumed:** instrumenting `Sched.tile_of` across a
   full digest run shows it reached on every contraction site (matmul `a2`; flash `dd` and `pj`) and returning
   `None` every time — there is no `TILE` slice to return, because nothing consumes the pins. So the digest gate
   pins RECOGNITION, term storage and the UN-SCHEDULED lowering path, and does **not** exercise the tiered/placed
   contraction path at all. Any change to `_factor`'s tiled arm or `_twist`'s warp realizer is invisible to it, and
   needs its own unit coverage until P0 restores the harness.
-- **The materializer has a live regression on the flash warp path.** `_twist._realize_prologue` reads `qk.acc` off a
-  parameter annotated `TilePlan`, which has no such field (`atom, units, regs, bk, axes`). ONE site — its siblings take
-  the node, which does have it. Four `digest_kernels` cases error with `AttributeError` **even at the pre-deletion
-  commit**, so the flash warp path has no obtainable baseline until it is fixed.
+- **The materializer has a live regression on the flash warp path.** `kernel/_twist._realize_prologue` reads
+  `qk.acc` off a parameter annotated `TilePlan`, which has no such field (`atom, units, regs, bk, axes`) — ONE site;
+  its siblings take the node, which does have it. It is unreachable at HEAD (nothing schedules, so the warp realizer
+  never runs), but at `e27d8fdc^` all four flash warp cases error with `AttributeError`, so the flash warp path has
+  no obtainable baseline until it is fixed.
 
 ## Gates
 
@@ -459,8 +452,8 @@ of that key's domain"** — ~3000 per-key assertions instead of 747 set-membersh
 ## Soundness tests
 
 Two directions. SOUNDNESS: every emitted row is materializable and legal — and it matters more here than usual
-because `validate` checks smem ONLY (the thread and CTA checks are stubbed "pending rebuild"; `max_threads_per_cta`
-appears once in the tree, inside that docstring). COMPLETENESS: every row that should exist is emitted — covered by
+because `validate` checks smem ONLY (the thread and CTA checks are documented but "pending rebuild" — they walked
+the demolished tile-flavor wrappers; `ctx.max_threads_per_cta` still exists as a field, read by nothing). COMPLETENESS: every row that should exist is emitted — covered by
 the two catalog tests above.
 
 Costs are MEASURED, not guessed:
@@ -483,49 +476,13 @@ Rows 9–10 must NOT be asserted in tier 0 — row 9 is enforced by the resolver
 
 **Spike first. The generic machinery is not the risk; the reconstruction is.**
 
-**P0 — make the harness honest (independent, land this week).** Fix `_twist.py:315`. Add a liveness assertion to
-`digest_kernels.py` (each case asserts its pinned knobs landed on the emitted `TileOp`) AND a nonzero exit on any
-`<ERROR>` line — today it exits 0 with errors printed as data. Commit a baseline from `e27d8fdc^` (needs
-`PYTHONPATH=.` from a worktree, and record which mode it runs in — the deploy/tune reduce narrowing differs). Flip
-the registry to `strict=True`. Write the full-corpus golden-reachability loop over `GOLDEN_CONFIGS` asserting
-`evaluate_golden(...).rank is not None` — ~10 lines on existing API; it xfails until phase 2 and then gates for
-free. **Nothing here depends on the design.**
-
-**P0.5 — the `Fold` collapse. LANDED, and the names are gone too.** There is ONE stored node kind. `Map` is
-deleted outright — a zero-axis fold built by `Fold.projection(...)` is the projection / pointwise cell, and
-`.sources` / `.fn` went with it (`.operands` / `.lift`). `Contraction` is deleted as a kind: `Fold.contraction(...)`
-is the builder (it generates the bilinear lift and the additive combine) and `is_contraction(x)` the reading — a
-predicate, not a type, which matters because `isinstance` answered `False` for the `Load` edges and plain `Assign`s
-that step-stream scans walk, and a bare `x.role is …` raises on them. `path._walk` tests the bilinear reading AHEAD
-of the generic operand walk, which is what keeps `PLACE@a` meaning what it meant.
-
-Gates met at each step: `scripts/digest_kernels.py` byte-identical across all 24 cases, and a per-test junit diff
-against the pre-collapse commit showing ZERO status changes.
-
-**The layer was then split by concern**, because the audit found almost no dead code — the size was four unrelated
-jobs in two files:
-
-| module | job |
-| --- | --- |
-| `ir/tile/ir.py` (1001) | the term vocabulary — `Fold`, `Channel`, `Store`, `TileOp` |
-| `ir/tile/ops.py` (345) | geometry-free compute reads + the `Sched` accessor |
-| `ir/tile/path.py` (361) | the tree-path codec |
-| `ir/tile/_key.py` (169) | `term_key` — a CACHE concern, not a structural read |
-| `ir/tile/_dump.py` (262) | the structural dump — a debugging view no lowering path consults |
-| `passes/lowering/tile/_fromloop.py` (192) | `fold_from_loop` / `nodify_reduce` — a PARSER, moved out of the IR |
-
-That last move also fixed a layering inversion it exposed: `ops.py` had begun importing up into the passes layer.
-`ir.py` + `ops.py` went 1964 → 1346 lines (−31%); about 90 lines were genuinely deleted rather than relocated
-(`demoted()` — zero callers; `as_fold()` — the identity since the collapse; `with_body`, `b_computed`,
-`_contract_view`, and 20 version markers of migration archaeology).
-
-**What this means for the rebuild.** Three things the deleted scheduler leaned on no longer exist and must be
-written, not ported:
-
-- `Fold.demoted()` — the collapse variant. Fully specified above; ~15 lines.
-- `Fold.operand_lift(i)` — the per-operand prologue reading (derived; phase 2 exposes it for the fused prologue).
-- any consumer that expected `Map` / `Contraction` as *types*: the readings are `axis is None` and
-  `is_contraction(x)`.
+**P0 — make the harness honest (independent, land this week).** Fix `kernel/_twist.py`'s `qk.acc`. Add a liveness
+assertion to `digest_kernels.py` — each case asserts its pinned knobs landed on the emitted `TileOp` (the nonzero
+exit on a raising case already exists). Commit a baseline from `e27d8fdc^` (needs `PYTHONPATH=.` from a worktree,
+and record which mode it runs in — the deploy/tune reduce narrowing differs). Flip the registry to `strict=True`.
+Write the full-corpus golden-reachability loop over `GOLDEN_CONFIGS` asserting `evaluate_golden(...).rank is not
+None` — ~10 lines on existing API; it xfails until phase 2 and then gates for free. **Nothing here depends on the
+design.**
 
 **SPIKE (1–2 days) — one shape end to end.** Restore `020_schedule` + `assemble` + the three CONTRACTION candidate
 functions for a plain matmul only. Gate: `pytest tests/compiler/passes/test_move_catalog.py
@@ -562,8 +519,8 @@ sweep.
 - **Every role emits rows; no role builds `TileOp`s directly.** This is the success criterion.
 - **ONE stored node kind.** Role, the A/B edge labels and the per-operand lifts are all DERIVED; nothing that a
   reading can produce gets a field. A new stored field on `Fold` is a design regression, not an optimization.
-- **Knob KEYS and VALUE spellings are frozen** — which, post-collapse, means `path._walk` must keep emitting the
-  `a` / `b` edge labels. Term keys are NOT frozen (the collapse changes them once, by design).
+- **Knob KEYS and VALUE spellings are frozen** — which means `path._walk` must keep emitting the `a` / `b` edge
+  labels. Term keys are NOT frozen; the collapse already changed them once, by design.
 - **Uniform key sets per fork**, `""` as a decided empty — prefix-consistency for the evidence pick.
 - **Bare `REDUCE` is the contraction's K fold, never the cone's stat** — both readings of a fused term spell against
   the contraction tree. (The earlier proposal to let each reading spell its own keys is dropped: it would change
@@ -597,8 +554,8 @@ Previously unstated and each otherwise discovered mid-phase:
 The acceptance corpus: for each shape the new walk must enumerate the SAME rows, in the same stored spellings.
 
 **Every term dump below is REAL** — produced from `scripts/digest_kernels.py`'s case list run through
-`Pipeline.build(CUDA_PASSES[:index("lowering/kernel")])` and printed with `TileOp.pretty_body()`, at the collapse
-commit. They are therefore *pre-schedule*: `place` reads `unmapped`, there is no `work` line and no schedule slices,
+`Pipeline.build(CUDA_PASSES[:index("lowering/kernel")])` and printed with `TileOp.pretty_body()`, at HEAD. They are
+therefore *pre-schedule*: `place` reads `unmapped`, there is no `work` line and no schedule slices,
 because the scheduler is deleted. The `←` annotations are the axis → grid/warp/thread mapping the pre-deletion
 dumps carried — i.e. what the emitters must produce, not what the tree emits today.
 
@@ -1076,17 +1033,15 @@ and recognition, not from this enumeration.
 
 ## Risks
 
-- **The collapse orphans measured evidence.** `ops.term_key` is `repr()` of the canonicalized term, so a changed
-  class name and the projection's changed nesting change `op_cache_key` and `Graph.structural_key` for EVERY term.
-  The cubin cache and every DB / reservoir row keyed on `(ctx.structural_key, op_cache_key)` stop matching; goldens
-  survive because they key on knob spellings. Correctness-cheap, evidence-expensive — which is exactly why P0.5 sits
-  before phase 2 and not after.
-- **The collapse can silently lose a path segment.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and the stored
-  corpus depends on `a` (`PLACE@a`, 9 rows) while depending on `map` / `fold` nowhere. If `path._walk`'s derived
-  labelling regresses, those nine rows do not fail loudly — they re-spell to a path form and read as a different
-  site. Assert them by name in P0.5, not by set membership.
-- **Zero-axis folds are now ambiguous by shape.** The pointwise cell, `030`'s finalize and the un-recognized escape
-  are all operandless zero-axis folds; only `ops.axis_role`'s `Loop.role` fallback and `family_sites`' root-only rule
+- **The measured evidence is already orphaned** (see "The IR beneath it"): the collapse changed `term_key`, so no
+  DB / reservoir row and no cubin keyed on `(ctx.structural_key, op_cache_key)` still matches. Phase 2 measures from
+  empty; goldens are unaffected. Sunk, not pending — but every "regression vs recorded evidence" reading is void.
+- **A path segment can be silently lost.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and the stored corpus
+  depends on `a` (`PLACE@a`, 9 rows) while depending on `map` / `fold` nowhere. If `path._walk`'s derived labelling
+  regresses, those nine rows do not fail loudly — they re-spell to a path form and read as a different site. Assert
+  them by name, not by set membership.
+- **Zero-axis folds are ambiguous by shape.** The pointwise cell, `030`'s finalize and the un-recognized escape are
+  all operandless zero-axis folds; only `ops.axis_role`'s `Loop.role` fallback and `family_sites`' root-only rule
   separate them. Pre-collapse the type distinguished nothing either, but the failure was loud; now it is a wrong
   emitter. Phase 3 asserts it directly.
 - **The reconstruction is the risk.** ~2460 lines exist only in `git show`, their tests were deleted with them, and

@@ -3,9 +3,10 @@
 Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`). Per-dialect details live in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (pass order, knob table, fork semantics). The **tile-lowering** phase
 (`lowering/tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
-specializations**: it dispatches on the fold algebra (`MAP` / `SEMIRING` / `MONOID`), never on a named shape
-(matmul / pointwise / attention) — flash attention is the `MONOID` algebra on the streaming schedule (a twisted
-monoid is a monoid), selected structurally, not a distinct kind.
+specializations**: it dispatches on the fold's DERIVED role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` /
+`TWISTED`, read off arity and the combine, never stored), never on a named shape (matmul / pointwise / attention) —
+flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
+structurally, not a distinct kind.
 
 ## The tile SCHEDULER is currently absent
 
@@ -48,7 +49,7 @@ How to comply:
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
   nobody designed for (a weight-side dequant cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
-  report the first thing the transform *fundamentally cannot do*, like `lowering/_predicates.classify_fragment_epilogue`
+  report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
   instead of with a hand-maintained list.
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
@@ -77,26 +78,27 @@ The same invariant applies *across* the tile→kernel boundary: the kernel mater
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
 option is built — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
 RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
-`Contraction`, so materialize reads the operands /
-`acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
-before the schedule means an atom that **cannot** be
-bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never becomes a node at all: it keeps the `Map`
-form, and the placed contraction reading declines it instead of failing several
-passes later:
+contraction-shaped `Fold`, so materialize reads the operands /
+`acc` off the node and only `factorize`s (the projection is peeled off the wrapping zero-axis fold's `lift` — its one
+home). Resolving it before the schedule means an atom that **cannot** be
+bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never gets built in the bilinear shape: its
+loads stay INLINE in a fold's lift, so the contraction reading (and with it the placed tiers) declines it instead of
+failing several passes later:
 
 - a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
   (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
-  has inlined an operand cone, the cone as a `Map` NODE stored INLINE on an operand edge (`_atomize.make_cone` — a
-  STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
-  no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `Contraction`
-  NODE itself (1s — the third stored node kind): pure algebra — `k_axis` + the shared `a` edge + the product
-  `Channel`s `(b_i, acc_i)`, sharing the node's ARITY — and NOTHING else: placement and schedule are not node
-  fields at all. The PLACED reading the tiers require is the SCHEDULE SLICE: a `TilePlan` carries the `(m, n)`
-  output axes it tiles (`TilePlan.at`, from the caller's placement) and derives the `Side` geometry from them, so
-  node and slice travel as a pair and a schedule can never ride a stored term. `as_fold()` is the node's DERIVED λ reading (the flat `(init, combine)` algebra
-  spelling `Reduction` and the PLANAR demotion consume; its derived loop body is byte-identical to the node's own,
-  unit-tested).
+  has inlined an operand cone, the cone as a zero-axis `Fold` stored INLINE on an operand edge (`_atomize.make_cone`
+  — a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
+  no statistic prologue) — plus the fold accumulator and the projection. The STORED form is ONE `Fold` in the
+  BILINEAR shape (`Fold.contraction` builds it, `is_contraction` / `Fold._contraction` read it back — a predicate and
+  a derived reading, never a kind): pure algebra — the K `axis` + the shared `a` edge + the product `Channel`s
+  `(b_i, acc_i)` read off `operands`, sharing the node's ARITY — and NOTHING else: placement and schedule are not
+  node fields at all. The PLACED reading the tiers require is the SCHEDULE SLICE: a `TilePlan` carries the `(m, n)`
+  output axes it tiles (bound by `Sched.tile_of` through `TilePlan.at`, from the caller's placement) and derives the
+  `Side` geometry from them, so node and slice travel as a pair and a schedule can never ride a stored term. The
+  stored term IS the λ form — the flat `(init, combine)` algebra that `Reduction` and the PLANAR demotion consume,
+  read directly off the node (the retired `as_fold()` conversion became the identity at the collapse and is gone).
   An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or
   COMPUTED (the node itself, stored inline). Tree ownership gives an inline node exactly one consumer — so there is
   no let table, no reference arm, and no resolve step:
@@ -110,8 +112,9 @@ passes later:
   precisely where "no reference arm" becomes visible: `P` is already in a register, and since an edge is a `Load` or
   an inline node and nothing else, pointing at it means wrapping it in the one-stmt node `{o}__p = copy(P)`
   (`_derived_expect_fold`) — the copy IS the reference, and the rename off the accumulator name keeps it stable
-  against the twist program's positional temps. That node is the edge directly; there is no empty-cell
-  `Map(body=(), sources=(…,))` cone wrapper around it, since with no per-cell work `cone_seam` bridges no stats
+  against the twist program's positional temps. That node is the edge directly; there is no empty-body
+  `Fold.projection(body=(), operands=(…,))` cone wrapper around it, since with no per-cell work `cone_seam` bridges
+  no stats
   either way and both spellings lower identically.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
@@ -139,7 +142,8 @@ passes later:
   dims whose origin coordinates are the operand's own index exprs — eligible when those exprs don't move with the
   tile or the K loop (the TMA operand box-rank rule), so a model's `[1, seq, K]` unit-batch view stages exactly like the
   rank-2 snippet twin (the gemma in-model matmuls' TMA lockout). A **transposed B** (the serving `F.linear` layout —
-  B given `(N, K)`, K gmem-contiguous, `Contraction.b_trans`) stages on the warp tier through an **N-major slab**:
+  B given `(N, K)`, K gmem-contiguous, `Fold.b_trans` — derived off the B edge's index) stages on the warp tier
+  through an **N-major slab**:
   the B slot takes A's geometry (`tile_n × bk`, K the inner dim — stride-1 in gmem and smem alike, so cp.async chunks
   and the TMA box stay contiguous; `Operand.trans` stamps the layout) and the drain is the plain no-`.trans`
   ldmatrix (`LdmatrixLoad(b_trans=True)` — the same staged path flash's K slab rides). Both operands' inner span is
@@ -164,16 +168,16 @@ passes later:
   conflicts / 82.5 M LSU inst on the 5090; the swizzle + vector fill store recovered -29% (std) / -41% (fm).
   Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
-  binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
-  per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
-  `Map(fn=projection, sources=(fold,))` — ONE `role=CONTRACTION` `Fold` whose LIFT multiplies each ⊗-channel's B
-  against the one shared inline A cone edge (itself a node tree: the statistic is the cone's inner `Fold`
-  source, the per-cell normalize its `Map` fn). Sharing is edge REUSE — the product semiring outputting N
+  binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting zero-axis fold
+  over a per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
+  `Fold.projection(fn=projection, operands=(fold,))` — over ONE `role=CONTRACTION` `Fold` whose LIFT multiplies each
+  ⊗-channel's B against the one shared inline A cone edge (itself a node tree: the statistic is the cone's inner
+  `Fold` operand, the per-cell normalize its own `lift`). Sharing is edge REUSE — the product semiring outputting N
   matrices — and the node schedules and lowers as ONE unit (one `TilePlan`/`Stage`/`ReducePlan` row;
   `Fold.loop` splices the shared cone once and carries the
   N-component product-monoid accumulator set) — a product-monoid fold: components never interact
-  per step; the combine — SwiGLU — is projection, riding the wrapping `Map.fn`. Channels whose B layouts disagree
-  were never legally fusable, so they simply never product (a formation gate, not a node assert).
+  per step; the combine — SwiGLU — is projection, riding the wrapping zero-axis fold's `lift`. Channels whose B
+  layouts disagree were never legally fusable, so they simply never product (a formation gate, not a node assert).
   It is offered as a fork SIBLING of the
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side). This retired the pin-only
@@ -209,31 +213,32 @@ like)`). The lowering layer's one algebra reader is `passes/lowering/_reduction.
 twist family is selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at
 formation; the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator,
 value name = expectation). The COMPOSED evaluations derive too (step 7): flash's kv stream λ-spells with its QK score
-`Contraction` a HOISTED inline-node operand edge (reading the enclosing kv var, never state) and its PV
+contraction a HOISTED inline-node operand edge (reading the enclosing kv var, never state) and its PV
 contraction SYNTHESIZED — and memoized, one identity per stored fold — inside the derived blocked evaluation
 (`ir._twisted_derived_step`, byte-identical to the retired in-step spelling); split-K's outer reduce is the
 IDENTITY-LIFT composition over its one inline sliced contraction node (combine at that singleton embeds the operand
 verbatim — no outer `Accum`s; `Fold.composed` is the one read of the composition, shared by `Fold.role` and
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
 goes through; `.loop` splices only the operand edges the derived step did not consume. `Fold.from_loop` returns
-`None` for a non-λ-representable loop (an effectful / raw-block body — the callers keep the raw-loop-IR `Map`
-escape), and its byte-identity gate compares the derived body/axis/unroll only — the role annotation is the
-fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and derives `PLANAR` (the 1l
+`None` for a non-λ-representable loop (an effectful / raw-block body — the callers keep the raw-loop-IR projection
+escape, an impure-bodied zero-axis fold), and its byte-identity gate compares the derived body/axis/unroll only —
+the role annotation is the fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and
+derives `PLANAR` (the 1l
 demotion, now a formation fact; `_extract_lift` accepts any PURE prefix, and `Fold.demoted()` un-hoists a
 demoted cone into the lift body). Kernel identity is the α-INVARIANT TERM HASH (`ops.term_key`: canonical
 renumbering in first-appearance walk order plus hash-time ANF body-order canonicalization — the stored term is never
 reordered, the lowered nest keeps storage order, identity does not; the lowered-nest identity is retired), consumed
-by `op_cache_key`'s TileOp arm and `Graph.structural_key`'s op field. `Map` stores `fn: Lambda` + `sources` (1n):
-sources bind positionally to `fn.params`
-(one param per source RESULT COMPONENT — a product source binds every channel accumulator — so lowering splices
-verbatim), and `fn.results` replace the retired `out` last-def convention.
+by `op_cache_key`'s TileOp arm and `Graph.structural_key`'s op field. The ZERO-AXIS fold is what `Map` was — no
+`fn` / `sources` fields survive it (`lift` / `operands`, built by `Fold.projection`): operands bind positionally to
+`lift.params` (one param per operand RESULT COMPONENT — a product operand binds every channel accumulator — so
+lowering splices verbatim), and `lift.results` replace the retired `out` last-def convention.
 
 **Effects sit at the kernel boundary (1q).** Every recognized term's `fn` is a STRICT pure `Lambda`: the root-store
 `Write`s — and the rms/softmax output-sweep `Loop` around them — left the term for `TileOp.stores`, a tuple of
 `Store` decorations (the `Write` held whole for field fidelity, plus the sweep axis/unroll). ONE reconstitution rule
 (`ir.effect_tail`, read through `ops.projection_tail`) reassembles the effectful stmt stream wherever the pipeline
 consumed it out of the body — the scheduler's tail gates (the transposed band's no-sweep condition, the shared-row
-stage detection, the split-K atomic-distributivity gate), the materializer's `Map` peel and flat-root arm, and
+stage detection, the split-K atomic-distributivity gate), the materializer's projection peel and flat-root arm, and
 `030_split_reduce`'s projection/cell reads — so the lowered kernels are byte-identical to the stored-`Write` era
 (the conversion sites run `split_effects`, whose round-trip gate is the same 1o construction-time byte-identity
 pattern; a declining shape keeps the raw spelling). `030`'s split partials nodify their sliced annotated `Loop`
@@ -241,8 +246,8 @@ into a `Fold` source and carry the workspace stores as boundary `Store`s; the re
 out per copy. The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
 that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
 un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
-composed contraction tail), formed through the one Map-private `_loop_ir_fn` arm and dying with the recognizer's
-growth toward totality. The closure scan (`_cut._captured_values`) demoted to the validation reading of
+composed contraction tail), formed through the one `Fold.projection`-private `_loop_ir_fn` arm and dying with the
+recognizer's growth toward totality. The closure scan (`_cut._captured_values`) demoted to the validation reading of
 edge-iff-closed.
 
 **The site-local value grammar + `WORK` (step 7).** Knob KEYS address tree sites (the path codec); since step 7 the
@@ -296,7 +301,7 @@ out, yielding the cascade statistic + scale + plain matmul, every piece joining 
 **Fuse is the default by ABSENCE** — no routing entry and no pin leaves recognition byte-untouched (digest-verified),
 and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`_captured_values`
 in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate
-(cutting an empty-body root `Map`'s only source, whose parent would merely copy the workspace out — the
+(cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
 non-terminating case) is refused. Loop fusion brakes on `__cut_` workspace producers — a decided placement is not
 fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary pairs). The old `020_cut_edge` /
 `025_sink_row_reduce` / `032_fuse_finalize` realizers stay retired; their non-default placements return only as
@@ -338,7 +343,8 @@ re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measure
 edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
 across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, cheap
 exactly on the small-free decode shapes the split-K CTA-count cap admits), the per-cell cone σ-reindexed to
-absolute k and the `Map`-wrapper projection folded into the deferred finalize (the split-K option's computed-A arm
+absolute k and the wrapping zero-axis fold's projection folded into the deferred finalize (the split-K option's
+computed-A arm
 → `030_split_reduce`'s structural path). Multi-channel (gate/up) nodes split too: the synthesized fold loop
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each
 channel's raw C fragment to its `ws[comp, ksplit, *cell]` slice (the per-acc `RegStore` arm — no ⊗-combine in

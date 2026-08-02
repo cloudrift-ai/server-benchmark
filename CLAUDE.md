@@ -19,21 +19,25 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Compiler** (Graph IR dialects, passes, backends) → [`emmy/compiler/ARCHITECTURE.md`](emmy/compiler/ARCHITECTURE.md) and child docs
 - **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
   [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
-- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR
-  has exactly THREE node kinds (all in `ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`, stored in
-  the λ-foldMap spelling (1m–1p): an iteration `axis`, a pure **`lift`** `Lambda` (`λ(k, v₁…vₙ) → S` — the
-  element's SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE monoid's flat **`(init,
-  combine)`** fields (ONE program, its results the fold's real accumulator names; the free helpers in
-  `ir/stmt/algebra`), and a symmetric tuple of
-  **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params); the bilinear
-  **`Contraction`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
-  shared `a` operand edge and the product `Channel`s `(b_i, acc_i)` (arity N = the fused gate⊗up edge; sharing is
-  the node's arity) and NOTHING ELSE — placement (`(m, n)` axes, the leading grid axes) and schedule
-  (`TilePlan`/`Stage`) are caller facts living on the `TileOp` (`place` / the `schedule` dict), the `(m, n)` axes
-  bound onto the `TilePlan` slice at the point of use (`TilePlan.at`); `as_fold()` survives only as the
-  node's DERIVED λ reading, consumed by the cross-partition `Reduction`
-  machinery and the PLANAR demotion, its loop body byte-identical to the node's own) — and the lift/projection
-  wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
+- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR has
+  exactly ONE node kind (`ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`, stored in the λ-foldMap
+  spelling (1m–1p): an OPTIONAL iteration `axis`, a pure **`lift`** `Lambda` (`λ(k, v₁…vₙ) → S` — the element's
+  SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE monoid's flat **`(init, combine)`** fields
+  (ONE program, its results the fold's real accumulator names; the free helpers in `ir/stmt/algebra`), and a symmetric
+  tuple of **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params). **`Map` and
+  `Contraction` are DERIVED READINGS, not stored kinds** — constructors that return a `Fold`, with `isinstance`
+  answering the reading. A ZERO-AXIS fold (`axis is None`) is what `Map` was: no monoid, its `lift` IS the per-cell
+  projection, so softmax/RMSNorm/flash's `divide(O, l)` are all one kind composed at two depths. The BILINEAR shape —
+  operands `(b₀, a, b₁…)` under a `multiply` lift and a componentwise-additive combine — is what `Contraction` was,
+  exposing `a` / `channels` / `b_trans` off `operands` (arity N = the fused gate⊗up edge; sharing is the node's arity).
+  The A/B split rides the stored operand ORDER, NOT the accesses: node-locally `A[m,k]` and `B[k,n]` are symmetric (each
+  carries K plus one free axis) and telling M from N needs the PLACEMENT, a caller fact living on the `TileOp` (`place`
+  / the `schedule` dict) with the `(m, n)` axes bound onto the `TilePlan` slice at the point of use (`TilePlan.at`);
+  `as_fold()` is now the identity. Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis,
+  `TWISTED` off the combine's twist family, `CONTRACTION` off the bilinear reading or the composed split-K operand,
+  `PLANAR` otherwise — so the PLANAR demotion is a formation fact with no role rewrite (`demoted()` moves the edges
+  inline and the same derivation answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
+  segments off those readings — `PLACE@a`'s golden rows depend on it.
   The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
   family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
   `AxisRole`; the retired `Algebra` bundle's lowering-side reads live in `passes/lowering/_reduction.Reduction`

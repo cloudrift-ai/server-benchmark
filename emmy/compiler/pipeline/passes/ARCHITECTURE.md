@@ -117,13 +117,15 @@ passes later:
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
-  recognized contraction, per-cell scalar included, stores as the `Contraction` node; an
+  recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
+  `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**
-  `PLANAR` and takes the reduce tiers at schedule dispatch — no role rewrite. **The node kind IS the `CONTRACTION`
-  role** (1s — `Contraction.role`, no bilinear parse), and **`Fold.role` stays derived, never stored** (1l):
-  `TWISTED` off the stored combine's twist family, `CONTRACTION` off the composed split-K
-  operand (`Fold.composed`), `PLANAR` otherwise — so "a contraction" below
-  always means the stored node, and the lowered `Loop`'s annotation falls out of the same read; the schedule fork only
+  `PLANAR` and takes the reduce tiers at schedule dispatch — no role rewrite. Since the collapse there is ONE stored
+  kind and **every role derives from arity** (`Fold.role`, never stored): `FREE` with no axis,
+  `TWISTED` off the stored combine's twist family, `CONTRACTION` off the bilinear reading
+  (`Fold._contraction`) or the composed split-K operand (`Fold.composed`), `PLANAR` otherwise — so "a contraction"
+  below always means a fold that reads as one, and the lowered `Loop`'s annotation falls out of the same read; the
+  schedule fork only
   stamps a `tile` onto a `replace()` copy, and `_factor.factorize` reads the facts off
   the placed node instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (the warp / scalar stage resolvers — transport

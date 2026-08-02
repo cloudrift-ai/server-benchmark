@@ -12,7 +12,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `frontend/ir`     | after tracing                   | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, `UnsqueezeOp`, `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp` |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
-| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: `Map` / `Reduction` / `Contraction`) + thin schedule fields (free→grid `Placement`, `workers`, residual `tier`/`stage`; reduce partitions ride the `Reduction` node) |
+| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: ONE `Fold` kind) + thin schedule fields (free→grid `Placement`, `workers`, residual `tier`/`stage`; reduce partitions ride the schedule dict) |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
@@ -29,7 +29,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   op; reductions are `Accum` statements inside a reduce `Loop`).
 - **Loop → tile** (after `lowering/tile`): `LoopOp` nodes replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` —
-  a `Map` / `Reduction` / `Contraction`) plus thin schedule fields
+  one `Fold` kind) plus thin schedule fields
   (`place` / `workers` + residual tier/stage; every reduce partition rides its `Reduction` node); a kernel's structure
   is read off its annotated reduce loop's `AxisRole`, not a Python
   type. `010_recognize` lifts the `Map` (a thin `Body` wrapper over
@@ -410,19 +410,29 @@ LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
 ## `tile/`
 
 Tile IR (`tile/ir.py`, `tile/ops.py`) keeps the stored term pure algebra and the schedule beside it. A `TileOp` holds
-the structural-IR root `op` directly — a `Map` / `Fold` / `Contraction` (the three stored node kinds, defined in
-`tile/ir.py`) — plus the root-global free→grid `Placement` (`place`), the worker inventory (`work`) and warp split
-(`workers`); every per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed
-`TileOp.schedule` dict (1r). **No node kind carries a schedule field at all**: a `Contraction` is `k_axis` + the `a`
-edge + its `Channel`s and nothing more, so a node's `==` / `hash` / `ops.term_key` is its algebra — two kernels
+the structural-IR root `op` directly — a `Fold`, the ONE stored node kind (defined in `tile/ir.py`) — plus the
+root-global free→grid `Placement` (`place`), the worker inventory (`work`) and warp split (`workers`); every
+per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed `TileOp.schedule` dict.
+
+**One kind, three readings.** A `Fold` is an optional `axis`, the `operands`, a joint `lift` and an optional
+`(init, combine)` monoid. `Map` and `Contraction` survive only as DERIVED readings — constructors that return a
+`Fold`, with `isinstance` answering the reading (a zero-axis node is the projection / pointwise cell, what `Map`
+was; the bilinear shape is the contraction, exposing `a` / `channels` / `b_trans` off `operands`). The A/B split
+rides the stored operand ORDER `(b₀, a, b₁…)`, because node-locally the two are symmetric — `A[m,k]` and
+`B[k,n]` each carry K plus one free axis — and telling M from N needs the placement, which lives on the `TileOp`.
+
+**No node carries a schedule field at all**: a contraction reading is its axis + edges + generated algebra and
+nothing more, so a node's `==` / `hash` / `ops.term_key` is its algebra — two kernels
 differing only in tile key identically, and no emission path can leak a schedule into a stored term. The placement +
 schedule a tier needs travels beside the node as its SCHEDULE SLICE — algebra and geometry as a `(node, tile)`
 pair, never fused into one object. The **geometry is the slice's own**: a `TilePlan` carries the
 `(m, n)` output axes it tiles (`axes`, bound by `.at(m, n)`) and derives the `Side` pair from them, so the tiled
 CELL's reading is a function of the schedule slice alone. `axes` is `compare=False` — placement is not a search
 dimension, so it never reaches `spell()`, a stamped knob row, a golden or a prior key. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
-structurally off the node (`ops.axis_role` — the contraction IS the `Contraction` kind; a fold's role derives),
-not a bespoke Python type per schedule.
+structurally off the node (`ops.axis_role` — every role DERIVES from arity: no axis is `FREE`, a twisted combine
+`TWISTED`, the bilinear shape `CONTRACTION`, else `PLANAR`), not a bespoke Python type per schedule. The PLANAR
+demotion is therefore a formation fact with no role rewrite: `demoted()` moves the edges inline and the same
+derivation answers `PLANAR` by itself.
 
 There is exactly ONE node walk over a stored term — `tile/path.py::sites` — shared by the key resolver, the
 stampers, the seam enumerator and every plain "walk the nodes" reader (take `.node` off each site). `tile/ir.py`
@@ -474,8 +484,9 @@ downstream in `lowering/kernel` against the op tree + schedule. The older tile-l
 **The structural dump** (`ops.pretty` / `TileOp.pretty_body`, what `emmy compile --ir tile` and the `EMMY_DUMP_DIR`
 `.txt` artifacts print) renders the STORED tree as a tree, never a lowered nest — the dump is where a reader meets the
 term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
-(a `Fold`'s `init` / `lift` / `combine` / `operands`, a `Contraction`'s `a` and one branch per `Channel`, a `Map`'s
-`sources` and `fn`), and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
+(`operands` first, then `init` / `lift` / `combine`, with the bilinear reading labelling its edges `operand[a]` /
+`operand[b<i>]` — the same `a` / `b` tokens the path codec spells, so a dump line matches a `PLACE@a` key by eye),
+and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
 for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. **A λ-valued field labels its own branch with its
 signature and nests its body two under it** — `lift:` / `combine:` / `fn:` all read the same way, so a binder is always
 adjacent to what it binds; none of them ride the node header, where on a big fold the signature sat a screenful above

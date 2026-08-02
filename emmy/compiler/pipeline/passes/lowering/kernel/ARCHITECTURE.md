@@ -14,9 +14,10 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 + `ir/tile/ops.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
 
-- **OUTPUT-tiled** (a contraction — warp / register tile) — the `Contraction` IS the stored node (1s,
-  `ir/tile/ir.py`), its operand→role binding resolved recognize-side (`010_recognize._nodify_contraction` /
-  `_atomize.bind_prologue_contraction` — the ONLY nodification sites; the schedule just places), so
+- **OUTPUT-tiled** (a contraction — warp / register tile) — a `Fold` that reads as bilinear (`ir/tile/ir.py`; since
+  the collapse `Contraction` is that READING, not a stored kind), its operand→role binding resolved recognize-side
+  (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction` — the ONLY nodification sites; the
+  schedule just places), so
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
   (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the
@@ -106,7 +107,7 @@ variant, and **no per-atom geometry object**. It expands any `Contraction` by ti
 the tiling layer (**`_tiling.py`**):
 `grid_tile(unit_tile(register_tile(atomize(...))))` — **GRID** block / **UNIT** / **REGISTER** / **ATOM**. The tiling
 geometry (the `(m, n)` `Side` pair — `tile` / `mask` / `block` / `unit` per axis — plus `block_threads` / `lanes`) is
-**derived on the `Contraction`** (`@property`, from the `tile` schedule × the output axes); the two sides
+**derived on the contraction reading** (`@property`, from the `tile` schedule × the output axes); the two sides
 thread through the tiling levels + the codegen callables as one `(m, n)` pair. `factorize` reads it straight off `c`
 and hands
 `grid_tile` the codegen in two halves: `_atom.reduce_codegen` — the reusable, **sink-agnostic** `(state_decls,

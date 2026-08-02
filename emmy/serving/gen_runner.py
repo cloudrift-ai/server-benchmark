@@ -630,14 +630,16 @@ class EmmyGenRunner:
                     prog.program.arrays[out_name] = cp.ndarray(m1_shared.shape, dtype=m1_shared.dtype, memptr=m1_shared.data)
         # A2: the same chaining for the SYMBOLIC programs (capacity-view buffers — device path
         # only, `max_tokens` set; the oracle's host `rebind` re-takes arena views per call and
-        # neither needs nor keeps the rewire) and for the static prefill-chunk twins. Every
-        # family's post output now aliases its pre twins' shared hidden-INPUT backing, so the
-        # between-layer seam copy self-skips on eager chunk steps (the measured ~0.9 ms/layer
-        # host+copy chunk overhead's copy share) and drops out of captured over-bucket sym
-        # steps. Rider steps stay safe under the cross-tier aliasing (all tiers' views share
-        # one backing base): they are eager by construction (prefill is never captured), and
-        # `run_device`'s uncaptured path CLONES the chunk-twin head before the decode-twin
-        # tail overwrites the shared rows.
+        # neither needs nor keeps the rewire) and for the static prefill-chunk twins. The skip
+        # fires on pointer equality, so it pays exactly where the caller receives a VIEW of the
+        # post output — i.e. under an outer capture (the A1 no-clone branch): the per-layer seam
+        # copy node drops from captured over-bucket sym decode graphs. On EAGER steps the
+        # protective output clone breaks pointer equality and the upload still copies — the
+        # chunk-twin chaining is groundwork that activates when chunk steps get whole-step
+        # captured (the recorded future work), not an eager win today. Rider steps stay safe
+        # under the cross-tier aliasing (all tiers' views share one backing base): they are
+        # eager by construction (prefill is never captured), and `run_device`'s uncaptured path
+        # CLONES the chunk-twin head before the decode-twin tail overwrites the shared rows.
         if max_tokens is not None and pre_programs and post_programs:
             sym_in = pre_programs[0].input_names[0]
             sym_shared = pre_programs[0].program.arrays[sym_in]

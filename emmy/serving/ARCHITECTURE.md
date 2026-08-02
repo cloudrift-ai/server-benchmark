@@ -120,8 +120,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   self-copy-skips on pointer equality, dropping the per-layer D2D seam copy from the captured decode graph.
   **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
-  shared hidden-INPUT backing, so the between-layer upload self-copy-skips — the seam copy leaves eager chunk
-  steps and captured over-bucket sym steps alike. Safe because the residual upload copies the previous hidden
+  shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays
+  where the caller holds a VIEW of the post output — under an outer capture (the no-clone branch) — so the seam
+  copy node drops from captured over-bucket sym decode graphs; EAGER steps still clone (the pointer-breaker), so
+  the chunk-twin chaining activates only once chunk steps are whole-step captured (recorded future work). Safe
+  because the residual upload copies the previous hidden
   out of the backing before post overwrites it, rider steps (all tiers alias one backing base) are eager by
   construction with the chunk head CLONED before the decode tail runs, and the host `rebind` path — which
   re-takes arena views and unwinds the rewire — is never mixed with the device path on one runner (the oracle

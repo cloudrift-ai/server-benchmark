@@ -409,15 +409,20 @@ LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
 
 ## `tile/`
 
-Tile IR (`tile/ir.py`, `tile/ops.py`) keeps the stored term pure algebra and the schedule beside it. A `TileOp` holds
-the structural-IR root `op` directly — a `Fold`, the ONE stored node kind (defined in `tile/ir.py`) — plus the
-root-global free→grid `Placement` (`place`), the worker inventory (`work`) and warp split (`workers`); every
-per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed `TileOp.schedule` dict.
+Tile IR keeps the stored term pure algebra and the schedule beside it. The layer is **one concern per module**:
+`tile/ir.py` the term vocabulary (`Fold`, `Channel`, `Store`, `TileOp`), `tile/ops.py` the geometry-free compute reads
+and the `Sched` accessor, `tile/path.py` the tree-path codec, `tile/_key.py` kernel identity (`term_key`),
+`tile/_dump.py` the structural dump. Loop IR → term is NOT here: `fold_from_loop` / `nodify_reduce` are a parser and
+live with the passes that consume them (`passes/lowering/tile/_fromloop.py`). A `TileOp` holds the structural-IR root
+`op` directly — a `Fold`, the ONE stored node kind (defined in `tile/ir.py`) — plus the root-global free→grid
+`Placement` (`place`), the worker inventory (`work`) and warp split (`workers`); every per-node schedule slice
+(`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed `TileOp.schedule` dict.
 
 **One kind, three readings.** A `Fold` is an optional `axis`, the `operands`, a joint `lift` and an optional
 `(init, combine)` monoid. `Map` is deleted outright — a zero-axis node (`Fold.projection(...)`) is the projection /
-pointwise cell it used to name, and `.sources` / `.fn` went with it (`.operands` / `.lift`). `Contraction` is deleted as well: `Fold.contraction(...)` is the BUILDER — it generates the
-bilinear lift and the additive combine — and `is_contraction(x)` the READING, a predicate rather than a kind, with
+pointwise cell it used to name, and `.sources` / `.fn` went with it (`.operands` / `.lift`). `Contraction` is
+deleted as well: `Fold.contraction(...)` is the BUILDER — it generates the bilinear lift and the additive
+combine — and `is_contraction(x)` the READING, a predicate rather than a kind, with
 `a` / `channels` / `b_trans` reading off `operands`. The A/B split
 rides the stored operand ORDER `(b₀, a, b₁…)`, because node-locally the two are symmetric — `A[m,k]` and
 `B[k,n]` each carry K plus one free axis — and telling M from N needs the placement, which lives on the `TileOp`.

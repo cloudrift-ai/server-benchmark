@@ -76,8 +76,12 @@ reads `Load.index` off the B edge once the edge is known. No stored `a` field, n
 
 The last two rows are the load-bearing ones and both already hold: the matvec demotion is a FORMATION fact
 (recognition keeps its loads inline in the lift, so there are no edges to parse and the row falls through to PLANAR),
-and `demoted()` — the collapse variant below — is exactly "move the edges inline", which flips CONTRACTION to PLANAR
-by the same table. The variant mechanism and the role derivation stop being two mechanisms.
+and the collapse variant below is exactly "move the edges inline", which flips CONTRACTION to PLANAR by the same
+table. The variant mechanism and the role derivation stop being two mechanisms.
+
+**`Fold.demoted()` no longer exists** — it was dead once the scheduler was deleted (zero callers) and went in the
+minimization pass. It is ~15 lines and fully specified here: move each operand edge into the lift body before the
+first read of its bound name, ties in operand order. Phase 3 re-adds it as part of the collapse variant.
 
 ### What it changes for this plan
 
@@ -202,7 +206,7 @@ Four moves rewrite the term rather than decorating it, and each therefore yields
 | --- | --- | --- |
 | strip | unrolls the zero-axis fold's `lift` ×r, α-renames SSA, fans out `TileOp.stores`, divides the inner extent | `_map_strip_option` |
 | split-K | wraps the sliced contraction fold in an identity-lift `Fold(axis=ksplit)`, σ-reindexes operands | `_splitk_option` + `_factor_k` |
-| collapse | splices a computed edge inline (`Fold.demoted()`), removing its schedule site | `_demote_planar` / `_demoted_warp_option` |
+| collapse | splices a computed edge inline (re-add `Fold.demoted()`), removing its schedule site | `_demote_planar` / `_demoted_warp_option` |
 | mixed-A promotion | turns a MATERIALIZED f32 A edge into a computed cone so the sync compute-fill can convert it | `_demote_mixed_a` |
 
 **The first two are functions of the ROW, not members of a pre-enumerated set.** This is the correction that

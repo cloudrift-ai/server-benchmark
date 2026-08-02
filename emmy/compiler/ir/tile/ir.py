@@ -395,8 +395,8 @@ class Fold(Stmt):
           no ``(m, n)`` loads, the zero-legal-rows fallback): recognition keeps its loads inline
           in the lift instead of building the node, so there are no edges for the bilinear
           reading to bind and the fold takes the reduce tiers at schedule dispatch. The demotion
-          is a FORMATION fact and there is no role rewrite anywhere — :meth:`demoted` moves the
-          edges inline and this same reading then answers ``PLANAR`` by itself."""
+          is a FORMATION fact and there is no role rewrite anywhere: recognition keeps an
+          unbindable contraction's loads inline in the lift, so there are no edges to bind."""
         if self.axis is None:
             return AxisRole.FREE
         if component_ops(self.combine) is None:
@@ -454,17 +454,6 @@ class Fold(Stmt):
     # ---- the DERIVED READINGS. zero-axis ``Fold`` and bilinear ``Fold`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old
     # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #
-    @property
-    def fn(self) -> Lambda:
-        """The projection lambda — the zero-axis node's ``lift`` (what the zero-axis fold's ``lift`` was)."""
-        return self.lift
-
-    @property
-    def sources(self) -> tuple:
-        """The projected-over nodes — this fold's operand edges (what ``operands`` was). An
-        edge is an edge; the zero-axis reading gives it the name its consumers already use."""
-        return self.operands
-
     @property
     def body(self) -> Body:
         """The projection body — ``lift.body`` (the stmts live on the lambda)."""
@@ -610,24 +599,6 @@ class Fold(Stmt):
                     yield from loads(b)
 
         return tuple(dict.fromkeys(nm for e in self.operands for nm in loads(_operand_body(e))))
-
-    def demoted(self) -> Fold:
-        """The operand hoist UNDONE — every edge moves INLINE into the lift body as a stmt (a
-        materialized ``Load`` verbatim, a computed node as the structural NODE — a term is a value,
-        legal in a pure ``Lambda``), each placed before the first read of its bound name (ties in
-        operand order — the splice rule). With no operand edges the bilinear parse declines, so the
-        fold DERIVES ``PLANAR`` and takes the reduce tiers at dispatch; ``_flatten_nodes`` flattens
-        the inline node at lowering, so the derived loop is byte-identical to the hoisted
-        spelling's (the demotion is a spelling change, never a semantics change)."""
-        lam = self.lift
-        assert lam is not None, "demoted: a λ-spelled fold only"
-        body = list(lam.body)
-        for edge in reversed(self.operands):
-            name = _operand_name(edge)
-            idx = next((i for i, st in enumerate(body) if name in deep_reads([st])), len(body))
-            body.insert(idx, edge)
-        lift = Lambda(params=(lam.params[0],), body=Body(tuple(body)), results=lam.results)
-        return Fold(axis=self.axis, unroll=self.unroll, lift=lift, init=self.init, combine=self.combine)
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:

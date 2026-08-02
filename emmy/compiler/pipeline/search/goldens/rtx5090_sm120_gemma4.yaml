@@ -4916,3 +4916,395 @@ configs:
     knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 163.3
     cublas_us: 163.0
+
+  # ---- m512 / m1024 prefill tiers (2026-08-02) ------------------------------------------------
+  # The chunk-quantum sweep at 1024 and 512 cold-resolved: those prefill widths had no golden
+  # tier at all, so the sweep measured missing coverage rather than the quantum it meant to test
+  # (TTFT 8707 / 57605 ms against 1688 at the covered 2048). Seeded here so the experiment can be
+  # re-run de-confounded. Configs transfer from the neighbouring tiers — m256 and m2048 share the
+  # w4x2 / f2x4/k2 (std) and w4x2 / f4x8/k4 (fm) families and differ only in the cross-CTA split,
+  # which is what fills the card at small M — so the split is the axis these rows were A/B'd on.
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m512.lin
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 193.8
+    cublas_us: 180.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m512.lin
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 125.6
+    cublas_us: 180.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m512.lin
+    M: 512
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 199.8
+    cublas_us: 181.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m512.lin
+    M: 512
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 125.5
+    cublas_us: 181.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m512.lin
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 903.6
+    cublas_us: 624.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m512.lin
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 449.5
+    cublas_us: 624.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m512.lin
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 340.6
+    cublas_us: 310.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m512.lin
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 248.1
+    cublas_us: 310.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m512.lin
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 92.1
+    cublas_us: 95.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m512.lin
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 74.2
+    cublas_us: 95.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m512.lin
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 178.8
+    cublas_us: 164.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m512.lin
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 135.7
+    cublas_us: 164.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m512.lin.cut
+    M: 512
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 211.3
+    cublas_us: 184.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m512.lin.cut
+    M: 512
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 213.5
+    cublas_us: 184.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m512.lin.cut
+    M: 512
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 669.2
+    cublas_us: 596.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m512.lin.cut
+    M: 512
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 355.8
+    cublas_us: 330.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m512
+    M: 512
+    N: 15360
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
+    emmy_us: 5.7
+    cublas_us: 8.0
+  - kernel: pointwise
+    name: gemma4_12b.cut_cone_scale.m512
+    M: 512
+    N: 3840
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4'}
+    emmy_us: 1.9
+    cublas_us: 4.0
+  - kernel: reduce
+    name: gemma4_12b.cut_cone_stat.m512
+    M: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {WORK: 't128', REDUCE: 'coop'}
+    emmy_us: 2.4
+    cublas_us: 8.0
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840.m512
+    M: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
+    emmy_us: 7.6
+    cublas_us: 6.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m1024.lin
+    M: 1024
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 366.3
+    cublas_us: 322.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m1024.lin
+    M: 1024
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 263.2
+    cublas_us: 322.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m1024.lin
+    M: 1024
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 367.6
+    cublas_us: 377.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m1024.lin
+    M: 1024
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 262.4
+    cublas_us: 377.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m1024.lin
+    M: 1024
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 1670.0
+    cublas_us: 1197.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m1024.lin
+    M: 1024
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 904.0
+    cublas_us: 1197.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m1024.lin
+    M: 1024
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 652.1
+    cublas_us: 576.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m1024.lin
+    M: 1024
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 481.8
+    cublas_us: 576.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m1024.lin
+    M: 1024
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 171.8
+    cublas_us: 148.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m1024.lin
+    M: 1024
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 132.4
+    cublas_us: 148.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m1024.lin
+    M: 1024
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 352.6
+    cublas_us: 297.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m1024.lin
+    M: 1024
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 256.6
+    cublas_us: 297.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m1024.lin.cut
+    M: 1024
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 377.6
+    cublas_us: 364.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m1024.lin.cut
+    M: 1024
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 430.2
+    cublas_us: 339.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m1024.lin.cut
+    M: 1024
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 1302.2
+    cublas_us: 1154.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m1024.lin.cut
+    M: 1024
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 678.2
+    cublas_us: 615.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m1024
+    M: 1024
+    N: 15360
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
+    emmy_us: 10.5
+    cublas_us: 12.0
+  - kernel: pointwise
+    name: gemma4_12b.cut_cone_scale.m1024
+    M: 1024
+    N: 3840
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4'}
+    emmy_us: 3.2
+    cublas_us: 4.0
+  - kernel: reduce
+    name: gemma4_12b.cut_cone_stat.m1024
+    M: 1024
+    K: 3840
+    dtype: 'fp16'
+    knobs: {WORK: 't128', REDUCE: 'coop'}
+    emmy_us: 3.4
+    cublas_us: 8.0
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840.m1024
+    M: 1024
+    K: 3840
+    dtype: 'fp16'
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
+    emmy_us: 9.9
+    cublas_us: 10.0

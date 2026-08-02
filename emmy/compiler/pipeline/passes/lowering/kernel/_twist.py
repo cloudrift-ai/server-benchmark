@@ -419,16 +419,15 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     realized projection + the fragment output store). See the module docstring for the walk."""
     red: Fold = head(op)
     partial = list(red.step_stmts())
-    # The stored steps are role=CONTRACTION folds; the realizer works on their DERIVED views. The
-    # query / value axes come off the placement's free axes (``Ctx.free`` — the un-shrunk
-    # originals); the score's stream axis is the fold's own, read through a slice partial's window
-    # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
-    kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
+    # The stored steps are contraction folds; the realizer works on their DERIVED views. Both
+    # slices arrive ALREADY PLACED from ``Sched.tile_of`` — the query / value axes off the
+    # placement's free axes, the score's stream axis off its parent fold read through a slice
+    # partial's window PARENT — so this reader states no placement rule of its own.
     qk: Fold = partial[0]
-    qk_t: TilePlan = ctx.sched.tile_of(qk).at(ctx.free[-2], kv_parent)
+    qk_t: TilePlan = ctx.sched.tile_of(qk)
     pv_fold = next(s for s in partial[1:] if is_contraction(s))
     pv: Fold = pv_fold
-    pv_t: TilePlan = ctx.sched.tile_of(pv_fold).at(ctx.free[-2], ctx.free[-1])
+    pv_t: TilePlan = ctx.sched.tile_of(pv_fold)
     atom = qk_t.atom
     shape = atom.shape
     atom_n = shape[1]

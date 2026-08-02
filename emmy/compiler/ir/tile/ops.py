@@ -51,9 +51,14 @@ class Sched:
     spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
     A node that is not a site of the family reads ``None`` and refuses writes loudly."""
 
-    def __init__(self, root, table: dict | None) -> None:
+    def __init__(self, root, table: dict | None, place=None) -> None:
         self.root = root
         self.table = table if table is not None else {}
+        #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
+        #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
+        #: position in the tree — so the binding belongs here, on the scheduling structure, and
+        #: not at each reader (:meth:`tile_of`).
+        self.place = place
         self._sites = None
 
     def _all_sites(self):
@@ -88,7 +93,48 @@ class Sched:
         self.table[k] = value
 
     def tile_of(self, node):
-        return self.get("TILE", node)
+        """The node's ``TILE`` slice, ALREADY PLACED — its ``(m, n)`` output axes bound
+        (:attr:`TilePlan.axes`), so a reader gets the geometry off the slice and never re-derives
+        placement of its own. ``axes`` stays ``compare=False`` / ``repr=False``, so binding it here
+        cannot reach ``spell()``, a stamped row, a golden or a prior key.
+
+        The pair is a function of the SITE (:meth:`_mn_for`), which is what makes one rule
+        possible where there used to be three hand-written ``.at(...)`` calls."""
+        plan = self.get("TILE", node)
+        if plan is None or self.place is None or plan.axes is not None:
+            return plan
+        mn = self._mn_for(node)
+        return plan.at(*mn) if mn is not None else plan
+
+    def _mn_for(self, node):
+        """The ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles, or ``None`` when
+        the placement cannot supply them (an unmapped / rank-<2 grid — the caller's untiled path).
+
+        THREE site shapes, one rule each — the geometry the retired ``Contraction`` node used to
+        carry as stamped fields, now read off the tree instead:
+
+        - the ROOT contraction tiles the kernel grid's trailing pair;
+        - a DERIVED site (flash's synthesized PV) tiles the placement's trailing free pair — it
+          lives below the seam lattice, so the grid says nothing about it;
+        - any other nested contraction (flash's hoisted QK edge) takes the free m axis and its
+          PARENT fold's axis as n — read through a slice partial's window PARENT, so the view
+          carries the pre-slice geometry the fragment clamps were built against.
+        """
+        free, grid = tuple(self.place.free), tuple(self.place.grid)
+        site = next((s for s in self._all_sites() if s.node is node), None)
+        if site is None:
+            return None
+        if site.depth == 1:
+            return (grid[-2], grid[-1]) if len(grid) >= 2 else None
+        if len(free) < 2:
+            return None
+        if site.derived:
+            return (free[-2], free[-1])
+        parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
+        ax = getattr(parent.node, "axis", None) if parent is not None else None
+        if ax is None:
+            return None
+        return (free[-2], ax.window.parent if ax.window is not None else ax)
 
     def reduce_of(self, node):
         return self.get("REDUCE", node)
@@ -99,7 +145,7 @@ class Sched:
 
 def sched_of(tile) -> Sched:
     """The :class:`Sched` view of a ``TileOp`` (binds its ``schedule`` dict to its op tree)."""
-    return Sched(tile.op, tile.schedule)
+    return Sched(tile.op, tile.schedule, place=tile.place)
 
 
 def unplaced_slices(tile) -> list[tuple[str, object]]:

@@ -290,13 +290,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     grid = tuple(ctx.grid)
     # The OUTPUT-tiled dispatch: a bilinear ``Fold`` whose schedule holds a TILE slice, over a
     # grid with an ``(m, n)`` pair to place it on. The node is pure algebra; the tiled reading comes
-    # off the slice, PLACED here on the kernel grid's trailing pair (``TilePlan.at``) — so the
+    # off the slice, which arrives ALREADY PLACED from ``Sched.tile_of`` (the ``(m, n)`` pair is a
+    # function of the site, so the binding lives on the scheduling structure, not here) — the
     # geometry the atom reads is the slice's own, not a separate view object's. A stored node
     # WITHOUT a TILE slice takes the reduce tiers instead (the per-cell / coop-K forms), where the
     # whole grid rides untiled.
     tile = ctx.sched.tile_of(op) if is_contraction(op) else None
-    if tile is not None and len(grid) >= 2:
-        c, tile = op, tile.at(grid[-2], grid[-1])
+    if tile is not None and tile.axes is not None and len(grid) >= 2:
+        c = op
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.out)

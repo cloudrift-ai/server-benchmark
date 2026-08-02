@@ -87,3 +87,79 @@ def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
     # shared coordinate is captured by the rename — the failure the threading prevents.
     [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(node, tile))
     assert captured.index[0] == Var("bt__ar0")
+
+
+# --- the (m, n) binding lives on the SCHEDULING STRUCTURE, not at each reader ------------------- #
+
+
+def test_sched_places_the_root_contraction_on_the_grids_trailing_pair() -> None:
+    """``Sched.tile_of`` hands back a slice that is ALREADY placed, so a reader never states a
+    placement rule of its own. The root contraction tiles the kernel grid's trailing ``(m, n)``."""
+    from emmy.compiler.ir.schedule import Placement
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.tile.ops import Sched, sched_of
+
+    node = _node()
+    tile = TileOp(op=node, place=Placement(free=(_M, _N), grid=(_M, _N), mapped=True))
+    Sched(node, tile.schedule).put("TILE", node, TilePlan(units=(2, 1), regs=(2, 1)))
+
+    placed = sched_of(tile).tile_of(node)
+    assert placed.axes == (_M, _N)
+    assert (placed.m.axis, placed.n.axis) == (_M, _N)  # the Side geometry derives from the binding
+    # The stored slice is untouched — placement is bound on READ, and `axes` is compare=False, so
+    # the row's identity (and every golden / prior key) never sees it.
+    assert tile.schedule["TILE"].axes is None
+    assert tile.schedule["TILE"] == placed
+
+
+def test_an_unmapped_placement_leaves_the_slice_unplaced() -> None:
+    """A rank-<2 or undecided grid supplies no pair; the slice comes back unplaced and the caller
+    takes its untiled path rather than getting a wrong binding."""
+    from emmy.compiler.ir.schedule import Placement
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.tile.ops import Sched, sched_of
+
+    node = _node()
+    tile = TileOp(op=node, place=Placement(free=(_M,), grid=(_M,)))
+    Sched(node, tile.schedule).put("TILE", node, TilePlan(units=(2, 1), regs=(2, 1)))
+    assert sched_of(tile).tile_of(node).axes is None
+
+
+def _flash_tile():
+    """The flash shape as a scheduled ``TileOp`` — the three-depth tree whose two contraction sites
+    take DIFFERENT placement rules (the hoisted QK edge vs the derived PV)."""
+    import importlib.util
+    import pathlib
+
+    from emmy.compiler.ir.schedule import Placement
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.tile.ops import Sched
+
+    spec = importlib.util.spec_from_file_location("_codec_fx", pathlib.Path(__file__).parents[1] / "ir" / "tile" / "test_path_codec.py")
+    fx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fx)
+    root, stream, qk, pv = fx._flash_tree()
+    b0, b1, m, d = Axis("b0", 2), Axis("b1", 8), Axis("m", 512), Axis("d", 64)
+    tile = TileOp(op=root, place=Placement(free=(b0, b1, m, d), grid=(b0, b1, m), mapped=True))
+    sched = Sched(root, tile.schedule)
+    sched.put("TILE", qk, TilePlan(units=(4, 1), regs=(1, 2)))
+    sched.put("TILE", pv, TilePlan(units=(4, 1), regs=(1, 16)))
+    return tile, stream, qk, pv
+
+
+def test_the_two_flash_contraction_sites_take_different_placement_rules() -> None:
+    """The rule is a function of the SITE, which is what lets ONE binding on the scheduling
+    structure replace the three hand-written ``.at(...)`` calls the readers used to carry:
+
+    - the hoisted QK edge tiles ``(free m, its PARENT fold's stream axis)`` — the score block;
+    - the DERIVED PV tiles ``(free m, free d)`` — it sits below the seam lattice, so the grid says
+      nothing about it.
+    """
+    from emmy.compiler.ir.tile.ops import sched_of
+
+    tile, stream, qk, pv = _flash_tile()
+    sched = sched_of(tile)
+    assert tuple(a.name for a in sched.tile_of(qk).axes) == ("m", stream.axis.name)
+    assert tuple(a.name for a in sched.tile_of(pv).axes) == ("m", "d")
+    # ...and neither is the ROOT rule (the grid's trailing pair would be (b1, m)).
+    assert sched.tile_of(qk).axes[1].name != "m"

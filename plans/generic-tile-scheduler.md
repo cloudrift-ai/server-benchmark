@@ -404,6 +404,13 @@ Three tooling facts that decide what a gate can mean:
   `norm_linear`/`_splitk`/`_coop`, `flash_hd128`/`_cp`, `flash_hd256_alt`/`_fm`, and `flash_chain`/`flash_scalar`.
   The pins are ignored and the un-recognized escape renders. No baseline exists in the tree. At `e27d8fdc^` all 22
   emitted digests are distinct and four `__partial` kernels appear.
+
+  **What that means for the collapse work, measured rather than assumed:** instrumenting `Sched.tile_of` across a
+  full digest run shows it reached on every contraction site (matmul `a2`; flash `dd` and `pj`) and returning
+  `None` every time — there is no `TILE` slice to return, because nothing consumes the pins. So the digest gate
+  pins RECOGNITION, term storage and the UN-SCHEDULED lowering path, and does **not** exercise the tiered/placed
+  contraction path at all. Any change to `_factor`'s tiled arm or `_twist`'s warp realizer is invisible to it, and
+  needs its own unit coverage until P0 restores the harness.
 - **The materializer has a live regression on the flash warp path.** `_twist.py:315` reads `qk.acc` where
   `qk: TilePlan` (fields: `atom, units, regs, bk, axes`). ONE site — 544/548 take a `Contraction`, which has the
   property. Four `digest_kernels` cases error with `AttributeError` **even at the pre-deletion commit**, so the flash

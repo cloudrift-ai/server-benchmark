@@ -602,6 +602,13 @@ commit. They are therefore *pre-schedule*: `place` reads `unmapped`, there is no
 because the scheduler is deleted. The `←` annotations are the axis → grid/warp/thread mapping the pre-deletion
 dumps carried — i.e. what the emitters must produce, not what the tree emits today.
 
+Each example leads with the **loop IR** the tile term is recognized FROM — the same case builders run through
+`Pipeline.build(LOOP_PASSES)` (i.e. one stage earlier, after `loop/stamp` and before `lowering/tile`) and printed
+with `LoopOp.pretty_body()`. That view is the scheduler-free ground truth: a plain affine nest with `acc <- ⊕(…)`
+accumulator statements and gmem `load`/store, no axis roles, no operand edges, no monoid. Reading the pair is what
+makes the collapse legible — recognition's whole job is to turn that nest into ONE node kind, and every `←` mapping
+on the tile view is a decision the loop form does not yet contain.
+
 Codec reminders for reading the annotations: thread `WORK` is `t<N>x<M>` and scalar `TILE` is `f<fn>[x<fm>]` — both
 **n-then-m**; warp `WORK` `w<M>x<N>` and warp `TILE` `<atom>/f<FM>x<FN>` are m-then-n. `operand[a]` / `operand[b]`
 are the bilinear reading's edge labels — the `a` / `b` path segments `PLACE@a` is keyed against.
@@ -611,6 +618,18 @@ are the bilinear reading's edge labels — the `a` / `b` path segments `PLACE@a`
 ```python
 torch.randn(N, 4096).sum(dim=-1)
 ```
+
+Loop IR:
+
+```
+    for a0 in 0..64                                   ← the free axis is just an outer loop here
+        for a1 in 0..4096
+            in0 = load x[a0, a1]
+            acc0 <- add(acc0, in0)                    ← the accumulator stmt IS the whole algebra: init, lift and
+        y[a0, 0] = acc0                                  combine are all implicit in `acc0 <- add(acc0, in0)`
+```
+
+Tile IR:
 
 ```
     place  free=(a0)  unmapped                        ← a0 → blockIdx: one CTA per output cell
@@ -638,6 +657,30 @@ wrapper always did, and it means the FREE and PLANAR emitters compose at depth 0
 ```python
 torch.nn.functional.rms_norm(x, (4096,), wn)
 ```
+
+Loop IR:
+
+```
+    in0 = load y_mean_count[0]                        ← the row-invariant prologue, hoisted above the nest
+    v0 = reciprocal(in0)
+    in1 = load y_eps[0]
+    for a0 in 0..64
+        for a1 in 0..4096
+            in2 = load x[a0, a1]
+            v1 = multiply(in2, in2)
+            acc0 <- add(acc0, v1)
+        v2 = multiply(acc0, v0)                       ← the between-loops straight-line block is what becomes the
+        v3 = add(in1, v2)                                OUTER lift; recognition splices the prologue into it
+        v4 = rsqrt(v3)
+        for a2 in 0..4096                             ← the SECOND a-axis loop over the same extent: a sweep, not
+            in3 = load x[a0, a2]                         a reduce, so it becomes `stores`' sweep, not a fold
+            v5 = multiply(in3, v4)
+            in4 = load wn[a2]
+            v6 = multiply(in4, v5)
+            y[a0, a2] = v6
+```
+
+Tile IR:
 
 ```
     place  free=(a0)  unmapped                        ← one CTA per row
@@ -673,6 +716,29 @@ depths, dispatched by `ops.axis_role` (FREE outer, PLANAR inner) with no wrapper
 torch.nn.functional.softmax(x, dim=-1)
 ```
 
+Loop IR:
+
+```
+    for a0 in 0..64
+        for a1 in 0..4096                             ← TWO sequential reduce loops over the same axis: the max
+            in0 = load x[a0, a1]                         pass…
+            acc0 <- maximum(acc0, in0)
+        for a1 in 0..4096                             ← …and the sum pass that DEPENDS on it. `Fold.from_loop`'s
+            in1 = load x[a0, a1]                         twisted merge regenerates the fused (m, l) combine from
+            v0 = subtract(in1, acc0)                     these two and byte-compares — that merge, not loop
+            v1 = exp(v0)                                 fusion, is what makes the single node below
+            acc1 <- add(acc1, v1)
+        v2 = reciprocal(acc1)
+        for a2 in 0..4096
+            in2 = load x[a0, a2]
+            v3 = subtract(in2, acc0)
+            v4 = exp(v3)
+            v5 = multiply(v2, v4)
+            y[a0, a2] = v5
+```
+
+Tile IR:
+
 ```
     place  free=(a0)  unmapped
     Fold  free
@@ -703,6 +769,21 @@ storage, not just of the algebra.
 torch.randn(512, 512) @ torch.randn(512, 512)
 ```
 
+Loop IR:
+
+```
+    for a0 in 0..512                                  ← nothing here says a0 is M and a1 is N — they are two
+        for a1 in 0..512                                 free loops, symmetric until the PLACEMENT names them
+            for a2 in 0..512
+                in0 = load w[a2, a1]                  ← the two loads become operand[b] / operand[a], in THIS
+                in1 = load x[a0, a2]                     stored order — the order is all the A/B label is
+                v0 = multiply(in0, in1)
+                acc0 <- add(acc0, v0)                 ← multiply-then-accumulate: the bilinear reading recognition
+            y[a0, a1] = acc0                             matches to build the contraction
+```
+
+Tile IR:
+
 ```
     place  free=(a0, a1)  unmapped          ← block-tiled: a0 (m) rows × a1 (n) cols per CTA
     Fold[a2 in 0..512] contraction          ← a2 (K) → SERIAL per thread, chunked by the staging ring
@@ -732,6 +813,24 @@ the `contraction_view` shape-probe. The warp sibling family maps the same axes d
 torch.relu(x @ w + bias)
 ```
 
+Loop IR:
+
+```
+    for a0 in 0..512
+        for a1 in 0..512
+            in0 = load bias[a1]
+            for a2 in 0..512                          ← example 4's nest VERBATIM, one level deeper
+                in1 = load w[a2, a1]
+                in2 = load x[a0, a2]
+                v0 = multiply(in1, in2)
+                acc0 <- add(acc0, v0)
+            v1 = add(acc0, in0)                       ← the post-reduce straight-line tail: the zero-axis fold's
+            v2 = relu(v1)                                lift, exactly as in example 2
+            y[a0, a1] = v2
+```
+
+Tile IR: no dump case for this shape exists in the digest battery — the term is
+
 Example 4's node verbatim, as the one operand of a zero-axis fold whose lift is `add`-then-`relu` and whose store is
 the root `Write` (structurally examples 2 and 4 composed; no separate dump case exists in the digest battery).
 
@@ -746,8 +845,46 @@ construction** — and post-collapse that means the same emitter ran, not that t
 F.silu(self.gate(x)) * self.up(x)  # gate/up: Linear(1024, 3072, bias=False)
 ```
 
-The arity-2 form, dumped from the operand-edge unit fixture (the `mlp_geglu` pipeline case does not reach the fused
-node pre-scheduler — its cone/contraction recognition lives in `_atomize`, inside the deleted arm):
+Loop IR (the `mlp_geglu` pipeline case — a norm-fed SwiGLU, so the shared cone is the RMSNorm row):
+
+```
+    in0 = load xn_mean_count[0]
+    v0 = reciprocal(in0)
+    in1 = load xn_eps[0]
+    in2 = load sg_one[0]
+    for a0 in 0..32
+        for a1 in 0..1024                             ← the statistic fold: recognition's cone SOURCE, the
+            in3 = load x[0, a0, a1]                      row-invariant prologue of the shared A edge
+            v1 = multiply(in3, in3)
+            acc0 <- add(acc0, v1)
+        v2 = multiply(acc0, v0)
+        v3 = add(in1, v2)
+        v4 = rsqrt(v3)
+        for a2 in 0..3072
+            for a3 in 0..1024                         ← ONE k loop, TWO accumulators — the arity-2 form is right
+                in4 = load x[0, a0, a3]                  here in the loop IR, as two `acc <- …` stmts sharing a
+                v5 = multiply(in4, v4)                   loop, not as a fusion the scheduler must discover
+                in5 = load wn[a3]
+                v6 = multiply(in5, v5)
+                in6 = load wg[a2, a3]
+                v7 = multiply(in6, v6)
+                acc1 <- add(acc1, v7)
+                v8 = multiply(in4, v4)                ← the cone body is spelled TWICE in the nest (v5/v6 and
+                v9 = multiply(in5, v8)                   v8/v9 are the same term); one edge read by both
+                in7 = load wu[a2, a3]                    channels is exactly what the node's arity expresses
+                v10 = multiply(in7, v9)
+                acc2 <- add(acc2, v10)
+            v11 = negative(acc1)                      ← the silu/multiply tail: the wrapping zero-axis fold
+            v12 = exp(v11)
+            v13 = add(in2, v12)
+            v14 = reciprocal(v13)
+            v15 = multiply(acc1, v14)
+            v16 = multiply(acc2, v15)
+            o[0, a0, a2] = v16
+```
+
+Tile IR — the arity-2 form, dumped from the operand-edge unit fixture (the `mlp_geglu` pipeline case does not reach
+the fused node pre-scheduler — its cone/contraction recognition lives in `_atomize`, inside the deleted arm):
 
 ```
     Fold[k in 0..256] contraction
@@ -778,6 +915,18 @@ the collapse had to preserve.
 torch.relu(x)
 ```
 
+Loop IR:
+
+```
+    for a0 in 0..64                                   ← no accumulator stmt anywhere: this is what "zero-axis"
+        for a1 in 0..4096                                means, and both loops are free
+            in0 = load x[a0, a1]
+            v0 = relu(in0)
+            y[a0, a1] = v0
+```
+
+Tile IR:
+
 ```
     place  free=(a0, a1)  unmapped          ← EVERY axis → grid; one THREAD per grid cell (per-cell tier —
     Fold  free  ‹pointwise›                    no work line, launch geometry derived by the materializer)
@@ -797,6 +946,55 @@ are also zero-axis folds with no operands. They are separated only by `ops.axis_
 ```python
 F.scaled_dot_product_attention(q, k, v, is_causal=True)
 ```
+
+Loop IR — TWO loop nodes, the score materialized to a whole S×S buffer between them (this is the `flash_chain`
+case, hd = 64, causal mask absent to match the tile dump below; in the second node the score buffer's name is
+elided to `…_scaled` for width, everything else is verbatim):
+
+```
+    in0 = load scaled_dot_product_attention_scale[0]
+    for a0 in 0..4
+        for a1 in 0..128
+            for a2 in 0..128
+                for a3 in 0..64                       ← the QK contraction, its own nest writing gmem…
+                    in1 = load x1[0, a0, a2, a3]
+                    in2 = load x0[0, a0, a1, a3]
+                    v0 = multiply(in1, in2)
+                    acc0 <- add(acc0, v0)
+                v1 = multiply(acc0, in0)
+                scaled_dot_product_attention_scaled[0, a0, a1, a2] = v1
+```
+
+```
+    for a0 in 0..4
+        for a1 in 0..128
+            for a2 in 0..128                          ← …re-read THREE times by the softmax passes and the PV
+                in0 = load …_scaled[0, a0, a1, a2]       loop. The S×S traffic flash exists to delete is the
+                acc0 <- maximum(acc0, in0)               plain reading of this loop IR
+            for a2 in 0..128
+                in1 = load …_scaled[0, a0, a1, a2]
+                v0 = subtract(in1, acc0)
+                v1 = exp(v0)
+                acc1 <- add(acc1, v1)
+            v2 = reciprocal(acc1)
+            for a3 in 0..64
+                for a4 in 0..128                      ← the PV contraction, on the SAME axis the twisted stream
+                    in2 = load …_scaled[0, a0, a1, a4]   runs on, and its P factor (v5) reads the reduction's own
+                    v3 = subtract(in2, acc0)             result — which is why the fused form keeps PV BELOW the
+                    v4 = exp(v3)                         seam as derived material rather than an operand edge
+                    v5 = multiply(v2, v4)
+                    in3 = load x2[0, a0, a4, a3]
+                    v6 = multiply(in3, v5)
+                    acc2 <- add(acc2, v6)
+                scaled_dot_product_attention[0, a0, a1, a3] = acc2
+```
+
+Everything flash *is* — one kv stream, the score never materialized, the (m, l, O) state register-resident — is
+absent from that loop IR. It is produced by recognition folding the score node back in as a hoisted operand edge
+and twisted-merging the two softmax passes; the whole distance between these two views is why the twisted emitter
+must be generic rather than a flash special case.
+
+Tile IR:
 
 ```
     place  free=(b0, b1, m, d)  unmapped              ← b0·b1 (batch · heads) → blockIdx on EVERY family; how m

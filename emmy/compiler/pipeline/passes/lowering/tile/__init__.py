@@ -3,7 +3,7 @@
 1. **Recognize** (``010_recognize``) — the Loop-IR → Tile-IR boundary. Fuse flash attention, fuse
    online softmax, annotate each reduce ``Loop`` with its ``AxisRole`` (the algebra is the body),
    then **lift** the kernel to a ``TileOp`` carrying ONE op-tree — a ``Fold`` /
-   ``Contraction`` term — with an **unmapped** placement (its parallel ``free`` axes). After this
+   bilinear ``Fold`` term — with an **unmapped** placement (its parallel ``free`` axes). After this
    nothing downstream traffics in ``LoopOp``. The ``_flash`` / ``_softmax`` helpers hold the
    pattern matchers, ``_atomize`` the algebra→atom binding, ``_cut`` the placement cut.
 2. **Split** (``030_split_reduce``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)

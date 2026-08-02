@@ -1,9 +1,9 @@
-"""The :class:`Fold` / :class:`Contraction` / :class:`Map` structural tile-IR nodes — their
+"""The :class:`Fold` / a bilinear ``Fold`` / :class:`Map` structural tile-IR nodes — their
 algebra/structure split and the round-trip invariant the materializer relies on.
 
 A ``Fold`` is the typed successor of the bare annotated reduce ``Loop`` (holding no projection);
 a projected reduce (softmax / RMSNorm) is a ``Map`` whose body IS the projection over a ``Fold``
-``source``. A ``Contraction`` is the tiled matmul node (built recognize-side at fork-emit), holding
+``source``. A bilinear ``Fold`` is the tiled matmul node (built recognize-side at fork-emit), holding
 its ``a`` edge + product channels + ``tile``; it synthesizes the canonical mul-add ``CONTRACTION``
 loop on demand so ``ops.lower`` / ``reduce_loop`` flatten it back to the loop nest the materializer
 expands (via ``_factor.factorize``). These pin that contract plus the structural reads (``axis_role`` /
@@ -18,7 +18,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, ReducePlan, TileOp
+from emmy.compiler.ir.tile import Channel, Fold, ReducePlan, TileOp
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, lower, reduce_loop, reduce_plan
 
 
@@ -132,11 +132,11 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
     assert axis_role(Fold.projection(body=Body(()), operands=(red,))) is AxisRole.TWISTED
 
 
-def _contraction() -> Contraction:
+def _contraction() -> Fold:
     """A minimal tiled contraction node — ``acc = Σ_k A[m, k]·B[k, n]`` over a scalar tile."""
     a = Load(name="a_e", input="A", index=(Var("m"), Var("k")))
     b = Load(name="b_e", input="B", index=(Var("k"), Var("n")))
-    return Contraction(
+    return Fold.contraction(
         k_axis=Axis("k", 256),
         a=a,
         channels=(Channel(b=b, acc="acc"),),
@@ -162,7 +162,7 @@ def test_contraction_dispatches_through_ops() -> None:
 
 
 def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
-    """ONE home for a projection: the wrapping ``Map``'s body. A ``Contraction`` lowers to just its
+    """ONE home for a projection: the wrapping ``Map``'s body. A bilinear ``Fold`` lowers to just its
     synthesized loop, and the projected form is the same ``project ∘ contract`` spelling the
     ``Fold`` tiers use — so the future cut realizer sees a single seam shape."""
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
@@ -207,7 +207,7 @@ def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
     assert axis_role(node) is AxisRole.PLANAR
 
 
-# --- split-K: Fold ⊃ Contraction (E1) --------------------------------------------------- #
+# --- split-K: Fold ⊃ bilinear fold (E1) --------------------------------------------------- #
 
 
 def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
@@ -229,7 +229,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     ksplit = Axis(name=f"{c.k_axis.name}_ks", extent=Dim(2))
     kslice = replace(c.k_axis, extent=Dim(128))
     sigma = Sigma({c.k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(128, "int")), Var(c.k_axis.name))})
-    inner = Contraction(
+    inner = Fold.contraction(
         k_axis=kslice,
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
@@ -258,7 +258,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     assert isinstance(inner_loops[0].body[-1], Accum) and inner_loops[0].body[-1].name == "acc"
 
 
-# --- flash: a reduce partial composing a nested PV Contraction (tensor-core-flash seam) --------- #
+# --- flash: a reduce partial composing a nested PV bilinear fold (tensor-core-flash seam) --------- #
 
 
 def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
@@ -296,7 +296,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
 
 
 def test_flash_op_is_a_two_contraction_tree() -> None:
-    """``_flash_op`` builds the blocked two-``Contraction`` tree: BOTH contractions ride the single
+    """``_flash_op`` builds the blocked two-bilinear ``Fold`` tree: BOTH contractions ride the single
     walked edge — ``step`` — with QK (``Σ_dd Q·K`` score) at its head and PV — a
     **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone INLINE on the
     edge) — spliced later (block=1: a singleton ``pj`` reduce). There is no second composition
@@ -309,7 +309,7 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
     (red,) = op.operands  # the streaming Fold under the O/l projection Map
     assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
-    folds = [s for s in red.step_stmts() if isinstance(s, Contraction)]
+    folds = [s for s in red.step_stmts() if isinstance(s, Fold) and s.role is AxisRole.CONTRACTION]
     assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the derived evaluation's head node"
     assert folds[0] is red.operands[0], "the QK score is the hoisted operand edge (step 7)"
     # Algebra reads come straight off the stored node — placement is the ``Placed`` view's job.
@@ -356,13 +356,13 @@ def test_out_store_index_reproduces_output_layout() -> None:
 # --- computed (register-resident) A operand: the tensor-core-flash PV crux ---------------------- #
 
 
-def _pv_contraction() -> Contraction:
+def _pv_contraction() -> Fold:
     """A PV-style contraction whose **A operand is computed**, not a gmem ``Load``:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
     (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE
     inline)."""
     cone = Fold.projection(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
-    return Contraction(
+    return Fold.contraction(
         k_axis=Axis("j", 8),
         a=cone,
         channels=(Channel(b=Load(name="v_e", input="V", index=(Var("j"), Var("d"))), acc="oblk"),),
@@ -410,7 +410,7 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
 def test_there_is_exactly_one_stored_node_kind_and_it_is_a_stmt() -> None:
     """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V
     contractions in a reduce partial, split-K's sliced node — and ``Stmt``-hood is what makes that
-    legal. After the collapse there is ONE stored kind to check: ``Map`` and ``Contraction`` are
+    legal. After the collapse there is ONE stored kind to check: ``Map`` and bilinear ``Fold`` are
     derived READINGS (constructors returning a ``Fold``, ``isinstance`` answering the reading), so
     everything a term can hold is a ``Fold``."""
     from emmy.compiler.ir.stmt.base import Stmt
@@ -447,12 +447,12 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
 # --- the B operand edge: same type as A, asymmetric only in the schedule ------------------------- #
 
 
-def _computed_b_contraction(a_load: bool = True) -> Contraction:
+def _computed_b_contraction(a_load: bool = True) -> Fold:
     """``O[m, n] = Σ_k A[m, k]·B'[k, n]`` where **B is computed**, not a gmem ``Load``:
     ``B' = exp(W[k, n])`` — the shape a fused per-column prologue takes (qk-norm / RoPE folded into a
     score, an on-the-fly dequant). The mirror of ``_pv_contraction``'s computed A."""
     cone = Fold.projection(body=Body((Load(name="w_e", input="W", index=(Var("k"), Var("n"))), Assign(name="wn", op="exp", args=("w_e",)))))
-    return Contraction(
+    return Fold.contraction(
         k_axis=Axis("k", 8),
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))) if a_load else cone,
         channels=(Channel(b=cone, acc="o"),),

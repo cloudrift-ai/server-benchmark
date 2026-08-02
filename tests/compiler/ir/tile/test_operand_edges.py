@@ -1,7 +1,7 @@
-"""Operand edges + the product-carrier :class:`Contraction` — sharing is arity, not naming.
+"""Operand edges + the product-carrier a bilinear ``Fold`` — sharing is arity, not naming.
 
 A computed operand is stored INLINE on its edge (there is no let table and no name-reference arm);
-"these two matmuls read the same A" is ONE ``Contraction`` with one ``a`` edge and N product
+"these two matmuls read the same A" is ONE bilinear ``Fold`` with one ``a`` edge and N product
 :class:`Channel`\\ s ``(b_i, acc_i)``. These pin the node's derived product loop (shared A lifted
 once, N-component product-monoid carrier), the arity-vs-copies distinction, the inline-arm
 canonicalization through ``rewrite``, and the closure predicate a placement cut asks before
@@ -15,7 +15,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, Contraction, Fold
+from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.ir.tile.ops import axis_names, lower
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
@@ -29,16 +29,16 @@ def _cone(name: str = "xhat") -> Fold:
     return Fold.projection(body=Body((load, scale, Assign(name=name, op="multiply", args=(f"{name}_e", f"{name}_s")))))
 
 
-def _node(a, *channels: tuple[str, str]) -> Contraction:
+def _node(a, *channels: tuple[str, str]) -> Fold:
     """A contraction over operand edge ``a`` with one ``(acc, weight-buffer)`` channel per arg."""
-    return Contraction(
+    return Fold.contraction(
         k_axis=Axis("k", 256),
         a=a,
         channels=tuple(Channel(b=Load(name=f"{acc}_b", input=w, index=(Var("k"), Var("n"))), acc=acc) for acc, w in channels),
     )
 
 
-def _product() -> Contraction:
+def _product() -> Fold:
     """The gate⊗up shape: ONE product contraction, two channels over one inline cone."""
     return _node(_cone(), ("acc_g", "Wg"), ("acc_u", "Wu"))
 

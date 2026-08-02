@@ -416,9 +416,9 @@ per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-
 
 **One kind, three readings.** A `Fold` is an optional `axis`, the `operands`, a joint `lift` and an optional
 `(init, combine)` monoid. `Map` is deleted outright — a zero-axis node (`Fold.projection(...)`) is the projection /
-pointwise cell it used to name, and `.sources` / `.fn` went with it (`.operands` / `.lift`). `Contraction` survives
-as a BUILDER — it generates the bilinear lift and the additive combine — plus a derived reading that `isinstance`
-answers, exposing `a` / `channels` / `b_trans` off `operands`. The A/B split
+pointwise cell it used to name, and `.sources` / `.fn` went with it (`.operands` / `.lift`). `Contraction` is deleted as well: `Fold.contraction(...)` is the BUILDER — it generates the
+bilinear lift and the additive combine — and `is_contraction(x)` the READING, a predicate rather than a kind, with
+`a` / `channels` / `b_trans` reading off `operands`. The A/B split
 rides the stored operand ORDER `(b₀, a, b₁…)`, because node-locally the two are symmetric — `A[m,k]` and
 `B[k,n]` each carry K plus one free axis — and telling M from N needs the placement, which lives on the `TileOp`.
 

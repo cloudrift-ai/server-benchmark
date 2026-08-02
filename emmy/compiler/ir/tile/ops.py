@@ -1,7 +1,6 @@
 r"""The geometry-free compute layer — node lowering and the structural reads.
 
 A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce), a
-:class:`~emmy.compiler.ir.tile.ir.Contraction` (a contraction cell — 1s), or a
 :class:`~emmy.compiler.ir.tile.ir.Fold` (a pure pointwise cell, or the projection wrapper over its
 source node). :func:`head` is the ONE accessor reaching that node through the projection (zero-axis) fold,
 and every structural fact a pass dispatches on — :func:`axis_role`, the reduce ``Axis``, the
@@ -22,7 +21,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail
+from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, is_contraction
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -192,7 +191,7 @@ def seal_workers(tile) -> None:
 
 def head(op):
     """The kernel's compute NODE — a :class:`~emmy.compiler.ir.tile.ir.Fold` /
-    :class:`~emmy.compiler.ir.tile.ir.Contraction`, bare or under its projection (zero-axis) fold — or
+    a bilinear ``Fold``, bare or under its projection (zero-axis) fold — or
     ``None`` for a pure pointwise cell / the raw-loop-IR escape (a zero-axis fold with no operands).
 
     The ONE accessor for "which node is this kernel about", replacing the hand-spelled
@@ -207,9 +206,9 @@ def head(op):
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback zero-axis ``Fold`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`Contraction` synthesizes its loop
+    :class:`~emmy.compiler.ir.tile.ir.Fold` / a bilinear ``Fold`` synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
-    :attr:`Contraction.loop`); a zero-axis ``Fold``
+    :attr:`Fold.loop`); a zero-axis ``Fold``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (``role=FREE`` — flat
     fallback) and is invisible here, so it materializes on the scalar tier.
@@ -260,7 +259,7 @@ def nodify_reduce(op, like=None):
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     zero-axis ``Fold`` body."""
     node = head(op)
-    if node is not None and node.role is AxisRole.CONTRACTION:
+    if is_contraction(node):
         return op, node  # a bare node IS its own head — the contraction keys its own plan
     if like is None:
         like = node if isinstance(node, Fold) else None
@@ -282,7 +281,7 @@ def axis_role(op) -> AxisRole:
     zero-axis ``Fold``. This is what the schedule / materialize passes dispatch on.
 
     Read off the NODE (:func:`head`) — the role is that node's own derived property
-    (``Fold.role`` / the ``Contraction`` kind), so the dispatch costs a field access. The
+    (``Fold.role``), so the dispatch costs a field access. The
     annotated-``Loop`` scan survives only for the raw-loop-IR escape (an un-recognized cell,
     ``030``'s finalize, the coop fused-tail sibling): no node to ask, the stamped ``Loop.role``
     IS the fact. Never synthesize a nest to answer this — :attr:`Fold.loop` splices every operand
@@ -303,7 +302,7 @@ def lower(op) -> list[Stmt]:
     one ``lower`` call emits the kernel's per-cell body with nothing left to expand. Stored trees
     are already resolved (computed operands are inline nodes), so there is no name-inlining step;
     a multi-channel contraction lowers through its own derived product loop
-    (:attr:`Contraction.loop`)."""
+    (:attr:`Fold.loop`)."""
 
     if isinstance(op, Fold):
         return op.lower()

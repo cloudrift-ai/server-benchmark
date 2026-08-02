@@ -67,7 +67,7 @@ def test_slice_last_logits_lowers_cold():
     """The in-graph last-token slice must build AND compute correctly COLD (``tune_db=None``,
     empty prior) — it is ``_CompiledLM``'s production graph. Two historical failure modes are
     pinned here: the M=1 demoted lm_head once stayed an unlowered ``LoopOp`` (fixed by the
-    tile-IR rebuild: the unbindable Contraction demotes to PLANAR), and the
+    tile-IR rebuild: the unbindable bilinear fold demotes to PLANAR), and the
     ``hidden[:, -1:, :]`` slice's negative row index once reached codegen as a raw ``-1``
     (``mul[-H + a1]``, an OOB read → silent zeros; fixed in ``140_slice`` by normalizing to
     ``seq_len - 1``). Runs the sliced graph at two lengths and checks logits against eager."""

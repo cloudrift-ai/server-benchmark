@@ -3,7 +3,7 @@ bound `Axis` objects through, exercised without a node, a `Ctx` or any algebra.
 
 `020_schedule` decides the plan; nothing it produces is an axis a kernel loops over. This layer is
 the other half, and it is algebra-free by construction: it takes a `Side` pair, integer counts and
-three callables. These tests hold that boundary — they never build a `Contraction` — and pin the
+three callables. These tests hold that boundary — they never build a `bilinear fold` — and pin the
 per-cell coordinate arithmetic `AxisOffset.base` accumulates across the levels, which is what the
 emitted σ substitutions index with.
 """
@@ -123,7 +123,7 @@ def test_the_layer_needs_no_node_ctx_or_algebra() -> None:
     from emmy.compiler.pipeline.passes.lowering.kernel import _tiling
 
     names = {n for n in dir(_tiling) if not n.startswith("__")}
-    for banned in ("Contraction", "Fold", "Map", "Placed", "Ctx", "reduce_codegen", "store_sink", "copy_cell"):
+    for banned in ("bilinear fold", "Fold", "Map", "Placed", "Ctx", "reduce_codegen", "store_sink", "copy_cell"):
         assert banned not in names, f"{banned} leaked into the tiling layer"
 
 

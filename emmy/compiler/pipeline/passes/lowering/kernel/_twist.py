@@ -1,7 +1,7 @@
 """The fragment realizer — a TWISTED carrier realized at WARP-FRAGMENT residence.
 
 The one ``_bind`` pipeline calls :func:`realize_warp_twist` when the reduce arm's tree carries a
-warp tile (:func:`warp_source` — the stream's head :class:`Contraction` stamped with an mma
+warp tile (:func:`warp_source` — the stream's head a bilinear ``Fold`` stamped with an mma
 :class:`TilePlan` by the schedule): the streaming reduce keeps its per-step values in mma
 C-fragments instead of scalars, so every piece of the scalar lowering is *realized* at the new
 residence — the fragment row of the placement-keyed fold (a within-warp ``FragmentRowReduce``
@@ -21,7 +21,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   (score, …)``, pivot first): the pivot's per-block fold is a ``FragmentRowReduce`` of its
   ``maximum`` (rowmax) + the running-stat update / rescale; a denominator component (literal-1
   term) row-reduces the exp-weight fragments (rowsum) into ``l = l·α + Σp``; an expectation
-  component (a value term) IS the P@V :class:`Contraction` node — its ⊗ lowers to ``mma.sync`` with
+  component (a value term) IS the P@V a bilinear ``Fold`` — its ⊗ lowers to ``mma.sync`` with
   the register-resident probability converted straight into its A-operand fragments by the C→A
   REGISTER repack (``FragmentRepack``, the ``AtomKind.c_to_a_repack`` lane-map compatibility —
   no smem round-trip, no sync; gated at schedule time);
@@ -70,7 +70,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Fold
+from emmy.compiler.ir.tile.ir import Fold, is_contraction
 from emmy.compiler.ir.tile.ops import head
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
@@ -127,7 +127,7 @@ def warp_source(op, sched):
     if len(stmts) == 0:
         return None
     head = stmts[0]
-    if isinstance(head, Contraction):
+    if is_contraction(head):
         htile = sched.tile_of(head)
         if htile is not None and htile.is_warp:
             return head
@@ -170,7 +170,7 @@ def _reads(s: Stmt) -> set[str]:
 
 
 def _frag_contraction(
-    c: Contraction,
+    c: Fold,
     tile: TilePlan,
     tiles: list[tuple[tuple[str, ...], tuple[str, ...]]],
     *,
@@ -184,7 +184,7 @@ def _frag_contraction(
     b_swizzle: str = "NONE",
     reg_depth: int = 1,
 ) -> list[Stmt]:
-    """One warp-tiled :class:`Contraction` step as fragment codegen — the ``read → ⊗ → fold`` spine
+    """One warp-tiled a bilinear ``Fold`` step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
     stamped :class:`TilePlan` (``regs`` / ``bk``). ``tiles`` is the ``(acc_frags, a_frags)`` pair
     per REGISTER QUERY TILE (the plan's ``regs[0]``): the A fragments are always resident (flash Q
@@ -322,7 +322,7 @@ def _realize_prologue(stmts, qk: TilePlan, frags: tuple[str, ...], col_bases, ro
     row_coord: Expr = Var(FRAG_ROW) if qk.axes[0].extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.axes[0]))
     col_coord: Expr = Var(FRAG_COL) if qk.axes[1].extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.axes[1]))
     for s in stmts:
-        if isinstance(s, Contraction):
+        if is_contraction(s):
             continue  # the expect fold — regenerated from its channel
         if state & (set(s.defines()) | _reads(s)):
             break  # the dissolved merge — regenerated from the injection spec
@@ -424,10 +424,10 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # originals); the score's stream axis is the fold's own, read through a slice partial's window
     # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
     kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
-    qk: Contraction = partial[0]
+    qk: Fold = partial[0]
     qk_t: TilePlan = ctx.sched.tile_of(qk).at(ctx.free[-2], kv_parent)
-    pv_fold = next(s for s in partial[1:] if isinstance(s, Contraction))
-    pv: Contraction = pv_fold
+    pv_fold = next(s for s in partial[1:] if is_contraction(s))
+    pv: Fold = pv_fold
     pv_t: TilePlan = ctx.sched.tile_of(pv_fold).at(ctx.free[-2], ctx.free[-1])
     atom = qk_t.atom
     shape = atom.shape

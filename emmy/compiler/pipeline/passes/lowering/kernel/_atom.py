@@ -1,6 +1,6 @@
 r"""The per-atom codegen strategies — the one seam every tiled contraction dispatches through.
 
-``_factor._bind`` (the output-tiled contraction arm) reads the tiling geometry off the :class:`Contraction`
+``_factor._bind`` (the output-tiled contraction arm) reads the tiling geometry off the a bilinear ``Fold``
 node and asks this module for the two codegen halves: :func:`reduce_codegen` (the sink-agnostic
 ``(state_decls, reduce_region)`` — the accumulator/operand decls + the shared :func:`_contract_kloop`
 K-loop) and :func:`store_sink` (the per-cell matmul sink). Both resolve through :func:`_atom_ops` to
@@ -39,7 +39,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction
+from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -179,7 +179,7 @@ def _warp_epilogue(
 # transform**: an ineligible kernel silently falls back to gmem-direct, and a staged kernel is
 # bit-identical to its gmem-direct baseline. The transport primitives (the fill loops + the
 # commit/wait / mbarrier handshakes) live in ``_stage.py``; these functions schedule them onto the
-# K-loop off the :class:`Contraction` geometry.
+# K-loop off the a bilinear ``Fold`` geometry.
 def _fold_frag(base: str, fold: int) -> str:
     """The per-fold-channel fragment name — the primary channel keeps the historic bare spelling
     (``_b0`` / ``_c0_0``), extra channels suffix ``_x<f>`` (the multi-B gate/up node)."""
@@ -445,7 +445,7 @@ def _stat_slab(name: str) -> str:
 
 
 def _sync_operands(
-    c: Contraction,
+    c: Fold,
     bk_elems: int,
     mn: tuple[Side, Side],
     cta: CtaTile,
@@ -674,7 +674,7 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Contraction, tile: TilePlan, lead: tuple = ()) -> frozenset[str]:
+def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = ()) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
@@ -691,7 +691,7 @@ def _scalar_protected(c: Contraction, tile: TilePlan, lead: tuple = ()) -> froze
 
 
 def _scalar_drain(
-    c: Contraction, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
+    c: Fold, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
 ) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
@@ -738,7 +738,7 @@ class _AtomOps:
     slab-reading leaf) and :meth:`slab_elem` (the slab element dtype). This IS the "atom as
     descriptor" seam: one factory (:func:`_atom_ops`), no scattered ``isinstance``."""
 
-    c: Contraction  # the ALGEBRA — operand edges, K axis, channels
+    c: Fold  # the ALGEBRA — operand edges, K axis, channels
     tile: TilePlan  # the SCHEDULE slice, PLACED (``TilePlan.at``): the atom + the ``(m, n)`` geometry
     stage: Stage | None = None
     inputs: object = None
@@ -1081,7 +1081,7 @@ class _ScalarOps(_AtomOps):
 
 
 def _atom_ops(
-    c: Contraction,
+    c: Fold,
     tile: TilePlan,
     stage: Stage | None = None,
     inputs=None,
@@ -1096,7 +1096,7 @@ def _atom_ops(
     return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam)
 
 
-def reduce_codegen(c: Contraction, tile: TilePlan, stage: Stage | None = None, inputs=None, workers=None, seam=None, lead: tuple = ()):
+def reduce_codegen(c: Fold, tile: TilePlan, stage: Stage | None = None, inputs=None, workers=None, seam=None, lead: tuple = ()):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
@@ -1107,7 +1107,7 @@ def reduce_codegen(c: Contraction, tile: TilePlan, stage: Stage | None = None, i
     return ops.state, ops.reduce
 
 
-def store_sink(c: Contraction, tile: TilePlan, epilogue: Body | None = None, lead: tuple = ()):
+def store_sink(c: Fold, tile: TilePlan, epilogue: Body | None = None, lead: tuple = ()):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the

@@ -54,11 +54,11 @@ redundant, form::
       Init (m_i = -inf, l_i = 0, O_i = 0)            # running (max, denom, out)
       for kv in 0..S_k:                              # streaming reduce (TWISTED)
         Init sacc = 0
-        for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score Contraction
+        for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score bilinear fold
         s = sacc · scale
         M = max(m_i, s); alpha = exp(m_i − M); P = exp(s − M)  # softmax stats (the derived exp merge)
         l_i = l_i·alpha + P
-        for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V Contraction (block=1: singleton j)
+        for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V bilinear fold (block=1: singleton j)
         O_i = O_i·alpha + O_i__pv                    # the LSE rescale + PV fold
       out[…,m,d] = O_i / l_i
 
@@ -89,7 +89,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.carrier import exp_combine_states
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Placement, Store, TileOp
+from emmy.compiler.ir.tile import Channel, Fold, Placement, Store, TileOp
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Node
@@ -344,9 +344,9 @@ def _flash_op(
     out_store: tuple[str, tuple] | None = None,
 ) -> Fold:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
-    ``Fold.projection(body=[O/l projection], operands=(Fold(role=TWISTED, axis=kv, step=[Contraction(QK), …,
-    Contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
-    holds the NESTED ``Σ_dd Q·K`` :class:`Contraction` node at its head (then scaled, optionally
+    ``Fold.projection(body=[O/l projection], operands=(Fold(role=TWISTED, axis=kv, step=[Fold.contraction(QK), …,
+    Fold.contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
+    holds the NESTED ``Σ_dd Q·K`` a bilinear ``Fold`` at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``
     after the loop. :meth:`Fold.loop` flattens the head QK node the same way it flattens the
     embedded PV, so the scalar tier expands the same loop-in-body nest as before. The free
@@ -371,11 +371,11 @@ def _flash_op(
     else:
         q_idx, k_idx, v_idx = access_indices
 
-    # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
+    # s = Σ_dd Q·K — the inner contraction as a high-level a bilinear ``Fold`` structural node, the
     # ``source`` of the streaming kv :class:`Fold`. Per-cell scalar (``TilePlan()``): the
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.
-    score_contraction = Contraction(
+    score_contraction = Fold.contraction(
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a=Load(name="q_e", input=q_buf, index=q_idx),
         channels=(Channel(b=Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),

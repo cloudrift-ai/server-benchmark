@@ -13,14 +13,14 @@ import pytest
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction
+from emmy.compiler.ir.tile import Channel
 from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
 
 
-def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> Contraction:
-    """A stored :class:`Contraction` node (1s) — pure algebra, no placement/schedule fields."""
-    return Contraction(
+def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> Fold:
+    """A stored a bilinear ``Fold`` (1s) — pure algebra, no placement/schedule fields."""
+    return Fold.contraction(
         k_axis=Axis(k_name, 256),
         a=a if a is not None else Load(name="a_e", input="A", index=(Var("m"), Var(k_name))),
         channels=(Channel(b=Load(name="b_e", input=w, index=(Var(k_name), Var(n_name))), acc=acc),),
@@ -87,7 +87,7 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
         init=(float("-inf"), 0.0, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    pv = next(s for s in stream.step_stmts()[1:] if isinstance(s, Contraction))  # the derived PV site
+    pv = next(s for s in stream.step_stmts()[1:] if isinstance(s, Fold) and s.role is AxisRole.CONTRACTION)  # the derived PV site
     root = Fold.projection(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), operands=(stream,))
     return root, stream, qk, pv
 

@@ -43,11 +43,12 @@ class Reduction:
     fold: object  # the Fold node (typed loosely — ir.tile imports nothing from here)
 
     def __post_init__(self) -> None:
-        from emmy.compiler.ir.tile.ir import Contraction  # noqa: PLC0415 — ir.tile imports nothing from here
 
-        # A Contraction node answers through its λ-fold reading (``as_fold`` — the one
+        # A bilinear fold node answers through its λ-fold reading (``as_fold`` — the one
         # place the algebra machinery still derives the flat combine for a stored contraction).
-        if isinstance(self.fold, Contraction):
+        from emmy.compiler.ir.tile.ir import is_contraction  # noqa: PLC0415 — avoid an import cycle
+
+        if is_contraction(self.fold):
             object.__setattr__(self, "fold", self.fold.as_fold())
 
     @property
@@ -107,7 +108,7 @@ class Reduction:
         of the cone's prologue node (``Fold.projection(body=cell, operands=(prologue,))``; the prologue itself
         a zero-axis ``Fold`` over the stat ``Fold``, or the bare fold). ``None`` when the cone carries no
         prologue (a gmem-``Load`` A) — the caller's serial fallback."""
-        from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415 — typing-only dependency
+        from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415 — avoid an import cycle
 
         pro = cone.operands[0] if (isinstance(cone, Fold) and cone.axis is None) and cone.operands else None
         head = pro.operands[0] if (isinstance(pro, Fold) and pro.axis is None) and pro.operands else pro

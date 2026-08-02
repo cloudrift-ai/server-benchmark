@@ -10,7 +10,7 @@ beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
 **codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
 :class:`WarpSpec` + :class:`Placement`). The per-node slices live in ``TileOp.schedule`` (1r —
-keyed by the tree-path codec, read through ``ops.Sched``; the derived ``Contraction`` carries
+keyed by the tree-path codec, read through ``ops.Sched``; the derived bilinear ``Fold`` carries
 them as view fields) beside the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
 fields (``place`` / ``work`` / ``workers``).
 
@@ -1147,7 +1147,7 @@ def _overhangs(axis: Axis, tile: int) -> bool:
 @dataclass(frozen=True)
 class Side:
     """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
-    derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Contraction.mn`)
+    derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Fold.mn`)
     mirroring :class:`TilePlan`'s own ``units`` / ``regs`` tuples, so the factorizer
     threads one object per axis instead of a dozen loose ``*_m`` / ``*_n`` args. The tile width,
     unit / register counts, and bound block/unit var names are derived from an axis + a

@@ -42,8 +42,8 @@ step unconditional — no knobs):
    statistic's scalar epilogue + a fresh free (column) ``Loop`` over one or more ⊗-folds of ONE
    shared A value reading the statistic (the fused norm→linear edge ``rmsnorm(x)·nw @ w``; its
    N-channel form the gate/up MLP edge ``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold) ALSO
-   nodifies to ``Fold.projection(body=projection, operands=(Contraction,))``: ONE computed-A product
-   :class:`Contraction` with a :class:`Channel` per ⊗-fold, the A cone stored inline on its edge
+   nodifies to ``Fold.projection(body=projection, operands=(bilinear fold,))``: ONE computed-A product
+   a bilinear ``Fold`` with a :class:`Channel` per ⊗-fold, the A cone stored inline on its edge
    (a real node tree — the per-row statistic its ``Fold`` source)
    (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid.
    Recognition only *builds* that reading (for the routing router's reference tree, below);
@@ -69,7 +69,6 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile import (
     Channel,
-    Contraction,
     Fold,
     Placement,
     TileOp,
@@ -275,7 +274,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
     projection = () if bare else (*pre_epilogue, *after)
     # A PLANAR / TWISTED reduce lifts to a typed ``Fold`` node (its ⊕ carrier + structure split
     # out, the fold loop synthesized on demand); a ``CONTRACTION`` is nodified to a
-    # :class:`Contraction` right after the free axes are ordered (:func:`_nodify_contraction`).
+    # a bilinear ``Fold`` right after the free axes are ordered (:func:`_nodify_contraction`).
     # ``lower`` flattens either back identically.
     if annotated.role in (AxisRole.PLANAR, AxisRole.TWISTED):
         reduction = Fold.from_loop(annotated)
@@ -296,7 +295,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
 
 
 def _nodify_contraction(node, free: tuple):
-    """Nodify a freshly-lifted flat ``CONTRACTION`` zero-axis ``Fold`` into the :class:`Contraction`
+    """Nodify a freshly-lifted flat ``CONTRACTION`` zero-axis ``Fold`` into the a bilinear ``Fold``
     structural node with a **deferred** per-cell ``TilePlan()`` (the schedule fork re-tiles it),
     resolving the operand→role binding ONCE, recognize-side (:func:`bind_contraction` over the
     ordered ``free`` axes' trailing ``(m, n)``). An unbindable contraction — a 1-D output (a
@@ -319,13 +318,13 @@ def _nodify_contraction(node, free: tuple):
         except LoweringError:
             pass
         else:
-            con = Contraction(
+            con = Fold.contraction(
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
                 channels=(Channel(b=b_load, acc=acc),),
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
-            # STORED form is the :class:`Contraction` node itself (1s) — pure algebra; the
+            # STORED form is the a bilinear ``Fold`` itself (1s) — pure algebra; the
             # output axes / tile / stage are caller facts, stamped at the point of use.
             return _project(con, epi)
     red = Fold.from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
@@ -353,7 +352,7 @@ def _lift(stmts: list[Stmt], output: str) -> tuple[Fold, tuple, tuple]:
     boundary stores)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
     The schedule maps them onto the grid, and the ``stores`` ride
     ``TileOp.stores`` (1q). A ``CONTRACTION`` cell
-    nodifies to a :class:`Contraction` once the free axes are output-ordered (the binding needs
+    nodifies to a a bilinear ``Fold`` once the free axes are output-ordered (the binding needs
     the final ``(m, n)``)."""
     free, cell = _peel(Body(tuple(stmts)))
     node, stores = _lift_cell(cell, free, output)

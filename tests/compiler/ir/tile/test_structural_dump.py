@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Store, TileOp
+from emmy.compiler.ir.tile import Channel, Fold, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, pretty, unplaced_slices
 
 
@@ -51,9 +51,9 @@ def _cone() -> Fold:
     )
 
 
-def _product(a=None) -> Contraction:
+def _product(a=None) -> Fold:
     """The gate⊗up shape — two channels over ONE shared ``a`` edge."""
-    return Contraction(
+    return Fold.contraction(
         k_axis=Axis("k", 256),
         a=a if a is not None else Load(name="a_e", input="x", index=(Var("m"), Var("k"))),
         channels=tuple(
@@ -128,9 +128,9 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
 
 
 def _split_k() -> Fold:
-    """Split-K's outer reduce — the identity-lift composition over one ``Contraction`` edge. Its
+    """Split-K's outer reduce — the identity-lift composition over one bilinear ``Fold`` edge. Its
     derived step embeds that very object, so a dump that printed the step would show it twice."""
-    inner = Contraction(
+    inner = Fold.contraction(
         k_axis=Axis("kslice", 128),
         a=Load(name="a_e", input="x", index=(Var("m"), Var("kslice"))),
         channels=(Channel(b=Load(name="b_e", input="w", index=(Var("kslice"), Var("n"))), acc="acc0"),),

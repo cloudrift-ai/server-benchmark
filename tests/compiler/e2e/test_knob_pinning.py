@@ -149,7 +149,7 @@ def test_norm_linear_fp16_scalar_reduce_tma_alignment(shape_mode, monkeypatch):
     np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
 
 
-# The recognize-nodified MONOID fused edge (norm→linear as a computed-A ``Contraction``) pinned to
+# The recognize-nodified MONOID fused edge (norm→linear as a computed-A bilinear ``Fold``) pinned to
 # the warp mma tier at a 64-row tile: S=32 overhangs it, so the STATIC mode exercises the masked
 # static-M sync compute-fill (clamped A/stat σ + guarded ``RegStore``) and the DYNAMIC mode the
 # symbolic-M form of the same clamps. K=128 / N=512 exactly cover (the sync fill's N/K contract).

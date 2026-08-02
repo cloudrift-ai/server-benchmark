@@ -1,4 +1,4 @@
-"""The stored `Contraction` node vs its placed `TilePlan` slice — the boundary the tile IR draws.
+"""The stored `bilinear fold` node vs its placed `TilePlan` slice — the boundary the tile IR draws.
 
 A contraction node is pure ALGEBRA (`k_axis` + the `a` edge + its `Channel`s). Placement and
 schedule ride the slice: a `TilePlan` bound to its `(m, n)` output axes by `.at()`, from which the
@@ -11,20 +11,20 @@ never executes it; calling it directly is what makes the regression visible off-
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.tile import Channel, Contraction
+from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _scalar_protected, copy_cell
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import _pv_streamed
 
 _M, _N, _K = Axis("m", 128), Axis("n", 128), Axis("k", 64)
 
 
-def _node() -> Contraction:
-    return Contraction(
+def _node() -> Fold:
+    return Fold.contraction(
         k_axis=_K,
         a=Load(name="a", input="A", index=(Var("m"), Var("k"))),
         channels=(Channel(b=Load(name="b", input="B", index=(Var("k"), Var("n"))), acc="acc"),),
@@ -61,7 +61,7 @@ def test_pv_streamed_swaps_the_stream_axis_on_the_stored_node() -> None:
     placed ``TilePlan`` is untouched."""
     node, tile = _node(), _slice()
     got = _pv_streamed(node, Axis("kv", 256))
-    assert isinstance(got, Contraction) and got.k_axis.name == "kv"
+    assert got.role is AxisRole.CONTRACTION and got.k_axis.name == "kv"
     assert tile.axes == (_M, _N)  # the slice still carries the placement the swap never saw
 
 

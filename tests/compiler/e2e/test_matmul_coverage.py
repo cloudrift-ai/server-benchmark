@@ -955,7 +955,7 @@ def _mma_qk_graph(B: int, H: int, M: int, N: int, D: int):
 def test_mma_batched_qk_matches_torch(B, H, M, N, D, monkeypatch):
     """The shared contraction codegen tiles a **batched transposed-B** Q@Kᵀ (flash's score shape:
     leading ``(b, h)`` axes + ``b_trans``) onto ``mma.sync`` and agrees with torch — the reuse seam
-    the warp-flash materializer rides (a ``Contraction`` placed under leading batch grid axes)."""
+    the warp-flash materializer rides (a bilinear ``Fold`` placed under leading batch grid axes)."""
     import torch  # noqa: PLC0415
 
     _pin_tile(monkeypatch, _WARP_PIN)
@@ -1437,8 +1437,8 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
 
 # --- split-K finalizes on the warp tier --------------------------------------
-# MMA split-K rides the structural ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` fork
-# (the split-K option): the inner ``Contraction`` factorizes to mma exactly like a non-split
+# MMA split-K rides the structural ``Fold(axis=ksplit, step=[Fold.contraction(k_axis=kslice)])`` fork
+# (the split-K option): the inner bilinear ``Fold`` factorizes to mma exactly like a non-split
 # matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
 # ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into the

@@ -360,13 +360,13 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
-        # A dumped ``Map.fn`` lambda is strict for every recognized term (the root stores left
+        # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
         # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
-        # rebuild through the same ``_loop_ir_fn`` arm ``Map`` construction uses.
+        # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
         "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Map`` / ``Fold`` / ``Contraction``) and the
+    # The tile-IR structural nodes (``Fold`` node) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /

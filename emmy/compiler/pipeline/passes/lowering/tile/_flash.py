@@ -8,15 +8,15 @@ halves:
   emits the fused fragment.
 - **Construction** — the ``flash_shape_eligible`` / ``gqa_group`` predicates and the fragment
   builder ``build_flash_frag``. It doesn't hand-assemble a kernel body — it builds the high-level
-  **λ-spelled structural-node tree** (``ir/tile/ir``): flash is ``Map(body=[O/l projection],
-  sources=(Fold(axis=kv, operands=(Fold(Σ_dd Q·K), Load(V)), lift=λ(kv, sacc, v_e) → (score, 1,
+  **λ-spelled structural-node tree** (``ir/tile/ir``): flash is ``Fold.projection(body=[O/l projection],
+  operands=(Fold(axis=kv, operands=(Fold(Σ_dd Q·K), Load(V)), lift=λ(kv, sacc, v_e) → (score, 1,
   v_e), init/combine = the exp-family ⊕),))`` — the ``(m,l,O)`` LSE streaming reduce over kv whose
   ``Σ_dd Q·K`` score is a HOISTED operand edge and whose **P@V** ``Σ_j P·V`` contraction (its A the
   register-resident softmax weight ``P``) is SYNTHESIZED into the DERIVED blocked evaluation
   (``ir._twisted_derived_step``), projected ``O/l`` after the loop. Both Q@K and P@V ride
   single walked ``step`` edge (no ``source`` asymmetry) and factorize through the one
   ``_factor`` contraction path; block=1 is the scalar streaming degenerate (``j`` a singleton reduce).
-  ``build_flash_frag`` returns that ``Map`` UNLOWERED, on a ``TileOp`` with an UNMAPPED ``Placement``
+  ``build_flash_frag`` returns that zero-axis ``Fold`` UNLOWERED, on a ``TileOp`` with an UNMAPPED ``Placement``
   — the free ``(batch…, m, d)`` axes are the schedule's (like every recognizer), and ``_schedule``
   maps them onto the grid; ``materialize`` lowers the nodes (``Fold.loop`` splices the
   contraction's ``Σ Q·K`` loop ahead of the partial, the scalar tier expanding the same loop nest) +
@@ -90,7 +90,6 @@ from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.carrier import exp_combine_states
 from emmy.compiler.ir.tile import Channel, Contraction, Fold, Placement, Store, TileOp
-from emmy.compiler.ir.tile.ops import Map
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Node
@@ -221,7 +220,7 @@ def build_flash_frag(
     (:func:`_out_store_index` — the caller degrades to cut). The caller guarantees
     :func:`flash_shape_eligible`.
 
-    The compute is the op tree itself — a ``Map`` whose body is the ``(m,l,O)`` LSE
+    The compute is the op tree itself — a zero-axis ``Fold`` whose body is the ``(m,l,O)`` LSE
     ``TWISTED`` reduce ``Loop`` then the ``O/l`` projection, carried unlowered on the ``TileOp`` with an empty
     schedule; the free ``(batch…, m, d)`` axes are the ``Placement``'s ``free`` (no
     free-axis loop nest). The schedule maps them onto the grid; ``materialize`` lowers
@@ -343,9 +342,9 @@ def _flash_op(
     layouts: tuple = (None, None, None),
     access_indices: tuple[tuple, tuple, tuple] | None = None,
     out_store: tuple[str, tuple] | None = None,
-) -> Map:
+) -> Fold:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
-    ``Map(body=[O/l projection], sources=(Fold(role=TWISTED, axis=kv, step=[Contraction(QK), …,
+    ``Fold.projection(body=[O/l projection], operands=(Fold(role=TWISTED, axis=kv, step=[Contraction(QK), …,
     Contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
     holds the NESTED ``Σ_dd Q·K`` :class:`Contraction` node at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``
@@ -358,7 +357,7 @@ def _flash_op(
     ``//group`` the upstream ``IndexMapOp`` encodes, moved into the load index so the
     kv_heads-many K/V are read without materializing the q_heads expansion. An additive
     ``mask_buf`` (broadcast leading dims) is added to the score; causal masking is a
-    ``Select`` stmt (``kv ≤ m`` else −inf) in the score ``Map`` — the index predicate
+    ``Select`` stmt (``kv ≤ m`` else −inf) in the score zero-axis ``Fold`` — the index predicate
     lives in the op tree, never in the carrier. Both make ``exp(s − m_new) = 0``, so
     masked keys contribute nothing."""
     bvars = _batch_vars(len(batch))
@@ -441,7 +440,7 @@ def _flash_op(
         combine=combine,
     )
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
-    # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
+    # O_i / l_i after the kv loop, the zero-axis ``Fold`` body over the reduction ``source``. When the caller
     # supplies ``out_store`` (``(buffer, index)``), the fragment ALSO carries the explicit output
     # ``Write`` at that index — the output-layout-aware store (:func:`_out_store_index`) that
     # reproduces the root's real buffer rank / transpose / broadcast dims — as a boundary
@@ -454,7 +453,7 @@ def _flash_op(
     if out_store is not None:
         out_buf, out_idx = out_store
         stores = (Store(write=Write(output=out_buf, index=out_idx, value="O_i__proj")),)
-    return Map(body=Body(proj), sources=(reduction,)), stores
+    return Fold.projection(body=Body(proj), operands=(reduction,)), stores
 
 
 # --------------------------------------------------------------------------- #
@@ -918,7 +917,7 @@ def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:
 
 def try_flash(graph: Graph, root: Node) -> Graph | None:
     """Recognize SDPA on ``root`` and return the fused flash ``Graph`` fragment (a
-    ``TileOp`` holding the flash ``Map`` (a ``TWISTED`` kv loop) + its scale / -inf constants), or ``None``
+    ``TileOp`` holding the flash zero-axis ``Fold`` (a ``TWISTED`` kv loop) + its scale / -inf constants), or ``None``
     if ``root`` is not a recognizable / eligible attention kernel."""
     found = _recognize(graph, root)
     if found is None:

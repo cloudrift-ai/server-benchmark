@@ -58,7 +58,7 @@ _ORDINAL_RE = re.compile(r"^([a-z]+)(\d+)$")
 @dataclass(frozen=True)
 class Site:
     """One schedule-bearing tree position: the node, its schedule-bearing axis (``None`` for a
-    pointwise ``Map``), the FULL segment path from the root (this node's own segment last), and the
+    pointwise zero-axis fold), the FULL segment path from the root (this node's own segment last), and the
     1-based ``ordinal`` among sites sharing the identical ``(segments, axis)`` (1 when unique —
     the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
     living in a λ-spelled fold's DERIVED evaluation (flash's synthesized PV contraction) — a real
@@ -153,8 +153,8 @@ def sites(root) -> tuple[Site, ...]:
 
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """The sites ``family`` may decorate: every fold for ``REDUCE`` / ``STAGE``; ``TILE`` takes the
-    ``role=CONTRACTION`` folds plus the pure pointwise ROOT ``Map`` (the register-strip tier — a
-    non-root sourceless ``Map``, e.g. a one-load demoted cone, is not a strip target); ``PLACE``
+    ``role=CONTRACTION`` folds plus the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a
+    non-root operandless zero-axis fold, e.g. a one-load demoted cone, is not a strip target); ``PLACE``
     every NON-ROOT node (the child names its parent↔child seam — cut legality is structural,
     edge-iff-closed by construction)."""
     if family not in PATH_FAMILIES:

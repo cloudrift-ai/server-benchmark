@@ -15,18 +15,18 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, Contraction, Map
+from emmy.compiler.ir.tile import Channel, Contraction, Fold
 from emmy.compiler.ir.tile.ops import axis_names, lower
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
 
 
-def _cone(name: str = "xhat") -> Map:
+def _cone(name: str = "xhat") -> Fold:
     """A minimal computed A-cone — ``xhat = x[m, k] * s[k]``, the shape the fused norm→linear edge's
     computed A takes (here without its statistic reduce, which the tree vocabulary does not need)."""
     load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
     scale = Load(name=f"{name}_s", input="w", index=(Var("k"),))
-    return Map(body=Body((load, scale, Assign(name=name, op="multiply", args=(f"{name}_e", f"{name}_s")))))
+    return Fold.projection(body=Body((load, scale, Assign(name=name, op="multiply", args=(f"{name}_e", f"{name}_s")))))
 
 
 def _node(a, *channels: tuple[str, str]) -> Contraction:
@@ -66,8 +66,8 @@ def test_product_loop_folds_the_n_component_product_state() -> None:
 def test_arity_is_not_two_copies() -> None:
     """One node with two channels ≢ two independent contractions each computing their own A: the
     former lifts the shared A once (one loop), the latter lower to two loops with a cone each."""
-    fused = lower(Map(body=Body(()), sources=(_product(),)))
-    copies = Map(body=Body(()), sources=(_node(_cone(), ("acc_g", "Wg")), _node(_cone("xhat2"), ("acc_u", "Wu"))))
+    fused = lower(Fold.projection(body=Body(()), operands=(_product(),)))
+    copies = Fold.projection(body=Body(()), operands=(_node(_cone(), ("acc_g", "Wg")), _node(_cone("xhat2"), ("acc_u", "Wu"))))
     assert len([s for s in fused if isinstance(s, Loop)]) == 1
     assert len([s for s in lower(copies) if isinstance(s, Loop)]) == 2
 
@@ -119,11 +119,11 @@ def test_pretty_prints_the_channels_once() -> None:
 # --- closure: the predicate a placement cut asks ------------------------------------------------- #
 
 
-def _capturing_cone(name: str = "xhat") -> Map:
+def _capturing_cone(name: str = "xhat") -> Fold:
     """A cone that READS a value the enclosing body defines (``m_run``) instead of producing it —
     the flash ``P = exp(s − m)`` shape, where the running max comes from the carrier merge."""
     load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
-    return Map(body=Body((load, Assign(name=name, op="subtract", args=(f"{name}_e", "m_run")))))
+    return Fold.projection(body=Body((load, Assign(name=name, op="subtract", args=(f"{name}_e", "m_run")))))
 
 
 def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
@@ -170,10 +170,10 @@ def test_rewrite_reaches_a_channels_b_edge() -> None:
 
 
 def test_map_binder_binds_sources_positionally() -> None:
-    single = Map(sources=(_product(),))
+    single = Fold.projection(operands=(_product(),))
     # One param per source RESULT COMPONENT (1q params flattening) — the product source binds
     # BOTH channel accumulators, so a combine reading the second never sees a free name.
     assert single.fn.params == _product().defines()
     assert single.fn.results == single.fn.params[:1]  # empty-body wrap: result = the carried state
     assert single.out == _product().out
-    assert Map().fn.params == () and Map().fn.results == ()
+    assert Fold.projection().fn.params == () and Fold.projection().fn.results == ()

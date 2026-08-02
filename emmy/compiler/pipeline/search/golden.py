@@ -363,7 +363,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 class RmsNormGoldenConfig(GoldenConfig):
     """A golden config for RMSNorm ``(M, K) → (M, K)`` (``torch.nn.RMSNorm(K)``).
 
-    RMSNorm is a ``Map(body=sweep, source=Fold)``: a per-row mean-of-squares reduce
+    RMSNorm is a ``Fold.projection(body=sweep, source=Fold)``: a per-row mean-of-squares reduce
     over ``K`` feeds an rsqrt that rescales every element of the row (the ``k_rms_norm``
     kernel). It is reduce-tier — the good config reduces each row cooperatively
     (``REDUCE`` coop>1), so it shares the reduce regime's arithmetic key (free=M, reduce=K)

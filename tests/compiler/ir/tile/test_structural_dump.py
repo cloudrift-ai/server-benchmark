@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, Store, TileOp
+from emmy.compiler.ir.tile import Channel, Contraction, Fold, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, pretty, unplaced_slices
 
 
@@ -38,9 +38,9 @@ def _stat_fold() -> Fold:
     return Fold.from_loop(Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR))
 
 
-def _cone() -> Map:
+def _cone() -> Fold:
     """A computed A edge — ``xhat = x[m, k] * w[k]``."""
-    return Map(
+    return Fold.projection(
         body=Body(
             (
                 Load(name="xhat_e", input="x", index=(Var("m"), Var("k"))),
@@ -91,7 +91,7 @@ def test_map_dump_shows_the_binder_and_its_sources() -> None:
     """A ``Map``'s storage is ``fn`` + ``sources``. The binder rides its OWN branch, next to the
     body it binds — not the header, which on a big fold sat a screenful above its stmts. Every
     λ-valued field reads the same way: ``lift:`` / ``combine:`` / ``fn:``, signature then body."""
-    m = Map(fn=None, sources=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
+    m = Fold.projection(fn=None, operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
     text = "\n".join(pretty(m))
     assert text.splitlines()[0] == "Fold  free"
     assert "├─ operand[0]: Fold[k in 0..512] planar" in text
@@ -102,7 +102,7 @@ def test_map_dump_shows_the_binder_and_its_sources() -> None:
 def test_the_fn_branch_survives_an_empty_body() -> None:
     """The branch carries the SIGNATURE, so it is emitted even with nothing to compute — an
     identity projection still binds, and dropping the branch would lose the binder entirely."""
-    text = "\n".join(pretty(Map(fn=None, sources=(_stat_fold(),), body=Body(()))))
+    text = "\n".join(pretty(Fold.projection(fn=None, operands=(_stat_fold(),), body=Body(()))))
     assert "└─ lift: λ(acc0) -> (acc0)" in text
 
 
@@ -190,10 +190,10 @@ def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() 
 # --- a λ that is not closed says so -------------------------------------------------------------- #
 
 
-def _capturing_cone() -> Map:
+def _capturing_cone() -> Fold:
     """The flash ``P = exp(s − m)`` shape — a cone that READS a value the enclosing body defines
     (``m_run``, the carrier's running max) instead of producing it."""
-    return Map(
+    return Fold.projection(
         body=Body(
             (
                 Load(name="p_e", input="x", index=(Var("m"), Var("k"))),
@@ -220,7 +220,7 @@ def test_iteration_vars_are_not_captures() -> None:
     m, n = Axis("m", 128), Axis("n", 64)
     body = Body((Load(name="w_e", input="w", index=(Var("m"), Var("n"))), Assign(name="o", op="multiply", args=("acc0", "w_e"))))
     tile = TileOp(
-        op=Map(fn=None, sources=(_stat_fold(),), body=body),
+        op=Fold.projection(fn=None, operands=(_stat_fold(),), body=body),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
@@ -257,7 +257,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
 def test_pretty_body_separates_placement_and_boundary_stores_from_the_term() -> None:
     m, n = Axis("m", 128), Axis("n", 64)
     tile = TileOp(
-        op=Map(fn=None, sources=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),))),
+        op=Fold.projection(fn=None, operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),))),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),

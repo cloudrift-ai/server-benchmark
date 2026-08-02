@@ -112,7 +112,7 @@ def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> No
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
     op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
-    (red,) = op.sources
+    (red,) = op.operands
     assert red.lift is not None
     assert red.role is AxisRole.TWISTED
     assert red.lift.results[1:] == (1.0, "v_e")  # ι: (score, 1, v) — the singleton state
@@ -193,10 +193,6 @@ def test_demoted_edge_composes_test_reads_stored_structure() -> None:
     STORED — an operand edge, or inline in the lift body — instead of the derived step."""
     fold = Fold.from_loop(_demoted_edge_loop())
     assert fold is not None
-    stored = any(isinstance(s, (Contraction, Fold)) for s in fold.lift.body) or any(
-        isinstance(e, (Contraction, Fold)) for e in fold.operands
-    )
-    step = any(isinstance(s, (Contraction, Fold)) for s in fold.step_stmts()) or any(
-        isinstance(e, (Contraction, Fold)) for e in fold.operands
-    )
+    stored = any(isinstance(s, Fold) for s in fold.lift.body) or any(isinstance(e, Fold) for e in fold.operands)
+    step = any(isinstance(s, Fold) for s in fold.step_stmts()) or any(isinstance(e, Fold) for e in fold.operands)
     assert stored is step is False

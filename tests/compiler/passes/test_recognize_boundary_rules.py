@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-from emmy.compiler.ir.tile import Contraction, Map, TileOp
+from emmy.compiler.ir.tile import Contraction, Fold, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
@@ -109,11 +109,10 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
     # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
     # is the computed cone (the GELU-constant preamble folded INSIDE K), the bias load riding the
     # projection body — the preamble split kept the two independent feeds apart.
-    from emmy.compiler.ir.tile import Map as _Map
     from emmy.compiler.ir.tile.ir import _operand_body
 
-    assert isinstance(node, _Map) and len(node.sources) == 1
-    fold = node.sources[0]
+    assert isinstance(node, Fold) and node.axis is None and len(node.operands) == 1
+    fold = node.operands[0]
     a_edge = fold.a
     assert a_edge is not None and not isinstance(a_edge, Load), "A must be the computed cone"
     a_loads = {st.input for st in _operand_body(a_edge) if isinstance(st, Load)}
@@ -169,7 +168,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
     # Both views of the packed buffer hoist as materialized operand edges of the stored node.
     from emmy.compiler.ir.tile import Contraction as _CV
 
-    con = node.sources[0] if not isinstance(node, _CV) else node
+    con = node.operands[0] if not isinstance(node, _CV) else node
     assert isinstance(con, _CV) and con.role.name == "CONTRACTION"
     a_edge = con.a
     assert isinstance(a_edge, Load)
@@ -178,7 +177,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
 
 # --------------------------------------------------------------------------- #
 # The MONOID-producer composition — ``rmsnorm(x)·nw @ w`` nodifies to a computed-A
-# ``Contraction`` fork sibling of the ``Map(source=Fold)`` form (``010_recognize``'s
+# ``Contraction`` fork sibling of the ``Fold.projection(source=Fold)`` form (``010_recognize``'s
 # ``bind_prologue_contraction`` merge). Pipeline-only (no CUDA): resolve the tile passes with a
 # capturing ``decide`` and assert the fork rows / the picked node's structure.
 # --------------------------------------------------------------------------- #
@@ -299,16 +298,16 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
     # (1q), so the row stores the BARE product fold (the ``Map`` wrapper dropped with its last stmt).
-    fold = tile.op.sources[0] if isinstance(tile.op, Map) else tile.op
+    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
     c = fold
     assert c.a_computed
     cone = c.a
-    assert isinstance(cone, Map) and cone.out == c.a_name
-    assert cone.sources[0].sources[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
+    assert (isinstance(cone, Fold) and cone.axis is None) and cone.out == c.a_name
+    assert cone.operands[0].operands[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
     pro, cell, stats = cone_seam(cone)
-    assert pro == tuple(lower(cone.sources[0])) and cell == tuple(cone.body)
+    assert pro == tuple(lower(cone.operands[0])) and cell == tuple(cone.body)
     assert not any(refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
     assert any(refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
@@ -321,7 +320,7 @@ def test_norm_linear_fp32_keeps_map_rows_only():
     the fork is exactly the Map-form reduce rows — the graceful fallback."""
     rows, tile = _resolve(_norm_linear_graph(dt=F32))
     assert rows and not any(_is_warp_row(r) for r in rows)
-    assert isinstance(tile.op, Map)
+    assert isinstance(tile.op, Fold) and tile.op.axis is None
 
 
 def test_norm_linear_symbolic_m_offers_warp_rows():
@@ -350,13 +349,13 @@ def _mlp_gate_up_graph() -> Graph:
 def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
-    combine as projection — nodifies to ``Map(body=combine, sources=(Contraction,))``: ONE
+    combine as projection — nodifies to ``Fold.projection(body=combine, operands=(Contraction,))``: ONE
     product-carrier contraction, two ``(b, acc)`` channels over its single inline A cone (sharing
     is arity), the root ``Write`` a boundary ``Store`` (1q), and offers warp sync rows."""
 
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
-    assert isinstance(tile.op, Map) and len(tile.op.sources) == 1
-    node = tile.op.sources[0]
+    assert (isinstance(tile.op, Fold) and tile.op.axis is None) and len(tile.op.operands) == 1
+    node = tile.op.operands[0]
     assert len(node.channels) == 2 and node.a_computed
     assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
     # The projection body is PURE (the SwiGLU combine); the root store rides ``TileOp.stores``.
@@ -401,12 +400,12 @@ def test_normed_gqa_sdpa_certifies_flash():
         n.op
         for n in terminal.nodes.values()
         if type(n.op).__name__ == "TileOp"
-        and isinstance(n.op.op, Map)
-        and n.op.op.sources
-        and getattr(n.op.op.sources[0], "role", None) is AxisRole.TWISTED
+        and (isinstance(n.op.op, Fold) and n.op.op.axis is None)
+        and n.op.op.operands
+        and getattr(n.op.op.operands[0], "role", None) is AxisRole.TWISTED
     ]
     assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
-    src = flash[0].op.sources[0]
+    src = flash[0].op.operands[0]
     assert isinstance(src.step_stmts()[0], Contraction), "flash did not absorb the score contraction (fold stayed cut)"
 
 
@@ -485,7 +484,7 @@ def _prologue_shape(*, b_layouts):
             (Loop(axis=k, body=Body(tuple(kbody))), *tail, Write(output="o", index=(Var("m"), Var("n")), value="y" if tail else accs[0]))
         ),
     )
-    return Map(body=Body((Assign(name="rs", op="rsqrt", args=("sacc",)), nloop)), sources=(stat,)), (m,)
+    return Fold.projection(body=Body((Assign(name="rs", op="rsqrt", args=("sacc",)), nloop)), operands=(stat,)), (m,)
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
@@ -496,7 +495,7 @@ def test_channels_with_agreeing_b_layouts_form_one_product_node():
     bound = bind_prologue_contraction(node, free)
     assert bound is not None
     c_map, _, _stores = bound
-    (product,) = c_map.sources  # the stored contraction node
+    (product,) = c_map.operands  # the stored contraction node
     assert isinstance(product, Contraction)
     assert len(product.channels) == 2, "two channels over ONE shared edge — sharing is the node's arity"
     assert product.a is not None

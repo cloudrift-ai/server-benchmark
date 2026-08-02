@@ -167,7 +167,7 @@ def _node_axes(knobs: dict) -> list[str | None]:
     ``STAGE`` for the primary stream — appends the ``""`` bare-remainder group so the primary
     node's slices keep contributing to the sum-pool (byte-identical to the retired ``@kv``
     spelling's own group). ``[]`` when the kernel carries no schedule codec at all (a pure
-    pointwise ``Map``)."""
+    pointwise zero-axis fold)."""
     axes: list[str] = []
     seen: set[str] = set()
     has_bare = False

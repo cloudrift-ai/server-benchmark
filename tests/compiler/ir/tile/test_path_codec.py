@@ -13,7 +13,7 @@ import pytest
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Map
+from emmy.compiler.ir.tile import Channel, Contraction
 from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
 
@@ -43,28 +43,28 @@ def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: s
     return fold
 
 
-def _cone(stat: Fold, out: str = "xn") -> Map:
-    """The norm→linear cone shape: ``Map(body=normalize, sources=(Map(body=sweep, sources=(stat,)),))``."""
-    pro = Map(body=Body((Assign(name="rr", op="rsqrt", args=(stat.out,)),)), sources=(stat,))
+def _cone(stat: Fold, out: str = "xn") -> Fold:
+    """The norm→linear cone shape: ``Fold.projection(body=normalize, operands=(Fold.projection(body=sweep, operands=(stat,)),))``."""
+    pro = Fold.projection(body=Body((Assign(name="rr", op="rsqrt", args=(stat.out,)),)), operands=(stat,))
     cell = Body(
         (
             Load(name="xc", input="x", index=(Var("m"), Var("k"))),
             Assign(name=out, op="multiply", args=("xc", "rr")),
         )
     )
-    return Map(body=cell, sources=(pro,))
+    return Fold.projection(body=cell, operands=(pro,))
 
 
-def _norm_linear_tree() -> tuple[Map, Fold, Fold]:
-    """``Map(proj, sources=(product,))`` — the product fold's shared-A edge is the cone, whose
+def _norm_linear_tree() -> tuple[Fold, Fold, Fold]:
+    """``Fold.projection(proj, operands=(product,))`` — the product fold's shared-A edge is the cone, whose
     prologue wraps the stat fold; the stat reduces the SAME ``k`` name the product contracts."""
     stat = _planar_fold("k")
     product = _contraction_fold("k", a=_cone(stat))
-    root = Map(body=Body((Write(output="y", value=product.out, index=(Var("m"), Var("n"))),)), sources=(product,))
+    root = Fold.projection(body=Body((Write(output="y", value=product.out, index=(Var("m"), Var("n"))),)), operands=(product,))
     return root, product, stat
 
 
-def _flash_tree() -> tuple[Map, Fold, Fold, Fold]:
+def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
     """The flash shape, λ-spelled (step 7 — mirroring ``_flash._flash_op``): the stream fold
     reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
     ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
@@ -88,7 +88,7 @@ def _flash_tree() -> tuple[Map, Fold, Fold, Fold]:
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
     pv = next(s for s in stream.step_stmts()[1:] if isinstance(s, Contraction))  # the derived PV site
-    root = Map(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), sources=(stream,))
+    root = Fold.projection(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), operands=(stream,))
     return root, stream, qk, pv
 
 
@@ -107,21 +107,21 @@ def test_bare_is_canonical_on_a_single_fold_kernel() -> None:
 
 def test_projected_fold_keeps_bare_canonical() -> None:
     fold = _contraction_fold()
-    root = Map(body=Body((Write(output="y", value=fold.out, index=(Var("m"), Var("n"))),)), sources=(fold,))
+    root = Fold.projection(body=Body((Write(output="y", value=fold.out, index=(Var("m"), Var("n"))),)), operands=(fold,))
     assert spell(root, "REDUCE", fold) == "REDUCE"
     assert resolve(root, "REDUCE").node is fold
 
 
 def test_reduce_kernel_has_no_tile_site() -> None:
     stat = _planar_fold()
-    root = Map(body=Body((Write(output="y", value=stat.out, index=(Var("m"),)),)), sources=(stat,))
+    root = Fold.projection(body=Body((Write(output="y", value=stat.out, index=(Var("m"),)),)), operands=(stat,))
     assert resolve(root, "TILE") is None  # the family doesn't apply — decided-empty stamps stay bare
     assert canonical(root, "TILE") is None
     assert resolve(root, "REDUCE").node is stat
 
 
 def test_pointwise_root_map_is_the_tile_site() -> None:
-    root = Map(
+    root = Fold.projection(
         body=Body(
             (
                 Load(name="xc", input="x", index=(Var("m"),)),
@@ -129,7 +129,7 @@ def test_pointwise_root_map_is_the_tile_site() -> None:
                 Write(output="y", value="r", index=(Var("m"),)),
             )
         ),
-        sources=(),
+        operands=(),
     )
     site = resolve(root, "TILE")
     assert site is not None and site.node is root and site.axis is None
@@ -200,7 +200,7 @@ def test_broken_stored_key_fails_loudly() -> None:
 def test_true_same_path_collision_emits_ordinals() -> None:
     f1 = _planar_fold("k", acc="s0", val="v1", load="x")
     f2 = _planar_fold("k", acc="t0", val="w1", load="z")
-    root = Map(body=Body((Assign(name="o", op="add", args=(f1.out, f2.out)),)), sources=(f1, f2))
+    root = Fold.projection(body=Body((Assign(name="o", op="add", args=(f1.out, f2.out)),)), operands=(f1, f2))
     assert spell(root, "REDUCE", f1) == "REDUCE@map.fold.k1"
     assert spell(root, "REDUCE", f2) == "REDUCE@map.fold.k2"
     assert resolve(root, "REDUCE@map.fold.k1").node is f1

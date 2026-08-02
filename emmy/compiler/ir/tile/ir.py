@@ -8,7 +8,7 @@ It sits between Loop IR (pure iteration) and Kernel IR (threads / smem):
 
 The whole point of the layer is the article's thesis: **the schedule is
 separate from the combine.** A ``TileOp`` holds the structural-IR root ``op``
-(the *combine* — the :class:`Map` / :class:`Fold` / :class:`Contraction`
+(the *combine* — the :class:`Fold` / :class:`Fold` / :class:`Contraction`
 nodes defined **in this module**, alongside ``ir/stmt/algebra``) directly,
 plus a thin set of **root-global schedule fields** — the
 free-axis → grid :class:`~.schedule.Placement` (``place``), the ONE worker inventory (``work``)
@@ -16,7 +16,7 @@ and the warp-spec split (``workers``). The
 per-node schedule slices live in ``TileOp.schedule`` (1r): ``{codec key → resolved TilePlan /
 ReducePlan / Stage}``, keyed by the tree-path codec's canonical key and read through
 ``ops.Sched`` — the stored term is pure algebra, IMMUTABLE across the whole schedule search
-(flash is a ``Map(sources=(Fold(operands=(Contraction(QK), Load(V)), lift, combine),))``
+(flash is a ``Fold.projection(operands=(Fold(operands=(Contraction(QK), Load(V)), lift, combine),))``
 node tree whose hoisted score edge and DERIVED PV contraction are the ``TILE@dd`` / ``TILE@pj``
 sites). There is no per-kind kernel/schedule type: dispatch reads the role
 structurally off the node (``ops.axis_role`` — a contraction IS the
@@ -52,11 +52,11 @@ weight the merge stmts of that same loop step produce, so it cannot be hoisted
 ahead of them. Composition therefore rides the sequence, not a hoisted operand
 tuple, and uniform ``Stmt``-hood is what makes a node a legal member of a
 ``Body`` (generic walks reach its children through ``nested()`` like any block
-stmt's). ``Map.sources`` are the exception on purpose: they are node EDGES,
+stmt's). ``operands`` are the exception on purpose: they are node EDGES,
 reached by the node-aware walk (``path.sites`` — the ONE walk over the tree),
 like a contraction operand.
 
-The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
+The combine lives entirely in the ``op`` wrapper (the :class:`Fold` /
 :class:`Fold` / :class:`Contraction` nodes here + ``ir/stmt/algebra``). A
 fold's role is DERIVED (``Fold.role``), never stored; a contraction is the
 :class:`Contraction` node kind itself (1s). ``lower(op)`` flattens the
@@ -124,10 +124,10 @@ def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ..
 
 def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
     """Flatten any nested **structural node** — a :class:`Contraction`, :class:`Fold`, or
-    :class:`Map` — that sits as a stmt in ``body`` to its own lowered loop nest; plain stmts pass
+    :class:`Fold` — that sits as a stmt in ``body`` to its own lowered loop nest; plain stmts pass
     through. All three node kinds ARE ``Stmt``\\ s, which is what makes a composed step a legal member
     of a ``Body``: flash's ``Σ_dd Q·K`` score and its ``Σ_j P·V``, split-K's sliced contraction, and
-    the fused sibling group (a ``Map``) inside a split reduce's partial. This is the single
+    the fused sibling group (a zero-axis ``Fold``) inside a split reduce's partial. This is the single
     **node-walk** the ``.loop`` splice and the kernel materializer's recursion share, and it yields
     the same loop nest whether a node was pre-flattened or reached structurally.
 
@@ -138,7 +138,7 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
     out: list[Stmt] = []
     for s in body:
-        if isinstance(s, (Fold, Map, Contraction)):
+        if isinstance(s, Fold):
             out.extend(lower(s))
         else:
             out.append(s)
@@ -158,10 +158,10 @@ def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Contraction:
     rename is load-bearing too — ``p_name`` is a positional temp of the generated twist program,
     while ``{o}__p`` is derived from the accumulator name and is stable.
 
-    There is no wrapping ``Map(body=(), sources=(<this>,))`` cone shape around it: an empty cell
+    There is no wrapping ``Fold.projection(body=(), operands=(<this>,))`` cone shape around it: an empty cell
     carries no information (``cone_seam`` bridges no stats either way, both spellings lower to
     this one stmt, and the lowered CUDA is byte-identical), so the edge IS the one-stmt node."""
-    cone = Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
+    cone = Fold.projection(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
     k = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
     return Contraction(k_axis=k, a=cone, channels=(Channel(b=v_edge, acc=f"{o}__pv"),))
 
@@ -229,7 +229,7 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
         edge = by_param.get(term)
         if isinstance(edge, Load):
             merge = _split_expect(merge, nm, term, edge)
-    head = tuple(e for e in fold.operands if isinstance(e, (Fold, Map, Contraction)))
+    head = tuple(e for e in fold.operands if isinstance(e, Fold))
     return (*head, *lam.body, *merge)
 
 
@@ -306,7 +306,7 @@ def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, 
         # twisted spelling reconstructs from the body alone (the byte-compare is the validator).
         return _extract_twisted_self(loop)
     if any(not s.pure for s in prefix):
-        return None  # an effectful / raw-block step is not λ-representable (the flat-Map escape)
+        return None  # an effectful / raw-block step is not λ-representable (the flat zero-axis escape)
     names = tuple(a.name for a in accums)
     try:
         lift = Lambda(params=(loop.axis.name,), body=Body(tuple(prefix)), results=tuple(a.value for a in accums))
@@ -418,7 +418,7 @@ class Fold(Stmt):
 
     It holds **no projection**: a bare reduce (``sum`` / ``max``) is the kernel root (its grid ``Write``
     is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
-    :class:`Map` whose body IS that projection. Like every structural node it IS a ``Stmt`` — that is
+    :class:`Fold` whose body IS that projection. Like every structural node it IS a ``Stmt`` — that is
     what lets a composed step occupy a statement position in another node's body;
     :func:`ops.lower` flattens it to the synthesized loop (``[loop]``), so ``op_cache_key`` and the
     ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
@@ -430,8 +430,8 @@ class Fold(Stmt):
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
-    # The reduce axis — ``None`` is the ZERO-AXIS node (what ``Map`` was): no iteration, no monoid,
-    # its ``lift`` the per-cell projection. ``Map`` / ``Contraction`` are DERIVED READINGS of this
+    # The reduce axis — ``None`` is the ZERO-AXIS node (what zero-axis ``Fold`` was): no iteration, no monoid,
+    # its ``lift`` the per-cell projection. ``Contraction`` is a DERIVED READING of this
     # one stored kind (view classes below), never separate storage.
     axis: Axis | None = None
     unroll: bool = False
@@ -462,7 +462,7 @@ class Fold(Stmt):
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
-            # iteration var. (The projection ``Map`` was exactly this, with ``fn`` for ``lift``.)
+            # iteration var. (The projection (zero-axis) fold was exactly this, with ``fn`` for ``lift``.)
             assert self.combine is None and not self.init, "a zero-axis Fold carries no monoid"
             bound = tuple(n for e in self.operands for n in _operand_result_names(e))
             assert tuple(self.lift.params) == bound, f"lift params {self.lift.params} must bind the operands {bound} positionally"
@@ -509,7 +509,7 @@ class Fold(Stmt):
         ``(init, combine)`` pair threading the loop's real accumulator names — and the
         byte-identity gate settled at construction. A NON-canonical shape (an effectful /
         raw-block step, a non-reproducible derivation) returns ``None`` — the caller keeps the
-        raw-loop-IR ``Map`` escape."""
+        raw-loop-IR zero-axis ``Fold`` escape."""
         lifted = _extract_lift(loop, like)
         if lifted is None:
             return None
@@ -529,7 +529,7 @@ class Fold(Stmt):
         """The fold's :class:`AxisRole`, DERIVED from the stored params — never stored:
 
         - ``FREE`` iff there is no axis (the zero-axis node — a pure pointwise cell or the
-          projection over a source node; what ``Map`` was).
+          projection over a source node; what zero-axis ``Fold`` was).
         - ``TWISTED`` iff the stored combine's twist family is non-degenerate (``exp`` — online
           softmax / flash).
         - ``CONTRACTION`` iff the bilinear reading holds (:attr:`_contraction` — a ``⊗`` lift
@@ -595,17 +595,17 @@ class Fold(Stmt):
         inner = self.operands[0]
         return inner if isinstance(inner, Contraction) else None
 
-    # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
+    # ---- the DERIVED READINGS. zero-axis ``Fold`` and ``Contraction`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old
     # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #
     @property
     def fn(self) -> Lambda:
-        """The projection lambda — the zero-axis node's ``lift`` (what ``Map.fn`` was)."""
+        """The projection lambda — the zero-axis node's ``lift`` (what the zero-axis fold's ``lift`` was)."""
         return self.lift
 
     @property
     def sources(self) -> tuple:
-        """The projected-over nodes — this fold's operand edges (what ``Map.sources`` was). An
+        """The projected-over nodes — this fold's operand edges (what ``operands`` was). An
         edge is an edge; the zero-axis reading gives it the name its consumers already use."""
         return self.operands
 
@@ -695,6 +695,29 @@ class Fold(Stmt):
         demotion already call, so their spelling does not move with the collapse."""
         return self
 
+    @classmethod
+    def projection(cls, fn: Lambda | None = None, operands: tuple = (), *, body=None, results: tuple[str, ...] | None = None) -> Fold:
+        """A ZERO-AXIS fold — the pointwise / projection cell (what the retired zero-axis ``Fold`` kind was).
+        No axis and no monoid: ``fn`` becomes the ``lift``, and it IS the per-cell compute, so
+        softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over the
+        reducing fold rather than a wrapper kind around it.
+
+        ``operands`` bind POSITIONALLY, one lift param per RESULT COMPONENT — a product operand
+        binds every channel accumulator, so the geglu combine's second read is a bound param and
+        never a free name. The ``body=`` form synthesizes the binder (params from the operands'
+        components, ``results`` from the last def) and is the arm the raw-loop-IR kernels take,
+        where :func:`_loop_ir_fn` tolerates an impure body."""
+        operands = tuple(operands)
+        if fn is None:
+            b = Body.coerce(body) if body is not None else Body()
+            params = tuple(n for s in operands for n in _operand_result_names(s))
+            if results is None:
+                results = _map_results(b) or params[:1]
+            fn = _loop_ir_fn(params, b, results)
+        elif body is not None or results is not None:
+            raise TypeError("Fold.projection: pass fn= xor (body= / results=), not both")
+        return cls(axis=None, operands=operands, lift=fn)
+
     def with_axis(self, axis: Axis) -> Fold:
         """This fold over a different iteration ``axis`` — a pure ALGEBRA edit. The lift's
         leading param IS the iteration var (positional binding), so it renames in lockstep;
@@ -774,7 +797,7 @@ class Fold(Stmt):
         to the loop :meth:`from_loop` captured (the λ spelling's construction gate guarantees it;
         a retained ``step`` reproduces trivially). Any **nested structural node inside the
         step** — a :class:`Contraction` / :class:`Fold` /
-        :class:`Map` — is flattened to its own loop nest in place by the shared :func:`_flatten_nodes`
+        :class:`Fold` — is flattened to its own loop nest in place by the shared :func:`_flatten_nodes`
         node-walk (so flash's kv loop holds the head ``Σ Q·K`` score contraction loop and the embedded
         ``Σ_j P·V`` PV contraction loop, and split-K's kslice contraction its own nest — exactly the
         loop-in-body form the scalar tier expands): ONE structural rule for a reduce whose per-step
@@ -796,7 +819,7 @@ class Fold(Stmt):
     def out(self) -> str:
         """The bound output name — the carried state's primary component (the combine's first
         result; a bare reduce's grid ``Write`` is glue). At zero axes there is no carried state,
-        so it is the projection's primary result (what ``Map.out`` read)."""
+        so it is the projection's primary result (what the retired ``Map.out`` read)."""
         if self.axis is None:
             r = self.lift.results
             assert r and isinstance(r[0], str), f"zero-axis Fold has no named result: {r!r}"
@@ -891,7 +914,7 @@ def _operand_name(op) -> str:
 def _operand_result_names(op) -> tuple[str, ...]:
     """An operand edge's bound RESULT names — one per produced component. A single-valued edge
     (a gmem ``Load``) is the 1-tuple of :func:`_operand_name`; a product fold / multi-channel
-    node exposes EVERY component, so a wrapping ``Map``'s synthesized params bind one name per
+    node exposes EVERY component, so a wrapping zero-axis fold's synthesized params bind one name per
     component (the 1q params-flattening fix: the geglu combine reads BOTH ``acc_g`` and
     ``acc_u`` from one source — before the flattening the second component reached the lambda
     as a free name)."""
@@ -938,7 +961,7 @@ def _sweep_start(stmts, axis_name: str) -> int:
 def effect_tail(stmts, stores) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary ``stores`` — the ONE reconstitution rule the scheduler's tail gates, the
-    materializer's ``Map`` peel and ``030_split_reduce`` share, so the lowered kernels stay
+    materializer's zero-axis ``Fold`` peel and ``030_split_reduce`` share, so the lowered kernels stay
     byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; a
     ``sweep`` store wraps the trailing run of stmts reading its axis (:func:`_sweep_start`)
     into the per-cell output ``Loop``, the ``Write`` last."""
@@ -992,7 +1015,7 @@ class Channel:
     fused gate⊗up MLP edge is two channels over the node's single shared ``a`` (sharing is arity,
     not naming — the product-carrier contraction outputs a tuple)."""
 
-    b: Load | Map | Fold | Contraction  # the streamed operand edge — MATERIALIZED or COMPUTED
+    b: Load | Fold  # the streamed operand edge — MATERIALIZED or COMPUTED
     acc: str  # this channel's fold accumulator
 
 
@@ -1046,14 +1069,14 @@ class Contraction(metaclass=_ContractionMeta):
 
 
 def _loop_ir_fn(params, body, results) -> Lambda:
-    """The RAW-LOOP-IR formation arm — the ONE impure ``Map.fn`` builder left after 1q, for the
+    """The RAW-LOOP-IR formation arm — the ONE impure the zero-axis fold's ``lift`` builder left after 1q, for the
     kernels that are loop IR rather than recognized algebra: ``010_recognize``'s un-recognized
     flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (``Init``
     seeds + the un-annotated ``StateMerge`` merge ``Loop``), the prologue'd split partial, and
     the coop norm→linear/geglu sibling's composed contraction tail. A PURE body goes through
     strict :class:`Lambda` formation — every ROOT STORE left the term at 1q (``TileOp.stores``),
     so impurity here is only iteration/seed structure, never an effect on the output. Reached
-    exclusively through ``Map``'s legacy ``body=`` construction / ``with_body`` / the rewrite
+    exclusively through zero-axis ``Fold``'s legacy ``body=`` construction / ``with_body`` / the rewrite
     handler — never build one by hand; the escape spelling dies when recognition becomes total
     (the "ONE algorithmic algebra recognizer" direction)."""
     body = Body.coerce(body)
@@ -1067,7 +1090,7 @@ def _loop_ir_fn(params, body, results) -> Lambda:
 
 
 def _map_results(body: Body) -> tuple[str, ...]:
-    """The synthesized ``results`` of a legacy ``Map(body=…)`` construction — the last defining
+    """The synthesized ``results`` of a legacy ``Fold.projection(body=…)`` construction — the last defining
     stmt's name (the last-def convention, run ONCE at construction instead of on every read).
     Empty when nothing in the body defines a name (a store-only projection tail)."""
     for s in reversed(body):
@@ -1075,58 +1098,6 @@ def _map_results(body: Body) -> tuple[str, ...]:
         if d:
             return (d[-1],)
     return ()
-
-
-class _MapMeta(type):
-    """``isinstance(x, Map)`` is the ZERO-AXIS READING of a stored :class:`Fold` — the collapse
-    left one stored kind, so "is this a pointwise / projection cell?" is the question "does it
-    iterate?", asked in the spelling its call sites already use."""
-
-    def __instancecheck__(cls, obj) -> bool:
-        return isinstance(obj, Fold) and obj.axis is None
-
-
-class Map(metaclass=_MapMeta):
-    """A pointwise lift / projection wrapper — a DERIVED READING of :class:`Fold` at zero axes,
-    and a constructor that builds one. ``fn`` is the fold's ``lift`` and ``sources`` its
-    ``operands``, bound POSITIONALLY: ``sources[i]``'s result components produce the values
-    ``fn.params`` name (one param per component — a product source binds every channel
-    accumulator, so the geglu combine's second read is a bound param, never a free name).
-
-    ``fn.body`` is the per-cell pointwise / projection compute, and it is PURE for every
-    recognized term: the root output ``Write`` (and the rms/softmax output-sweep ``Loop`` around
-    it) rides ``TileOp.stores`` at the kernel boundary, reconstituted on demand
-    (:func:`effect_tail`). The raw-loop-IR kernels that are NOT recognized algebra — the
-    un-recognized flat escape cell, ``030_split_reduce``'s finalize, the coop fused-tail sibling —
-    still form an impure fn through the one :func:`_loop_ir_fn` arm.
-
-    SEVERAL sources is the **fused sibling group** — N contractions over one shared A, the gate⊗up
-    MLP edge; the group schedules and lowers as ONE unit. The legacy ``Map(body=…, sources=…)``
-    construction shape keeps working: the binder is synthesized (params = the sources' result
-    components; results = the last def, once, here)."""
-
-    def __new__(
-        cls,
-        fn: Lambda | None = None,
-        sources: tuple = (),
-        *,
-        body=None,
-        results: tuple[str, ...] | None = None,
-    ) -> Fold:
-        sources = tuple(sources)
-        if fn is None:
-            b = Body.coerce(body) if body is not None else Body()
-            # One param per source RESULT COMPONENT (1q params flattening): a product fold /
-            # multi-channel source produces N values and the projection may read all of them
-            # (the geglu combine reads ``acc_g`` AND ``acc_u`` from one source), so every
-            # component is a bound param — never a free name.
-            params = tuple(n for s in sources for n in _operand_result_names(s))
-            if results is None:
-                results = _map_results(b) or params[:1]
-            fn = _loop_ir_fn(params, b, results)
-        elif body is not None or results is not None:
-            raise TypeError("Map: pass fn= xor (body= / results=), not both")
-        return Fold(axis=None, operands=sources, lift=fn)
 
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -1159,7 +1130,7 @@ def _(s: Fold, rename, sigma, axis_fn):
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
 
-    Holds the structural-IR root ``op`` (a :class:`Map` /
+    Holds the structural-IR root ``op`` (a :class:`Fold` /
     :class:`Fold` / :class:`Contraction`, or ``None`` for a
     placeholder node) plus the schedule fields — not a pre-lowered body. The per-cell loop-IR
     body is generated at materialize time by ``lower(op)``, and a bare reduction / contraction's
@@ -1253,7 +1224,6 @@ class TileOp(Op):
 __all__ = [
     "Channel",
     "Contraction",
-    "Map",
     "Fold",
     "Store",
     "TileOp",

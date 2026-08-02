@@ -280,7 +280,7 @@ def _node_stage(tile_op):
     from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
 
     op = tile_op.op
-    node = op.sources[0] if getattr(op, "sources", ()) else op
+    node = op.operands[0] if getattr(op, "sources", ()) else op
     return sched_of(tile_op).stage_of(node)
 
 

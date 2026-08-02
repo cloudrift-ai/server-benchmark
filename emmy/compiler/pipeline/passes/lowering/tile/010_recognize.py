@@ -2,7 +2,7 @@
 STRUCTURAL half of the Loop-IR → Tile-IR boundary.
 
 After this rule nothing downstream traffics in ``LoopOp``. Recognition reads the algebra off the
-body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.tile.ir.Map` whose body is the
+body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.tile.ir.Fold` whose body is the
 **annotated loop nest** (the reduce ``Loop`` stamped with its
 :class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body),
 wrapped in a :class:`~emmy.compiler.ir.tile.ir.TileOp` whose ``place`` carries just the free axes.
@@ -31,18 +31,18 @@ step unconditional — no knobs):
    exp-family merge dissolved in the body. The ``_softmax`` helper
    (``_fuse``).
 3. **Lift** — peel the free (parallel) axes off the kernel and lift the per-cell compute into a
-   ``Map`` whose body holds the annotated reduce ``Loop`` + projection: a pure pointwise body is a
-   flat ``Map``; a single flat reduce is annotated in place — ``CONTRACTION`` (clean contraction)
+   zero-axis ``Fold`` whose body holds the annotated reduce ``Loop`` + projection: a pure pointwise body is a
+   flat zero-axis fold; a single flat reduce is annotated in place — ``CONTRACTION`` (clean contraction)
    / ``PLANAR`` (plain ``sum`` / ``max`` / ``mean``) / pre-annotated ``TWISTED`` (online softmax) —
    with the projection after it. The free axes ride on
    the ``TileOp``'s schedule (the root's concern); ``_schedule`` maps them onto the grid. A cell
    the lift can't cleanly factor (no reduce, several reduces, or a nested non-flash reduce) stays a
-   flat un-annotated ``Map`` (→ the scalar tier).
-4. **The MONOID-producer composition** — a lifted ``Map(source=Fold)`` whose body is the
+   flat un-annotated zero-axis ``Fold`` (→ the scalar tier).
+4. **The MONOID-producer composition** — a lifted ``Fold.projection(source=Fold)`` whose body is the
    statistic's scalar epilogue + a fresh free (column) ``Loop`` over one or more ⊗-folds of ONE
    shared A value reading the statistic (the fused norm→linear edge ``rmsnorm(x)·nw @ w``; its
    N-channel form the gate/up MLP edge ``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold) ALSO
-   nodifies to ``Map(body=projection, sources=(Contraction,))``: ONE computed-A product
+   nodifies to ``Fold.projection(body=projection, operands=(Contraction,))``: ONE computed-A product
    :class:`Contraction` with a :class:`Channel` per ⊗-fold, the A cone stored inline on its edge
    (a real node tree — the per-row statistic its ``Fold`` source)
    (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid.
@@ -71,7 +71,6 @@ from emmy.compiler.ir.tile import (
     Channel,
     Contraction,
     Fold,
-    Map,
     Placement,
     TileOp,
     split_effects,
@@ -89,7 +88,7 @@ PATTERN = [Pattern("root", LoopOp)]
 
 # --------------------------------------------------------------------------- #
 # Lift — peel the free (parallel) axes off and lift the per-cell compute into ONE
-# ``Map`` whose body holds the annotated reduce ``Loop`` + projection.
+# zero-axis ``Fold`` whose body holds the annotated reduce ``Loop`` + projection.
 # --------------------------------------------------------------------------- #
 
 
@@ -118,8 +117,8 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
         cur = list(rest[0].body)
 
 
-def _flat_cell(cell: list[Stmt]) -> tuple[Map, tuple]:
-    """A FLAT ``Map`` of the cell stmts — the pointwise / un-recognized spelling — with the
+def _flat_cell(cell: list[Stmt]) -> tuple[Fold, tuple]:
+    """A FLAT zero-axis ``Fold`` of the cell stmts — the pointwise / un-recognized spelling — with the
     trailing root ``Write``\\ s split to boundary :class:`Store`\\ s when the cell is otherwise
     pure (the pointwise / concat forms; 1q). A reduce-bearing or interleaved-effect cell keeps
     the raw-loop-IR spelling verbatim (the scalar-tier escape — split declines). Sweep stores are
@@ -128,8 +127,8 @@ def _flat_cell(cell: list[Stmt]) -> tuple[Map, tuple]:
     split = split_effects(tuple(cell))
     if split is not None and split[1] and all(st.sweep is None for st in split[1]):
         pure, stores = split
-        return Map(body=Body(pure)), stores
-    return Map(body=tuple(cell)), ()
+        return Fold.projection(body=Body(pure)), stores
+    return Fold.projection(body=tuple(cell)), ()
 
 
 def _reduce_in(stmts) -> bool:
@@ -194,7 +193,7 @@ def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
     algebra is the body itself (its dissolved fold ``Accum``\\ s / streaming merge, read back by
     ``Fold.from_loop``). An already-annotated loop (online-softmax from ``_fuse``) keeps its
     role; a clean contraction stamps ``CONTRACTION``; a single-``Accum`` reduce stamps
-    ``PLANAR``. Returns ``None`` (→ flat ``Map`` fallback) when the shape
+    ``PLANAR``. Returns ``None`` (→ flat zero-axis fold fallback) when the shape
     can't be read (several ``Accum``\\ s, no fold)."""
     body = (*pre_reduce, *rloop.body)
     if rloop.role is not AxisRole.FREE:
@@ -207,17 +206,17 @@ def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
     return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR)
 
 
-def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, tuple]:
-    """Lift the per-cell stmts into a ``Map`` whose body is the annotated loop nest, returning
+def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
+    """Lift the per-cell stmts into a zero-axis ``Fold`` whose body is the annotated loop nest, returning
     ``(node, stores)`` — the 1q boundary split: a projected reduce's root ``Write`` (and the
     rms/softmax output-sweep ``Loop`` around it) leaves the term for a :class:`Store` decoration
     when :func:`split_effects`' byte-identity gate accepts the shape; a declining projection (a
     contraction tail's composed loop) keeps the raw-loop-IR spelling with empty stores. A pure
-    pointwise cell (no reduce) is a flat ``Map`` of its stmts; a single flat reduce annotates that
+    pointwise cell (no reduce) is a flat zero-axis fold of its stmts; a single flat reduce annotates that
     reduce ``Loop`` in place (``CONTRACTION`` / ``PLANAR`` / pre-annotated ``TWISTED``), its body
     holding the reduce loop followed by the projection — stripped to just the loop when the only
     epilogue is the grid-cell ``Write`` (materialize stores ``out`` as glue). A cell with no, or
-    several, or a nested reduce stays a flat ``Map`` (un-annotated → the scalar tier)."""
+    several, or a nested reduce stays a flat zero-axis fold (un-annotated → the scalar tier)."""
     reduces = [i for i, s in enumerate(cell) if isinstance(s, Loop) and s.is_reduce]
     if len(reduces) != 1:
         return _flat_cell(cell)
@@ -231,7 +230,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
     # the whole preamble as one unit demoted contractions with both kinds of independent values —
     # e.g. DiT's GELU constants feed computed A while the linear bias feeds the epilogue. A single
     # stmt/cone feeding BOTH still can't be placed by reordering, so keep that cell as a flat
-    # ``Map`` (its loop-IR order is preserved verbatim).
+    # zero-axis ``Fold`` (its loop-IR order is preserved verbatim).
     before = [s for s in cell[:idx] if not isinstance(s, Init)]
     after = list(cell[idx + 1 :])
     reduce_need = _reads(list(rloop.body))
@@ -280,35 +279,35 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
     # ``lower`` flattens either back identically.
     if annotated.role in (AxisRole.PLANAR, AxisRole.TWISTED):
         reduction = Fold.from_loop(annotated)
-        if reduction is None:  # not λ-representable — the raw-loop-IR escape (the flat Map)
-            return Map(body=(annotated, *projection)), ()
+        if reduction is None:  # not λ-representable — the raw-loop-IR escape (the flat zero-axis fold)
+            return Fold.projection(body=(annotated, *projection)), ()
         if bare:
             return reduction, ()
-        # A projected reduce (softmax / RMSNorm) is the ``source`` of a ``Map`` whose body IS that
+        # A projected reduce (softmax / RMSNorm) is the ``source`` of a zero-axis ``Fold`` whose body IS that
         # projection — pure, its root store (and the output sweep around it) a boundary ``Store``
         # when the split gate accepts; the composed-tail shapes (norm→linear's column loop) decline
         # and keep the raw-loop-IR spelling for ``bind_prologue_contraction`` to parse.
         split = split_effects(projection)
         if split is not None:
             pure, stores = split
-            return Map(body=Body(pure), sources=(reduction,)), stores
-        return Map(body=Body(projection), sources=(reduction,)), ()
-    return Map(body=(annotated, *projection)), ()
+            return Fold.projection(body=Body(pure), operands=(reduction,)), stores
+        return Fold.projection(body=Body(projection), operands=(reduction,)), ()
+    return Fold.projection(body=(annotated, *projection)), ()
 
 
 def _nodify_contraction(node, free: tuple):
-    """Nodify a freshly-lifted flat ``CONTRACTION`` ``Map`` into the :class:`Contraction`
+    """Nodify a freshly-lifted flat ``CONTRACTION`` zero-axis ``Fold`` into the :class:`Contraction`
     structural node with a **deferred** per-cell ``TilePlan()`` (the schedule fork re-tiles it),
     resolving the operand→role binding ONCE, recognize-side (:func:`bind_contraction` over the
     ordered ``free`` axes' trailing ``(m, n)``). An unbindable contraction — a 1-D output (a
     matvec-shaped cell) or no (m, n)-bearing K-loads — keeps its loads INLINE in the fold's step
     (no operand hoist), so the fold **derives PLANAR** (``Fold.role``) and takes the reduce tiers
     at schedule dispatch, gaining the cooperative / ILP partitions a per-cell serial fold never
-    offered — the old recognition-time role rewrite is gone. After this step no flat ``Map``
+    offered — the old recognition-time role rewrite is gone. After this step no flat zero-axis fold
     carries an annotated ``CONTRACTION`` loop — the scheduler and materializer read contraction
     structure only off the node. A computed-A cone is stored INLINE on the ``a`` edge
     (:func:`make_cone`)."""
-    if not isinstance(node, Map) or node.sources or len(node.body) == 0:
+    if not (isinstance(node, Fold) and node.axis is None) or node.operands or len(node.body) == 0:
         return node, ()
     rloop = node.body[0]
     if not isinstance(rloop, Loop) or rloop.role is not AxisRole.CONTRACTION:
@@ -325,18 +324,18 @@ def _nodify_contraction(node, free: tuple):
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
                 channels=(Channel(b=b_load, acc=acc),),
             )
-            # ONE home for the projection: the wrapping ``Map``'s body, never a node field. The
+            # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
             # STORED form is the :class:`Contraction` node itself (1s) — pure algebra; the
             # output axes / tile / stage are caller facts, stamped at the point of use.
             return _project(con, epi)
     red = Fold.from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
-    if red is None:  # not λ-representable — the raw-loop-IR escape (the flat Map)
-        return Map(body=(rloop, *projection)), ()
+    if red is None:  # not λ-representable — the raw-loop-IR escape (the flat zero-axis fold)
+        return Fold.projection(body=(rloop, *projection)), ()
     return _project(red, projection)
 
 
-def _project(fold: Fold, projection: Body) -> tuple[Map | Fold, tuple]:
-    """Wrap ``fold`` in its projecting ``Map``, the root store split to the boundary (1q):
+def _project(fold: Fold, projection: Body) -> tuple[Fold, tuple]:
+    """Wrap ``fold`` in its projecting zero-axis ``Fold``, the root store split to the boundary (1q):
     ``split_effects``' byte-identity gate accepts the epilogue's trailing ``Write`` (and an
     output sweep) or the raw-loop-IR spelling stands. A bare fold passes through (its grid-cell
     store stays materialize glue)."""
@@ -345,11 +344,11 @@ def _project(fold: Fold, projection: Body) -> tuple[Map | Fold, tuple]:
     split = split_effects(tuple(projection))
     if split is not None:
         pure, stores = split
-        return Map(body=Body(pure), sources=(fold,)), stores
-    return Map(body=projection, sources=(fold,)), ()
+        return Fold.projection(body=Body(pure), operands=(fold,)), stores
+    return Fold.projection(body=projection, operands=(fold,)), ()
 
 
-def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Fold | Contraction, tuple, tuple]:
+def _lift(stmts: list[Stmt], output: str) -> tuple[Fold, tuple, tuple]:
     """Peel the free axes and lift the per-cell compute, returning ``(root node, free axes,
     boundary stores)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
     The schedule maps them onto the grid, and the ``stores`` ride
@@ -365,7 +364,7 @@ def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Fold | Contraction, tup
     return node, free, stores or con_stores
 
 
-def _order_free_by_output(node: Map | Fold, free: list, stores: tuple = ()) -> tuple:
+def _order_free_by_output(node: Fold, free: list, stores: tuple = ()) -> tuple:
     """Order the free (grid) axes to match the **output Write's index order**, so the innermost
     grid axis is the output's *contiguous* dim. The contraction tier needs ``n_axis == grid[-1] ==``
     the contiguous output axis — the mma fragment store coalesces a ``float2`` along it, and the

@@ -123,7 +123,7 @@ def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
 def _warp_epilogue(
     tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[tuple[str, str], ...] = ()
 ) -> RegEpilogue | None:
-    """Fold the projection ``Map`` into a :class:`RegEpilogue` for cell ``sigma``. ``None`` when
+    """Fold the projection (zero-axis) fold into a :class:`RegEpilogue` for cell ``sigma``. ``None`` when
     there is no projection (a bare ``Write`` of the accumulator). ``extra_accs`` binds a multi-fold
     node's additional ``(acc, C-fragment)`` pairs so the chain combines the channels per element.
 
@@ -748,9 +748,9 @@ class _AtomOps:
     # from the caller that owns the grid (``_factor._bind``), not off the ``tile`` slice: the slice
     # reads the tiled ``(m, n)`` cell, and what sits outside it is the grid's fact.
     lead: tuple = ()
-    # The projection this node's store folds in — the wrapping ``Map``'s body plus the grid-``Write``
+    # The projection this node's store folds in — the wrapping zero-axis fold's lift body plus the grid-``Write``
     # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
-    # the ``Map`` wrapper, and the store sink is where it lands.
+    # the zero-axis ``Fold`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
     # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY
     # (``ops.cone_seam``). ``None`` for a
@@ -1110,7 +1110,7 @@ def reduce_codegen(c: Contraction, tile: TilePlan, stage: Stage | None = None, i
 def store_sink(c: Contraction, tile: TilePlan, epilogue: Body | None = None, lead: tuple = ()):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
-    projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
+    projection off the node's zero-axis ``Fold`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
     sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
     shared ``reduce`` emission."""
     return _atom_ops(c, tile, epilogue=epilogue, lead=lead).store

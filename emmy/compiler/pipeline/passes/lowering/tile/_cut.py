@@ -11,7 +11,7 @@ hierarchy — a piece's entry may itself cut (the cone piece re-recognizes as th
 and its routing entry cuts the statistic out). NO routing entry = fuse = the recognized form —
 the deployment-safety default, spelled as absence.
 
-The realizer is seam-agnostic by design: the two seam shapes (a ``Map`` projection seam, a fold
+The realizer is seam-agnostic by design: the two seam shapes (a zero-axis ``Fold`` projection seam, a fold
 operand edge) fall out of the node kinds — the child's index space is DERIVED (the enclosing
 iteration axes its lowered body reads: parent free axes + ancestor fold axes), the workspace
 dtype from the seam kind (a fold child's carrier state is **f32**, mirroring the split-reduce
@@ -36,9 +36,7 @@ from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.ir import (
-    Contraction,
     Fold,
-    Map,
     _operand_name,
     _operand_result_names,
     deep_defines,
@@ -193,7 +191,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     - the child is CLOSED over values (:func:`_captured_values` — its demoted validation role: a
       state-capturing composition like flash's ``P`` sits in the step at its semantic position
       and is simply not cuttable);
-    - the seam is not the pure-copy degenerate: cutting a root ``Map``'s only source when the
+    - the seam is not the pure-copy degenerate: cutting a root zero-axis fold's only source when the
       projection body is empty and the store is a plain write leaves a parent that merely
       copies the workspace back out — the child IS the kernel, the tree does not shrink, and
       the recursion never terminates."""
@@ -202,8 +200,8 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
         return False
     if _captured_values(child, axis_names(root) | {a.name for a in free}):
         return False
-    trivial_body = isinstance(root, Map) and not len(root.body) and all(st.sweep is None for st in stores)
-    if trivial_body and any(s is child for s in root.sources):
+    trivial_body = (isinstance(root, Fold) and root.axis is None) and not len(root.body) and all(st.sweep is None for st in stores)
+    if trivial_body and any(s is child for s in root.operands):
         return False
     # The PARENT must be closed once the seam materializes: replace the child with its workspace
     # ``Load`` and require no residual free value reads. A seam whose subtree feeds the parent
@@ -339,9 +337,9 @@ def _nest(stmts: list[Stmt], axes: list[Axis]) -> list[Stmt]:
 def _ws_dtype(child, inputs: dict):
     """The seam workspace dtype: a fold child bridges raw carrier STATE — **f32**, the
     split-reduce workspace rule (a reduced statistic must not round-trip through the output
-    dtype) — while a value seam (a ``Map`` child — the cone's per-cell normalize) keeps its leaf
+    dtype) — while a value seam (a zero-axis ``Fold`` child — the cone's per-cell normalize) keeps its leaf
     operand's dtype: the same bytes the fused form's A slab stored, so numerics match."""
-    if isinstance(child, (Fold, Contraction)):
+    if isinstance(child, Fold):
         return F32
     for s in lower(child):
         for ld in Body(tuple([s])).loads:

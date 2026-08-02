@@ -2,8 +2,8 @@ r"""The geometry-free compute layer — node lowering and the structural reads.
 
 A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce), a
 :class:`~emmy.compiler.ir.tile.ir.Contraction` (a contraction cell — 1s), or a
-:class:`~emmy.compiler.ir.tile.ir.Map` (a pure pointwise cell, or the projection wrapper over its
-source node). :func:`head` is the ONE accessor reaching that node through the projection ``Map``,
+:class:`~emmy.compiler.ir.tile.ir.Fold` (a pure pointwise cell, or the projection wrapper over its
+source node). :func:`head` is the ONE accessor reaching that node through the projection (zero-axis) fold,
 and every structural fact a pass dispatches on — :func:`axis_role`, the reduce ``Axis``, the
 operand edges — is a STORED param on it (a fold's role is derived from those params, never
 stored). Reading a node fact off a SYNTHESIZED nest is the inversion this module exists to
@@ -22,13 +22,13 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Fold, Map, deep_defines, deep_reads, effect_tail
+from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
-    scanning stmts: the cone is ``Map(body=<the per-cell normalize>, sources=(<the row-invariant
-    prologue>,))``, and the prologue node IS the per-row statistic (its own ``Map`` over the stat
+    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
+    prologue>,))``, and the prologue node IS the per-row statistic (its own zero-axis ``Fold`` over the stat
     ``Fold``) plus any row-invariant cone prefix, placed there when the cone was built
     (``_atomize.make_cone`` splits at the K seam once, structurally).
 
@@ -149,7 +149,7 @@ def axis_names(root) -> set[str]:
 
 
 def projection_tail(tile) -> list[Stmt]:
-    """The kernel's EFFECTFUL projection stmt stream — the root ``Map``'s (pure) body with the
+    """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.stores`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.effect_tail`).
     The ONE read every scheduler gate that inspects "the tail" goes through (1q), so a converted
     kernel (stores at the boundary) and a raw-loop-IR one (effects still in-body, empty ``stores``)
@@ -192,11 +192,11 @@ def seal_workers(tile) -> None:
 
 def head(op):
     """The kernel's compute NODE — a :class:`~emmy.compiler.ir.tile.ir.Fold` /
-    :class:`~emmy.compiler.ir.tile.ir.Contraction`, bare or under its projection ``Map`` — or
-    ``None`` for a pure pointwise cell / the raw-loop-IR escape (a ``Map`` with no sources).
+    :class:`~emmy.compiler.ir.tile.ir.Contraction`, bare or under its projection (zero-axis) fold — or
+    ``None`` for a pure pointwise cell / the raw-loop-IR escape (a zero-axis fold with no operands).
 
     The ONE accessor for "which node is this kernel about", replacing the hand-spelled
-    ``op.sources[0] if isinstance(op, Map) and op.sources else op`` ternary at every reader. Every
+    ``op.operands[0] if op.axis is None and op.operands else op`` ternary at every reader. Every
     node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns, so a scheduling
     read never needs :func:`reduce_loop` (which synthesizes a whole nest) to reach it."""
@@ -206,10 +206,10 @@ def head(op):
 
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
-    or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
+    or ``None`` for a pure pointwise / flat-fallback zero-axis ``Fold`` (no annotated reduce). A
     :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`Contraction` synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
-    :attr:`Contraction.loop`); a ``Map``
+    :attr:`Contraction.loop`); a zero-axis ``Fold``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (``role=FREE`` — flat
     fallback) and is invisible here, so it materializes on the scalar tier.
@@ -230,8 +230,8 @@ def reduce_loop(op):
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read from
     ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.tile.ir.Fold` — when ``tile.op``
-    is a ``Fold`` (bare, or wrapped via ``Map.sources``), else ``None`` (a pure pointwise / scalar
-    per-cell ``Map`` has no partition). An unstamped fold reads the empty plan (the scalar serial
+    is a ``Fold`` (bare, or wrapped via ``operands``), else ``None`` (a pure pointwise / scalar
+    per-cell zero-axis ``Fold`` has no partition). An unstamped fold reads the empty plan (the scalar serial
     fold), matching the retired node field's default. The single accessor the materializer /
     ``030_split_reduce`` read."""
     node = head(tile.op)
@@ -246,19 +246,19 @@ def nodify_reduce(op, like=None):
     partition can key on (the plan itself lives in ``TileOp.schedule`` — the caller stores it
     against the returned fold). Returns ``(op2, fold)``. A stored contraction fold (the
     recognize-side per-cell contraction) is already the node — the coop / ILP K partition treats
-    it as the degenerate algebra of its additive fold, any projection riding the wrapping ``Map``.
-    A flat ``Map`` holding an annotated reduce ``Loop`` (a split partial) nodifies via
+    it as the degenerate algebra of its additive fold, any projection riding the wrapping zero-axis fold.
+    A flat zero-axis fold holding an annotated reduce ``Loop`` (a split partial) nodifies via
     :meth:`Fold.from_loop`, which reconstructs the identical annotated loop, so the lowering is
-    byte-identical; a projection tail (a fused epilogue) rides a wrapping ``Map`` over the node, a
+    byte-identical; a projection tail (a fused epilogue) rides a wrapping zero-axis fold over the node, a
     bare reduce becomes the root node. ``like`` is the fold whose algebra a TWISTED loop extracts
     against (:meth:`Fold.from_loop`) — defaulted from ``op``'s own head when it is node-form
     (030 passes the pre-slice fold for its flat split partial).
 
     Used by the scheduler (the coop / ILP-K contraction) and ``030_split_reduce`` (the split partial) so
-    EVERY partitioned reduce keys its plan off a node uniformly. For the ``Map`` form the reduce ``Loop``
+    EVERY partitioned reduce keys its plan off a node uniformly. For the zero-axis ``Fold`` form the reduce ``Loop``
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
-    ``Map`` body."""
+    zero-axis ``Fold`` body."""
     node = head(op)
     if node is not None and node.role is AxisRole.CONTRACTION:
         return op, node  # a bare node IS its own head — the contraction keys its own plan
@@ -272,14 +272,14 @@ def nodify_reduce(op, like=None):
     idx = body.index(rloop)
     pre, tail = body[:idx], body[idx + 1 :]
     assert not pre, f"nodify_reduce: unexpected prologue ahead of the reduce loop: {pre}"
-    return (Map(body=Body(tuple(tail)), sources=(red,)) if tail else red), red
+    return (Fold.projection(body=Body(tuple(tail)), operands=(red,)) if tail else red), red
 
 
 def axis_role(op) -> AxisRole:
     """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction: a
     ``CONTRACTION`` contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain
     ``sum`` / ``max`` / ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback
-    ``Map``. This is what the schedule / materialize passes dispatch on.
+    zero-axis ``Fold``. This is what the schedule / materialize passes dispatch on.
 
     Read off the NODE (:func:`head`) — the role is that node's own derived property
     (``Fold.role`` / the ``Contraction`` kind), so the dispatch costs a field access. The
@@ -290,14 +290,14 @@ def axis_role(op) -> AxisRole:
     node = head(op)
     if node is not None:
         return node.role
-    for s in op.body:  # the escape: a flat Map whose recognition-stamped reduce Loop is a top-level stmt
+    for s in op.body:  # the escape: a flat zero-axis fold whose recognition-stamped reduce Loop is a top-level stmt
         if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
             return s.role
     return AxisRole.FREE
 
 
 def lower(op) -> list[Stmt]:
-    """Lower the lift wrapper to loop-IR stmts — the ``Map``'s body verbatim. The carriers are
+    """Lower the lift wrapper to loop-IR stmts — the zero-axis ``Fold``'s body verbatim. The carriers are
     already dissolved into loose fold ``Accum``\\ s (and the streaming ``merge`` for a twisted
     carrier) at recognition, and the reduce ``Loop``\\ s carry their role/carrier annotations, so
     one ``lower`` call emits the kernel's per-cell body with nothing left to expand. Stored trees
@@ -332,7 +332,7 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
 def _term_names(root) -> tuple[list[str], list[str]]:
     """Every SSA name and buffer name in ``root``'s term, in DETERMINISTIC first-appearance
     order over the canonical walk (operand edges in tuple order, then lift params / body defs /
-    results, then the combine results; a ``Map``'s fn params / body / results, then sources).
+    results, then the combine results; a zero-axis ``Fold``'s fn params / body / results, then sources).
     The order is a function of the stored params only, so the renumber map — and with it
     :func:`term_key` — is α-invariant."""
     from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
@@ -466,7 +466,7 @@ def term_key(root) -> str:
     canonically renumbered TERM, no longer the lowered loop nest): every SSA name maps to
     ``s<i>`` and every buffer to ``b<i>`` in the deterministic first-appearance order of
     :func:`_term_names`, the rename applied through the ONE ``_rewrite`` registry (the Fold /
-    Map handlers rename lift / combine in lockstep, regenerating the
+    the Fold handler renames lift / combine in lockstep, regenerating the
     exp-family programs over the renamed state), and the renumbered term's ``repr`` is the key
     text. Two terms differing only in SSA / buffer spelling — trace naming, fusion suffixes —
     key identically; any structural difference (an op, an axis, an operand shape) keys apart."""
@@ -592,7 +592,7 @@ def _head(node, ctx: _Ctx) -> str:
 
 
 def _stmts(stmts, ctx: _Ctx):
-    """Render a λ body (a ``lift`` / ``combine`` / ``Map.fn``) — indented two under the signature
+    """Render a λ body (a ``lift`` / ``combine`` / the zero-axis fold's ``lift``) — indented two under the signature
     line that binds it, so the program reads as the binder's body rather than as a sibling of the
     branch labels. A structural NODE may occupy a statement position here (a demoted cone's inline
     node); it expands in place, since a lift body is storage like any other."""
@@ -674,7 +674,6 @@ def pretty(op, indent: str = "", *, tile=None) -> list[str]:
 
 
 __all__ = [
-    "Map",
     "axis_role",
     "Sched",
     "cone_seam",

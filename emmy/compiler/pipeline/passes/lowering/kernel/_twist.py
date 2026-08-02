@@ -70,7 +70,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
+from emmy.compiler.ir.tile.ir import Contraction, Fold
 from emmy.compiler.ir.tile.ops import head
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
@@ -115,12 +115,12 @@ _NEGATE = {"<=": ">", "<": ">=", ">=": "<", ">": "<=", "==": "!="}
 
 def warp_source(op, sched):
     """The warp-tiled stream-head fold of a ``TWISTED`` :class:`Fold` tree
-    (``op`` bare or under a projecting :class:`Map`), or ``None`` — the structural schedule read
+    (``op`` bare or under a projecting :class:`Fold`), or ``None`` — the structural schedule read
     the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling).
     Returns the STORED ``role=CONTRACTION`` fold — its warp tile is a schedule slice
     (``sched`` — the ``TileOp.schedule`` view, 1r), never a node field;
     :func:`realize_warp_twist` derives the full views itself."""
-    red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
+    red = (op.operands[0] if op.operands else None) if (isinstance(op, Fold) and op.axis is None) else op
     if not isinstance(red, Fold):
         return None
     stmts = red.step_stmts()

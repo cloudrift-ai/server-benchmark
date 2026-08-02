@@ -18,7 +18,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, ReducePlan, TileOp
+from emmy.compiler.ir.tile import Channel, Contraction, Fold, ReducePlan, TileOp
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, lower, reduce_loop, reduce_plan
 
 
@@ -54,7 +54,7 @@ def test_bare_reduction_lowers_to_just_the_loop() -> None:
 def test_projected_reduce_is_a_map_over_the_reduction() -> None:
     loop = _sum_loop()
     proj = (Assign(name="rms", op="sqrt", args=("acc",)),)
-    node = Map(body=Body(proj), sources=(Fold.from_loop(loop),))
+    node = Fold.projection(body=Body(proj), operands=(Fold.from_loop(loop),))
     # lower flattens the source's loop then the projection body — the bare-loop ``Map`` body.
     assert lower(node) == [loop, *proj]
     assert node.out == "rms"  # the projection's last def
@@ -64,20 +64,20 @@ def test_projected_reduce_is_a_map_over_the_reduction() -> None:
 
 
 def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
-    """``lower(Map(source=Fold))`` equals the bare-loop ``Map(body=(loop, *proj))`` — the parity
+    """``lower(Fold.projection(source=Fold))`` equals the bare-loop ``Fold.projection(body=(loop, *proj))`` — the parity
     guarantee that keeps ``op_cache_key`` stable across the lift."""
     loop = _sum_loop()
     proj = (Write(output="out", index=(Var("m"),), value="acc"),)
-    node = Map(body=Body(proj), sources=(Fold.from_loop(loop),))
-    legacy = Map(body=(loop, *proj))
+    node = Fold.projection(body=Body(proj), operands=(Fold.from_loop(loop),))
+    legacy = Fold.projection(body=(loop, *proj))
     assert lower(node) == lower(legacy)
     assert reduce_loop(node) == reduce_loop(legacy)
     assert axis_role(node) == axis_role(legacy)
 
 
 def test_pure_pointwise_map_has_no_reduce() -> None:
-    node = Map(body=(Load(name="x_e", input="x", index=(Var("m"),)), Assign(name="y", op="relu", args=("x_e",))))
-    assert node.sources == ()
+    node = Fold.projection(body=(Load(name="x_e", input="x", index=(Var("m"),)), Assign(name="y", op="relu", args=("x_e",))))
+    assert node.operands == ()
     assert reduce_loop(node) is None
     assert axis_role(node) is AxisRole.FREE
     assert node.out == "y"
@@ -99,7 +99,7 @@ def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
     bare = _tile(red)
     sched_of(bare).put("REDUCE", red, plan)
     assert reduce_plan(bare) is plan
-    wrapped = _tile(Map(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), sources=(red,)))
+    wrapped = _tile(Fold.projection(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), operands=(red,)))
     sched_of(wrapped).put("REDUCE", red, plan)
     assert reduce_plan(wrapped) is plan
 
@@ -108,9 +108,9 @@ def test_reduce_plan_is_none_for_a_flat_map_without_a_reduction_node() -> None:
     """A flat ``Map`` (pointwise, or a scalar per-cell contraction holding a loop-in-body with no
     ``Fold`` source) has NO partition — ``reduce_plan`` reads ``None``, not a residual field.
     Every partitioned reduce is nodified (``nodify_reduce``), so the fallback is gone."""
-    legacy = Map(body=(_sum_loop(),))  # loop in the body, no Fold source
+    legacy = Fold.projection(body=(_sum_loop(),))  # loop in the body, no Fold source
     assert reduce_plan(_tile(legacy)) is None
-    pointwise = Map(body=(Load(name="x_e", input="x", index=(Var("m"),)),))
+    pointwise = Fold.projection(body=(Load(name="x_e", input="x", index=(Var("m"),)),))
     assert reduce_plan(_tile(pointwise)) is None
 
 
@@ -129,7 +129,7 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
     assert red.role is AxisRole.TWISTED
     assert red.loop == loop  # the derivation reproduces the recognizer's annotation exactly
     assert axis_role(red) is AxisRole.TWISTED
-    assert axis_role(Map(body=Body(()), sources=(red,))) is AxisRole.TWISTED
+    assert axis_role(Fold.projection(body=Body(()), operands=(red,))) is AxisRole.TWISTED
 
 
 def _contraction() -> Contraction:
@@ -167,7 +167,7 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
     ``Fold`` tiers use — so the future cut realizer sees a single seam shape."""
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
     c = _contraction()
-    node = Map(body=Body(proj), sources=(c,))  # the STORED form under the wrapper
+    node = Fold.projection(body=Body(proj), operands=(c,))  # the STORED form under the wrapper
     assert lower(c) == [c.loop]
     assert lower(node) == [c.loop, *proj]
     assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
@@ -182,7 +182,7 @@ def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
     from emmy.compiler.ir.tile.ops import nodify_reduce, sched_of
 
     loop = _sum_loop()
-    flat = Map(body=(loop,))
+    flat = Fold.projection(body=(loop,))
     plan = ReducePlan.of(coop=4)
     node, fold = nodify_reduce(flat)
     assert isinstance(node, Fold) and fold is node
@@ -193,15 +193,15 @@ def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
 
 
 def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
-    """A fused-epilogue reduce (loop then projection) nodifies to ``Map(body=proj,
+    """A fused-epilogue reduce (loop then projection) nodifies to ``Fold.projection(body=proj,
     source=Fold)`` — the tail rides the wrapping ``Map``, the partition the ``Fold``."""
     from emmy.compiler.ir.tile.ops import nodify_reduce
 
     loop = _sum_loop()
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"),), value="y"))
-    flat = Map(body=(loop, *proj))
+    flat = Fold.projection(body=(loop, *proj))
     node, fold = nodify_reduce(flat)
-    assert isinstance(node, Map) and node.sources[0] is fold and isinstance(fold, Fold)
+    assert (isinstance(node, Fold) and node.axis is None) and node.operands[0] is fold and isinstance(fold, Fold)
     assert tuple(node.body) == proj
     assert lower(node) == lower(flat)  # bit-identical
     assert axis_role(node) is AxisRole.PLANAR
@@ -286,7 +286,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     (kv_loop,) = lower(red)
     assert kv_loop.axis.name == "kv"
     body = list(kv_loop.body)
-    assert not any(isinstance(s, (Contraction, Fold, Map)) for s in body), "the nested PV fold must be flattened, not left raw"
+    assert not any(isinstance(s, Fold) for s in body), "the nested PV fold must be flattened, not left raw"
     (qk_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "k"]
     (pv_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "pj"]
     o_fold = next(s for s in body if isinstance(s, Accum) and s.name == "O_i")
@@ -307,7 +307,7 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
     op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
-    (red,) = op.sources  # the streaming Fold under the O/l projection Map
+    (red,) = op.operands  # the streaming Fold under the O/l projection Map
     assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
     folds = [s for s in red.step_stmts() if isinstance(s, Contraction)]
     assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the derived evaluation's head node"
@@ -320,7 +320,7 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     # A is the ONE-STMT node itself, not an identity ``Map`` wrapping a prologue in the cone shape:
     # the copy is the reference (an edge is a Load or an inline node — no name-reference arm), and
     # with an empty cell the wrapper carried nothing (``cone_seam`` bridges no stats either way).
-    assert not pv.a.sources, "PV's A is the one-stmt cone itself — no empty-cell cone wrapper"
+    assert not pv.a.operands, "PV's A is the one-stmt cone itself — no empty-cell cone wrapper"
     assert [s.pretty()[0].strip() for s in pv.a_body] == ["O_i__p = copy(m_i__t5)"]
     assert cone_seam(pv.a) == ((), tuple(pv.a.body), ()), "an empty-cell wrapper bridged no stats — the seam is the node"
     # The reduce loop flattens BOTH folds; the O-fold reads the PV output (no inline v·P).
@@ -361,7 +361,7 @@ def _pv_contraction() -> Contraction:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
     (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE
     inline)."""
-    cone = Map(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
+    cone = Fold.projection(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
     return Contraction(
         k_axis=Axis("j", 8),
         a=cone,
@@ -416,8 +416,7 @@ def test_there_is_exactly_one_stored_node_kind_and_it_is_a_stmt() -> None:
     from emmy.compiler.ir.stmt.base import Stmt
 
     assert issubclass(Fold, Stmt)
-    assert not isinstance(Map, type) or not issubclass(Map, Stmt)  # a view, not a stored kind
-    for built in (_contraction(), Map(body=Body(()), sources=()), Fold.from_loop(_sum_loop())):
+    for built in (_contraction(), Fold.projection(body=Body(()), operands=()), Fold.from_loop(_sum_loop())):
         assert type(built) is Fold
 
 
@@ -428,7 +427,7 @@ def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
     from emmy.compiler.ir.tile.ir import deep_defines
 
     inner = Assign(name="g", op="copy", args=("x",))
-    group = Map(body=Body((inner,)))
+    group = Fold.projection(body=Body((inner,)))
     assert group.nested() == (Body((inner,)),)
     assert "g" in deep_defines(Loop(axis=Axis("k", 8), body=Body((group,))))
 
@@ -452,7 +451,7 @@ def _computed_b_contraction(a_load: bool = True) -> Contraction:
     """``O[m, n] = Σ_k A[m, k]·B'[k, n]`` where **B is computed**, not a gmem ``Load``:
     ``B' = exp(W[k, n])`` — the shape a fused per-column prologue takes (qk-norm / RoPE folded into a
     score, an on-the-fly dequant). The mirror of ``_pv_contraction``'s computed A."""
-    cone = Map(body=Body((Load(name="w_e", input="W", index=(Var("k"), Var("n"))), Assign(name="wn", op="exp", args=("w_e",)))))
+    cone = Fold.projection(body=Body((Load(name="w_e", input="W", index=(Var("k"), Var("n"))), Assign(name="wn", op="exp", args=("w_e",)))))
     return Contraction(
         k_axis=Axis("k", 8),
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))) if a_load else cone,

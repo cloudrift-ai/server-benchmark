@@ -4678,25 +4678,79 @@ configs:
     emmy_us: 169.2
     cublas_us: 170.0
 
+  # ---- mlp_down_fused, remaining serving widths (2026-08-02, vast.ai 5090 seeding) ----------------
+  # The last four #446-reopened down keys (m8/m64/m2048/m4096) — un-closable by cut rows (the down
+  # cone is geglu->down in-model, no legal seam) and un-benchable until the route_cut fix made
+  # schedule-family pins authoritative over recorded routing entries (the same-shape .cut rows were
+  # firing inside pinned replay compiles). Tuned + benched via the isolated .lin snippet (one shared
+  # cold DB/prior, small->large); emmy_us is the -O3 greedy A/B, cublas_us the same run's eager
+  # (torch's unfused rms_norm + linear decomposition). The wide widths trail eager (0.58-0.70x) on
+  # the std-lane FP32-accumulate wall — honest pins, not wins; the golden's job here is deploy
+  # pinning (the unseeded fork cold-resolved ~100x off in serving, TPOT ~2760 ms at p2048/c8).
+  # m8/m64 record the m32/m256 rows' spelling (w1x8 f2x2/k4 g4k — the workspace reduce split),
+  # not the snippet greedy's w1x16/g*a winners: those audited DRIFT in-model (the w1x16 + atomic
+  # split rows are not offered on the geglu->down cone), while the g4k twin benches close (m8
+  # 105.4 vs the 84.1 unrealizable winner, m64 133.5 vs 123.6 — partial + finalize summed).
+  # All four dicts DROP the snippet record_knobs' REDUCE@a1='' stamp: the snippet nest spells a
+  # second reduce axis that neither the in-model rows nor the kind's canonical reference tree
+  # carry (the spelling gate rejects the key), and the axis-keyed pin is all-or-nothing, so
+  # keeping it makes the split rows unmatchable in-model (probed: with it 0 rows match).
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m8.lin
+    M: 8
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 105.4
+    cublas_us: 100.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m64.lin
+    M: 64
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 133.5
+    cublas_us: 99.4
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m2048.lin
+    M: 2048
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f1x4/k4', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 2066.0
+    cublas_us: 1190.2
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m4096.lin
+    M: 4096
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', STAGE: 'd2/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 3238.6
+    cublas_us: 2259.1
+
   # ---- Fused-fork cut routings, remaining serving widths (2026-07-31) -----------------------------
   # The #446 PLACE-knob retirement commented out every fused computed-A golden that spelled a PLACE@
   # placement, reopening the fused norm->linear / down forks at m1/m8/m64/m2048/m4096 (the drift-gate
-  # ratchet's 2026-07-30 block). The prescribed d*/sync fused anchor CANNOT currently be recorded:
-  # since the tile-IR 1s commits (post-0ffea99d) the staged computed-A form no longer realizes in the
-  # ISOLATED GOLDEN SNIPPET — a `STAGE=d1/sync` (or d2/sync) pin reports `realized (off)` on every
-  # width, including a replay of the 2026-07-30 m192/m256/m32 fused rows that snippet-benched it the
-  # day before. The IN-MODEL twins still realize it (the m32/m192 fused rows MATCH in `eval golden
-  # --in-model`), so serving deploys are unaffected; what is broken is the fused rows' isolated
-  # reproduction / re-record path, and the only snippet-realizable fused schedule is the unstaged
-  # gmem-direct one (~13x off eager at m192). So what is recorded here is the PLACE=cut routing
-  # alone: pieces resolve the width's seeded stat/scale/matmul tiers deterministically, the cut fires
+  # ratchet's 2026-07-30 block). What is recorded here is the PLACE=cut routing:
+  # pieces resolve the width's seeded stat/scale/matmul tiers deterministically, the cut fires
   # in-model for the norm->linear cones, and it IS the measured winner at every width where both
-  # forms last benched (m192/m32: fused d1/sync loses 1.6-1.9x to the cut). NO down-cone rows are
-  # added at m8/m64/m2048/m4096: the down cut is in-model-inert (multichannel/geglu residual, the
-  # #389 class — the pre-existing m32/m192/m256 down .cut rows are equally snippet-only, their keys
-  # covered in-model by their realizable fused siblings), and a down fused row cannot be benched
-  # until the snippet-side realization returns — those four keys stay in the drift-gate ratchet.
-  # When the snippet realization is fixed, re-anchor fused rows beside these and re-check the picks.
+  # forms last benched (m192/m32: fused d1/sync loses 1.6-1.9x to the cut).
+  # CORRECTION (2026-08-02): the 2026-07-31 note here blamed the tile-IR 1s commits for the fused
+  # d*/sync anchor's `realized (off)` in the isolated snippet. Bisect exonerated them — the recorded
+  # same-shape .cut ROUTING rows themselves (landed 0ffea99d) were firing inside PINNED replay
+  # compiles (only PLACE pins were authoritative over routing), rerouting the pinned fused row onto
+  # the cut's pieces. route_cut now keeps schedule-family pins authoritative, fused rows bench
+  # honestly again, and the four down keys are seeded above (2026-08-02 block). The down cut stays
+  # in-model-inert (multichannel/geglu residual, the #389 class — the pre-existing m32/m192/m256
+  # down .cut rows are snippet-only, their keys covered in-model by their realizable fused siblings).
   # The m2048/m4096 gate_up cut totals trail eager in the STD lane (the FP32-accumulate half-rate
   # wall on the wide matmul piece); the fm lane's piece tier covers those widths at >=1.0x.
   - kernel: norm_linear

@@ -183,21 +183,12 @@ EXPECTED_GAPS = {
 # fused serving fork and the gate stayed green precisely because those keys blended into a
 # routine baseline edit (``test_no_major_key_hides_in_the_generic_baseline``).
 EXPECTED_MAJOR_GAPS = {
-    "NVIDIA GeForce RTX 5090": {
-        # 2026-07-31 (#449): the four mlp_down_fused keys (m8/m64/m2048/m4096) are the #446
-        # remainder — the down cone's PLACE=cut routing is in-model-inert (the cone is
-        # geglu→down, the multichannel/#389 residual, so the cut never fires in-model), and the
-        # fused-row re-record was dead: a same-shape recorded ``.cut`` routing row fired inside
-        # the PINNED replay compile too, so the pinned d*/sync row compiled the cut's pieces and
-        # gated ``realized (off)`` (this was misread as a tile-IR 1s recognition loss; the 1s
-        # commits are exonerated). 2026-08-02: route_cut now keeps schedule-family pins
-        # authoritative over routing entries, so fused rows bench honestly again — burn these
-        # four down by seeding mlp_down_fused rows at the open widths on a 5090.
-        ShapeKey(free_prod=30720, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=245760, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=7864320, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=15728640, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=4096),
-    },
+    # 2026-08-02: the 5090 major baseline is EMPTY — the last four #446-reopened keys (the
+    # mlp_down_fused widths, un-closable by cut rows and un-benchable while recorded ``.cut``
+    # routing rows fired inside pinned replay compiles) burned down once route_cut made
+    # schedule-family pins authoritative: fused d*/sync rows benched honestly again and the
+    # four widths were seeded on a vast.ai 5090 (the 2026-08-02 block in the gemma4 YAML).
+    "NVIDIA GeForce RTX 5090": set(),
     "NVIDIA GeForce RTX 4090": {
         # The 4090 majors are all one deferral: the card's mirror re-tune (box lost its GPU at
         # the PCI level; several widths have no 24 GB serving at all — m1, m192 — and the

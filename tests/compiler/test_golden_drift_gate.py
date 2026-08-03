@@ -20,7 +20,15 @@ only kernels outside the gate are fork-free deterministic lowerings — rope/emb
 which never consult the golden tier). The per-card baseline must match exactly: a NEW gap
 fails (an uncovered kernel appeared — record a golden or deliberately extend the baseline in
 review); a CLOSED one also fails, asking for its line to be deleted so the ratchet only
-tightens. Warp-contraction gaps (the misdeploy/hang hazard class) are the ones to close first.
+tightens.
+
+Warp-contraction gaps (``major_gap_keys`` — the misdeploy/hang hazard class) are ratcheted
+SEPARATELY through ``EXPECTED_MAJOR_GAPS``, never through the generic baseline: the #446
+PLACE-knob retirement uncovered every fused serving fork on the 5090 and this gate stayed
+green because the 18 keys rode a routine ``EXPECTED_GAPS`` extension. A major-class
+regression must now edit the hazard-labeled list, whose entries each need a dated reason and
+a burn-down condition (``test_no_major_key_hides_in_the_generic_baseline`` keeps the two sets
+disjoint).
 
 Interactive twin: ``emmy eval golden --in-model``.
 """
@@ -34,7 +42,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
-from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_keys, summarize
+from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_keys, major_gap_keys, summarize
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
@@ -85,14 +93,17 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=17825792, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         # 2026-07-30: the PLACE-knob retirement (#446) commented out the fused computed-A
         # goldens that recorded a PLACE@ placement, so every fused norm→linear / geglu fork
-        # (kind="fused", across the m1/m8/m32/m2048/m4096 audit widths) is uncovered again.
-        # 2026-07-31: closed — every reopened fused fork carries a PLACE=cut routing row whose
-        # pieces resolve each width's seeded stat/scale/matmul/pw tiers. The down (geglu-cone)
-        # forks needed the _cut.py routing-key fix first: the pre-fork consult keyed a stat-free
-        # computed-A cone kind='' and never joined its fused-keyed .cut entries, deploying the
-        # fused computed-A down everywhere — the 2026-07-31 serving TTFT/TPOT regression. With
-        # the key rebuilt off the tree's computed-A edge the down cuts route, their matmul pieces
-        # MATCH the mX tiers, and the geglu-materialize pieces MATCH the pw.n15360.mX rows.
+        # (kind="fused", across the m1/m8/m32/m2048/m4096 audit widths) was uncovered.
+        # 2026-07-31: closed for the norm→linear cones — they carry PLACE=cut routing rows
+        # whose pieces resolve each width's seeded stat/scale/matmul tiers (the cut fires
+        # in-model for those cones).
+        # The mlp_down (geglu-cone) forks closed too, by two independent routes that landed on
+        # separate branches and are both merged here: the _cut.py routing-key fix (the pre-fork
+        # consult keyed a stat-free computed-A cone kind='' and so never joined its fused-keyed
+        # .cut entries, which deployed the slow fused down everywhere — the 2026-07-31 serving
+        # TTFT/TPOT regression), and the directly-seeded mlp_down_fused widths. Either one covers
+        # the key; together they leave the 5090 hazard-class baseline (EXPECTED_MAJOR_GAPS)
+        # empty, which is the state that matters.
         # 2026-07-31: the m192 width (the MTP c=64 verify bucket, serving_mtp_rtx5090) joined
         # the audit — its aux keys below are the same greedy-near-optimal classes as the other
         # widths' (per-head qk-norm rms sweeps, the post-attn/cut-stat rms key, the merged-cat
@@ -108,55 +119,41 @@ EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 4090": {
         # 2026-07-31: the m192 width (the MTP c=64 verify bucket) joined the audit. There is no
         # m192 serving on 24 GB (the 12B does not fit), so the whole m192 fork set is uncovered
-        # here — the merged-cat matmuls/glue, o_proj (reduce 4096/8192), the fused cones, and
-        # the rms/qknorm sweeps. Mirror the 5090's m192 + o_proj + fused-cut seeding if a 4090
-        # m192 tier is ever wanted.
+        # here — the merged-cat glue and rms/qknorm sweeps below; the m192 warp-contraction
+        # forks (o_proj, the fused cones) live in EXPECTED_MAJOR_GAPS. Mirror the 5090's m192 +
+        # o_proj + fused-cut seeding if a 4090 m192 tier is ever wanted.
         ShapeKey(free_prod=1572864, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=1572864, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
         ShapeKey(free_prod=1572864, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=1671168, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=1671168, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
         ShapeKey(free_prod=393216, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=5898240, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=737280, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
         ShapeKey(free_prod=737280, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=737280, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=737280, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
         ShapeKey(free_prod=786432, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=98304, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-26: the m2048 (chunk-quantum) width joined the audit (parity campaign round
         # 3). The 5090 seeded its m2048 golden set the same day (_tune/m2048/ sweeps); the
         # 4090's rides the same deferred mirror re-tune, so every m2048 fork is uncovered
-        # there — merged/canonical matmuls, fused norm->merged forms, and the rms/qknorm
-        # sweeps below. Burn down with the m8 mirror once a 4090 is back.
+        # there — the glue and rms/qknorm sweeps below; the m2048 warp-contraction forks
+        # (merged/canonical matmuls, fused norm→merged forms) live in EXPECTED_MAJOR_GAPS.
+        # Burn down with the m8 mirror once a 4090 is back.
         ShapeKey(free_prod=1048576, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=16777216, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
         ShapeKey(free_prod=16777216, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=17825792, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
         ShapeKey(free_prod=4194304, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=7864320, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
         ShapeKey(free_prod=7864320, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-25: the m8 (bucket-8 decode) width joined the audit. The 5090 seeded its m8
         # golden set the same day (WS2, serving-next); the 4090's is deferred with the mirror
         # re-tune (box lost its GPU at the PCI level), so EVERY m8 fork is uncovered there —
-        # the merged matmul/fused forms and the per-head/aux rms sweeps below. Burn down by
-        # mirroring the m8 seeding recipe (_tune/decode-m8/) once a 4090 is back.
+        # the glue and per-head/aux rms sweeps below; the m8 warp-contraction forks (merged
+        # matmul/fused forms, o_proj) live in EXPECTED_MAJOR_GAPS. Burn down by mirroring the
+        # m8 seeding recipe (_tune/decode-m8/) once a 4090 is back.
         ShapeKey(free_prod=16384, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=30720, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
         ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=30720, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=30720, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
         ShapeKey(free_prod=32768, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=4096, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
         ShapeKey(free_prod=65536, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=69632, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
         ShapeKey(free_prod=245760, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=262144, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=32768, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
@@ -168,23 +165,68 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=8388608, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-24b: the m1 (gemv-tier) width joined the audit — its aux keys (m1
         # pointwise/rope glue, per-head rms at M=1, the small o_proj/lm_head-side forms;
-        # on the 4090 also the fused m1 keys, never seeded there — no m1 serving on 24 GB).
+        # the m1 fused/o_proj warp-contraction keys live in EXPECTED_MAJOR_GAPS — never
+        # seeded here, no m1 serving on 24 GB).
         ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
         ShapeKey(free_prod=3840, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=3840, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=3840, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
         ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
         ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+    },
+}
+
+# The warp-contraction hazard baseline — ``major_gap_keys``: warp forks with a real reduce
+# extent (plain matmul, fused computed-A, flash). This is the misdeploy/hang class the goldens
+# exist to pin: an unseeded gemma projection deployed a scalar tile ~770x off cuBLAS, and the
+# 2026-08-02 5090 serving audit (on main, before #449 merged) measured every uncovered fused
+# twin family 114–1014x over the weight-streaming floor with the p2048/c8 chunk cell at TPOT
+# ~2760 ms. The same exact-match ratchet discipline as EXPECTED_GAPS, with a stricter bar for
+# ADDING: every entry needs a dated reason AND a concrete burn-down condition, and a width a
+# card actually serves should be closed (seed a golden or a routing row), not listed. Majors
+# may never ride the generic EXPECTED_GAPS set — the #446 PLACE retirement uncovered every
+# fused serving fork and the gate stayed green precisely because those keys blended into a
+# routine baseline edit (``test_no_major_key_hides_in_the_generic_baseline``).
+EXPECTED_MAJOR_GAPS = {
+    # 2026-08-02: the 5090 major baseline is EMPTY — the last four #446-reopened keys (the
+    # mlp_down_fused widths, un-closable by cut rows and un-benchable while recorded ``.cut``
+    # routing rows fired inside pinned replay compiles) burned down once route_cut made
+    # schedule-family pins authoritative: fused d*/sync rows benched honestly again and the
+    # four widths were seeded on a vast.ai 5090 (the 2026-08-02 block in the gemma4 YAML).
+    "NVIDIA GeForce RTX 5090": set(),
+    "NVIDIA GeForce RTX 4090": {
+        # The 4090 majors are all one deferral: the card's mirror re-tune (box lost its GPU at
+        # the PCI level; several widths have no 24 GB serving at all — m1, m192 — and the
+        # m8/m2048 sets ride the same rented-card mirror). Burn down per width once a 4090 is
+        # back, mirroring the 5090 seeding recipes (_tune/decode-m8/, _tune/m2048/, the m192 +
+        # fused-cut seeding of 2026-07-31).
+        # m1 (no m1 serving on 24 GB): fused qkv/qk_global/gate_up + o_proj/o_proj_global.
+        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
         ShapeKey(free_prod=8704, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        # 2026-07-30: the PLACE-knob retirement (#446) commented out the fused computed-A
-        # goldens that recorded a PLACE@ placement — the m32/m4096 fused forks they covered
-        # are uncovered again (the other widths were already in this set, see above). Burn
-        # down by re-recording PLACE-free fused rows (manual --ab; the d*/sync anchor).
+        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=3840, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=3840, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        # m8 (deferred mirror re-tune): fused qkv/qk_global/gate_up/down + o_proj forms.
+        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=30720, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
+        ShapeKey(free_prod=30720, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=30720, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        # m192 (no m192 serving on 24 GB): fused cones + o_proj/o_proj_global.
+        ShapeKey(free_prod=1572864, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=1671168, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=5898240, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=737280, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
+        ShapeKey(free_prod=737280, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=737280, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        # m2048 (deferred mirror re-tune): fused qkv/qk_global/gate_up/down forms.
+        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=7864320, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
+        # m32/m4096 #446 remainder (the PLACE@ fused rows the retirement commented out).
         ShapeKey(free_prod=245760, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
         ShapeKey(free_prod=15728640, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=4096),
         ShapeKey(free_prod=33554432, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
@@ -257,7 +299,22 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
         f"ratchet tightens: {sorted(fixed_drifts)}"
     )
 
-    gaps = gap_keys(res)
+    majors = major_gap_keys(res)
+    new_major = majors - EXPECTED_MAJOR_GAPS[gpu_name]
+    assert not new_major, (
+        f"NEW uncovered WARP-CONTRACTION fork(s) on {gpu_name}: {sorted(new_major, key=str)}\n"
+        "This is the misdeploy/hang hazard class — an uncovered contraction cold-resolves in serving "
+        "(the #446 regression served the p2048/c8 chunk cell at TPOT ~2760 ms vs the ~20 ms record). "
+        "Close it (seed a golden or a routing row on the card) rather than listing it; extending "
+        "EXPECTED_MAJOR_GAPS needs a dated reason and a concrete burn-down condition in review."
+    )
+    closed_major = EXPECTED_MAJOR_GAPS[gpu_name] - majors
+    assert not closed_major, (
+        f"major gap(s) on {gpu_name} are now covered — delete their EXPECTED_MAJOR_GAPS lines so the "
+        f"ratchet tightens: {sorted(closed_major, key=str)}"
+    )
+
+    gaps = gap_keys(res) - majors
     new = gaps - EXPECTED_GAPS[gpu_name]
     assert not new, (
         f"NEW uncovered kernel fork(s) on {gpu_name}: {sorted(new, key=str)}\n"
@@ -273,3 +330,14 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
         f"only {counts['MATCH']} golden matches on {gpu_name} (floor {MIN_MATCH[gpu_name]}) with no DRIFT — "
         "the twins likely re-keyed wholesale (tracer or ShapeKey classifier change), turning matches into GAPs."
     )
+
+
+def test_no_major_key_hides_in_the_generic_baseline():
+    """The warp-contraction hazard class may only be ratcheted through EXPECTED_MAJOR_GAPS —
+    a major key in the generic set would let a coverage loss ride a routine baseline edit,
+    which is exactly how the #446 fused-fork loss stayed green."""
+    for gpu_name, keys in EXPECTED_GAPS.items():
+        leaked = {k for k in keys if k.is_warp and k.reduce_max > 0}
+        assert not leaked, (
+            f"warp-contraction key(s) in EXPECTED_GAPS[{gpu_name}] — move them to EXPECTED_MAJOR_GAPS: {sorted(leaked, key=str)}"
+        )

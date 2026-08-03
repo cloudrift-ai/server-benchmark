@@ -81,10 +81,15 @@ where the re-baked image deployed one fused computed-A kernel):
   histogram does fire `fused` at routing time, so the `.cut` sibling routes **pre-fork in the golden
   replay too** — the fused form then never exists for a `STAGE=d1/sync` pin to realize against, and
   the replay reports `unreproducible pin … realized (off)`. The staged computed-A tier was never
-  broken. Residual eval-side limitation, still open: a fused *schedule* row cannot be replayed by
-  name while a `.cut` sibling exists (the replay would need an implicit `PLACE=fuse` pin for
-  schedule-row goldens); until then fused-row µs can only be refreshed by temporarily removing the
-  sibling.
+  broken. **The residual eval-side limitation this left open — a fused *schedule* row could not be
+  replayed by name while a `.cut` sibling existed — was independently found and FIXED on
+  `feature/golden-major-gap-gate` (merged 2026-08-02): `route_cut` now treats schedule-family pins as
+  authoritative over recorded routing entries, so a pinned fused row is no longer rerouted onto the
+  cut's pieces and benches honestly again.** That branch reached the same root cause by bisect from
+  the other end and used it to seed the four `mlp_down_fused` widths as fused schedule rows; those
+  coexist with the cut routings (a routing entry is consulted pre-fork and excluded from the schedule
+  golden index, so one decides cut-vs-fuse and the other pins the fused form for compiles where
+  routing does not fire).
 
 Closure: the four down `.cut` rows re-recorded (snippet totals were valid), `pw.n15360` tiers added
 at m64/m192/m2048/m4096 (the geglu-materialize piece's key; m8/m32/m256 were already covered), and

@@ -4678,6 +4678,72 @@ configs:
     emmy_us: 169.2
     cublas_us: 170.0
 
+  # ---- mlp_down_fused, remaining serving widths (2026-08-02, vast.ai 5090 seeding) ----------------
+  # The last four #446-reopened down keys (m8/m64/m2048/m4096) — un-benchable until the route_cut
+  # fix made
+  # schedule-family pins authoritative over recorded routing entries (the same-shape .cut rows were
+  # firing inside pinned replay compiles). Tuned + benched via the isolated .lin snippet (one shared
+  # cold DB/prior, small->large); emmy_us is the -O3 greedy A/B, cublas_us the same run's eager
+  # (torch's unfused rms_norm + linear decomposition). The wide widths trail eager (0.58-0.70x) on
+  # the std-lane FP32-accumulate wall — honest pins, not wins; the golden's job here is deploy
+  # pinning (the unseeded fork cold-resolved ~100x off in serving, TPOT ~2760 ms at p2048/c8).
+  # m8/m64 record the m32/m256 rows' spelling (w1x8 f2x2/k4 g4k — the workspace reduce split),
+  # not the snippet greedy's w1x16/g*a winners: those audited DRIFT in-model (the w1x16 + atomic
+  # split rows are not offered on the geglu->down cone), while the g4k twin benches close (m8
+  # 105.4 vs the 84.1 unrealizable winner, m64 133.5 vs 123.6 — partial + finalize summed).
+  # All four dicts DROP the snippet record_knobs' REDUCE@a1='' stamp: the snippet nest spells a
+  # second reduce axis that neither the in-model rows nor the kind's canonical reference tree
+  # carry (the spelling gate rejects the key), and the axis-keyed pin is all-or-nothing, so
+  # keeping it makes the split rows unmatchable in-model (probed: with it 0 rows match).
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m8.lin
+    M: 8
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 105.4
+    cublas_us: 100.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m64.lin
+    M: 64
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 133.5
+    cublas_us: 99.4
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m2048.lin
+    M: 2048
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f1x4/k4', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 2066.0
+    cublas_us: 1190.2
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m4096.lin
+    M: 4096
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', STAGE: 'd2/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 3238.6
+    cublas_us: 2259.1
+
+  # NOTE (merge, 2026-08-02): these fused rows and the `.lin.cut` routings later in this file are
+  # complementary, not rivals — a routing entry is consulted PRE-FORK and is excluded from the
+  # schedule golden index, so it decides cut-vs-fuse while these pin the fused form for compiles
+  # where routing does not fire. The branch that recorded these judged the down cut permanently
+  # in-model-inert; that held only while the routing consult mis-keyed a stat-free computed-A cone
+  # as kind='' (fixed in `_cut.py::_routing_entry`). With both changes the cut routes and wins where
+  # measured (m8 76.7 vs 105.4, m64 84.2 vs 133.5), and these rows remain the pinned-compile floor.
+
   # ---- Fused-fork cut routings, remaining serving widths (2026-07-31) -----------------------------
   # The #446 PLACE-knob retirement commented out every fused computed-A golden that spelled a PLACE@
   # placement, reopening the fused norm->linear / down forks at m1/m8/m64/m2048/m4096 (the drift-gate

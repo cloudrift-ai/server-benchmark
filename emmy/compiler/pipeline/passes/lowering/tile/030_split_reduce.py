@@ -65,7 +65,7 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import Sched, head, lower, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
@@ -115,7 +115,7 @@ def _boundary(stmts, plain_only: bool = False) -> tuple[tuple, tuple]:
 def _cell_index(stmts, grid) -> tuple:
     """The output-cell index the original kernel writes (the projection ``Write``'s index,
     or — for a bare carrier whose grid-cell store is glue — the grid-axis vars). Read off the
-    kernel's lowered body (``ops.lower`` — the annotated loop nest, zero-axis and iterating alike)."""
+    kernel's lowered body (``Fold.lower`` — the annotated loop nest, zero-axis and iterating alike)."""
     for s in stmts:
         if isinstance(s, Write):
             return s.index
@@ -181,7 +181,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     grid = tile.place.grid
     cell = tuple(Var(a.name) for a in grid)
     src_sched = sched_of(tile)
-    inner_tile, inner_stage = src_sched.tile_of(node), src_sched.stage_of(node)
+    inner_tile, inner_stage = src_sched.tile_of(node), src_sched.get("STAGE", node)
 
     def _partial_sched(partial_op) -> dict:
         """The partial's schedule dict — the sliced contraction's tile / resolved pipeline,
@@ -355,7 +355,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
     orig_pv = next(st for st in list(red.step_stmts())[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
     p_sched.put("TILE", sliced_head, head_tile)
     p_sched.put("TILE", sliced_pv, src_sched.tile_of(orig_pv))
-    p_sched.put("STAGE", sliced, src_sched.stage_of(red))
+    p_sched.put("STAGE", sliced, src_sched.get("STAGE", red))
     stripped = _strip_grid(plan)
     if stripped.stages:
         p_sched.put("REDUCE", sliced, stripped)
@@ -457,7 +457,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # The lowered loop nest (zero-axis and iterating alike) — find the annotated reduce loop
     # in it by position (``reduce_loop`` returns a fresh synthesized loop for a ``Fold``, so key
     # off the lowered list, not object identity).
-    stmts = effect_tail(lower(op), tile.stores)  # boundary stores reconstituted — ``after`` keeps its Write
+    stmts = effect_tail(op.lower(), tile.stores)  # boundary stores reconstituted — ``after`` keeps its Write
     cell = _cell_index(stmts, grid)
     split = Axis(name=_SPLIT, extent=Dim(cta))
     idx = next(i for i, s in enumerate(stmts) if isinstance(s, Loop) and s.role.is_reduce)

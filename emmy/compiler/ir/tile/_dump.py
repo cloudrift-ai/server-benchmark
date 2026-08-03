@@ -43,7 +43,7 @@ def unplaced_slices(tile) -> list[tuple[str, object]]:
 # It renders NO derived material. The structure is already complete in the stored tree — the
 # operand edges and their nesting — and a derived evaluation (the per-cell step, the synthesized
 # nodes inside it, the loop nest a node lowers to) is a CONSEQUENCE of the stored params, exactly
-# as re-derivable as ``lower()``'s output. Printing it beside storage is the inversion this module
+# as re-derivable as ``Fold.lower()``'s output. Printing it beside storage is the inversion this module
 # exists to prevent, and it is bulk: measured over eight kernels the step branch restated
 # ``lift`` + ``combine`` and contributed no schedule site on seven of them. ``--ir loop`` is where
 # a reader goes for a body.

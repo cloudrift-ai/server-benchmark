@@ -110,13 +110,13 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
     # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
     # is the computed cone (the GELU-constant preamble folded INSIDE K), the bias load riding the
     # projection body — the preamble split kept the two independent feeds apart.
-    from emmy.compiler.ir.tile.ir import _operand_body
+    from emmy.compiler.ir.tile.ir import operand_body
 
     assert isinstance(node, Fold) and node.axis is None and len(node.operands) == 1
     fold = node.operands[0]
     a_edge = fold.a
     assert a_edge is not None and not isinstance(a_edge, Load), "A must be the computed cone"
-    a_loads = {st.input for st in _operand_body(a_edge) if isinstance(st, Load)}
+    a_loads = {st.input for st in operand_body(a_edge) if isinstance(st, Load)}
     assert a_loads == {"one_buf", "x"}
     assert isinstance(node.body[0], Load) and node.body[0].input == "bias_buf"
 
@@ -293,8 +293,8 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
     identical ``[stat loop, …, cone]`` stmt run. The stored form is the role=CONTRACTION fold; the
     bilinear ``Fold`` reading is the PLACED stamp (``the placed reading``)."""
-    from emmy.compiler.ir.tile.ir import refs_axis
-    from emmy.compiler.ir.tile.ops import cone_seam, lower
+    from emmy.compiler.ir.tile.ir import operand_body, operand_name, refs_axis
+    from emmy.compiler.ir.tile.ops import cone_seam
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
@@ -302,18 +302,18 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
     c = fold
-    assert c.a_computed
+    assert not isinstance(c.a, Load)
     cone = c.a
-    assert (isinstance(cone, Fold) and cone.axis is None) and cone.out == c.a_name
+    assert (isinstance(cone, Fold) and cone.axis is None) and cone.out == operand_name(c.a)
     assert cone.operands[0].operands[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
     pro, cell, stats = cone_seam(cone)
-    assert pro == tuple(lower(cone.operands[0])) and cell == tuple(cone.body)
-    assert not any(refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
-    assert any(refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
+    assert pro == tuple(cone.operands[0].lower()) and cell == tuple(cone.body)
+    assert not any(refs_axis(s, c.axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
+    assert any(refs_axis(s, c.axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
     # The operand body is the flattened cone verbatim: the stat loop, its sweep, then the cone.
-    assert c.a_body == tuple(lower(cone)) == (*pro, *cell)
+    assert operand_body(c.a) == tuple(cone.lower()) == (*pro, *cell)
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():
@@ -357,7 +357,7 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
     assert (isinstance(tile.op, Fold) and tile.op.axis is None) and len(tile.op.operands) == 1
     node = tile.op.operands[0]
-    assert len(node.channels) == 2 and node.a_computed
+    assert len(node.channels) == 2 and (not isinstance(node.a, Load))
     assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
     # The projection body is PURE (the SwiGLU combine); the root store rides ``TileOp.stores``.
     assert all(s.pure for s in tile.op.body) and not isinstance(tile.op.body[-1], Write)

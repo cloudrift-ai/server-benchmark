@@ -191,11 +191,11 @@ reduce loop where it needs it, never a Python type:
   nest is the inversion `ops` exists to prevent (`Fold.loop` splices every edge and flattens every nested
   node just to hand back the property it was given).
 - A contraction is a `Map` whose reduce `Loop` is `CONTRACTION`: the `⊗` lift `Assign` sits
-  in the loop body and the additive fold `Accum` IS the loop-level algebra spelling. The shared
-  builder `ops.contraction_loop(lift, fold, operand_bodies, reduce_axis)` builds it in the
-  recognizable `Accum`-in-`Loop` form (used by flash's score producer and the scalar matmul).
+  in the loop body and the additive fold `Accum` IS the loop-level algebra spelling. `Fold.loop`
+  derives exactly that `Accum`-in-`Loop` form from the stored algebra — there is no separate
+  loop builder.
 
-`ir.tile.ops.lower(op)` is now just the `Map`'s body verbatim — the folds were already
+`Fold.lower()` is now just the `Map`'s body verbatim — the folds were already
 dissolved into loose fold `Accum`s (and the streaming `merge` for a twisted fold) at
 recognition, and the reduce `Loop`s carry their role annotation, so one `lower`
 call emits the kernel's per-cell body with nothing left to expand.
@@ -481,13 +481,25 @@ compute-fill has no async load half). An illegal / unparseable spec — or one c
 param — degrades to uniform silently; a legal one stamps and the staged K-loop materializes the split
 (`lowering/kernel/_stage._wspec_kloop`).
 
-`tile/ops.py` `lower(op)` returns the `Map`'s body verbatim — the loop nest with its annotated reduce `Loop`s, the
+Lowering has ONE spelling and it lives on the node: `tile/ir.py` `Fold.lower()`. There is no free `ops.lower`
+wrapper duplicating it — which is also what keeps `tile/ir.py` free of any import back into `tile/ops.py`. Reading an
+operand EDGE is likewise free-function, not per-role: `ir.operand_body(edge)` / `ir.operand_name(edge)` (an edge is an
+edge, and which role it plays — A vs B — is the caller's reading of the operand ORDER, never a property of the edge,
+so there is no `a_body` / `b_body` / `a_name` / `b_name` quartet on the node).
+
+**A derived reading earns its place by deriving something.** `role`, `a` / `channels` / `b_trans`, `composed`, `loop`,
+`step_stmts` all compute; a property that only renames a stored field or wraps one `isinstance` does not, and is spelled
+at the call site instead — the contraction axis is `fold.axis` (there is no `k_axis` alias), a computed A is
+`not isinstance(c.a, Load)` (the same spelling the B side already used), and a schedule slice is `sched.get("STAGE", n)`
+(only `tile_of` is a method, because only it does work — the `(m, n)` placement binding).
+
+`Fold.lower()` returns the `Map`'s body verbatim — the loop nest with its annotated reduce `Loop`s, the
 carriers already dissolved into loose folds + the streaming `merge` at recognition. The tensor-core, cooperative-combine, staging (cp.async / TMA), and warp-specialization tiers are materialized
 downstream in `lowering/kernel` against the op tree + schedule. The older tile-level `GridTile` / `ThreadTile` /
 `Stage` structures were removed in the tile-IR rebuild and are being rebuilt there as the schedules return (see
 `pipeline/passes/ARCHITECTURE.md`).
 
-**The structural dump** (`ops.pretty` / `TileOp.pretty_body`, what `emmy compile --ir tile` and the `EMMY_DUMP_DIR`
+**The structural dump** (`tile/_dump.pretty` / `TileOp.pretty_body`, what `emmy compile --ir tile` and the `EMMY_DUMP_DIR`
 `.txt` artifacts print) renders the STORED tree as a tree, never a lowered nest — the dump is where a reader meets the
 term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
 (`operands` first, then `init` / `lift` / `combine`, with the bilinear reading labelling its edges `operand[a]` /
@@ -508,7 +520,7 @@ rather than reporting grid coordinates as captures.
 
 **Nothing DERIVED is printed** — not the per-cell step, not the nodes synthesized inside it, not the lowered nest.
 The structure is already complete in the stored tree: the operand edges and their nesting say it, and a derived
-evaluation follows from the same params, as re-derivable as `lower()`'s output. Printing one beside storage is the
+evaluation follows from the same params, as re-derivable as `Fold.lower()`'s output. Printing one beside storage is the
 inversion this layer exists to prevent, and it was the bulk of the output — measured over eight frontend kernels the
 step branch restated `lift` + `combine` and contributed no schedule site on seven of them (flash 50 → 28 term lines,
 softmax 31 → 21). `--ir loop` is where a reader goes for a body.

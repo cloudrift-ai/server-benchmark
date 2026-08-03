@@ -8,48 +8,19 @@ a bilinear ``Fold``, with computed operands stored inline on their edges) plus
 ``ops.axis_role``, no per-kind type.
 """
 
-from emmy.compiler.ir.atom import AtomKind
-from emmy.compiler.ir.schedule import (
-    FoldMove,
-    Level,
-    Placement,
-    ReducePlan,
-    ReduceStage,
-    Stage,
-    TilePlan,
-    WarpSpec,
-)
-from emmy.compiler.ir.tile.ir import (
-    Channel,
-    Fold,
-    Store,
-    TileOp,
-    deep_defines,
-    deep_reads,
-    effect_tail,
-    refs_axis,
-    split_effects,
-    stmt_axis_names,
-)
+from emmy.compiler.ir.schedule import FoldMove, Level, Placement, ReducePlan, ReduceStage
+from emmy.compiler.ir.tile.ir import Channel, Fold, Store, TileOp, effect_tail, split_effects
 
 __all__ = [
-    "AtomKind",
     "Channel",
+    "Fold",
     "FoldMove",
     "Level",
     "Placement",
     "ReducePlan",
     "ReduceStage",
-    "Fold",
-    "Stage",
     "Store",
     "TileOp",
-    "TilePlan",
-    "WarpSpec",
-    "deep_defines",
-    "deep_reads",
     "effect_tail",
-    "refs_axis",
     "split_effects",
-    "stmt_axis_names",
 ]

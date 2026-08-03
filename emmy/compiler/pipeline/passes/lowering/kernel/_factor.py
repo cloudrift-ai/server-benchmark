@@ -129,7 +129,7 @@ def _emit(op, ctx: Ctx) -> Frag:
     """Recurse over a structural node, returning its :class:`Frag` (per-cell body + wire + carrier).
     The single node-kind dispatch every kernel's compute flows through — walking ``source`` AND
     ``step`` so flash's Q@K / P@V contractions are reached as nodes. Scalar-nested: a node's body
-    is its lowered loop-IR (byte-identical to ``ops.lower``); a WARP-TILED tree does not reach this
+    is its lowered loop-IR (byte-identical to ``Fold.lower``); a WARP-TILED tree does not reach this
     walk — ``_bind`` realizes it at fragment residence through ``_twist`` instead."""
     if isinstance(op, Fold) and op.axis is None:
         src = _emit(op.operands[0], ctx) if op.operands else None
@@ -303,12 +303,12 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             epi = with_store(epi, ctx.output, grid, c.out)
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
-        seam = cone_seam(c.a) if c.a_computed else None
+        seam = cone_seam(c.a) if (not isinstance(c.a, Load)) else None
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
         lead = grid[:-2]
-        state_decls, reduce_region = reduce_codegen(c, tile, ctx.sched.stage_of(c), ctx.inputs, ctx.workers, seam, lead)
+        state_decls, reduce_region = reduce_codegen(c, tile, ctx.sched.get("STAGE", c), ctx.inputs, ctx.workers, seam, lead)
         sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead)
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
@@ -317,7 +317,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduce — monoid, flash, coop-K /
         # split contraction — is a ``Fold`` node after ``ops.nodify_reduce`` (a projecting
         # zero-axis ``Fold`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.reduce_of(op) or ReducePlan()) if isinstance(op, Fold) else None
+        plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         wsrc = warp_source(op, ctx.sched)
         csrc = chain_source(op, ctx.sched) if wsrc is None else None
@@ -709,7 +709,8 @@ def _tile_reduce_axis_transposed(
     lanes_n = 32
     k_ways = coop // lanes_n
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
-    assert not (ctx.sched.stage_of(op) is not None and ctx.sched.stage_of(op).smem), "transposed coop cannot ride shared-row staging"
+    stage = ctx.sched.get("STAGE", op)
+    assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
     (rloop,) = _emit(op, ctx).body
@@ -790,7 +791,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # (the coop-K matmul's pinned pipeline) never sets ``smem``, so it passes through untouched.
     tail_src = list(tail)
     fill_stmts: list[Stmt] = []
-    op_stage = ctx.sched.stage_of(op)
+    op_stage = ctx.sched.get("STAGE", op)
     if lane is not None and op_stage is not None and op_stage.smem:
         from emmy.compiler.backend.cuda.dtype import cuda_name  # noqa: PLC0415
 

@@ -23,7 +23,8 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Fold, Store, TileOp
-from emmy.compiler.ir.tile.ops import Sched, pretty, unplaced_slices
+from emmy.compiler.ir.tile._dump import pretty, unplaced_slices
+from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -150,7 +151,7 @@ def _split_k() -> Fold:
 
 
 def test_the_derived_step_is_not_printed() -> None:
-    """The step is a CONSEQUENCE of ``lift`` + ``combine``, as re-derivable as ``lower()``'s
+    """The step is a CONSEQUENCE of ``lift`` + ``combine``, as re-derivable as ``Fold.lower()``'s
     output — printing it beside storage is the inversion the dump exists to prevent, and it was
     the bulk of the output. ``--ir loop`` is where a body lives."""
     fold = _stat_fold()

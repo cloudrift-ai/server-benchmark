@@ -5,7 +5,7 @@ A ``Fold`` is the typed successor of the bare annotated reduce ``Loop`` (holding
 a projected reduce (softmax / RMSNorm) is a ``Map`` whose body IS the projection over a ``Fold``
 ``source``. A bilinear ``Fold`` is the tiled matmul node (built recognize-side at fork-emit), holding
 its ``a`` edge + product channels + ``tile``; it synthesizes the canonical mul-add ``CONTRACTION``
-loop on demand so ``ops.lower`` / ``reduce_loop`` flatten it back to the loop nest the materializer
+loop on demand so ``Fold.lower`` / ``reduce_loop`` flatten it back to the loop nest the materializer
 expands (via ``_factor.factorize``). These pin that contract plus the structural reads (``axis_role`` /
 ``reduce_loop`` / ``out``) dispatching on the nodes.
 """
@@ -19,7 +19,8 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Fold, ReducePlan, TileOp
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, lower, reduce_loop, reduce_plan
+from emmy.compiler.ir.tile.ir import operand_body, operand_name
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, reduce_loop, reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -47,7 +48,7 @@ def test_bare_reduction_lowers_to_just_the_loop() -> None:
     loop = _sum_loop()
     red = fold_from_loop(loop)
     assert red is not None
-    assert lower(red) == [loop]
+    assert red.lower() == [loop]
     # A bare reduce's grid ``Write`` is glue — ``out`` is the carried state's primary component.
     assert red.out == "acc"
 
@@ -57,7 +58,7 @@ def test_projected_reduce_is_a_map_over_the_reduction() -> None:
     proj = (Assign(name="rms", op="sqrt", args=("acc",)),)
     node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))
     # lower flattens the source's loop then the projection body — the bare-loop ``Map`` body.
-    assert lower(node) == [loop, *proj]
+    assert node.lower() == [loop, *proj]
     assert node.out == "rms"  # the projection's last def
     # The structural reads see straight through to the source's reduce.
     assert reduce_loop(node) == loop
@@ -65,13 +66,13 @@ def test_projected_reduce_is_a_map_over_the_reduction() -> None:
 
 
 def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
-    """``lower(Fold.projection(source=Fold))`` equals the bare-loop ``Fold.projection(body=(loop, *proj))`` — the parity
+    """``Fold.projection(source=Fold).lower()`` equals the bare-loop ``Fold.projection(body=(loop, *proj))`` — the parity
     guarantee that keeps ``op_cache_key`` stable across the lift."""
     loop = _sum_loop()
     proj = (Write(output="out", index=(Var("m"),), value="acc"),)
     node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))
     legacy = Fold.projection(body=(loop, *proj))
-    assert lower(node) == lower(legacy)
+    assert node.lower() == legacy.lower()
     assert reduce_loop(node) == reduce_loop(legacy)
     assert axis_role(node) == axis_role(legacy)
 
@@ -148,8 +149,8 @@ def test_contraction_synthesizes_the_mul_add_loop() -> None:
     c = _contraction()
     loop = c.loop
     assert loop.role is AxisRole.CONTRACTION
-    assert loop.axis == c.k_axis
-    # The shared ``contraction_loop`` builder: B, A loads + the ⊗ lift + the additive fold.
+    assert loop.axis == c.axis
+    # The derived contraction loop: B, A loads + the ⊗ lift + the additive fold.
     assert isinstance(loop.body[-1], Accum) and loop.body[-1].name == "acc"
     assert isinstance(loop.body[-2], Assign) and loop.body[-2].op.name == "multiply"
 
@@ -158,7 +159,7 @@ def test_contraction_dispatches_through_ops() -> None:
     c = _contraction()
     assert axis_role(c) is AxisRole.CONTRACTION
     assert reduce_loop(c) == c.loop
-    assert lower(c) == [c.loop]  # bare: just the synthesized loop (the grid Write is materialize glue)
+    assert c.lower() == [c.loop]  # bare: just the synthesized loop (the grid Write is materialize glue)
     assert c.out == "acc"
 
 
@@ -169,8 +170,8 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
     c = _contraction()
     node = Fold.projection(body=Body(proj), operands=(c,))  # the STORED form under the wrapper
-    assert lower(c) == [c.loop]
-    assert lower(node) == [c.loop, *proj]
+    assert c.lower() == [c.loop]
+    assert node.lower() == [c.loop, *proj]
     assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
 
 
@@ -188,7 +189,7 @@ def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
     plan = ReducePlan.of(coop=4)
     node, fold = nodify_reduce(flat)
     assert isinstance(node, Fold) and fold is node
-    assert lower(node) == lower(flat)  # bit-identical lowering
+    assert node.lower() == flat.lower()  # bit-identical lowering
     t = _tile(node)
     sched_of(t).put("REDUCE", fold, plan)
     assert reduce_plan(t) is plan
@@ -205,7 +206,7 @@ def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
     node, fold = nodify_reduce(flat)
     assert (isinstance(node, Fold) and node.axis is None) and node.operands[0] is fold and isinstance(fold, Fold)
     assert tuple(node.body) == proj
-    assert lower(node) == lower(flat)  # bit-identical
+    assert node.lower() == flat.lower()  # bit-identical
     assert axis_role(node) is AxisRole.PLANAR
 
 
@@ -228,9 +229,9 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     c = _contraction()  # k_axis = k(256)
     # The split-K factoring, spelled inline: ksplit (the partition index, a distinct name) x kslice
     # (the per-partition chunk, the ORIGINAL name), and the sigma reconstructing the absolute index.
-    ksplit = Axis(name=f"{c.k_axis.name}_ks", extent=Dim(2))
-    kslice = replace(c.k_axis, extent=Dim(128))
-    sigma = Sigma({c.k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(128, "int")), Var(c.k_axis.name))})
+    ksplit = Axis(name=f"{c.axis.name}_ks", extent=Dim(2))
+    kslice = replace(c.axis, extent=Dim(128))
+    sigma = Sigma({c.axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(128, "int")), Var(c.axis.name))})
     inner = Fold.contraction(
         k_axis=kslice,
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
@@ -253,7 +254,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     t = _tile(red)
     sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2
-    lo = lower(red)
+    lo = red.lower()
     assert len(lo) == 1 and isinstance(lo[0], Loop) and lo[0].axis.name == "k_ks"
     inner_loops = [s for s in lo[0].body if isinstance(s, Loop)]
     assert len(inner_loops) == 1 and inner_loops[0].axis.name == "k"  # distinct from ksplit — no double-reduce
@@ -285,7 +286,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     )
     assert red.role is AxisRole.TWISTED
 
-    (kv_loop,) = lower(red)
+    (kv_loop,) = red.lower()
     assert kv_loop.axis.name == "kv"
     body = list(kv_loop.body)
     assert not any(isinstance(s, Fold) for s in body), "the nested PV fold must be flattened, not left raw"
@@ -316,17 +317,17 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     assert folds[0] is red.operands[0], "the QK score is the hoisted operand edge (step 7)"
     # Algebra reads come straight off the stored node — placement is the ``Placed`` view's job.
     pv = folds[1]
-    assert pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
+    assert (not isinstance(pv.a, Load)) and operand_name(pv.a) == "O_i__p", "PV's A operand is the inline exp weight P"
     assert pv.a.out == "O_i__p"
     assert pv.acc == "O_i__pv"
     # A is the ONE-STMT node itself, not an identity ``Map`` wrapping a prologue in the cone shape:
     # the copy is the reference (an edge is a Load or an inline node — no name-reference arm), and
     # with an empty cell the wrapper carried nothing (``cone_seam`` bridges no stats either way).
     assert not pv.a.operands, "PV's A is the one-stmt cone itself — no empty-cell cone wrapper"
-    assert [s.pretty()[0].strip() for s in pv.a_body] == ["O_i__p = copy(m_i__t5)"]
+    assert [s.pretty()[0].strip() for s in operand_body(pv.a)] == ["O_i__p = copy(m_i__t5)"]
     assert cone_seam(pv.a) == ((), tuple(pv.a.body), ()), "an empty-cell wrapper bridged no stats — the seam is the node"
     # The reduce loop flattens BOTH folds; the O-fold reads the PV output (no inline v·P).
-    (kv_loop,) = lower(red)
+    (kv_loop,) = red.lower()
     o_fold = next(s for s in kv_loop.body if isinstance(s, Accum) and s.name == "O_i")
     assert o_fold.value == "O_i__pv", "the O-fold consumes the PV contraction's output, not an inline product"
 
@@ -373,8 +374,8 @@ def _pv_contraction() -> Fold:
 
 def test_contraction_computed_a_operand_exposes_its_body() -> None:
     c = _pv_contraction()
-    assert c.a_computed and c.a_name == "p"
-    assert isinstance(c.a_body[0], Load) and c.a_body[0].input == "S" and c.a_body[-1].op.name == "exp"
+    assert (not isinstance(c.a, Load)) and operand_name(c.a) == "p"
+    assert isinstance(operand_body(c.a)[0], Load) and operand_body(c.a)[0].input == "S" and operand_body(c.a)[-1].op.name == "exp"
     # external reads are the A body's LOADED buffers + B — the computed ``p`` is an internal temp, not a read.
     assert set(c.external_reads()) == {"S", "V"}
 
@@ -474,9 +475,9 @@ def test_both_operand_edges_have_the_same_type() -> None:
 
 def test_computed_b_exposes_the_same_accessors_as_a() -> None:
     c = _computed_b_contraction()
-    assert not isinstance(c.b, Load) and not c.a_computed
-    assert c.b_name == "wn"
-    assert isinstance(c.b_body[0], Load) and c.b_body[-1].op.name == "exp"
+    assert not isinstance(c.b, Load) and isinstance(c.a, Load)
+    assert operand_name(c.b) == "wn"
+    assert isinstance(operand_body(c.b)[0], Load) and operand_body(c.b)[-1].op.name == "exp"
     # Both edges' loaded buffers are external reads; the computed ``wn`` is an internal temp.
     assert set(c.external_reads()) == {"A", "W"}
 
@@ -489,7 +490,7 @@ def test_a_computed_b_has_no_gmem_layout() -> None:
 
 def test_computed_b_lowers_into_the_k_loop() -> None:
     """The computed B body is spliced into the synthesized ``CONTRACTION`` loop ahead of the ⊗
-    multiply, exactly as a computed A's is — the same ``contraction_loop`` builder, no B-specific
+    multiply, exactly as a computed A's is — the same derived loop, no B-specific
     path: ``for k: w_e = W[k, n]; wn = exp(w_e); a_e = A[m, k]; o__v = wn·a_e; o += o__v``."""
     loop = _computed_b_contraction().loop
     assert loop.role is AxisRole.CONTRACTION and loop.axis.name == "k"
@@ -515,7 +516,7 @@ def test_computed_b_factorizes_at_the_scalar_tier() -> None:
 def test_both_edges_may_be_computed_at_once() -> None:
     """Nothing privileges one side: a contraction of two computed operands lowers too."""
     c = _computed_b_contraction(a_load=False)
-    assert c.a_computed and not isinstance(c.b, Load)
+    assert (not isinstance(c.a, Load)) and not isinstance(c.b, Load)
     assert any(isinstance(s, Accum) for s in c.loop.body)
 
 

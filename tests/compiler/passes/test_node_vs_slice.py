@@ -61,7 +61,7 @@ def test_pv_streamed_swaps_the_stream_axis_on_the_stored_node() -> None:
     placed ``TilePlan`` is untouched."""
     node, tile = _node(), _slice()
     got = _pv_streamed(node, Axis("kv", 256))
-    assert got.role is AxisRole.CONTRACTION and got.k_axis.name == "kv"
+    assert got.role is AxisRole.CONTRACTION and got.axis.name == "kv"
     assert tile.axes == (_M, _N)  # the slice still carries the placement the swap never saw
 
 

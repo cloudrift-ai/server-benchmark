@@ -14,7 +14,7 @@ reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
   ``ReducePlan`` carries a BLOCK ``coop`` and/or a REG ``reg`` stage: the reduce axis is partitioned
   ``coop`` ways across the CTA's threads (cooperation) and ``reg`` ways across per-thread register
   accumulators (ILP), then a REG-tree fold, the cross-thread combine, and the projection.
-- **Scalar tier** — one thread per output cell (``lower(op)`` + an output-store glue).
+- **Scalar tier** — one thread per output cell (``op.lower()`` + an output-store glue).
 
 The op tree + ``lower`` are shared across kinds; only the schedule's partition changes — the
 article's "schedule separate from combine" thesis. The tier machinery all lives in ``_factor``.

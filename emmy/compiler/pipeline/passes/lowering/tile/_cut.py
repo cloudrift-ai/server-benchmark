@@ -16,7 +16,7 @@ operand edge) fall out of the node kinds — the child's index space is DERIVED 
 iteration axes its lowered body reads: parent free axes + ancestor fold axes), the workspace
 dtype from the seam kind (a fold child's carrier state is **f32**, mirroring the split-reduce
 workspace rule; a value seam keeps its leaf operand dtype — the same bytes the fused form's A
-slab stored), and the piece bodies from ``ops.lower`` with loop-invariant stmts placed at the
+slab stored), and the piece bodies from ``Fold.lower`` with loop-invariant stmts placed at the
 shallowest level that defines their reads. Legality is structural (edge-iff-closed holds by
 construction); an open seam cannot be spelled because ``PLACE`` sites are tree children.
 """
@@ -37,13 +37,13 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.ir import (
     Fold,
-    _operand_name,
     _operand_result_names,
     deep_defines,
     deep_reads,
     effect_tail,
+    operand_name,
 )
-from emmy.compiler.ir.tile.ops import axis_names, lower
+from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
@@ -175,7 +175,7 @@ def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
     scope it captures from) — which is why that seam is not cuttable.
 
     Returned sorted, so callers can put it straight into an error message."""
-    stmts = list(lower(root))
+    stmts = list(root.lower())
     defs: set[str] = set()
     for s in stmts:
         defs |= deep_defines(s)
@@ -209,7 +209,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     # channel's accumulator while the seam value is only the gate's — is not a cut: only the
     # seam value crosses the kernel boundary, so the second path's def would vanish with the
     # subtree (found live: ``Assign v9: arg 'acc1' not defined`` on the m4096 geglu cut).
-    probe = Load(name=_operand_name(child), input="__seam_probe", index=())
+    probe = Load(name=operand_name(child), input="__seam_probe", index=())
     parent_tree = _replace_edge(root, child, probe)
     sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}  # boundary-store sweeps live off-term (1q)
     if _captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
@@ -277,7 +277,7 @@ def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:
     reads (its own bound axes excluded), in enclosing order: the parent placement's free axes,
     then the ancestor fold axes along the path down to the seam."""
     reads: set[str] = set()
-    for s in lower(child):
+    for s in child.lower():
         reads |= _member_reads(s)
     return [a for a in (*free, *ancestors) if a.name in reads]
 
@@ -341,7 +341,7 @@ def _ws_dtype(child, inputs: dict):
     operand's dtype: the same bytes the fused form's A slab stored, so numerics match."""
     if isinstance(child, Fold):
         return F32
-    for s in lower(child):
+    for s in child.lower():
         for ld in Body(tuple([s])).loads:
             t = (inputs or {}).get(ld.input)
             if t is not None:
@@ -374,7 +374,7 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     kind)."""
     out = root.output
     child = site.node
-    child_name = _operand_name(child)
+    child_name = operand_name(child)
     ws = f"{out.name}__cut_{child_name}"
     if ws in match.graph.nodes:
         raise RuleSkipped(f"seam already cut — {ws} exists")
@@ -386,14 +386,14 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     logger.info("placement: cutting %s (%s → %s + residue) on %s", spelled, root.id, ws, out.name)
 
     # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
-    child_stmts = [*lower(child), Write(output=ws, index=ws_index, value=child_name)]
+    child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
     child_body = _nest(child_stmts, axes)
     child_op = LoopOp(body=Body(tuple(child_body)))
 
     # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
     load = Load(name=child_name, input=ws, index=ws_index)
     parent_tree = _replace_edge(tile_op, child, load)
-    parent_cell = effect_tail(lower(parent_tree), stores)
+    parent_cell = effect_tail(parent_tree.lower(), stores)
     parent_body = _nest(list(parent_cell), list(free))
     parent_op = LoopOp(body=Body(tuple(parent_body)))
 

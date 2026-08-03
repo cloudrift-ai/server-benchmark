@@ -59,7 +59,7 @@ like a contraction operand.
 The combine lives entirely in the ``op`` wrapper (the :class:`Fold` /
 :class:`Fold` / a bilinear ``Fold``s here + ``ir/stmt/algebra``). A
 fold's role is DERIVED (``Fold.role``), never stored; a contraction is the
-a bilinear ``Fold`` kind itself. ``lower(op)`` flattens the
+a bilinear ``Fold`` kind itself. ``Fold.lower`` flattens the
 structural tree back to the loop nest.
 
 The stored nodes hold algebra params only; the contraction's placement/schedule
@@ -110,13 +110,13 @@ def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ..
         return stmts
     at: dict[int, list] = {}
     for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
-        name = _operand_name(edge)
+        name = operand_name(edge)
         idx = next((i for i, st in enumerate(stmts) if name in deep_reads([st])), len(stmts))
         at.setdefault(idx, []).append(edge)
     out: list[Stmt] = []
     for i, st in enumerate((*stmts, None)):
         for edge in at.get(i, ()):
-            out.extend(_operand_body(edge))
+            out.extend(operand_body(edge))
         if st is not None:
             out.append(st)
     return tuple(out)
@@ -134,12 +134,10 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
     A composed step's POSITION in the body is semantic, not incidental: flash's PV reads the softmax
     weight the merge stmts of that same loop step produce, so the step cannot be hoisted ahead of
     them. That is why composition rides the sequence rather than a hoisted operand tuple."""
-    from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
-
     out: list[Stmt] = []
     for s in body:
         if isinstance(s, Fold):
-            out.extend(lower(s))
+            out.extend(s.lower())
         else:
             out.append(s)
     return tuple(out)
@@ -303,7 +301,7 @@ class Fold(Stmt):
     is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
     :class:`Fold` whose body IS that projection. Like every structural node it IS a ``Stmt`` — that is
     what lets a composed step occupy a statement position in another node's body;
-    :func:`ops.lower` flattens it to the synthesized loop (``[loop]``), so ``op_cache_key`` and the
+    :meth:`lower` flattens it to the synthesized loop (``[loop]``), so ``op_cache_key`` and the
     ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
 
     The **scheduling param** is the ``reduce`` partition (:class:`ReducePlan` — GRID split / BLOCK coop
@@ -431,7 +429,7 @@ class Fold(Stmt):
         body = tuple(self.lift.body)
         if len(body) != n or tuple(self.lift.results) != tuple(f"{r}__v" for r in self.combine.results):
             return None
-        names = [_operand_name(e) for e in self.operands]
+        names = [operand_name(e) for e in self.operands]
         b0, a, rest = names[0], names[1], names[2:]
         want = [(b0, a), *((a, b) for b in rest)]
         for stmt, (x, y) in zip(body, want, strict=True):
@@ -460,11 +458,6 @@ class Fold(Stmt):
         return self.lift.body
 
     @property
-    def k_axis(self) -> Axis | None:
-        """The contraction axis — this fold's own ``axis`` (what the contraction axis)."""
-        return self.axis
-
-    @property
     def a(self):
         """The shared M-resident operand edge of the bilinear reading (``operands[1]``)."""
         v = self._contraction
@@ -488,33 +481,6 @@ class Fold(Stmt):
     def acc(self) -> str:
         """The primary channel's fold accumulator (``channels[0].acc``)."""
         return self.channels[0].acc
-
-    @property
-    def a_body(self) -> tuple[Stmt, ...]:
-        """The A operand's producing stmts — a singleton gmem ``Load``, or the inline cone node
-        flattened (a register-resident A: flash PV's ``P = exp(S − M)``)."""
-        return _operand_body(self.a)
-
-    @property
-    def b_body(self) -> tuple[Stmt, ...]:
-        """The primary B operand's producing stmts — symmetric to :attr:`a_body`."""
-        return _operand_body(self.b)
-
-    @property
-    def a_computed(self) -> bool:
-        """True when A is a computed register-resident operand (an inline node), not a gmem
-        ``Load`` — the mma tier reads it as a fragment, the scalar tier as the value."""
-        return not isinstance(self.a, Load)
-
-    @property
-    def a_name(self) -> str:
-        """The A operand's bound SSA name."""
-        return _operand_name(self.a)
-
-    @property
-    def b_name(self) -> str:
-        """The primary B operand's bound SSA name."""
-        return _operand_name(self.b)
 
     @property
     def b_trans(self) -> bool:
@@ -543,12 +509,12 @@ class Fold(Stmt):
         channels = tuple(channels)
         prim = channels[0]
         operands = (prim.b, a, *(ch.b for ch in channels[1:]))
-        a_name = _operand_name(a)
-        body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(_operand_name(prim.b), a_name))]
-        body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, _operand_name(ch.b))) for ch in channels[1:]]
+        a_name = operand_name(a)
+        body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(operand_name(prim.b), a_name))]
+        body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, operand_name(ch.b))) for ch in channels[1:]]
         accs = tuple(ch.acc for ch in channels)
         lift = Lambda(
-            params=(k_axis.name, *(_operand_name(e) for e in operands)),
+            params=(k_axis.name, *(operand_name(e) for e in operands)),
             body=Body(tuple(body)),
             results=tuple(f"{acc}__v" for acc in accs),
         )
@@ -598,7 +564,7 @@ class Fold(Stmt):
                 for b in s.nested():
                     yield from loads(b)
 
-        return tuple(dict.fromkeys(nm for e in self.operands for nm in loads(_operand_body(e))))
+        return tuple(dict.fromkeys(nm for e in self.operands for nm in loads(operand_body(e))))
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:
@@ -671,11 +637,13 @@ class Fold(Stmt):
     def lower(self) -> list[Stmt]:
         """Flatten to the loop-IR body the materializer expands — the synthesized reduce ``Loop``,
         or, at zero axes, the operand nests followed by the projection body (a ``Load`` edge is
-        the CUT TERMINAL: the seam value arrives materialized, so the "nest" is the load itself)."""
-        from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
+        the CUT TERMINAL: the seam value arrives materialized, so the "nest" is the load itself).
 
+        The ONE lowering spelling: every caller that consumes a body calls this method (there is no
+        free ``ops.lower`` wrapper duplicating it), which is also what keeps this module free of any
+        import back into :mod:`~emmy.compiler.ir.tile.ops`."""
         if self.axis is None:
-            prefix = [s for e in self.operands for s in ((e,) if isinstance(e, Load) else lower(e))]
+            prefix = [s for e in self.operands for s in operand_body(e)]
             return [*prefix, *self.body]
         return [self.loop]
 
@@ -704,7 +672,7 @@ class Fold(Stmt):
         return replace(self, lift=_loop_ir_fn(self.lift.params, Body.coerce(partial), self.lift.results))
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        raise AssertionError("Fold must be lowered (ops.lower) before render")
+        raise AssertionError("Fold must be lowered (Fold.lower) before render")
 
 
 def is_contraction(x) -> bool:
@@ -749,22 +717,23 @@ def stmt_axis_names(stmts) -> set[str]:
     return out
 
 
-def _operand_body(op) -> tuple[Stmt, ...]:
+def operand_body(op) -> tuple[Stmt, ...]:
     """An operand edge's producing stmts — the singleton gmem ``Load``, or the inline node
-    flattened."""
-    from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
+    flattened (:meth:`Fold.lower`). A free function, not a per-role ``a_body`` / ``b_body`` pair on
+    the node: an edge is an edge, and which ROLE it plays (A vs B) is the caller's reading of the
+    operand order, not a property of the edge itself."""
+    return (op,) if isinstance(op, Load) else tuple(op.lower())
 
-    return (op,) if isinstance(op, Load) else tuple(lower(op))
 
-
-def _operand_name(op) -> str:
-    """An operand edge's bound SSA name — the inline node's ``out``, or the ``Load``'s def."""
+def operand_name(op) -> str:
+    """An operand edge's bound SSA name — the inline node's ``out``, or the ``Load``'s def. Free
+    for the same reason as :func:`operand_body`."""
     return op.defines()[-1] if isinstance(op, Load) else op.out
 
 
 def _operand_result_names(op) -> tuple[str, ...]:
     """An operand edge's bound RESULT names — one per produced component. A single-valued edge
-    (a gmem ``Load``) is the 1-tuple of :func:`_operand_name`; a product fold / multi-channel
+    (a gmem ``Load``) is the 1-tuple of :func:`operand_name`; a product fold / multi-channel
     node exposes EVERY component, so a wrapping zero-axis fold's synthesized params bind one name per
     component (the 1q params-flattening fix: the geglu combine reads BOTH ``acc_g`` and
     ``acc_u`` from one source — before the flattening the second component reached the lambda
@@ -778,7 +747,7 @@ def _operand_result_names(op) -> tuple[str, ...]:
             named = tuple(r for r in op.lift.results if isinstance(r, str))
             return named if named else (op.out,)
         return tuple(op.combine.results)
-    return (_operand_name(op),)
+    return (operand_name(op),)
 
 
 @dataclass(frozen=True)
@@ -935,7 +904,7 @@ class TileOp(Op):
     Holds the structural-IR root ``op`` (a :class:`Fold` /
     :class:`Fold` / a bilinear ``Fold``, or ``None`` for a
     placeholder node) plus the schedule fields — not a pre-lowered body. The per-cell loop-IR
-    body is generated at materialize time by ``lower(op)``, and a bare reduction / contraction's
+    body is generated at materialize time by ``op.lower()``, and a bare reduction / contraction's
     output ``Write`` is glue generated there too (from ``place.grid`` + the graph node's output
     buffer; see ``lowering/kernel/010_materialize``). ``inputs`` / ``outputs`` come from the base
     :meth:`Op.populate_io` (graph edges) — no body walk.
@@ -995,6 +964,8 @@ __all__ = [
     "deep_defines",
     "deep_reads",
     "effect_tail",
+    "operand_body",
+    "operand_name",
     "refs_axis",
     "split_effects",
     "stmt_axis_names",

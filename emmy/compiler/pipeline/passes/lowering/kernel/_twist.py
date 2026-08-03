@@ -204,7 +204,7 @@ def _frag_contraction(
     atom = tile.atom
     shape = atom.shape
     nt = tile.regs[1]  # output n-atoms per step (warp order (FM, FN))
-    n_name, k_name = tile.axes[1].name, c.k_axis.name
+    n_name, k_name = tile.axes[1].name, c.axis.name
     b_trans = c.b_trans
     if b_slab is not None:
         ldm_b = b_ldm
@@ -554,14 +554,14 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # pipeline (``stage.alt``) additionally stages Q: a padded row-major smem tile filled once,
     # its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident registers
     # are what make the wide (64-key) block fit.
-    stage = ctx.sched.stage_of(red)
+    stage = ctx.sched.get("STAGE", red)
     alt = stage is not None and stage.alt
     is_tma = stage is not None and stage.transport == "tma"
     elem_bytes = atom.operand_dtype("b").nbytes
     kv_pad = 0 if is_tma else _PAD
-    k_swz = pick_swizzle_atom(qk.k_axis.extent.as_static(), elem_bytes)[1] if is_tma else "NONE"
+    k_swz = pick_swizzle_atom(qk.axis.extent.as_static(), elem_bytes)[1] if is_tma else "NONE"
     v_swz = pick_swizzle_atom(d_v, elem_bytes)[1] if is_tma else "NONE"
-    head_dim_s = qk.k_axis.extent.as_static()
+    head_dim_s = qk.axis.extent.as_static()
     q_ldm = head_dim_s + _PAD  # the staged-Q slab row stride (padded, like the cp.async K/V rows)
     # Gmem-direct fragment ROW strides, derived from each operand's load index + buffer shape
     # (``gmem_row_stride``) — NOT the trailing-axis extent: an un-transposed ``(B, S, H, D)``
@@ -569,7 +569,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # (the gemma layer-0 NaN). Canonical ``(batch…, row, dd)`` layouts derive the same values as
     # before (bit-identical). The schedule gate guarantees derivability.
     q_gmem_ldm = gmem_row_stride(qk.a, qk_t.axes[0].name, ctx.inputs)
-    k_gmem_ldm = gmem_row_stride(qk.b, qk_t.axes[1].name if qk.b_trans else qk.k_axis.name, ctx.inputs)
+    k_gmem_ldm = gmem_row_stride(qk.b, qk_t.axes[1].name if qk.b_trans else qk.axis.name, ctx.inputs)
     v_gmem_ldm = gmem_row_stride(pv.b, pv_t.axes[1].name if pv.b_trans else kv_axis.name, ctx.inputs)
     assert q_gmem_ldm and k_gmem_ldm and v_gmem_ldm, "warp twist: underivable gmem row stride (schedule-gate breach)"
 
@@ -596,7 +596,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # they load ONCE ahead of the stream — ``bk`` resident fragments per tile instead of
         # ``bk`` gmem fills per KV block. Same loads, same values: bit-identical to the in-loop form.
         q_guard = (qt.row_base, _ext(qk_t.axes[0])) if symbolic_q else None
-        q_kzero_bound = _ext(qk.k_axis) if qk.k_axis.extent.as_static() % atom.atom_k else None
+        q_kzero_bound = _ext(qk.axis) if qk.axis.extent.as_static() % atom.atom_k else None
         for s, qaf in enumerate(qt.qa):
             k_base = Literal(s * atom.atom_k, "int")
             q_kzero = (k_base, q_kzero_bound) if q_kzero_bound is not None else None
@@ -605,7 +605,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 LdmatrixLoad(
                     frag=qaf,
                     src_buffer=qk.a.input,
-                    src_index=_idx(qk.a, {qk_t.axes[0].name: qt.row_base, qk.k_axis.name: k_base}),
+                    src_index=_idx(qk.a, {qk_t.axes[0].name: qt.row_base, qk.axis.name: k_base}),
                     role="a",
                     ldm=q_gmem_ldm,
                     staged=False,
@@ -647,8 +647,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             # operand's own (absolute) coordinates (``col_bases`` / ``_abs_kv(kv0)``), so a slice
             # partial bounds at its absolute end, not the window-local one.
             qk_mask[qk_t.axes[1].name] = (kv0_var, abs_kv_end)
-        if qk.k_axis.extent.as_static() % atom.atom_k:
-            qk_mask[qk.k_axis.name] = (Literal(0, "int"), _ext(qk.k_axis))
+        if qk.axis.extent.as_static() % atom.atom_k:
+            qk_mask[qk.axis.name] = (Literal(0, "int"), _ext(qk.axis))
         stream += _frag_contraction(
             qk,
             qk_t,
@@ -661,7 +661,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             mask=qk_mask,
             b_slab="_k_smem" if staged else None,
             b_slot=k_slot,
-            b_ldm=qk.k_axis.extent.as_static() + kv_pad if staged else 0,
+            b_ldm=qk.axis.extent.as_static() + kv_pad if staged else 0,
             b_gmem_ldm=k_gmem_ldm,
             b_swizzle=k_swz if staged else "NONE",
             reg_depth=stage.reg_depth if staged else 1,
@@ -764,9 +764,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # overhanging P columns, so the staged kernel stays bit-identical to gmem-direct.
         kv_ext = kv_axis.extent if symbolic_k else kv_axis.extent.as_static()
         n_chunks = kv_axis.extent.ceil_div(bn) if symbolic_k else kv_axis.extent.as_static() // bn
-        head_dim = qk.k_axis.extent.as_static()
+        head_dim = qk.axis.extent.as_static()
         k_load, v_load = qk.b, pv.b
-        kn, kk, vn = qk_t.axes[1].name, qk.k_axis.name, pv_t.axes[1].name
+        kn, kk, vn = qk_t.axes[1].name, qk.axis.name, pv_t.axes[1].name
 
         def _key_row(k0: Expr, row) -> Expr:
             # cp.async has no OOB zero-fill — clamp a symbolic tail's key rows to the last valid
@@ -839,7 +839,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 slab="_q_smem",
                 shape=(q_rows, head_dim_s),
                 src=qk.a.input,
-                gmem_index=lambda row, col: _idx(qk.a, {qk_t.axes[0].name: _q_row(row), qk.k_axis.name: col}),
+                gmem_index=lambda row, col: _idx(qk.a, {qk_t.axes[0].name: _q_row(row), qk.axis.name: col}),
                 cta=cta,
                 elem_bytes=elem_bytes,
                 name="q",

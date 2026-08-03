@@ -281,7 +281,7 @@ def _node_stage(tile_op):
 
     op = tile_op.op
     node = op.operands[0] if getattr(op, "sources", ()) else op
-    return sched_of(tile_op).stage_of(node)
+    return sched_of(tile_op).get("STAGE", node)
 
 
 def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:

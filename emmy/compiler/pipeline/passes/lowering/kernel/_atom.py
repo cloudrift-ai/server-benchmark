@@ -39,7 +39,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Fold
+from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -471,7 +471,7 @@ def _sync_operands(
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
     of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
     contract the copy transports follow)."""
-    m_name, k_name = mn[0].axis.name, c.k_axis.name
+    m_name, k_name = mn[0].axis.name, c.axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = seam
 
@@ -483,7 +483,7 @@ def _sync_operands(
         sigma = Sigma({m_name: m_coord(row), k_name: BinaryExpr("+", k0, col)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
         stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
-        return stmts, c.a_name
+        return stmts, operand_name(c.a)
 
     prologue: list[Stmt] = []
     if stats:
@@ -516,8 +516,8 @@ def _sync_operands(
             tag=tag,
             buf=bl.input,
             shape=shape,
-            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis),
-            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis, tile_is_row=c.b_trans),
+            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis),
+            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans),
             swizzle=swizzles[1],
             trans=c.b_trans,
         )
@@ -539,7 +539,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     M / N overhang is fill-side clamped (cp.async) or box zero-filled (TMA); the discard stays with
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
-    k_axis = c.k_axis
+    k_axis = c.axis
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
@@ -679,7 +679,7 @@ def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = ()) -> frozenset[st
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
     block, so renaming one would emit a reference no enclosing loop defines."""
-    m, n, k_axis = tile.m, tile.n, c.k_axis
+    m, n, k_axis = tile.m, tile.n, c.axis
     prot = {k_axis.name}
     for s in (m, n):
         prot |= {s.block, s.unit}
@@ -706,7 +706,7 @@ def _scalar_drain(
     seam the mma drain rides."""
     (a_slab, b_slab), (row_base, col_base) = slabs, base
     off_a, off_b = offs
-    b_name, a_name = c.b_name, c.a_name
+    b_name, a_name = operand_name(c.b), operand_name(c.a)
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
@@ -767,7 +767,7 @@ class _AtomOps:
     def cone(self) -> tuple:
         """The A cone's ``(row-invariant prologue, per-cell body, bridged stats)`` — the node
         boundary, or the whole operand body when there is no cone to split."""
-        return self.seam if self.seam is not None else ((), tuple(self.c.a_body), ())
+        return self.seam if self.seam is not None else ((), operand_body(self.c.a), ())
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -890,8 +890,8 @@ class _MmaOps(_AtomOps):
         and transposed-B both have gmem-direct K zero-fill helpers)."""
         c = self.c
         atom, (m, n) = self.tile.atom, mn
-        k_axis = c.k_axis
-        assert not c.a_computed, (
+        k_axis = c.axis
+        assert isinstance(c.a, Load), (
             "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
         )
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
@@ -1045,18 +1045,18 @@ class _ScalarOps(_AtomOps):
         its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
         c = self.c
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
-        k_axis = c.k_axis
+        k_axis = c.axis
         m, n = mn
         prot = _scalar_protected(c, self.tile, self.lead)
-        b_name, a_name = c.b_name, c.a_name
+        b_name, a_name = operand_name(c.b), operand_name(c.a)
 
         def read_row(i):
             if m is None:
-                return copy_cell(c.a_body, Sigma({}), f"__ar{i}", prot)
-            return copy_cell(c.a_body, Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
+                return copy_cell(operand_body(c.a), Sigma({}), f"__ar{i}", prot)
+            return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell(c.b_body, Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
 
         def contract(i, j):
             v = f"{c.acc}__v__c{i}_{j}"

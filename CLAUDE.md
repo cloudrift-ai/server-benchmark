@@ -66,7 +66,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   validation reading, living with its one consumer in `passes/lowering/tile/_cut.py`) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
   flash's PV, whose `P` reads the running state — sits BELOW the seam lattice, a derived schedule site excluded
   from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
-  site. **A `Contraction` carries NO placement and NO schedule**: the node is pure algebra (`k_axis` + the `a`
+  site. **A `Contraction` carries NO placement and NO schedule**: the node is pure algebra (its reduce `axis` + the `a`
   edge + `Channel`s), so its identity (`==` / `hash` / `term_key`) is its algebra alone, and the placed reading
   the tensor-core/staged tiers require — the `(m, n)` `Side` geometry — is the SCHEDULE SLICE's:
   `TilePlan.at(m, n)` binds the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads to
@@ -102,7 +102,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   golden corpus was re-spelled mechanically). Dispatch reads the
   role/algebra off the node — `ops.head` reaches it through the projection `Map` and every scheduling FACT
   (`ops.axis_role`, the reduce `Axis`, the operand edges read off the node) is a stored param on it, so no
-  scheduling decision synthesizes a nest; `reduce_loop`/`ops.lower` are for callers that consume a body, and flatten
+  scheduling decision synthesizes a nest; `reduce_loop`/`Fold.lower` are for callers that consume a body, and flatten
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
   synthesized contraction node — a twisted monoid is a monoid,

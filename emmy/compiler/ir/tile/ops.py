@@ -6,20 +6,21 @@ source node). :func:`head` is the ONE accessor reaching that node through the pr
 and every structural fact a pass dispatches on — :func:`axis_role`, the reduce ``Axis``, the
 operand edges — is a STORED param on it (a fold's role is derived from those params, never
 stored). Reading a node fact off a SYNTHESIZED nest is the inversion this module exists to
-prevent: :func:`reduce_loop` / :func:`lower` are for callers that consume a body.
+prevent: :func:`reduce_loop` and :meth:`Fold.lower` are for callers that consume a body.
 
-This module is the thin lowering of any node back to its loop nest (:func:`lower` — a fold
-flattens through :attr:`Fold.loop`, a wrapping projection appends) plus the shared
-contraction-loop builder (:func:`contraction_loop`), the tree-path schedule accessor
-(:class:`Sched`), kernel identity (:func:`term_key`) and the worker sealing
-(:func:`seal_workers`). Stored trees are already resolved — a computed operand is an inline node
-on its edge, so there is no name-resolution step ahead of a lowering walk."""
+This module holds the structural reads over a node tree — the cone seam (:func:`cone_seam`), the
+iteration-space names (:func:`axis_names`) — plus the tree-path schedule accessor (:class:`Sched`),
+kernel identity (:func:`term_key`) and the worker sealing (:func:`seal_workers`). Lowering itself
+has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
+:attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
+resolved — a computed operand is an inline node on its edge, so there is no name-resolution step
+ahead of a lowering walk."""
 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
-from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
+from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail
 
@@ -37,7 +38,7 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     them (``sync_stat_fill``)."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    pro = tuple(lower(cone.operands[0]))
+    pro = tuple(cone.operands[0].lower())
     cell = tuple(cone.body)
     stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
@@ -135,12 +136,6 @@ class Sched:
         if ax is None:
             return None
         return (free[-2], ax.window.parent if ax.window is not None else ax)
-
-    def reduce_of(self, node):
-        return self.get("REDUCE", node)
-
-    def stage_of(self, node):
-        return self.get("STAGE", node)
 
 
 def sched_of(tile) -> Sched:
@@ -263,7 +258,7 @@ def reduce_plan(tile):
     node = head(tile.op)
     if node is None:
         return None
-    plan = sched_of(tile).reduce_of(node)
+    plan = sched_of(tile).get("REDUCE", node)
     return plan if plan is not None else ReducePlan()
 
 
@@ -288,42 +283,10 @@ def axis_role(op) -> AxisRole:
     return AxisRole.FREE
 
 
-def lower(op) -> list[Stmt]:
-    """Lower the lift wrapper to loop-IR stmts — the zero-axis ``Fold``'s body verbatim. The carriers are
-    already dissolved into loose fold ``Accum``\\ s (and the streaming ``merge`` for a twisted
-    carrier) at recognition, and the reduce ``Loop``\\ s carry their role/carrier annotations, so
-    one ``lower`` call emits the kernel's per-cell body with nothing left to expand. Stored trees
-    are already resolved (computed operands are inline nodes), so there is no name-inlining step;
-    a multi-channel contraction lowers through its own derived product loop
-    (:attr:`Fold.loop`)."""
-
-    if isinstance(op, Fold):
-        return op.lower()
-    raise TypeError(f"lower: expected a Fold, got {type(op).__name__}")
-
-
-def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
-    """Build the contraction (matmul) reduce ``Loop`` in the recognizable ``Accum``-in-``Loop``
-    form: expand each operand source's stmts (siblings), the ``⊗`` lift ``Assign``
-    (``fold.value = lift(operands…)``), and the additive ``fold`` ⊕ (its identity init is the
-    ``Loop``'s immediate-``Accum`` prelude — no explicit ``Init``). The loop is stamped
-    ``CONTRACTION`` — its algebra IS the body's additive ``Accum`` — so the
-    warp / cooperative tiers read the operands structurally off
-    the body. Shared by the flash score producer and the scalar register-tile contraction."""
-    body: list[Stmt] = []
-    names: list[str] = []
-    for ob in operand_bodies:
-        stmts = list(ob)
-        body += stmts
-        names.append(stmts[-1].defines()[-1])
-    body.append(Assign(name=fold.value, op=lift, args=tuple(names)))
-    body.append(fold)
-    return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION)
-
-
-# ``term_key`` (kernel identity) and ``pretty`` (the structural dump) moved to their own modules —
-# neither is a compute read. Re-exported here so the layer keeps ONE import surface.
-from emmy.compiler.ir.tile._dump import pretty, unplaced_slices  # noqa: E402
+# ``term_key`` (kernel identity) lives in its own module — it is not a compute read. Re-exported
+# here because ``ops.term_key`` is the layer's ONE public identity name (``op_cache_key`` /
+# ``Graph.structural_key`` reach it through this module). The structural dump is NOT re-exported:
+# it has no consumer outside ``_dump`` itself, so a shim here would serve nothing.
 from emmy.compiler.ir.tile._key import term_key  # noqa: E402
 
 __all__ = [
@@ -331,15 +294,11 @@ __all__ = [
     "axis_names",
     "axis_role",
     "cone_seam",
-    "contraction_loop",
     "head",
-    "lower",
-    "pretty",
     "projection_tail",
     "reduce_loop",
     "reduce_plan",
     "sched_of",
     "seal_workers",
     "term_key",
-    "unplaced_slices",
 ]

@@ -16,7 +16,8 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Channel, Fold
-from emmy.compiler.ir.tile.ops import axis_names, lower
+from emmy.compiler.ir.tile.ir import operand_body, operand_name
+from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
 
@@ -49,7 +50,7 @@ def _product() -> Fold:
 def test_product_node_derives_one_fold_loop_with_the_shared_a_lifted_once() -> None:
     """The fused group lowers to ONE derived loop — the shared A evaluated once, each further
     channel splicing its ``b → ⊗ → ⊕`` triple after it — never one loop per channel."""
-    stmts = lower(_product())
+    stmts = _product().lower()
     assert len(stmts) == 1 and isinstance(stmts[0], Loop)
     body = list(stmts[0].body)
     assert sum(1 for s in body if isinstance(s, Assign) and s.name == "xhat") == 1
@@ -66,10 +67,10 @@ def test_product_loop_folds_the_n_component_product_state() -> None:
 def test_arity_is_not_two_copies() -> None:
     """One node with two channels ≢ two independent contractions each computing their own A: the
     former lifts the shared A once (one loop), the latter lower to two loops with a cone each."""
-    fused = lower(Fold.projection(body=Body(()), operands=(_product(),)))
+    fused = Fold.projection(body=Body(()), operands=(_product(),)).lower()
     copies = Fold.projection(body=Body(()), operands=(_node(_cone(), ("acc_g", "Wg")), _node(_cone("xhat2"), ("acc_u", "Wu"))))
     assert len([s for s in fused if isinstance(s, Loop)]) == 1
-    assert len([s for s in lower(copies) if isinstance(s, Loop)]) == 2
+    assert len([s for s in copies.lower() if isinstance(s, Loop)]) == 2
 
 
 def test_defines_and_out_read_the_channels() -> None:
@@ -81,9 +82,9 @@ def test_defines_and_out_read_the_channels() -> None:
 
 def test_single_channel_node_is_the_plain_matmul() -> None:
     node = _node(Load(name="a_e", input="x", index=(Var("m"), Var("k"))), ("acc", "W"))
-    (loop,) = lower(node)
+    (loop,) = node.lower()
     assert [s.name for s in loop.body if isinstance(s, Accum)] == ["acc"]
-    assert not node.a_computed
+    assert isinstance(node.a, Load)
 
 
 # --- inline computed operands ------------------------------------------------------------------- #
@@ -91,9 +92,9 @@ def test_single_channel_node_is_the_plain_matmul() -> None:
 
 def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
     node = _product()
-    assert node.a_computed
-    assert node.a_body == tuple(lower(node.a))
-    assert node.a_name == "xhat"
+    assert not isinstance(node.a, Load)
+    assert operand_body(node.a) == tuple(node.a.lower())
+    assert operand_name(node.a) == "xhat"
 
 
 def test_the_node_walk_covers_inline_operand_edges() -> None:
@@ -108,7 +109,7 @@ def test_external_reads_cover_every_channel() -> None:
 def test_pretty_prints_the_channels_once() -> None:
     """One shared A edge, one branch per channel — the dump names the ``a`` / ``b`` edge labels the
     path codec spells, so a ``PLACE@a`` key can be matched to a dump line by eye."""
-    from emmy.compiler.ir.tile.ops import pretty
+    from emmy.compiler.ir.tile._dump import pretty
 
     text = "\n".join(pretty(_product()))
     assert text.count("operand[a]:") == 1  # the SHARED A edge — printed once, not once per channel
@@ -132,7 +133,7 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     ``_captured_values`` is the predicate for."""
     node = _node(_capturing_cone(), ("acc_g", "Wg"))
     fold = node
-    assert lower(fold)  # lowers fine — position in the enclosing body is what makes it legal
+    assert fold.lower()  # lowers fine — position in the enclosing body is what makes it legal
     cone = node.a
     # The output axes are the CALLER's placement — never on the node — so the cut supplies them
     # from ``TileOp.place`` alongside the term's own iteration names.

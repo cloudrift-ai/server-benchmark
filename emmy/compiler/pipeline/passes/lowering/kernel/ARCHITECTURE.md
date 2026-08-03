@@ -11,7 +11,7 @@ afterwards.
 `tile.op` through `_factorize`, which peels the projecting `Map`s and binds the leaf via the ONE root binder
 (`_factor._bind`) — a single pipeline whose form is read off the node's SCHEDULE (which axes are tiled), never a kernel
 kind, sealed through the one `grid_tile` finalizer (the article's "schedule separate from combine" thesis — the op tree
-+ `ir/tile/ops.lower` are shared across kinds; only the partition changes). Its arms are points of one
++ `ir/tile` `Fold.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
 
 - **OUTPUT-tiled** (a contraction — warp / register tile) — a `Fold` that reads as bilinear (`ir/tile/ir.py`; since
@@ -42,7 +42,7 @@ through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient c
 `Handle` wire). The reduce binder drives `_emit` off the `Fold` node to
 build its per-cell reduce loop, so a **nested** contraction (flash's Q@K / P@V) is reached AS A NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
-`ir/tile/ops.lower(node)` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
+`node.lower()` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
 register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
 `TilePlan`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
@@ -56,7 +56,7 @@ binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
 grid's fact and reach the per-cell rename from `_factor` as its own `lead`) from the **algebra the node owns** (what to
-contract: the `k_axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
+contract: the reduce `axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
 computed node itself, stored inline (flash PV's
 `P = exp(S − M)`, produced from an in-register score, not a gmem address); a projection
 is NEVER a node field, its one home is the wrapping `Map.body`. The edges share ONE type: the A/B asymmetry that is real

@@ -36,12 +36,16 @@ def completions_url(base_url):
 
 
 def build_model_args(base_url, model):
-    """Constructor args for lm-eval's `local-completions` model (untokenized requests, fixed concurrency)."""
+    """Constructor args for lm-eval's `local-completions` model (untokenized requests, fixed
+    concurrency). The explicit timeout overrides TemplateAPI's 300 s default: the emmy lane's
+    slower prefill pushed request tails past it, and the resulting tenacity retry storm died on
+    a closed aiohttp session ("Session is closed"), sinking the whole gate (2026-08-01)."""
     return {
         "base_url": completions_url(base_url),
         "model": model,
         "num_concurrent": NUM_CONCURRENT,
         "tokenized_requests": False,
+        "timeout": 900,
     }
 
 

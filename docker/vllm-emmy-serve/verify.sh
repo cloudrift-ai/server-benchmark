@@ -85,3 +85,36 @@ if [ "$before" != "$after" ]; then
     exit 1
 fi
 echo "[verify] PASS — served offline with zero new cubins ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack-hit boot}"
+
+# ---- the extra shapes ------------------------------------------------------------------
+# Each shape warm.sh baked a pack for must ALSO hit it, for the same reason the pinned shape
+# must: a shape whose pack silently misses re-pays the whole compiler frontend on every boot
+# of that lane, and nothing else in the pipeline would notice. Boot the image once per extra
+# shape with that shape's knobs and assert the hit. A miss here is a FAIL — the pack was baked,
+# so a miss means a key mismatch between warm and serve, not an un-warmed lane.
+for spec in ${SERVE_WARM_SHAPES:-}; do
+    IFS=':' read -r b p m lane <<<"$spec"
+    args=(-e "EMMY_GEN_DECODE_BUCKET=${b:-$SERVE_DECODE_BUCKET}")
+    [ -n "$p" ] && args+=(-e "EMMY_GEN_PREFILL_BUCKET=$p")
+    args+=(-e "SERVE_MAX_NUM_BATCHED_TOKENS=${m:-$SERVE_MAX_NUM_BATCHED_TOKENS}")
+    [ "${lane:-}" = "fm" ] && args+=(-e "EMMY_FAST_MATH=1")
+    echo "[verify] ---- extra shape $spec ----"
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 "${args[@]}" "$IMAGE" >/dev/null
+    for _ in $(seq 1 240); do
+        if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then break; fi
+        if [ -z "$(docker ps -q -f name=$NAME)" ]; then
+            echo "[verify] FAIL — server died at shape $spec:"; docker logs --tail 50 "$NAME"; exit 1
+        fi
+        sleep 10
+    done
+    curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] FAIL — shape $spec timed out"; docker logs --tail 50 "$NAME"; exit 1; }
+    shape_after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
+    if ! docker logs "$NAME" 2>&1 | grep "pack hit" >/dev/null; then
+        echo "[verify] FAIL — shape $spec baked a pack but its boot did not hit it:"
+        docker logs "$NAME" 2>&1 | grep -i "\[pack\]" | tail -5 || true
+        exit 1
+    fi
+    [ "$shape_after" = "$after" ] || { echo "[verify] FAIL — shape $spec compiled new cubins at runtime:"; diff <(echo "$after") <(echo "$shape_after") || true; exit 1; }
+    echo "[verify] PASS — shape $spec: pack-hit boot, zero new cubins"
+done

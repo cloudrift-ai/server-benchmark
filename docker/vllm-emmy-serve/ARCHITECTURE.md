@@ -83,6 +83,18 @@ compose healthcheck's own boot window (`start_period` 1200s + 180 × 10s probes 
 override a coin flip on host core count rather than a supported configuration. Recipes that need a width outside the
 warmed set should either re-warm the image at that width or expect the deploy to be killed as unhealthy.
 
+**So an image bakes a pack per serving shape it is meant to serve, not just the pinned one.** `SERVE_WARM_SHAPES` in
+`models/<slug>.env` lists the extra shapes as `<decode_bucket>:<prefill_bucket>:<max_num_batched_tokens>[:fm]` (an
+empty field keeps the pinned value); `warm.sh` runs the offline fixpoint once per shape and each writes its own pack
+directory, and `verify.sh` boots the baked image once per shape and asserts the pack HIT plus zero new cubins. Packs
+are a few MB, so the cost is warm time, not image size. The `:fm` suffix exists because the precision gate is part of
+the pack's environment key — a `EMMY_FAST_MATH=1` boot can never hit a standard-lane pack, and before that key
+existed it silently *did*, serving standard kernels under the fast-math label (fixed 2026-08-01). What this is worth:
+in the 2026-08-01 article reproduction 24 of 28 emmy benchmark cells missed the pack at ~12 min of frontend each,
+about 4.5 hours of the session — and every customer following the documented per-workload knobs pays the same on
+every boot. An extra shape that will not converge is reported loudly but does **not** fail the release: the pinned
+shape is the contract, and the degraded outcome for the others is a cold boot, not a broken image.
+
 ## Files
 
 - `models/<slug>.env` — the pinned serving config, one file per model (the filename IS the slug). Every value is cache-key-relevant; it must be **final before warming**
@@ -158,13 +170,14 @@ The full release session on a rented card (each step from the repo checkout; hos
 
    A pulled tag must come from the SAME commit you release from (the wheel is part of the cubin `source`); when in
    doubt, build on the rental. To pin a non-default tag for every later target: `make VLLM_EMMY_TAG=… <target>`.
-2. Preflight the toolchain with the **image's** nvcc — mount just the script; it needs no repo or GPU in-container
-   (the emmy wheel + nvcc are in the image; it hides CUDA and resolves goldens off-GPU):
+2. Preflight the toolchain with the **image's** nvcc — mount the `scripts/` directory (the preflight imports its
+   sibling `check_serving_goldens`, so a single-file mount dies on `ModuleNotFoundError`); it needs no repo root or
+   GPU in-container (the emmy wheel + nvcc are in the image; it hides CUDA and resolves goldens off-GPU):
 
    ```bash
-   docker run --rm --entrypoint bash -v "$PWD/scripts/preflight_serving_kernels.sh":/preflight.sh \
+   docker run --rm --entrypoint bash -v "$PWD/scripts":/scripts:ro \
        -e MODEL=google/gemma-4-12B-it -e ARCH=sm_120 \
-       cloudriftai/vllm-emmy:TAG /preflight.sh          # expect: <N> OK, 0 FAIL
+       cloudriftai/vllm-emmy:TAG /scripts/preflight_serving_kernels.sh   # expect: <N> OK, 0 FAIL
    ```
 
    The enumeration is this model's golden set (the same matcher as step 0), so the preflight covers exactly the

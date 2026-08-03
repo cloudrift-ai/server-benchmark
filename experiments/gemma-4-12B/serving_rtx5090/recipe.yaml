@@ -131,15 +131,31 @@ matrices:
     benchmark.max_concurrency: 4
     benchmark.num_prompts: 16
 
-  # ---- emmy lanes: the 256/256 c=64 point (decode bucket 64; chunk width 4096, no rider headroom — the
-  # measured c=64 trade: rider headroom buys −34 ms wave TTFT but −1.2% saturated tok/s) ----
+  # ---- emmy lanes: the 256/256 c=64 point (decode bucket 64 + the 2048 chunk quantum) ----
+  # The quantum joined this lane on 2026-08-02 after a same-box A/B at the article's single-wave
+  # TTFT protocol (--num-prompts 64), both precision lanes, every shape pack-hit:
+  #
+  #   lane        no quantum   + 2048 quantum
+  #   emmy std      2263 ms      1986 ms   (-12%)
+  #   emmy fm       1834 ms      1688 ms   (-8%)
+  #   stock         1512 ms
+  #
+  # It is not a KV-capacity effect, which was the leading hypothesis and is refuted: this
+  # workload needs 64 x 512 = 32,768 KV tokens and emmy has 43,499 without the quantum (65,232
+  # with it), so all 64 requests are resident either way. The gain is step structure — shorter
+  # chunk steps interleave first tokens sooner. The lane still trails stock by ~12% on TTFT;
+  # the residual is the plugin running a mixed prefill+decode step as two passes over disjoint
+  # rows where stock composes one fused varlen batch, which is a serving-stack change rather
+  # than a knob. TPOT at this point is already at parity (26.7 vs stock 26.9).
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
     engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
-    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2112 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=64", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64"]
+      engine.llm.vllm.extra_env:
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 256
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 64

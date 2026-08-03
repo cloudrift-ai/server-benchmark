@@ -35,12 +35,17 @@ command:
     SRC=$task_dir/llama.cpp
     GGUF=$task_dir/gemma-4-12B-it-f16.gguf
 
-    # Build llama.cpp from source (CUDA, native arch)
+    # Build llama.cpp from source (CUDA, native arch). Fail fast on a missing toolchain — a bare
+    # `cmake: command not found` buried in cmake.log cost a run to diagnose (2026-08-01).
+    command -v cmake >/dev/null || { echo "FATAL: cmake not on PATH — apt install cmake (see the repro skill's host prereqs)"; exit 1; }
     if [ ! -x "$$SRC/build/bin/llama-server" ]; then
       git clone --depth 1 https://github.com/ggml-org/llama.cpp $$SRC
       arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+      # Bound build parallelism by RAM: the CUDA fattn template instances run ~3 GB/job, and
+      # -j$(nproc) on a 32-core/60 GB box gets OOM-killed mid-build (2026-08-01, exit "Terminated").
+      jobs=$$(nproc); memg=$$(free -g | awk '/^Mem:/{print $$2}'); [ $$((memg / 3)) -lt $$jobs ] && jobs=$$((memg / 3))
       cmake -S $$SRC -B $$SRC/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$$arch -DLLAMA_CURL=ON > $task_dir/cmake.log 2>&1
-      cmake --build $$SRC/build --target llama-server -j $$(nproc) >> $task_dir/cmake.log 2>&1
+      cmake --build $$SRC/build --target llama-server -j $$jobs >> $task_dir/cmake.log 2>&1
     fi
     $$SRC/build/bin/llama-server --version 2>&1 | head -1 | tee $task_dir/build.txt
 

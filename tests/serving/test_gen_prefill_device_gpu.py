@@ -75,13 +75,24 @@ def test_run_device_sym_matches_host_path():
     for T in (24, 40, 56):
         hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
         attn = (rng.standard_normal((T, config.num_attention_heads * 16)) * 0.3).astype(np.float16)
+        # Snapshot each stage to host IMMEDIATELY: rider outputs (T=40) are views of the shared
+        # joint destinations (A3), which the NEXT rider call overwrites — the same consume-
+        # before-next-call discipline the vLLM plugin follows (attention reads q/k/v within the
+        # layer), made explicit here.
         q, k, v = runner.forward_layer_pre_device(0, torch.from_numpy(hidden).cuda())
+        q_np_dev, k_np_dev, v_np_dev = q.cpu().numpy(), k.cpu().numpy(), v.cpu().numpy()
+        q_ptr = q.data_ptr()
         out = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda())
+        out_np_dev = out.cpu().numpy()
         # Chained layer-to-layer handoff: feed the post output straight back as the next pre
-        # input (what the vLLM plugin does layer to layer). On the eager path the post result
-        # is a clone, so this exercises the upload path against the aliased backing.
+        # input (what the vLLM plugin does layer to layer).
         q2, _, _ = runner.forward_layer_pre_device(0, out)
-        cases.append((T, hidden, attn, q.cpu().numpy(), k.cpu().numpy(), v.cpu().numpy(), out.cpu().numpy(), q2.cpu().numpy()))
+        q2_np_dev = q2.cpu().numpy()
+        if T == 40:
+            # A3 pin: rider outputs are slices of persistent shared joint destinations — the
+            # handoff call above reused the same storage (no per-step allocation, no torch.cat).
+            assert q2.data_ptr() == q_ptr
+        cases.append((T, hidden, attn, q_np_dev, k_np_dev, v_np_dev, out_np_dev, q2_np_dev))
 
     for T, hidden, attn, q, k, v, out, q2 in cases:
         check = np.testing.assert_array_equal if T == 56 else close

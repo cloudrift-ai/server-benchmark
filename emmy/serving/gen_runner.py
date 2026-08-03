@@ -52,7 +52,7 @@ class _Program:
             out = self.program.outputs({"num_tokens": t})
         return [out[n] for n in self.output_names]
 
-    def run_device(self, arrays):
+    def run_device(self, arrays, out=None):
         """Device-resident captured-replay twin of :meth:`run` for the **static M=bucket** decode
         programs. ``arrays``: torch CUDA tensors aligned to ``input_names`` (each ``[T, …]``,
         ``T <= bucket``). Uploads the ``T`` real rows into the buffer prefix (device-to-device),
@@ -60,6 +60,14 @@ class _Program:
         sliced to ``T`` — no host round-trip. Stale prefix padding rows are safe (pre/post are
         per-token-independent; only ``[:T]`` is read out). All cupy work runs on torch's current
         stream so the upload, replay and output read stay ordered.
+
+        ``out`` (A3, eager only): a list of torch CUDA destination views aligned to
+        ``output_names``, each ``[T, …]``. The single protective copy lands directly in the
+        caller's destination (``dest.copy_(view)``) instead of a freshly allocated clone — the
+        rider path passes slices of one shared joint tensor, so the halves need no
+        ``torch.cat`` (which paid a second full copy plus the allocation). Illegal under an
+        outer capture: the captured branch returns raw views by design (dropping copies is the
+        point there), so ``out`` would silently change semantics — asserted against.
 
         Under an OUTER capture (vLLM's whole-step decode cudagraph — torch's current stream is
         capturing) the program's own graph machinery is illegal (nested stream capture aborts, and
@@ -77,6 +85,7 @@ class _Program:
             feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.upload_prefix_device(feed)
             if torch.cuda.is_current_stream_capturing():
+                assert out is None, "run_device(out=...) is an eager-path contract — captured steps return views"
                 self.program.run_once()
                 # Under the outer whole-step capture the output CLONES are dead weight: the graph's
                 # fixed kernel order guarantees every consumer (RoPE — in-place on the view is fine,
@@ -91,6 +100,10 @@ class _Program:
             self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
             self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
+            if out is not None:
+                for o, n in zip(out, self.output_names, strict=True):
+                    o.copy_(torch.from_dlpack(outs[n])[:t])
+                return out
             return [torch.from_dlpack(outs[n])[:t].clone() for n in self.output_names]
 
     def run_device_sym(self, arrays):
@@ -815,6 +828,24 @@ class EmmyGenRunner:
             rows = (rows.float() * scale).to(rows.dtype)
         return rows
 
+    def _rider_dest(self, name, rows, cols, ref):
+        """A3: the shared joint destination for a rider step's combined result — one persistent
+        tensor per ``(name, cols)`` sized ``[prefill_bucket + rider_width, cols]``, sliced to the
+        step's rows. Shared across layers: q/k/v are consumed within their layer (RoPE + paged
+        attention + KV-cache write), and the hidden dest's residual read happens at the NEXT
+        post's upload, before that post's rider halves overwrite the dest. Cached per column
+        width because gemma-4's global layers are wider than its sliding ones."""
+        import torch  # noqa: PLC0415
+
+        dests = getattr(self, "_rider_dests", None)
+        if dests is None:
+            dests = self._rider_dests = {}
+        cap = self._prefill_bucket + self.rider_width
+        d = dests.get((name, cols))
+        if d is None:
+            d = dests[(name, cols)] = torch.empty(cap, cols, dtype=ref.dtype, device=ref.device)
+        return d[:rows]
+
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
@@ -838,12 +869,16 @@ class EmmyGenRunner:
         if self._pre_prefill is not None and t == self._prefill_bucket:
             return tuple(self._pre_prefill[layer].run_device([hidden]))
         if 0 < t - self._prefill_bucket <= self.rider_width:
-            import torch  # noqa: PLC0415
-
+            # A3: both halves copy ONCE, straight into slices of one shared joint destination —
+            # no torch.cat (which allocated 3 tensors and re-copied every row per layer per
+            # rider step). Rider steps are eager by construction, run_device's out= contract.
             pb = self._prefill_bucket
-            head = self._pre_prefill[layer].run_device([hidden[:pb]])
-            tail = self._pre_decode[layer].run_device([hidden[pb:]])
-            return tuple(torch.cat(pair, dim=0) for pair in zip(head, tail, strict=True))
+            hd, nh, nkv, _ = self._attn_meta[layer]
+            widths = (nh * hd, nkv * hd, nkv * hd)
+            dests = [self._rider_dest(nm, t, w, hidden) for nm, w in zip(("q", "k", "v"), widths, strict=True)]
+            self._pre_prefill[layer].run_device([hidden[:pb]], out=[d[:pb] for d in dests])
+            self._pre_decode[layer].run_device([hidden[pb:]], out=[d[pb:] for d in dests])
+            return tuple(dests)
         self._warn_symbolic_decode(t)
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
@@ -859,12 +894,15 @@ class EmmyGenRunner:
         if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
         if 0 < t - self._prefill_bucket <= self.rider_width:
-            import torch  # noqa: PLC0415
-
+            # A3: same slice-bound joint destination as the pre path. The residual reads are
+            # ordered before the overwrites: each half's upload copies its residual slice into
+            # the program's own buffer before that half's kernels run, and the NEXT layer's
+            # post uploads its residual (this dest) before its own halves overwrite it.
             pb = self._prefill_bucket
-            head = self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]])[0]
-            tail = self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]])[0]
-            return torch.cat((head, tail), dim=0)
+            dest = self._rider_dest("hidden", t, residual.shape[1], residual)
+            self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[dest[:pb]])
+            self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[dest[pb:]])
+            return dest
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 
     def post_attn_backing(self, layer: int, rows: int):

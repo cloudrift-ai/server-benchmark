@@ -97,7 +97,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   tail chunk routed through it would pay the full-bucket grids for a sliver of real rows), a **rider-carrying full
   chunk step** (`prefill_bucket < num_tokens ≤ prefill_bucket + rider_width`, `rider_width` = the decode bucket when
   both twin families exist) **splits row-wise** across the chunk twin + the decode twin — correct because pre/post are
-  per-token-independent — which is what lets `--max-num-batched-tokens` default to `DYNAMIC_DIM_MAX + bucket`: a full
+  per-token-independent; since A3 both halves copy once into slices of one persistent shared joint destination
+  (`_rider_dest`, cached per column width for gemma-4's heterogeneous layers) instead of clone + `torch.cat`,
+  halving the rider seam bytes and removing the per-layer allocation churn — the caller must consume rider
+  outputs before its next rider call (attention does, within the layer) — which is what lets `--max-num-batched-tokens` default to `DYNAMIC_DIM_MAX + bucket`: a full
   chunk step keeps carrying its decode riders and the previous prompt's 1-token BOS tail instead of freezing every
   decoding request for the whole chunk and deferring first-token sampling (the measured c=4/c=8 TTFT structure), and
   every other width rides the SYMBOLIC programs' `run_device_sym`

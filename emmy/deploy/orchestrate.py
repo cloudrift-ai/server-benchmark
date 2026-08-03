@@ -25,6 +25,24 @@ from emmy.timing import (
 logger = logging.getLogger(__name__)
 
 
+async def _baked_hf_cache(run_cmd, image):
+    """The image's own HF cache directory, when it ships one — else None.
+
+    A prebuilt per-model serving image (``docker/vllm-emmy-serve/``) bakes the model
+    snapshot under its own HF_HOME and sets HF_HUB_OFFLINE=1, so it never reaches the
+    hub. That pair is the image declaring itself self-contained: pointing HF_HOME at a
+    host cache instead hides the baked snapshot while offline mode stays on, which makes
+    the download step fail outright — and would re-fetch the full weights if it didn't.
+    """
+    fmt = "{{range .Config.Env}}{{println .}}{{end}}"
+    # stream=False is what makes run_cmd return stdout rather than pass it through.
+    rc, out, _ = await run_cmd(f"docker image inspect {image} --format '{fmt}'", stream=False, timeout=60)
+    if rc != 0 or not out:
+        return None
+    env = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return env.get("HF_HOME") if env.get("HF_HUB_OFFLINE") == "1" else None
+
+
 async def run_deploy(
     run_cmd,
     write_file,
@@ -85,7 +103,10 @@ async def run_deploy(
     logger.info("Pulling images...")
     async with timer.ameasure(PHASE_IMAGE_PULL):
         rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=1800, log_output=True)
-    _, images_out, _ = await run_cmd("docker compose config --images", timeout=60)
+    # stream=False, else run_cmd passes stdout through and returns "" — which left this
+    # guard iterating an empty list, so a genuinely missing image fell through to the
+    # confusing later failure the check exists to replace.
+    _, images_out, _ = await run_cmd("docker compose config --images", stream=False, timeout=60)
     missing = []
     for image in images_out.split():
         rc_i, _, _ = await run_cmd(f"docker image inspect {image}", timeout=60)
@@ -97,22 +118,33 @@ async def run_deploy(
     if rc != 0:
         logger.warning("Image pull reported failures, but every image exists locally — proceeding (local copies may be stale)")
 
-    # Step 2: Download model via hf CLI in container
-    logger.info(f"Downloading model {model_name}...")
-    dl_cmd = (
-        f"docker run --rm"
-        f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
-        f" -e HF_HOME={model_dir}"
-        f" -v {model_dir}:{model_dir}"
-        f" --entrypoint bash"
-        f" {image}"
-        f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}'"
-    )
-    async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
-        rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
-    if rc != 0:
-        logger.error("Failed to download model")
-        return False
+    # Step 2: Model weights. An image that ships its own snapshot needs none of this —
+    # and cannot do it, since it runs offline by construction. Defer to its cache and
+    # rewrite the compose file so the service keeps the baked HF_HOME too (the first
+    # write had to happen before the pull, which is what `docker compose pull` reads).
+    baked_hf_home = await _baked_hf_cache(run_cmd, image)
+    if baked_hf_home:
+        logger.info(f"Image ships its model cache at {baked_hf_home} (offline) — skipping download")
+        compose_content = generate_compose(
+            recipe, model_dir, hf_token, num_instances=num_instances, gpu_device_ids=gpu_device_ids, baked_hf_home=baked_hf_home
+        )
+        await write_file("docker-compose.yaml", compose_content)
+    else:
+        logger.info(f"Downloading model {model_name}...")
+        dl_cmd = (
+            f"docker run --rm"
+            f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
+            f" -e HF_HOME={model_dir}"
+            f" -v {model_dir}:{model_dir}"
+            f" --entrypoint bash"
+            f" {image}"
+            f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}'"
+        )
+        async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
+            rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
+        if rc != 0:
+            logger.error("Failed to download model")
+            return False
 
     # Step 3: Clean up old containers
     logger.info("Cleaning up old containers...")

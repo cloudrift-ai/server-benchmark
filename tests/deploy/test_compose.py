@@ -222,6 +222,30 @@ def test_compose_empty_extra_env_produces_no_extra_lines(sample_config):
     assert len(env) == 2  # HUGGING_FACE_HUB_TOKEN and HF_HOME only
 
 
+# ── prebuilt-image HF cache ───────────────────────────────────────
+
+
+def test_compose_defers_to_baked_hf_home(sample_config):
+    """A prebuilt per-model image bakes the snapshot under its own HF_HOME and runs
+    offline; overriding HF_HOME would hide it, so the compose override is dropped."""
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1, baked_hf_home="/opt/emmy/hf")
+    parsed = yaml.safe_load(result)
+    env = parsed["services"]["vllm_0"]["environment"]
+    assert not any(e.startswith("HF_HOME=") for e in env)
+    assert "HUGGING_FACE_HUB_TOKEN=token" in env
+
+
+def test_compose_baked_hf_home_keeps_extra_env(sample_config):
+    """Dropping the HF_HOME override must not disturb the recipe's own env lines."""
+    sample_config["engine"]["llm"]["vllm"]["extra_env"] = {"EMMY_FAST_MATH": "1"}
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1, baked_hf_home="/opt/emmy/hf")
+    env = yaml.safe_load(result)["services"]["vllm_0"]["environment"]
+    assert "EMMY_FAST_MATH=1" in env
+    assert len(env) == 2  # token + the recipe's own var, no HF_HOME
+
+
 def test_compose_with_extra_env_parses_as_valid_yaml(sample_config):
     sample_config["engine"]["llm"]["vllm"]["extra_env"] = {"MY_VAR": "hello"}
     recipe = Recipe.from_dict(sample_config)

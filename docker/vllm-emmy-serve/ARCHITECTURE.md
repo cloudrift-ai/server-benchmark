@@ -105,12 +105,16 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
   `SERVE_*` config; keep in sync with `_generate_compile_args` in `emmy/commands/serve.py`).
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
-  the gated download happens here, once, via `HF_TOKEN`), `warm/cubin` (every compiled kernel), and `warm/pack`
+  the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`
   (the execution-plan pack the first boot writes).
 - `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` + `COPY warm/pack` to `/opt/emmy`, bakes
   the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
   on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
-  anything baked there.
+  anything baked there. The baked `HF_HOME` + `HF_HUB_OFFLINE=1` pair is also the signal `emmy deploy` reads
+  (`orchestrate._baked_hf_cache`): an image that declares itself self-contained keeps its own `HF_HOME` in the
+  generated compose and skips the download step entirely. Deploy used to override `HF_HOME` unconditionally, which
+  hid the baked snapshot while offline mode stayed on — the download then failed outright and no deploy from a
+  prebuilt image was possible.
 - `verify.sh` — cold-starts the **baked** image with no token, issues one completion, and diffs the cubin file set
   before/after: an empty diff proves 100% cache hit (zero compiles), and the offline boot proves zero downloads.
   When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass

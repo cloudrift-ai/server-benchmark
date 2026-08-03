@@ -124,6 +124,51 @@ MTP-stock d2/d3 **0.675 / 0.685**, MTP-Emmy d2/d3 **0.680 / 0.690**. All within 
 published conclusion that hybrid accumulation costs no task quality. The accumulation-error sweep reproduces the
 published table exactly (fp32 2.8e-7 at K=3840 → 8.1e-7 at K=32768; fp16 growing to 6.6e-3; hybrid flat 3.3e-4).
 
+## The 256/256 c=64 lane — what it is, and two hypotheses that died
+
+The lane loses TTFT to stock and this session did not close it. What it did do is eliminate every
+tunable explanation by measurement, which is worth more than another knob sweep.
+
+**Ruled out — KV admission.** The leading theory (emmy's footprint starves the KV pool, so requests
+queue) is false for this workload: it needs 64 x 512 = 32,768 KV tokens and emmy has **43,499**
+without the chunk quantum, **65,232** with it. All 64 requests are resident either way, and
+`peak_concurrent_requests` reads 64 on both engines.
+
+**Ruled out — prefill kernel speed.** In the fast-math lane the deployed m4096 kernels aggregate
+*faster* than eager (39,047 vs 44,275 us summed across all m4096 shapes). Emmy also WINS pure
+prefill: one 4096-token prompt at c=1 gives TTFT 471 vs stock 565.
+
+**Ruled out — chunk padding.** The hypothesis: emmy's prefill twin is a static fixed-width program,
+so partial chunks pay for padding stock's varlen batch does not; 64 prompts of 256 tokens make
+chunks partial. It predicted TTFT would keep improving as the quantum shrank toward the 256-token
+prompt length (zero padding). The prediction was registered in the recipe before running. Measured,
+fast-math lane, single-wave protocol:
+
+| quantum | 4096 | 2048 | 1024 | 512 | 256 | stock |
+|---|--:|--:|--:|--:|--:|--:|
+| TTFT ms | 1834 | **1688** | 2253 | 1798 | 2104 | **1512** |
+| tok/s | 1132 | 1122 | 1074 | 1106 | 1066 | 1198 |
+
+Zero-padding (256) lands mid-pack, so **padding is not the mechanism**. The ordering is also
+non-monotonic (512 beats 1024), and 1688 / 1798 / 1834 sit inside a ~9% band that single runs
+cannot separate — treat 2048 / 512 / 4096 as indistinguishable and 1024 as an outlier worth a
+repeat. 2048 stays the lane's setting (committed) because it is the best point measured and the
+one with a baked pack.
+
+**A confound found and removed mid-experiment.** The first pass at this sweep read 8707 ms at
+quantum 1024 and 57,605 ms at 512 — apparently damning. Both cells showed ~1100-1200 s init, i.e.
+they pack-missed and cold-compiled, and the golden file had merged matmul tiers at
+m8/32/64/192/256/2048/4096 and **nothing at 512 or 1024**. The sweep was measuring missing coverage,
+not the quantum. Seeding those two tiers (40 entries, commit `f84cc869`) moved the same cells to
+2253 and 1798 — a 3.9x and 32x correction, and a clean demonstration of what an unseeded width
+costs. Any future sweep over a new width must seed it first or it measures the wrong thing.
+
+**What is left** is the integration seam: the plugin runs a mixed prefill+decode step as two passes
+over disjoint rows where stock composes one fused varlen batch. That is consistent with the tail
+shape (emmy mean 1.6x median, p99/median ~5; stock mean ~= median, p99/median 2.96) and with emmy
+winning pure prefill while losing batched prefill. Closing it means owning attention and batch
+composition — a fork of the serving stack, not a knob or a kernel.
+
 ## Open leads (not fixed here)
 
 1. **std-lane greedy picks trail their own recorded goldens on the wide projections.** Live catalog sweep:
@@ -139,6 +184,48 @@ published table exactly (fp32 2.8e-7 at K=3840 → 8.1e-7 at K=32768; fp16 growi
    `emmy serve --generate` with `EMMY_FAST_MATH=1` served at **2.4–3.8 tok/s** (~18× slow) reading it; the same
    lane in docker (no prior) runs at full speed. Consider staleness-gating the prior on a feature/format version,
    or at minimum warning at boot when the checkpoint predates the current featurizer.
+
+## MTP: 13 of 15 blank table cells filled, and an assumption overturned
+
+The article's three depth tables carried em-dashes where the grid never measured. Filling them
+(all on baked shapes, so ~2 min boots) showed that one of the *reasons* cells were omitted is
+false. The recipe header asserted "depth 5 already loses under batching"; it was never measured,
+and it is wrong — depth 5 is the best depth for stock at c=4 and for emmy at c=8:
+
+| point | d3 | d5 |
+|---|--:|--:|
+| 4k/4k c=4, stock | 443.7 | **586.5** |
+| 4k/4k c=8, emmy | 496.0 | **632.7** |
+| 4k/4k c=8, stock | 716.5 | 728.2 |
+| 4k/4k c=4, emmy | **436.3** | 404.2 |
+
+The 8192/256 RAG row (absent from the grid entirely) is now measured at every depth: speculation
+helps stock (112.9 -> 129.3 at d5) and is roughly flat for emmy (102.5-113.9), consistent with a
+prefill-dominated point where speculation has little to offer.
+
+**Two cells stay blank deliberately**: 256/256 c=64 at depths 3 and 5 need decode buckets of 256
+and 384, and bucket 256 is the configuration that FAILS the GSM8K quality gate (0.0, empty
+completions). Publishing throughput for a config that emits garbage is worse than an em-dash.
+Re-opening them means warming bucket 256 and re-running the quality gate first — now more
+plausible than before, since the multi-shape bake can warm that width and the original failure was
+attributed to cold-resolved kernels at an unwarmed width.
+
+## Measurement-plumbing failures worth not repeating
+
+Three runs were invalidated by the harness rather than the code under test, all mine:
+
+1. **A leftover `vllm_0` container** from a previous suite held all 31.9 GB, so every bench worker
+   in the m512/m1024 seeding pass died on allocation. `emmy bench` does not tear the container down
+   when the run ends; chain scripts must `docker rm -f` between suites.
+2. **`nvcc` absent from a systemd unit's PATH** — the next attempt compiled nothing
+   (`RuntimeError: nvcc unavailable`). Transient units do not inherit an interactive PATH; export
+   `/usr/local/cuda/bin` explicitly.
+3. **A `head`-truncated log parsed as if complete**, which manufactured a 180x "win" on
+   `norm_gate_up.m1024.lin.cut` (6.4 us against eager 1154). The real number was 1302.2 (0.89x).
+   Parse the per-shape logs, never the console summary.
+
+A fourth, non-harness: the desktop session's ~1.2 GiB of VRAM put a util-0.97 boot 216 MiB short
+and killed a bake. At util 0.97 on a 32 GB card the desktop must stay under ~979 MiB.
 
 ## Harness fixes landed alongside (`4a2048fb`)
 

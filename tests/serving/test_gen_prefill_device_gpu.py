@@ -43,6 +43,21 @@ def test_run_device_sym_matches_host_path():
     assert runner.prefill_bucket == 32
     assert runner.rider_width == 16  # chunk twin + decode twin -> split coverage above the chunk
 
+    # A2 chaining pins: every family's post OUTPUT array aliases its pre twins' hidden-INPUT
+    # backing, so the next layer's pre upload self-copy-skips. Checked BEFORE any host-path
+    # call — the host ``rebind`` re-takes arena views at the call's shape, which unwinds the
+    # rewire for that program (correct, just copies again; serving never runs the host path).
+    def _ptr(prog, name):
+        return prog.program.arrays[name].data.ptr
+
+    assert _ptr(runner._post[0], runner._post[0].output_names[0]) == _ptr(runner._pre[0], runner._pre[0].input_names[0])
+    assert _ptr(runner._post_prefill[0], runner._post_prefill[0].output_names[0]) == _ptr(
+        runner._pre_prefill[0], runner._pre_prefill[0].input_names[0]
+    )
+    assert _ptr(runner._post_decode[0], runner._post_decode[0].output_names[0]) == _ptr(
+        runner._pre_decode[0], runner._pre_decode[0].input_names[0]
+    )
+
     rng = np.random.default_rng(0)
     H = config.hidden_size
     close = lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)  # noqa: E731
@@ -52,20 +67,29 @@ def test_run_device_sym_matches_host_path():
     # the chunk+decode twin row SPLIT (different kernels from the host's symbolic program,
     # so fp16 accumulation order may differ by rounding). T=56: past the rider window
     # (48 = pb + rider is still split) — the SYMBOLIC device regime, same program as the
-    # host path (bit-exact).
-    for T, check in (
-        (24, close),
-        (40, close),
-        (56, np.testing.assert_array_equal),
-    ):
+    # host path (bit-exact). TWO PHASES, all device calls first: the host ``rebind`` both
+    # unwinds the chaining rewire AND re-sizes the shared capacity buffers to each call's
+    # shape (a later device call at a larger T would then refuse on capacity) — serving never
+    # mixes the two paths on one runner, and neither may this test.
+    cases = []
+    for T in (24, 40, 56):
         hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
-        q_np, k_np, v_np = runner.forward_layer_pre(0, hidden)  # host rebind path
+        attn = (rng.standard_normal((T, config.num_attention_heads * 16)) * 0.3).astype(np.float16)
         q, k, v = runner.forward_layer_pre_device(0, torch.from_numpy(hidden).cuda())
+        out = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda())
+        # Chained layer-to-layer handoff: feed the post output straight back as the next pre
+        # input (what the vLLM plugin does layer to layer). On the eager path the post result
+        # is a clone, so this exercises the upload path against the aliased backing.
+        q2, _, _ = runner.forward_layer_pre_device(0, out)
+        cases.append((T, hidden, attn, q.cpu().numpy(), k.cpu().numpy(), v.cpu().numpy(), out.cpu().numpy(), q2.cpu().numpy()))
+
+    for T, hidden, attn, q, k, v, out, q2 in cases:
+        check = np.testing.assert_array_equal if T == 56 else close
+        q_np, k_np, v_np = runner.forward_layer_pre(0, hidden)  # host rebind path
         for host, dev in ((q_np, q), (k_np, k), (v_np, v)):
             assert dev.shape[0] == T
-            check(dev.cpu().numpy().astype(np.float32), host.astype(np.float32))
-
-        attn = (rng.standard_normal((T, config.num_attention_heads * 16)) * 0.3).astype(np.float16)
+            check(dev.astype(np.float32), host.astype(np.float32))
         out_np = runner.forward_layer_post(0, attn, hidden)
-        out = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda())
-        check(out.cpu().numpy().astype(np.float32), out_np.astype(np.float32))
+        check(out.astype(np.float32), out_np.astype(np.float32))
+        q2_np, _, _ = runner.forward_layer_pre(0, out)
+        check(q2.astype(np.float32), q2_np.astype(np.float32))

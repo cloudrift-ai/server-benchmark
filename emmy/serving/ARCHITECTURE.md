@@ -118,6 +118,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` (default off) lets
   vLLM's paged attention write directly into the M=1 post twin's `attn_out` input backing — the prefix upload
   self-copy-skips on pointer equality, dropping the per-layer D2D seam copy from the captured decode graph.
+  **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
+  integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
+  shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays
+  where the caller holds a VIEW of the post output — under an outer capture (the no-clone branch) — so the seam
+  copy node drops from captured over-bucket sym decode graphs; EAGER steps still clone (the pointer-breaker), so
+  the chunk-twin chaining activates only once chunk steps are whole-step captured (recorded future work). Safe
+  because the residual upload copies the previous hidden
+  out of the backing before post overwrites it, rider steps (all tiers alias one backing base) are eager by
+  construction with the chunk head CLONED before the decode tail runs, and the host `rebind` path — which
+  re-takes arena views and unwinds the rewire — is never mixed with the device path on one runner (the oracle
+  and the device server are separate runners; `tests/serving/test_gen_prefill_device_gpu.py` pins both the
+  pointers and the two-phase discipline).
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir

@@ -131,3 +131,39 @@ def test_run_device_aliased_input_backing_replays_live():
     g.replay()
     torch.cuda.synchronize()
     assert torch.allclose(out, ref2, rtol=1e-2, atol=1e-2)
+
+
+def test_run_device_sym_aliased_input_backing_replays_live():
+    """The A2 chained-seam primitive on the SYMBOLIC path: the caller writes INTO the sym
+    program's own input backing (what the previous layer's chained post output is, after A2),
+    so ``upload_prefix_device`` self-copy-skips — and a captured graph over ``run_device_sym``
+    must still replay LIVE through the aliased backing."""
+    pytest.importorskip("cupy")
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+
+    from emmy.serving.gen_runner import _compile_split
+
+    torch.manual_seed(0)
+    wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], ["input"], np.dtype("float16"), capacity=64)
+
+    ref_mod = wrapper.cuda()
+    t = 24
+    # The alias: a torch prefix view of the sym program's OWN capacity input buffer.
+    x = torch.from_dlpack(prog.program.arrays[prog.input_names[0]])[:t]
+    x.copy_(torch.randn(t, 16, dtype=torch.float16, device="cuda"))
+    warm = prog.run_device_sym([x])[0]  # uncaptured warmup at this width (self-copy-skips)
+    assert torch.allclose(warm, ref_mod(x), rtol=1e-2, atol=1e-2)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = prog.run_device_sym([x])[0]
+    x2 = torch.randn(t, 16, dtype=torch.float16, device="cuda")
+    ref2 = ref_mod(x2)
+    x.copy_(x2)
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.allclose(out, ref2, rtol=1e-2, atol=1e-2)

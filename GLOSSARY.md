@@ -156,8 +156,15 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 
 - **Autotuning** — Trying several valid GPU schedules, measuring them, and keeping evidence about which ones are
   fast.
-- **Fork** — A compiler decision point with several correct alternatives. Each branch can lead to a different
-  schedule.
+- **Fork** — The point where a rewrite rule returns several correct alternatives instead of one result, because which
+  is fastest depends on the hardware and shapes. Each alternative is identified by the knob values it pins. An
+  ordinary fork chooses settings within one kernel (tile size, staging, …); these are the forks the prior decides —
+  it ranks the options directly whenever no measurement already answers the choice.
+- **Structural fork** — A fork whose alternatives change which kernels exist — for example, keeping operations fused
+  in one kernel versus splitting them apart. The prior is never asked to rank these options. Instead, the compiler
+  compares the total estimated cost of each resulting kernel set; the prior contributes only per-kernel cost
+  estimates inside that comparison. Only a trusted online prior — trained and passing calibration — may supply those
+  estimates; on the offline prior or a quarantined online prior, the default kernel set is kept.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Candidate** — One complete set of choices that the compiler could use.
 - **Greedy selection** — Choosing the candidate that currently appears best without exploring alternatives during

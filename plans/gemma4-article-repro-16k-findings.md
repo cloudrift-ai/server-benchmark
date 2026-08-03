@@ -149,11 +149,17 @@ fast-math lane, single-wave protocol:
 | TTFT ms | 1834 | **1688** | 2253 | 1798 | 2104 | **1512** |
 | tok/s | 1132 | 1122 | 1074 | 1106 | 1066 | 1198 |
 
-Zero-padding (256) lands mid-pack, so **padding is not the mechanism**. The ordering is also
-non-monotonic (512 beats 1024), and 1688 / 1798 / 1834 sit inside a ~9% band that single runs
-cannot separate — treat 2048 / 512 / 4096 as indistinguishable and 1024 as an outlier worth a
-repeat. 2048 stays the lane's setting (committed) because it is the best point measured and the
-one with a baked pack.
+Zero-padding (256) lands mid-pack, so **padding is not the mechanism**. 2048 stays the lane's
+setting (committed).
+
+*Correction (2026-08-03).* This paragraph first called 1688 / 1798 / 1834 indistinguishable, "a
+~9% band single runs cannot separate". That was wrong, and a full re-measurement on a freshly
+re-baked image says so: every cell of this lane reproduced to **0.3-0.5%** (stock 1512 -> 1506,
+fm+quantum 1688 -> 1693, fm no-quantum 1834 -> 1830, std+quantum 1986 -> 1991, std no-quantum
+2263 -> 2274). At that reproducibility the sweep's spread is real signal — 2048 genuinely beats
+512, which genuinely beats 4096 — and 1024's 2253 is a genuine anomaly rather than variance,
+worth a look if anyone revisits this. The conclusion (padding refuted, 2048 best) is unchanged;
+only the stated confidence was miscalibrated, in the direction of under-claiming.
 
 **A confound found and removed mid-experiment.** The first pass at this sweep read 8707 ms at
 quantum 1024 and 57,605 ms at 512 — apparently damning. Both cells showed ~1100-1200 s init, i.e.
@@ -162,6 +168,14 @@ m8/32/64/192/256/2048/4096 and **nothing at 512 or 1024**. The sweep was measuri
 not the quantum. Seeding those two tiers (40 entries, commit `f84cc869`) moved the same cells to
 2253 and 1798 — a 3.9x and 32x correction, and a clean demonstration of what an unseeded width
 costs. Any future sweep over a new width must seed it first or it measures the wrong thing.
+
+**Does main's #453 close it? No — and for a structural reason.** The `no-clone run_device_sym`
+change (+10.6% req/s at c=64 in its own measurement) optimises the SYMBOLIC over-bucket decode
+path. Both c=64 lanes here are tuned so the decode width lands EXACTLY on its bucket (64 streams
+-> bucket 64; MTP depth-2's 64x3 -> bucket 192), which routes to the static twin and never touches
+`run_device_sym`. Re-measured on an image carrying it, the regular lane moved 0.3-0.5% (i.e. not at
+all) and the MTP cell 882.8 -> 870.1. The change is real; it simply does not apply to a lane whose
+bucket is chosen correctly, which is what the capture-ladder invariant already asks for.
 
 **What is left** is the integration seam: the plugin runs a mixed prefill+decode step as two passes
 over disjoint rows where stock composes one fused varlen batch. That is consistent with the tail

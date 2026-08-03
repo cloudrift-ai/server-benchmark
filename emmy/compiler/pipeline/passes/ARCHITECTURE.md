@@ -8,29 +8,48 @@ specializations**: it dispatches on the fold's DERIVED role (`Fold.role` — `FR
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
-## The tile SCHEDULER is currently absent
+## The tile scheduler is ONE generic row enumerator
 
-Schedule **enumeration and composition** — the step that decided a `TileOp`'s `place` (free axes → grid) and its
-`schedule` slices, and offered them as a fork — has been REMOVED to clear the ground for a demand-driven recursive
-enumerator over the stored term. What went: the whole-tree candidate paths (the contraction tile × stage × raster
-product, the reduce-partition families, the computed-A rows, the flash form fork, the pin-narrowing and demotion
-backtracking) and the rule that drove them.
+Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its
+`schedule` slices, and offers them as a fork — is a single pipeline in `lowering/tile/_schedule.py`, driven by the
+`020_schedule` rule. Every role runs the same four stages, and **no role builds `TileOp`s directly**:
 
-What did NOT go, and is the contract the replacement must meet:
+```
+sites  → path.family_sites(family, path.sites(term))   # the ONE node walk (ir/tile/path.py)
+values → per-family typed slices, keyed on the site's AxisRole (the domain is search/space.py's catalog)
+rows   → _assemble: spell each family ONCE, site-local, and DERIVE the one WORK inventory
+fork   → build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
+```
 
-- **Recognition** (`010_recognize`, `_flash`, `_softmax`, `_atomize`, `_cut`) — unchanged. It still emits an
-  UNMAPPED `TileOp` carrying the term and its free axes.
-- **The codec** — `TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` value grammars, the tree-path key codec
-  (`ir/tile/path.py`), the typed slices (`TilePlan` / `ReducePlan` / `Stage` in `ir/schedule.py`), the move catalog
-  (`search/space.py`), `seal_workers`, and every stored/golden spelling. Frozen; a scheduler that changes a
-  spelling is wrong by definition.
-- **The materializer** (`lowering/kernel/*`) and the split rewrite (`030_split_reduce`) — unchanged. They consume
-  the same schedule slices off the `TileOp`.
+Three properties this shape enforces, each of which the previous hand-written scheduler violated in at least one
+arm:
 
-Consequence: nothing today maps a `TileOp`, so every compile that reaches scheduling fails. Those tests are
-xfailed through `tests/xfail_registry.py`, whose node-id list is the acceptance obligation for the new scheduler —
-it shrinking to empty is the completion gate. Passages below that describe enumeration families and their legality
-gates are kept deliberately: they are the behavior to reproduce, not code that exists right now.
+- **`WORK` is derived, never a free variable.** The codec's dependency runs slice → work
+  (`plan_workers` → `derive_workers` → `ops.seal_workers`), so `_assemble` derives the inventory from the row's own
+  slices and DROPS the row when they disagree (a tiled scalar site and a coop reduce are co-representable only when
+  `par_m == 1 and par_n == coop`). That is also what makes `WORK` legal as the outermost fork level.
+- **Uniform key sets per fork, `""` a DECIDED empty.** The evidence pick's prefix-consistency depends on it: an
+  absent key reads as "free" and would let a gmem-direct leaf inherit a staged row's measurement.
+- **Enumeration produces a SET; ranking is the prior's job.** The only ordering obligation is that each family's
+  FIRST value is its conservative default (per-family, not global — the reduce tier deliberately leads with its
+  cooperative pick).
+
+A predicate has ONE home and ONE severity: each legality function returns its refusal, and the caller picks
+raise-vs-drop from whether the family is PINNED (an unpinned warp move with an indivisible K-step is dropped;
+the same defect in a pin raises). That is the bug class — "the pin says yes and the enumeration says no" — the
+single-home rule exists to prevent.
+
+**Still incomplete.** The enumerator schedules the roles whose operand edges are all MATERIALIZED: `FREE` (the
+pointwise cell + the register-strip term variant), `PLANAR` / `TWISTED` (the reduce partition), and `CONTRACTION`
+(the tile × stage × reduce × raster product over the scalar and warp tiers, with split-K routing through the
+structural `Fold ⊃ Fold` composition `030_split_reduce` consumes). Two families still yield NO rows, and
+`020_schedule` then leaves the term unmapped rather than guessing — the guardrail contract, `[]` and never a raise:
+
+- a **COMPUTED operand edge** (the fused norm→linear / gate⊗up cone and its sync compute-fill rows);
+- the **flash streaming pair** (the `TWISTED` warp / chain / split-KV forms).
+
+Those tests ride `tests/xfail_registry.py`, whose node-id list is the acceptance obligation for the rest — it
+shrinking to empty is the completion gate.
 
 ## No shape-specific pattern matching
 

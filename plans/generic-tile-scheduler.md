@@ -367,7 +367,29 @@ correctness budget is spent on churn.
 
 ## Status — what the tree actually holds
 
-The old scheduler is DELETED at `e27d8fdc`: `_schedule.py` (2458 lines), `_view.py` (96), `020_schedule.py` (109).
+**The SPIKE and the materialized-edge phases have LANDED.** `_schedule.py` is rebuilt in the `rows` / `values` /
+`_assemble` shape above (one `build_fork_tree`, levels `[WORK, *site keys, RASTER]`, `WORK` derived by `_assemble`),
+and `020_schedule.py` drives it. What it schedules today:
+
+| role | covered | gate that proved it |
+| --- | --- | --- |
+| `FREE` | pointwise cell + the register-strip TERM VARIANT (`TILE=f<r>`) | `pointwise` digest byte-identical to `e27d8fdc^` |
+| `PLANAR` / `TWISTED` | the reduce partition (heuristic option-0 + coop / ILP catalog + the matvec layout gate) | `rms_norm` / `softmax` / `reduce` / `matvec_coopt` / `flash_scalar` / `norm_linear_coop` digests byte-identical |
+| `CONTRACTION`, materialized edges | tile × stage × reduce × wspec × raster, scalar + warp tiers, split-K through the `Fold ⊃ Fold` composition | `matmul_scalar` / `_warp_tma` / `_warp_f16acc` / `_splitk` (+ `__partial`) / `_raster` / `_wspec` / `_dynm` digests byte-identical |
+
+52 ids left `tests/xfail_registry.py` (107 → 55); `make test` is green with zero XPASS. On a 4090 the CUDA suite went
+**414 → 121 failures with ZERO new ones** (measured against the same tree at `e829694c`, same box, same nvcc flags) —
+so the restored rows execute and match torch, not merely render. 33 of that delta came from migrating
+`test_reduce_coverage` / `test_matmul_coverage`'s reduce pins off the retired embedded-width spelling (`b32` →
+`REDUCE=coop` + `WORK=t32`), a step-7 grammar drift the xfail masking had been hiding.
+
+**Two families still yield NO rows**, and `020_schedule` leaves those terms unmapped rather than guessing (the
+guardrail contract): a COMPUTED operand edge (phase 4 — the fused cone, 16 GPU failures) and the flash streaming pair
+(phase 5, 83). The remaining 22 are whole-model / serving tests that contain both. Their digests therefore still
+differ from the `e27d8fdc^` baseline, and that difference is the remaining work — phases 4–6 below, plus P0's
+`qk.acc` repair, which the flash warp path needs before it has any obtainable baseline.
+
+The old scheduler was DELETED at `e27d8fdc`: `_schedule.py` (2458 lines), `_view.py` (96), `020_schedule.py` (109).
 Recognition, the codec, the materializer and `030_split_reduce` were untouched by that commit.
 
 **Every helper this plan reconstructs returns zero greps at HEAD** — `_tile_rows`, `_reduce_specs`,

@@ -106,11 +106,16 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
   synthesized contraction node — a twisted monoid is a monoid,
-  selected structurally not as a distinct kind). **The SCHEDULE step is currently absent** — candidate enumeration
-  and composition (free axes → grid, the per-node `TILE`/`REDUCE`/`STAGE`/`WORK`/`RASTER` fork) was removed to make
-  room for a generic recursive enumerator; recognition, the codec, the move catalog and the materializer are
-  untouched, nothing maps a `TileOp` today, and the compiles that reach scheduling are xfailed through
-  `tests/xfail_registry.py` →
+  selected structurally not as a distinct kind). The SCHEDULE step (`020_schedule` + `_schedule.py`) is ONE generic
+  row enumerator — sites (`ir/tile/path.py`) → per-family typed slices keyed on the site's `AxisRole` (the domain
+  is `search/space.py`'s move catalog) → rows that spell each family ONCE, site-local, and DERIVE the kernel's
+  single `WORK` inventory → one `build_fork_tree` over levels `[WORK, *site keys, RASTER]`. **Every role emits
+  rows; no role builds `TileOp`s directly.** It is INCOMPLETE: the materialized-edge roles are covered (`FREE` +
+  the register-strip term variant, `PLANAR`/`TWISTED`'s reduce partition, `CONTRACTION`'s tile × stage × reduce ×
+  raster product over the scalar and warp tiers with split-K), while a COMPUTED operand edge (the fused
+  norm→linear / gate⊗up cone) and the flash streaming pair still yield NO rows — `020` then leaves the term
+  unmapped (the guardrail contract: empty enumeration returns `[]`, never raises) and those compiles stay xfailed
+  through `tests/xfail_registry.py` →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 - **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
   [`GLOSSARY.md`](GLOSSARY.md)

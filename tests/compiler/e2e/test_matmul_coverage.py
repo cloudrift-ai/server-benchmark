@@ -153,10 +153,12 @@ def test_matmul_tile_coverage(variant, mode, monkeypatch):
 # (``r`` REG), or both, through the same ``_reduce`` materializer. A non-``g`` ``REDUCE`` pin was
 # silently ignored on a contraction before. (Output is per-cell here — composing the partition WITH
 # an output TILE is the remaining step.)
+# Pinned as ``(REDUCE, WORK, marker)`` — the step-7 value grammar puts the cooperative WIDTH in
+# the kernel-global ``WORK`` inventory, leaving ``REDUCE`` the site-local partition kind.
 _REDUCE_VARIANTS = {
-    "coop": ("b4", "__shfl"),  # 4 threads cooperatively fold K
-    "ilp": ("r4", None),  # 4 ILP register-accumulator chains, one thread
-    "coop_ilp": ("r2/b4", "__shfl"),  # composed: 2 ILP chains × 4 coop threads
+    "coop": ("coop", "t4", "__shfl"),  # 4 threads cooperatively fold K
+    "ilp": ("r4", "", None),  # 4 ILP register-accumulator chains, one thread
+    "coop_ilp": ("r2/coop", "t4", "__shfl"),  # composed: 2 ILP chains × 4 coop threads
 }
 
 
@@ -167,9 +169,11 @@ def test_matmul_reduce_partition(variant, monkeypatch):
     before): the K axis partitions across threads / register chains and still matches numpy."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
-    spec, marker = _REDUCE_VARIANTS[variant]
+    spec, work, marker = _REDUCE_VARIANTS[variant]
     monkeypatch.delenv("EMMY_TILE", raising=False)
     monkeypatch.setenv("EMMY_REDUCE", spec)
+    if work:
+        monkeypatch.setenv("EMMY_WORK", work)
     rng = np.random.default_rng(0)
     a = rng.standard_normal((1, _M, _K), dtype=np.float32)
     b = rng.standard_normal((_K, _N), dtype=np.float32)

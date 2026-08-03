@@ -6,7 +6,13 @@
    bilinear ``Fold`` term — with an **unmapped** placement (its parallel ``free`` axes). After this
    nothing downstream traffics in ``LoopOp``. The ``_flash`` / ``_softmax`` helpers hold the
    pattern matchers, ``_atomize`` the algebra→atom binding, ``_cut`` the placement cut.
-2. **Split** (``030_split_reduce``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)
+2. **Schedule** (``020_schedule``) — decide that op's ``place`` (free axes → grid) and its per-node
+   ``schedule`` slices, and offer them as a fork. ONE generic row enumerator (``_schedule``): the
+   site walk hands each family its typed candidate slices (keyed on the site's ``AxisRole``, the
+   domain being the ``search/space.py`` move catalog), the rows spell each family ONCE and DERIVE
+   the kernel's single ``WORK`` inventory, and one ``build_fork_tree`` turns them into the lazy
+   fork. Every role emits rows; none builds a ``TileOp`` directly.
+3. **Split** (``030_split_reduce``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)
    as a **graph rewrite**: a partial kernel reduces each CTA's slice of the reduce axis and
    either ``atomicAdd``\\ s its (additive) state into the output (one kernel) or writes it to a
    ``__partial`` workspace folded by a sibling finalize kernel (the carrier's
@@ -14,15 +20,13 @@
    flash ``(m, l, O)`` split-KV). The schedule carries the partition; the graph carries the
    kernel count, so ``lowering/kernel`` only ever sees single-launch kernels.
 
-**The SCHEDULE step between them is currently ABSENT.** Deciding a ``TileOp``'s ``place`` (free
-axes → grid) and its per-node ``schedule`` slices — enumerating the ``TILE`` / ``REDUCE`` /
-``STAGE`` / ``WORK`` / ``RASTER`` families and offering them as a fork — was removed to clear the
-ground for a demand-driven recursive enumerator over the stored term; the hand-written whole-tree
-paths it replaces (contraction rows, reduce partitions, computed-A rows, the flash form fork, pin
-narrowing, the demotion backtracking) went with it. Recognition above, the knob / path codec, the
-move catalog (``search/space.py``) and the whole ``lowering/kernel`` materializer are untouched and
-frozen — they are the contract the replacement meets. Until it lands nothing maps a ``TileOp``, so
-every compile that reaches scheduling fails; those tests ride ``tests/xfail_registry.py``.
+**The schedule step is INCOMPLETE.** It covers the roles whose operand edges are all MATERIALIZED —
+``FREE`` (pointwise + the register-strip term variant), ``PLANAR`` / ``TWISTED`` (the reduce
+partition) and ``CONTRACTION`` (scalar + warp tiers, staging, split-K, raster). A COMPUTED operand
+edge (the fused norm→linear / gate⊗up cone) and the flash streaming pair still yield NO rows, and
+``020`` then leaves the term unmapped — the guardrail contract, ``[]`` and never a raise. Those
+tests ride ``tests/xfail_registry.py``; the knob / path codec, the move catalog and the whole
+``lowering/kernel`` materializer are frozen — they are the contract the enumerator meets.
 
 Recognition reads algebraic structure; scheduling is geometry; materialization back to
 loop IR happens in ``lowering/kernel`` — so the tile passes work purely with algebra

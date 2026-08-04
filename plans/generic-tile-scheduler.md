@@ -612,10 +612,26 @@ Codec reminders for reading the annotations: thread `WORK` is `t<N>x<M>` and sca
 **n-then-m**; warp `WORK` `w<M>x<N>` and warp `TILE` `<atom>/f<FM>x<FN>` are m-then-n. `operand[a]` / `operand[b]`
 are the bilinear reading's edge labels — the `a` / `b` path segments `PLACE@a` is keyed against.
 
-**Each example carries a SITE TABLE** — the recursion's job for that shape, stated as `site → variables →
-constraints`.
-Read it as the contract phase 1 must satisfy: one row per site the walk visits, the families that site offers, and
-what bounds them (`↓` = inherited from the parent, `↑` = folded up to the kernel, otherwise site-local legality).
+**Each example carries a SITE TABLE** — the recursion's job for that shape, stated as
+`site → variables → constraints`. Read it as the contract phase 1 must satisfy: one row per site the walk visits,
+the free VARIABLES that site offers, and what bounds them (`↓` = inherited from the parent, `↑` = folded up to the
+kernel, otherwise site-local legality).
+
+The variables are named as they are registered, so a table row reads directly against the code:
+
+| variables | what they geometrize | registered as |
+| --- | --- | --- |
+| `par_n`, `par_m`, `reg_n`, `reg_m` | the scalar output tile | `_SCALAR_TILE_SPACE` — a `Space` in `search/space.py`, generated from `Bound(("par_n","par_m"), 1024)` |
+| `wm`, `wn`, `fm`, `fn`, `bk` | the warp output tile | `_WARP_TILE_SPACE` — generated from `Bound(("wm","wn"), 1024, coeff=32)` and `Bound(("fm","fn"), 32)` |
+| `atom` | the mma atom kind | CATEGORICAL — `ATOM_REGISTRY`, filtered by operand dtype. Not a `Space` dimension: `domain.py` knows integers and products only |
+| `depth`, `transport`, `ring`, `reg_depth`, `alt` | the operand pipeline | the `Stage` fields, spelled `d<depth>/<transport>[/ring][/alt][/p<reg_depth>]`; LISTED (`stage_moves`) — nothing multiplicative couples them |
+| `cta`, `coop`, `reg`, `finalize`, `coop_transposed` | the reduce partition | the `ReducePlan.of` fields, spelled `g<cta>[k\|a]` / `b<coop>[t]` / `r<reg>`; LISTED (`splitk_moves`, `coop_reduce_moves`) |
+| `group`, `orient` | the launch order | the `Raster` fields, spelled `g<orient><group>`; LISTED (`raster_moves`) |
+| `warps_m`, `key_atoms`, `q_tiles` | the flash geometry | LISTED (`twisted_warp_moves`) — a candidate for a `Space` once its bounds are stated |
+| `units`, `producer` | the `WORK` inventory | NOT enumerated — derived (`derive_inventory`) and folded up |
+
+A LISTED family is not a lesser one: `domain.py`'s scope is integer dimensions coupled by PRODUCTS, so a family whose
+values are a hand-kept ladder stays a list until a real multiplicative bound appears. Phase 1 registers nothing new.
 
 The rule the tables make concrete, and the one reason the walk must recurse:
 
@@ -668,7 +684,7 @@ wrapper always did, and it means the FREE and PLANAR emitters compose at depth 0
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` (depth 0) | — (it has an operand, so no strip `TILE`); owns the free-axis → grid mapping | — |
-| `Fold[a1] planar` — bare `REDUCE` | the reduce partition: serial, `coop` at `t<n>`, `g<n>[k\|a]` cta split, `r<n>` register fold | coop ≤ the CTA cap and a power of two; `g<n>` needs a STATIC extent; the option-0 heuristic declines coop past the free-cell cap. `↑` the coop width IS the kernel's `WORK` inventory |
+| `Fold[a1] planar` — bare `REDUCE` | `coop ∈ {4,8,…,512}`, `reg ∈ {2,4}`, `cta ∈ {2,4,8}`, `finalize ∈ {kernel, atomic}`, `coop_transposed ∈ {F,T}` — serial (all 1) is option-0 | `coop` a power of two ≤ the CTA cap; `cta` needs a STATIC extent and divides it; `finalize=atomic` only when the projection distributes; `coop_transposed` needs a k-major B and a 32-divisible inner free axis. `↑` `coop` IS the kernel's `WORK` inventory |
 | same fold — bare `STAGE` | nothing to stage: the operand is INLINE in the lift, not an edge | decided empty |
 | `RASTER` | — | CONTRACTION-scoped; a pure reduce offers no rows |
 
@@ -734,7 +750,7 @@ depths, dispatched by `ops.axis_role` (FREE outer, PLANAR inner) with no wrapper
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` | — (has an operand); its lift is the per-cell normalize, its `stores` the sweep | the sweep's lane mapping follows the inner fold's `↑` inventory — one CTA, one row |
-| `Fold[a1] planar` — bare `REDUCE` | as example 1 | as example 1 |
+| `Fold[a1] planar` — bare `REDUCE` | `coop`, `reg`, `cta`, `finalize`, `coop_transposed` — as example 1 | as example 1 |
 | same fold — bare `STAGE` | the SHARED-ROW slab: the input read in BOTH the inner lift and the outer sweep | offered only over a cooperative partition AND a contraction tail (`has_contraction_tail`); declines here, so decided empty |
 
 
@@ -794,7 +810,7 @@ storage, not just of the algebra.
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` | — | — |
-| `Fold[a1] twisted` — bare `REDUCE` | the SAME partition catalog as examples 1–2 | identical legality; the twist changes the combine's cost, not any move's legality — no twisted-only value exists |
+| `Fold[a1] twisted` — bare `REDUCE` | `coop`, `reg`, `cta`, `finalize`, `coop_transposed` — the SAME variables as examples 1–2 | identical legality; the twist changes the combine's COST, not any variable's domain — there is no twisted-only dimension |
 | same fold — bare `STAGE` | shared-row slab | declines (no contraction tail) |
 
 
@@ -844,12 +860,12 @@ Depth-0 is the tile × stage × reduce × raster product. The warp sibling famil
 
 | site | enumerate | constraints |
 | --- | --- | --- |
-| root `Fold[a2] contraction` — bare `TILE` | scalar `f<fn>[x<fm>]` (`par × reg`) OR warp `<atom>/f<FM>x<FN>[/k<bk>]` per eligible atom | `par_n·par_m ≤ 1024`; `FM·FN ≤ 32`; `32·WM·WN ≤ 1024`; the atom's operand dtype must match A/B; `bk·atom_k` divides a static K. `↑` the tile's units ARE the `WORK` inventory |
-| same node — bare `STAGE` | `d<depth>` × `sync` \| `cp` \| `tma` × `ring` — **the transport for BOTH materialized operands**, since neither is a site | the resolver returns the largest slab that fits `ctx.max_dynamic_smem`, or declines to gmem-direct; TMA needs `ctx.has_tma`; `↓` warp `TILE` only |
-| same node — bare `REDUCE` | `""` (serial K) or `g<n>[k\|a]` split-K | `n` divides K; atomic finalize only when the projection distributes; `↑` no coop beside a warp inventory |
-| kernel-global `WORK` | — DERIVED, never chosen | `↑` folded from the slices; the row drops if they disagree |
-| root-global `RASTER` | `""`, `gm<G>`, `gn<G>` | static grid only |
-| `+p<np>` producer band (in `WORK`) | aux warp counts | warp `TILE` + a RESOLVED TMA `STAGE`, no cross-CTA split, `block_threads + 32·np ≤ 1024` |
+| root `Fold[a2] contraction` — bare `TILE` | SCALAR `par_n ∈ {16,32,64}`, `par_m ∈ {8,16}`, `reg_n ∈ {1,2,4}`, `reg_m ∈ {1,2,4,6,8,10,12,14,26}` — OR WARP `atom`, `wm`, `wn ∈ {1,2,4,8,16}`, `fm`, `fn ∈ {1,2,4,8}`, `bk ∈ {1,2,4,8}` | `par_n·par_m ≤ 1024`; `32·wm·wn ≤ 1024`; `fm·fn ≤ 32`; `atom`'s operand dtype must match A/B; `bk·atom.atom_k` divides a static K. `↑` `(par_n, par_m)` / `(wm, wn)` ARE the `WORK` inventory |
+| same node — bare `STAGE` | `depth ∈ {1,2,3,4}`, `transport ∈ {sync, cp, tma}`, `ring ∈ {F,T}`, `reg_depth ∈ {1,2}` — **the transport for BOTH materialized operands**, since neither is a site | the resolver returns the largest slab fitting `ctx.max_dynamic_smem`, or declines to gmem-direct; `transport=tma` needs `ctx.has_tma`; `reg_depth=2` is `↓` warp-only |
+| same node — bare `REDUCE` | `cta ∈ {2,4,8}`, `finalize ∈ {kernel, atomic}` (serial = option-0) | `cta` divides K; `finalize=atomic` only when the projection distributes; `↑` no `coop` beside a warp inventory |
+| kernel-global `WORK` | `units`, `producer` — DERIVED, never chosen | `↑` folded from the slices; the combination drops if they disagree |
+| root-global `RASTER` | `group ∈ {8}`, `orient = m` (flat = option-0; `orient = n` is pin-only until a shape wants it) | 2-D-tiled static grid only |
+| the producer band (`WORK`'s `+p<np>`) | `producer ∈ {1, 2}` | warp `TILE` + a RESOLVED `transport=tma`, no `cta` split, `block_threads + 32·producer ≤ 1024`, `32·producer ≤ block_threads` |
 | `operand[a]`, `operand[b]` | **NOT SITES** — gmem `Load`s | their transport is the parent's `STAGE`, above |
 
 
@@ -888,7 +904,7 @@ construction** — and post-collapse that means the same emitter ran, not that t
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` (the epilogue) | — (has an operand) | its lift becomes the per-fragment `RegEpilogue`; a data-dependent gather in it `↓` REFUSES the child's warp tier — the one cross-level constraint this shape adds |
-| child `Fold[a2] contraction` | example 4's four families verbatim | example 4's constraints, plus the `↓` epilogue filter above |
+| child `Fold[a2] contraction` | example 4's variables verbatim — `par_*`/`reg_*` or `atom`,`wm`,`wn`,`fm`,`fn`,`bk`; `depth`,`transport`,`ring`,`reg_depth`; `cta`,`finalize`; `group`,`orient` | example 4's constraints, plus the `↓` epilogue filter above |
 
 
 ### 6. SwiGLU — the fused gate⊗up edge, where sharing IS arity
@@ -963,13 +979,13 @@ union the rows". `PLACE@cone` and `PLACE@a` are the segment spellings the collap
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` (silu ⊗ multiply) | — (has an operand) | the ⊗-combine defers into the finalize under split-K |
-| `Fold[k] contraction` — bare `TILE` | warp tiles only | **no scalar tier**: the fill is a compute fill, which only the warp realizer has; `↑` its units are the inventory both channels share |
-| same node — bare `STAGE` | `d1` (compute fill) and the asymmetric B-only ring `d2` | `↓` a COMPUTED `a` edge ⇒ `sync` compute-fill is MANDATORY; multi-channel (gate⊗up) ⇒ no `cp.async` / TMA at all; no producer band (the band assumes a copying producer) |
-| same node — bare `REDUCE` | `""` or `g<n>k` — the redundant-statistic split | single-channel for the classic arm; multi-channel splits with per-channel raw `C` partials; the k-invariant prologue is RECOMPUTED per partition, so only the small-free decode shapes admit it |
+| `Fold[k] contraction` — bare `TILE` | `atom`, `wm`, `wn`, `fm`, `fn`, `bk` — the WARP variables ONLY | `par_*` / `reg_*` are not offered: the fill is a compute fill, which only the warp realizer has. Same bounds as example 4; `↑` `(wm, wn)` is the inventory BOTH channels share |
+| same node — bare `STAGE` | `depth ∈ {1, 2}` only — `transport` is not free, `ring` / `reg_depth` / `alt` unoffered | `↓` a COMPUTED `a` edge PINS `transport = sync` (the compute fill); `depth=2` is the asymmetric B-only prefetch ring; multi-channel (gate⊗up) forbids `cp` / `tma` outright; `producer` unoffered — the band assumes a COPYING producer |
+| same node — bare `REDUCE` | `cta ∈ {2,4,8}`, `finalize = kernel` — the redundant-statistic split | `finalize=atomic` unoffered; single-channel for the classic arm, multi-channel splits with per-channel raw `C` partials; the k-invariant prologue is RECOMPUTED per partition, so only small-free decode shapes admit it |
 | `operand[a]` — the cone, `PLACE@a` | **IS a site**: the seam is real, so cut legality is spelled here | edge iff closed — structural, by construction |
-| the cone's statistic fold — `REDUCE@<axis>` / `STAGE@<axis>` | its OWN reduce partition + the row-invariant prologue's placement (hoisted above the K loop, published by a CTA barrier) | `↓` `coop` binds to the parent's inventory (`ReducePlan.parse` requires a THREAD kind and `coop == work.count`) — the codec-imposed limit, unchanged by this plan |
+| the cone's statistic fold — `REDUCE@<axis>` / `STAGE@<axis>` | its OWN `coop`, `reg`, `cta` — plus the prologue's placement (hoisted above the K loop, published by a CTA barrier) | `↓` `coop` binds to the parent's inventory: `ReducePlan.parse` requires a THREAD kind and `coop == work.count`, so beside a WARP parent the statistic's coop band is unspellable — the codec-imposed limit, unchanged by this plan |
 | `operand[b0]`, `operand[b1]` | **NOT SITES** — gmem `Load`s, one per channel | plain-copy fills issued BEFORE the compute fill, under the parent's `STAGE` |
-| root-global `RASTER` | `""`, `gm<G>`, `gn<G>` | load-bearing here: B re-streams per M-tile row, so the grouped order's L2 reuse is real (`gn8` measured −8% on the gemma gate_up edge, 5090) |
+| root-global `RASTER` | `group`, `orient` | load-bearing here: B re-streams per M-tile row, so the grouped order's L2 reuse is real (`orient=n, group=8` measured −8% on the gemma gate_up edge, 5090) |
 
 
 ### 7. Pure pointwise — a zero-axis fold with no operands
@@ -1006,7 +1022,7 @@ are also zero-axis folds with no operands. They are separated only by `ops.axis_
 
 | site | enumerate | constraints |
 | --- | --- | --- |
-| root `Fold free` (no operands, depth 1) — bare `TILE` | the register-STRIP ratios `f<r>` — the one case a zero-axis fold is a `TILE` site | `r` divides the inner free extent statically; the cell body must be stateless (no sweep, no carried state); a warp codec is illegal on a pointwise cell |
+| root `Fold free` (no operands, depth 1) — bare `TILE` | `reg_n ∈ {2, 4}` — the register STRIP ratio, spelled `f<reg_n>` (per-cell `""` is option-0). The one case a zero-axis fold is a `TILE` site | `reg_n` divides the inner free extent STATICALLY; the cell body must be stateless (no sweep, no carried state); `atom` / `wm` / `wn` are illegal on a pointwise cell. The ladder stops at 4 — `f8` regressed both pointwise goldens on register pressure |
 | everything else | — | no axis ⇒ no `REDUCE`/`STAGE`; no operands ⇒ no child sites; `RASTER` is CONTRACTION-scoped |
 
 
@@ -1122,10 +1138,10 @@ block, no flash-specific pin escape.
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` (the `divide(O, l)` projection) | — (has an operand) | — |
-| `Fold[kv] twisted` — `REDUCE@<kv>` | the form family: warp streaming / chain / per-cell / coop, plus `g<n>k` split-KV | `g<n>`: kv divides, slices block-whole; coop: a `t<n>` band within the CTA; `↑` ONE inventory shared by every site below |
-| same fold — `STAGE` | `d<depth>` × `cp` \| `tma` × `ring` \| `alt` for the K/V stream | slab fits smem; `↓` warp forms only — the chain and per-cell forms stage nothing |
-| `operand` — the hoisted QK score, `TILE@dd` | **IS a site**: its own warp fragment tile + `bk` | `↓` bn = WN·FN·atom_n must equal the parent's streaming key block — the kv-block ↔ score-tile coupling, the archetypal downward constraint; `WN = 1` |
-| the DERIVED PV contraction, `TILE@pj` | its own fragment tile (`f<FM>x<FN>[/k<bk>]`), including the f16-acc atom sibling | `↓` shares the QK child's warp map by construction; `Site.derived` ⇒ EXCLUDED from `PLACE` (it lies below the seam lattice, so it is not a cut) |
+| `Fold[kv] twisted` — `REDUCE@<kv>` | the FORM (warp streaming / chain / per-cell / coop), plus `cta ∈ {2,4,8}`, `coop`, `finalize = kernel` for split-KV | `cta` divides kv and slices block-whole; `finalize=atomic` is ILLEGAL (the twisted `e^{Δm}` rescale cannot be an atomic); `↑` ONE inventory shared by every site below |
+| same fold — `STAGE` | `depth ∈ {1,2,3,4}`, `transport ∈ {cp, tma}`, `ring`, `alt` for the K/V stream | slab fits smem; `↓` warp forms only — the chain and per-cell forms stage nothing |
+| `operand` — the hoisted QK score, `TILE@dd` | **IS a site**: `atom`, `wm` (the `warps_m` of the flash grid), `wn`, `fm` (`q_tiles`), `fn` (`key_atoms`), `bk` | `↓` `wn·fn·atom.atom_n` must EQUAL the parent's streaming key block — the kv-block ↔ score-tile coupling, the archetypal downward constraint, and a `Bound(op="==")` if this family is ever generated; `wn = 1` |
+| the DERIVED PV contraction, `TILE@pj` | its own `atom` (including the f16-acc sibling), `fm`, `fn`, `bk` | `↓` `wm` / `wn` are NOT free here — it shares the QK child's warp map by construction; `Site.derived` ⇒ EXCLUDED from `PLACE` (it lies below the seam lattice, so it is not a cut) |
 | `Q`, `K`, `V` loads | **NOT SITES** | transport is the parent fold's `STAGE` |
 
 

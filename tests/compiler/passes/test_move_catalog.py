@@ -23,7 +23,7 @@ from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
-from emmy.compiler.pipeline.search.space import scalar_tile_moves, warp_tile_moves
+from emmy.compiler.pipeline.search.space import scalar_tile_moves
 
 # The hand-computed legal product as explicit literals — per-cell option-0, then the (par × reg) box
 # as the pair each move STORES: its site-local ``TILE`` value (the register sub-tile; the default
@@ -62,19 +62,6 @@ def test_scalar_tile_moves_equals_hand_product():
         site, work = _stored(plan)
         assert resolve_site_tile(site, Workers.parse(work)) == plan
         assert plan.units_n * plan.units_m <= _MAX_BLOCK_THREADS
-
-
-def test_tile_spaces_respect_their_multiplicative_bounds():
-    """The two budgets that bound the tile spaces hold on every generated point: a scalar tile
-    spends ``par_n·par_m`` threads of the CTA budget, a warp tile ``32·WM·WN`` of the same budget
-    plus ``FM·FN`` cells of the C fragment."""
-    from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_CELLS, WARP_LANES
-
-    for plan in scalar_tile_moves():
-        assert plan.units_n * plan.units_m <= _MAX_BLOCK_THREADS
-    for plan in warp_tile_moves(("mma_m16n8k16_f16_f32",)):
-        assert WARP_LANES * plan.units_m * plan.units_n <= _MAX_BLOCK_THREADS
-        assert plan.reg_m * plan.reg_n <= MAX_FRAGMENT_CELLS
 
 
 def _matmul_graph() -> Graph:

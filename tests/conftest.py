@@ -186,13 +186,15 @@ _CUDA_CLI_GROUP = "cuda-cli"
 def pytest_collection_modifyitems(config, items):
     import heapq
 
-    # Step 0: xfail everything the removed tile scheduler took down with it. Non-strict, so a
-    # partially restored scheduler reports XPASS (``-rX``) instead of failing — the registry
-    # shrinking to empty is the completion gate. See ``tests/xfail_registry.py``.
+    # Step 0: xfail everything the removed tile scheduler took down with it. STRICT — an id that
+    # starts passing fails the run and must be deleted from the registry, so "the file shrinking to
+    # empty is the completion gate" is enforced rather than aspirational. The consequence modules
+    # additionally do not run. See ``tests/xfail_registry.py``.
     for it in items:
-        reason = scheduling_xfail(it.nodeid)
-        if reason is not None:
-            it.add_marker(pytest.mark.xfail(reason=reason, strict=False))
+        entry = scheduling_xfail(it.nodeid)
+        if entry is not None:
+            reason, run = entry
+            it.add_marker(pytest.mark.xfail(reason=reason, strict=True, run=run))
 
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for

@@ -21,10 +21,17 @@ What remains below is what the enumerator still declines to schedule, leaving th
   independent obligation.
 
 The registry is deliberately a LIST OF EXACT NODE IDS, not a module or path glob: each id is a
-concrete acceptance obligation for the new scheduler, and the marker is non-strict-XPASS-visible
-(``strict=False`` so a partially restored scheduler does not turn recovery into a failure, but
-``-rX`` lists every id that has started passing). Porting a phase means deleting the ids it
-restores — the file shrinking to empty IS the completion gate.
+concrete acceptance obligation for the new scheduler. The marker is **strict**: an id that starts
+passing FAILS the run and must be deleted from this list, which is what makes "the file shrinking to
+empty IS the completion gate" an enforced claim rather than an aspiration. Genuinely flaky or
+card-conditional expectations do not belong here — they stay inline ``@pytest.mark.xfail(strict=False)``
+at their own test, where the reason can name the condition.
+
+The :data:`CONSEQUENCE_MODULES` ids additionally do not RUN (``run=False``). They fail only because
+their graph CONTAINS one of the two gaps above, so executing them re-measures a known-missing
+enumerator at a cost of minutes per suite (the drift gate alone spends ~190 s reaching its xfail).
+The trade is deliberate: a consequence id can no longer report XPASS, so recovery is signalled by
+the PRIMARY ids — which is where it should be signalled anyway.
 
 Two limits to know about:
 
@@ -257,6 +264,26 @@ NODEIDS: frozenset[str] = frozenset(
 )
 
 
-def scheduling_xfail(nodeid: str) -> str | None:
-    """The xfail reason for ``nodeid``, or ``None`` if it is not a scheduler casualty."""
-    return REASON if nodeid in NODEIDS else None
+#: Modules whose registered ids fail only as CONSEQUENCES of the two enumerator gaps — whole-model
+#: and serving end-to-end graphs, and the golden drift gate. None is an independent obligation, so
+#: they are marked ``run=False``: the expectation is recorded, the minutes are not spent.
+CONSEQUENCE_MODULES: frozenset[str] = frozenset(
+    {
+        "tests/compiler/e2e/test_block.py",
+        "tests/compiler/ir/test_dynamic_shapes.py",
+        "tests/compiler/test_golden_drift_gate.py",
+        "tests/serving/test_attention_split_gpu.py",
+        "tests/serving/test_gen_prefill_device_gpu.py",
+        "tests/serving/test_gen_runner_gpu.py",
+        "tests/serving/test_generate_gpu.py",
+        "tests/serving/test_runner_batched_gpu.py",
+    }
+)
+
+
+def scheduling_xfail(nodeid: str) -> tuple[str, bool] | None:
+    """``(reason, run)`` for ``nodeid``, or ``None`` if it is not a scheduler casualty. ``run`` is
+    ``False`` for the consequence modules — record the expectation, skip the execution."""
+    if nodeid not in NODEIDS:
+        return None
+    return REASON, nodeid.split("::")[0] not in CONSEQUENCE_MODULES

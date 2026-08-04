@@ -1826,7 +1826,12 @@ _MASKED_CASES = {
     "symbolic_k_cp": (_CP_KNOBS, (), [16, 31, 130, 512, 700], _make_symbolic_k),
     # Transposed-B (A @ Bᵀ, K contiguous) symbolic-K: the mma zero-fills the masked-K tail through
     # the (n,k)-swapped trans helper. Gmem-direct (no STAGE), M/N are tile divisors so only K masks.
-    "symbolic_k_trans": ({"TILE": _MASK_WARP}, (), [16, 31, 130, 512, 700], _make_transposed_symbolic_k),
+    "symbolic_k_trans": (
+        {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1]},
+        (),
+        [16, 31, 130, 512, 700],
+        _make_transposed_symbolic_k,
+    ),
     # Routed through the SCALAR tier (no WARP pin): the batched-warp masked-M+K fragment codegen
     # at runtime is a separate gap, so accuracy rides the scalar tier (the structure render
     # reaches the warp tier — see ``test_batched_symbolic_mk_reaches_warp``).

@@ -41,6 +41,7 @@ from emmy.compiler.ir.tile.ir import (
     deep_defines,
     deep_reads,
     effect_tail,
+    is_contraction,
     operand_name,
 )
 from emmy.compiler.ir.tile.ops import axis_names
@@ -98,22 +99,16 @@ def _card_has_routing(gpu_name, cap) -> bool:
 
 
 def _has_computed_a(node) -> bool:
-    """Whether the tree carries a computed-A :class:`Contraction` — an ``a`` edge stored INLINE
-    (a cone node) rather than materialized (a gmem ``Load``). The structural twin of the offer
-    signal ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers
-    enumerate the ``sync`` compute-fill): at the routing consult no offer exists yet, but the
-    routing reference tree does, and the edge inhabitant is the same fact."""
-    if isinstance(node, Contraction) and not isinstance(node.a, Load):
+    """Whether the tree carries a computed-A contraction — an ``a`` edge stored INLINE (a cone
+    node) rather than materialized (a gmem ``Load``). The structural twin of the offer signal
+    ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers enumerate
+    the ``sync`` compute-fill): at the routing consult no offer exists yet, but the routing
+    reference tree does, and the edge inhabitant is the same fact."""
+    if is_contraction(node) and not isinstance(node.a, Load):
         return True
-    if isinstance(node, Map):
-        children = node.sources
-    elif isinstance(node, Fold):
-        children = node.operands
-    elif isinstance(node, Contraction):
-        children = (node.a, *(ch.b for ch in node.channels))
-    else:
+    if not isinstance(node, Fold):
         return False
-    return any(_has_computed_a(c) for c in children if isinstance(c, (Map, Fold, Contraction)))
+    return any(_has_computed_a(e) for e in node.operands)
 
 
 def _routing_entry(ctx, knobs: dict, root=None):

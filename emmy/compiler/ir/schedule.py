@@ -752,6 +752,14 @@ class TilePlan:
         placement where the geometry is actually read."""
         return dc_replace(self, axes=(m_axis, n_axis))
 
+    def placed_on(self, place: Placement) -> TilePlan:
+        """This tile bound to the ROOT contraction's ``(m, n)`` — :attr:`Placement.root_mn` — and
+        left UNPLACED when the grid cannot supply the pair. The scheduler binds through here at
+        option assembly and :meth:`Sched.tile_of` re-derives the same pair for a reader that takes
+        the slice off the tree, so the depth-1 rule and its degradation are stated ONCE."""
+        mn = place.root_mn
+        return self.at(*mn) if mn is not None else self
+
     # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
     # unit / register counts) + the bound block/unit var names (the original m/n names live in the
     # operand indices, so the bound axes take a fresh ``_b`` / ``_u`` suffix). --------------------- #
@@ -968,6 +976,15 @@ class Placement:
         ``grid`` (so a scheduled placement built directly with its grid, as the flash / strip /
         split options do, still reads mapped)."""
         return self.mapped or bool(self.grid)
+
+    @property
+    def root_mn(self) -> tuple[Axis, Axis] | None:
+        """The ``(m, n)`` output axes a ROOT (depth-1) contraction tiles — the grid's TRAILING
+        pair — or ``None`` when the grid cannot supply them (unmapped, or rank < 2: the caller's
+        untiled path). The one home of the depth-1 rule; :meth:`TilePlan.placed_on` and
+        :meth:`Sched._mn_for` both read it."""
+        grid = tuple(self.grid)
+        return (grid[-2], grid[-1]) if len(grid) >= 2 else None
 
     def on_grid(self) -> Placement:
         """The scalar-tier mapping: bind every free axis onto the thread grid."""

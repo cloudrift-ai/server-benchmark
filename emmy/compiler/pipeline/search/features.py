@@ -66,33 +66,36 @@ def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -
     return feats
 
 
-def _row_workers(knobs: dict):
-    """The row's ``WORK`` inventory (:class:`~emmy.compiler.ir.schedule.Workers`), or ``None``
-    — absent / empty / unparseable. The site-value grammar factors the worker geometry out of the
-    TILE/REDUCE values into this one entry, so every geometry featurizer resolves its parse against
-    it; a row without one is the per-cell / pure-reduce form (its launch geometry is derived)."""
-    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
+def _row_slices(knobs: dict):
+    """This row's schedule families as TYPED slices, through the ONE resolver the scheduler
+    materializes with (``schedule.resolve_row``): the ``WORK`` inventory, plus the ``TILE`` and
+    ``REDUCE`` values resolved against it (which is what disambiguates the
+    empty-TILE-beside-thread-WORK unit-register tile from the coop tier). Family keys are read
+    axis-aware, so flash's ``TILE@dd`` resolves like a bare one — the pooled read; a per-node
+    featurizer loops the keys itself.
 
-    try:
-        return Workers.parse(str(knobs.get("WORK") or ""))
-    except ValueError:
-        return None
+    A featurizer only ever sees a REALIZED row, where an absent family IS its decided empty
+    (``stamp_schedule_families`` fills in every family the passes declined) — so absent reads as
+    ``""`` here, not as the unset-pin ``None`` the enumeration reads it as. A malformed value
+    RAISES, one severity: the two callers below each choose what to do about it."""
+    from emmy.compiler.ir.schedule import resolve_row  # noqa: PLC0415
+
+    def val(family: str) -> str:
+        v = family_value(knobs, family)
+        return "" if v is None else str(v)
+
+    return resolve_row(str(knobs.get("WORK") or ""), val("TILE"), val("STAGE"), val("REDUCE"))
 
 
 def _tile_plan(knobs: dict):
-    """The row's parsed :class:`TilePlan` — the SITE value resolved against the row's ``WORK``
-    inventory (``schedule.resolve_site_tile``, which disambiguates the
-    empty-TILE-beside-thread-WORK unit-register tile from the coop tier via the REDUCE value) —
-    or ``None`` for the per-cell / untiled forms and unparseable values."""
-    from emmy.compiler.ir.schedule import resolve_site_tile  # noqa: PLC0415
-
-    spec = family_value(knobs, "TILE")
-    red = family_value(knobs, "REDUCE")
+    """The row's resolved :class:`TilePlan` (:func:`_row_slices`), or ``None`` for the per-cell /
+    untiled forms and for a row that does not resolve — a geometry featurizer degrades to "no tile
+    geometry" rather than failing a whole fit on one unreadable row."""
     try:
-        plan = resolve_site_tile(str(spec) if spec is not None else None, _row_workers(knobs), str(red) if red is not None else "")
+        plan = _row_slices(knobs).tile
     except ValueError:
         return None
-    return plan if plan.is_tiled else None
+    return plan if plan is not None and plan.is_tiled else None
 
 
 def mma_atom(knobs: dict) -> str | None:
@@ -375,11 +378,9 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     tier's one decomposition knob, decided in the ``_schedule`` helper). The ``serial``
     remainder is derived from the schedule (``ceil(extent / parallel)``), not a knob, so it
     stays the ``_Decomp`` default."""
-    from emmy.compiler.ir.schedule import ReducePlan  # noqa: PLC0415
-
     spec = family_value(knobs, "REDUCE")
     try:
-        plan = ReducePlan.parse(str(spec) if spec is not None else None, _row_workers(knobs))
+        plan = _row_slices(knobs).reduce
     except ValueError:
         if spec and "coop" in str(spec):
             # A site ``coop`` value with no WORK inventory in the dict (a fork PREFIX row cut

@@ -114,19 +114,20 @@ class Sched:
         THREE site shapes, one rule each — the geometry the retired ``Contraction`` node used to
         carry as stamped fields, now read off the tree instead:
 
-        - the ROOT contraction tiles the kernel grid's trailing pair;
+        - the ROOT contraction tiles the kernel grid's trailing pair (``Placement.root_mn``, the
+          same reading the scheduler binds through at option assembly);
         - a DERIVED site (flash's synthesized PV) tiles the placement's trailing free pair — it
           lives below the seam lattice, so the grid says nothing about it;
         - any other nested contraction (flash's hoisted QK edge) takes the free m axis and its
           PARENT fold's axis as n — read through a slice partial's window PARENT, so the view
           carries the pre-slice geometry the fragment clamps were built against.
         """
-        free, grid = tuple(self.place.free), tuple(self.place.grid)
+        free = tuple(self.place.free)
         site = next((s for s in self._all_sites() if s.node is node), None)
         if site is None:
             return None
         if site.depth == 1:
-            return (grid[-2], grid[-1]) if len(grid) >= 2 else None
+            return self.place.root_mn
         if len(free) < 2:
             return None
         if site.derived:

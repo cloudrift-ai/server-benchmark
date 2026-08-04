@@ -61,7 +61,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.algebra import M
-from emmy.compiler.ir.stmt.passes import projection_distributes
+from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Fold, Placement, ReducePlan, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction
 from emmy.compiler.ir.tile.ops import Sched, axis_role, head, projection_tail, scheduled
@@ -157,13 +157,6 @@ def _projection(op) -> Body:
     return op.lift.body if isinstance(op, Fold) and op.axis is None and op.operands else Body(())
 
 
-def _placed(place: Placement, plan: TilePlan) -> TilePlan:
-    """``plan`` bound to the ROOT contraction's ``(m, n)`` — the kernel grid's trailing pair, the
-    same rule ``ops.Sched._mn_for`` states for a depth-1 site (so a reader never re-derives it)."""
-    grid = tuple(place.grid)
-    return plan.at(grid[-2], grid[-1]) if len(grid) >= 2 else plan
-
-
 def _site_keys(op) -> tuple[str, str, str]:
     """The ``(TILE, STAGE, REDUCE)`` key triple for this kernel's primary node — bare when there is
     no node to key on (a pure pointwise cell / the raw-loop-IR escape). A node that is not a site of
@@ -194,18 +187,6 @@ def _inner_free(place: Placement) -> Axis | None:
     return next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
 
 
-def _has_contraction_tail(stmts) -> bool:
-    """The post-reduce tail contracts over a NEW free axis — a ``Loop`` whose body holds an inner
-    reduce ``Loop``. This is the fused norm→linear shape, distinguished from a plain softmax tail
-    (a single sweep over the SAME axis). ``Body.accums`` supplies the deep accumulator scan."""
-    for s in stmts:
-        if isinstance(s, Loop) and any(isinstance(c, Loop) and Body(c.body).accums for c in s.body):
-            return True
-        if any(_has_contraction_tail(list(b)) for b in s.nested()):
-            return True
-    return False
-
-
 def _matvec_b_kstride(kernel, carrier, place) -> int | None:
     """B's gmem stride along the reduce axis at the per-cell MATVEC tier, or ``None`` when no
     layout gate applies. A contraction demoted to PLANAR carries BOTH a vector operand (a load
@@ -232,7 +213,7 @@ def _shared_row_buf(carrier_loads, tail, grid_vars, raxis: Axis, inputs) -> str 
     """The input buffer reused as a CTA-shared ROW across the reduce + a contraction tail — read in
     the carrier at ``(grid…, raxis)`` AND in the tail at ``(grid…, k)``, its trailing dim the
     (static) reduce extent. ``None`` ⇒ no eligible operand (stay gmem-direct)."""
-    if not raxis.extent.is_static or not _has_contraction_tail(tail):
+    if not raxis.extent.is_static or not has_contraction_tail(tail):
         return None
     n = len(grid_vars)
     carrier_bufs = {
@@ -254,7 +235,7 @@ def _row_stage(tile, place) -> Stage | None:
     if red is None:
         return None
     tail = projection_tail(tile)
-    if not _has_contraction_tail(tail):
+    if not has_contraction_tail(tail):
         return None
     grid_vars = tuple(Var(a.name) for a in place.grid)
     carrier_loads = [ld for ld in _node_loads(red) if ld.is_scalar]
@@ -377,7 +358,7 @@ def _reduce_specs(kernel, place, ctx) -> list[ReducePlan]:
     extent = _hint_extent(carrier.axis)
     free = _free_cells(place)
     tail = projection_tail(kernel)
-    coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
+    coop = _pick_coop(extent, free, has_tail=has_contraction_tail(tail))
     # The layout gate (WS5, the cold-poison hardening): at the matvec tier the coop bands are only
     # coalesced on ONE B orientation — the plain band interleaves lanes along K, the transposed
     # band sweeps lanes along the output axis. Enumeration is the single choke point every tier
@@ -476,7 +457,7 @@ def _stage_values(kernel, node, place, plan: TilePlan, budget: int, tma_ok: bool
     or gmem-direct when it declines."""
     if node is None or not plan.is_tiled:
         return [""]  # per-cell / unbindable — no operand slab to stage
-    tile = _placed(place, plan)
+    tile = plan.placed_on(place)
 
     def resolve(spec: str) -> str | None:
         st = Stage.parse(spec)
@@ -638,7 +619,7 @@ def _contraction_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
             # unpinned path above drops on, one home each.
             legal.enforce(legal.warp_k_step(node, plan), pinned=True)
             legal.enforce(legal.fragment_epilogue(proj), pinned=True)
-        placed = _placed(place, plan)
+        placed = plan.placed_on(place)
         for stage in _stage_values(tile, node, place, plan, budget, tma_ok):
             for red in _reduce_values(tile, place, plan, node, len(node.channels)):
                 for aux in _wspec_bands(plan, placed, stage, red):
@@ -735,7 +716,7 @@ def _tile_option(tile: TileOp, place: Placement, plan: TilePlan, node, name: str
     legal.enforce(legal.scalar_block_threads(plan), pinned=True)
     slices: list = []
     if plan.is_tiled:
-        placed = _placed(place, plan)
+        placed = plan.placed_on(place)
         stage = legal.resolve_scalar_stage(node, placed, Stage.parse(stage_spec), tile.inputs, budget) if stage_spec else None
         slices = [("TILE", node, placed), ("STAGE", node, stage)]
     return _stamp(tile, tile.op, place, name, knobs, slices)
@@ -753,7 +734,7 @@ def _warp_option(tile: TileOp, place, plan: TilePlan, node, name: str, knobs: di
     tile/stage: the band is gated on the RESOLVED stage, so an ineligible spec degrades to uniform
     rather than claiming a pipeline that never ran."""
     legal.enforce(legal.warp_k_step(node, plan), pinned=True)
-    placed = _placed(place, plan)
+    placed = plan.placed_on(place)
     stage = legal.resolve_warp_stage(node, placed, Stage.parse(stage_spec), budget) if stage_spec else None
     workers = _wspec_workers(wspec, stage)
     return _stamp(tile, tile.op, place, name, knobs, [("TILE", node, placed), ("STAGE", node, stage)], workers=workers)
@@ -795,7 +776,7 @@ def _splitk_option(
         a=replace(node.a, index=tuple(sigma.apply(e) for e in node.a.index)),
         channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in node.channels),
     )
-    placed = _placed(place, plan)
+    placed = plan.placed_on(place)
     stage = None
     if stage_spec:
         st = Stage.parse(stage_spec)

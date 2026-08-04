@@ -424,12 +424,27 @@ second rebuild and every simplification after it are byte-identical against it, 
 real behaviour changes mid-flight (a uniform `WSPEC` band re-offered beside a pin; a dead `STAGE`
 mask in a test).
 
-**Its blind spot, measured not assumed:** instrumenting `Sched.tile_of` across a digest run shows it
-reached on every contraction site and returning `None` every time — the pins do not land, so the
-harness pins recognition, term storage and the UN-SCHEDULED lowering path, and does **not** exercise
-the tiered/placed contraction path. A change to `_factor`'s tiled arm or `_twist`'s warp realizer is
-invisible to it. Adding the liveness assertion (each case asserts its pinned knobs landed on the
-emitted `TileOp`) is the half of P0 that stays open, and it should land before phases 4–5.
+**The liveness assertion has LANDED, and it re-measures that blind spot smaller than the earlier
+`Sched.tile_of` instrumentation suggested.** Every case now asserts its pins reached a kernel — all
+of them together, on ONE emitted op (under split-K that op is the `__partial`) — because a digest
+cannot tell a covered path from an unmapped one: both render and both hash stably. Measured against
+the harness as committed:
+
+- **13 cases land their pins**, so the scalar / warp / f16acc / split-K / raster / dynM contraction
+  tiers, the coop reduce tiers and the coop flash form ARE covered, contrary to the earlier reading.
+  What `tile_of` returned `None` for was the un-scheduled cases below, not the tiered path.
+- **10 cases do not**, each a consequence of one of the two enumerator gaps — `norm_linear` ×4 and
+  `mlp_geglu` (phase 4), the four flash warp forms and `flash_chain` (phase 5). They are recorded in
+  a `UNSCHEDULED` set that is STRICT like the xfail registry: a case that starts landing its pins
+  FAILS until it is deleted, so phases 4 and 5 report their own completion here.
+- **One case was pinning a retired key.** `matmul_wspec` pinned `WSPEC=p1`, which no longer lands
+  anything: the row fell through to an unrelated split-K leaf, so the "warp-specialization" digest
+  was digesting a split-K kernel with no producer band at all. Re-pinned as `matmul_pband` with the
+  live `WORK=w2x4+p1` spelling — `__launch_bounds__(288)` and the `threadIdx.x < 256` band split
+  confirm the band is realized. It is the third defect this class of check has found, after the
+  uniform band re-offered beside a pin and the dead `STAGE` mask.
+
+Every other digest is unchanged across the fix, so the baseline's byte-identity claim survives it.
 
 **The registry is `strict=True`** — an id that starts passing now FAILS until it is deleted, so "the
 file shrinking to empty IS the completion gate" is enforced rather than aspirational (measured: 0
@@ -461,16 +476,23 @@ Worth recording because each was invisible to the type checker and to the suite:
 - `ctx=None` was unreachable (one caller; `Pipeline.run` probes) yet carried four fallbacks that
   each meant something different.
 
-### What is still hand-written that need not be
+### What was still hand-written — **all three LANDED**
 
-Ranked, from the simplification review:
+The simplification review's remaining list, now closed (digest-identical across all three):
 
-- `TilePlan.at` / `_placed` restate `Sched._mn_for`'s depth-1 rule in two places with DIFFERENT
-  degradation (`None` vs an unplaced plan that raises later, inside a stage resolver).
-- `search/features.py`'s `_row_workers` / `_tile_plan` duplicate what `ir/schedule.resolve_row` now
-  does for the scheduler; one resolver could serve both, with the featurizer catching.
-- `_has_contraction_tail` and the loop-shape predicates belong beside `projection_distributes` in
-  `ir/stmt/passes.py`.
+- the depth-1 `(m, n)` rule has ONE home: `Placement.root_mn` (the grid's trailing pair, or `None`
+  when the grid cannot supply it). `TilePlan.placed_on` binds through it at option assembly and
+  `Sched._mn_for` reads it for a reader that takes the slice off the tree, so the rule and its
+  degradation are stated once instead of twice with different failure modes; `_placed` is gone.
+- `search/features.py` resolves through `ir/schedule.resolve_row` (`_row_slices`), so the hand-rolled
+  `Workers.parse` + `resolve_site_tile` + `ReducePlan.parse` triple is gone. Because a featurizer only
+  ever sees a REALIZED row, an absent family reads there as its decided empty `""`, not the unset-pin
+  `None` the enumeration reads it as — that difference is the one thing the shared resolver cannot
+  infer, so it is stated at the featurizer's edge. The resolver keeps its one severity (raise) and
+  each caller chooses: the geometry readers catch, `_reduce_decomp` keeps its coop-without-`WORK`
+  escape and otherwise raises.
+- `has_contraction_tail` moved to `ir/stmt/passes.py` beside `projection_distributes` — both are
+  statement-SHAPE predicates, neither belongs to the scheduler that asks.
 
 The old scheduler was DELETED at `e27d8fdc`: `_schedule.py` (2458 lines), `_view.py` (96),
 `020_schedule.py` (109). Recognition, the codec, the materializer and `030_split_reduce` were
@@ -506,7 +528,7 @@ untouched by that commit. What exists today is ~880 + ~290 lines across `_schedu
 | `test_golden_knobs_are_members_of_the_move_catalog` (live today) | a golden becoming unreachable | non-golden losses |
 | per-key value-domain snapshot (new, ~80 lines) | which family lost which value, localized | ranking quality |
 | `xfail_registry` shrink (107 ids) | a restored behavior regressing | the 605 CPU skips; GPU-only; silent XPASS under `strict=False` |
-| `digest_kernels.py` vs a committed baseline | a pinned/golden row materializing differently | the 4 broken flash-warp cases until P0 |
+| `digest_kernels.py` vs a committed baseline (+ its per-case pin liveness) | a pinned/golden row materializing differently; a case whose pins stop reaching a kernel, or an `UNSCHEDULED` one that starts | the 10 `UNSCHEDULED` cases' materialization, until phases 4–5 land and they leave the set |
 | eval-golden MATCH sweep (GPU) | the deployed pick drifting | non-golden shapes |
 | option-0 assertion (`stamp_schedule_families(rows[0])` all-`off`, per-family) | the safety-net pick becoming non-degenerate | — |
 
@@ -550,7 +572,7 @@ Phases 1–3 and the SPIKE are DONE (see Status). What is left:
 
 | phase | scope | gate |
 | --- | --- | --- |
-| P0-rest | the digest LIVENESS assertion — each case asserts its pinned knobs landed on the emitted `TileOp`. Without it the baseline does not cover the tiered/placed contraction path at all. Also `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have; unreachable until the flash warp realizer runs, and it has no obtainable baseline until fixed) | the gate stops lying |
+| P0-rest | LANDED for the liveness assertion (see Status — 13 cases land, 10 recorded `UNSCHEDULED`, one stale `WSPEC` pin fixed). Still open: `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have; unreachable until the flash warp realizer runs, and it has no obtainable baseline until fixed) | the gate stops lying |
 | 4 | CONTRACTION with computed edges — the fused norm→linear / gate⊗up cone, whose A edge is an inline node rather than a gmem `Load`. The `020` merge becomes a row union under ONE spelling | 4 `norm_linear` + `mlp_geglu` digest cases + 6 recognize-boundary ids |
 | 5 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction | 40 attention-pin ids + 4 attention-coverage ids; digest only after P0-rest |
 | 6 | `schedule()`'s own dispatch and flash-form selection once 4–5 exist | registry empty + `make test` + `make lint` |

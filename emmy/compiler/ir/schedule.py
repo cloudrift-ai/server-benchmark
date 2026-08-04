@@ -855,6 +855,42 @@ def resolve_site_tile(spec: str | None, work: Workers | None, reduce_spec: str |
     return TilePlan(units=tuple(work.units))
 
 
+@dataclass(frozen=True)
+class RowSlices:
+    """The four schedule families of ONE row, resolved together into their typed slices.
+
+    ``None`` means the family is ABSENT — an unset env pin, which the enumeration reads as "offer
+    the catalog". An EMPTY STRING is a DECIDED value and resolves to its default slice (per-cell
+    ``TILE``, serial ``REDUCE``, gmem-direct ``STAGE``), which is what a fork row always carries.
+    Keeping the two apart is the whole reason this is a type and not a tuple of parses."""
+
+    work: Workers | None
+    tile: TilePlan | None
+    stage: str | None
+    reduce: ReducePlan | None
+
+
+def resolve_row(work: str | None, tile: str | None, stage: str | None, reduce: str | None) -> RowSlices:
+    """Resolve one row's schedule-family VALUES into typed slices against the ONE ``WORK``
+    inventory they share.
+
+    The single home for "a row (or the live env pins) → its slices". Both readers go through it:
+    the scheduler's materialize, which resolves an enumerated row, and the pin reads, which resolve
+    the env. They used to be six separate parses whose severities had already drifted apart — a
+    malformed ``REDUCE`` raised on one path and was swallowed on two others.
+
+    Order matters: ``WORK`` resolves first because ``TILE`` and ``REDUCE`` are both spelled
+    site-locally against it (:func:`resolve_site_tile` also needs ``REDUCE``, for the empty-value
+    ambiguity). A malformed value RAISES — one severity, and the caller that wants a drop catches."""
+    w = Workers.parse(work) if work else None
+    return RowSlices(
+        work=w,
+        tile=None if tile is None else resolve_site_tile(tile, w, reduce or ""),
+        stage=stage,
+        reduce=None if reduce is None else ReducePlan.parse(reduce, w),
+    )
+
+
 def plan_workers(plan: TilePlan | None) -> Workers | None:
     """The worker inventory ONE tile plan implies — ``None`` for an untiled plan or a 1-thread
     thread inventory (a bare register strip: the per-cell forms keep their derived launch

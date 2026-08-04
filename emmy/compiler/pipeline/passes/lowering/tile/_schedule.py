@@ -51,12 +51,12 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import (
     Raster,
+    RowSlices,
     Stage,
     TilePlan,
     WarpSpec,
-    Workers,
     derive_inventory,
-    resolve_site_tile,
+    resolve_row,
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Loop, Stmt, Write
@@ -92,28 +92,12 @@ logger = logging.getLogger(__name__)
 # ---- target / pin reads ------------------------------------------------------------------------ #
 
 
-def _pinned_workers() -> Workers | None:
-    """The live ``WORK`` env pin's inventory, or ``None`` when unset. A MALFORMED pin raises — one
-    severity per pin, the same doctrine :func:`._legality.enforce` states."""
-    raw = WORK.raw()
-    return Workers.parse(raw) if raw else None
-
-
-def _pinned_tile() -> TilePlan | None:
-    """The live ``TILE`` env pin resolved into a :class:`TilePlan` against the ``WORK`` (and
-    ``REDUCE``, for the empty-value ambiguity rule) pins, or ``None``. Raises on a malformed pin."""
-    raw = TILE.raw()
-    if raw is None:
-        return None
-    return resolve_site_tile(raw, _pinned_workers(), REDUCE.raw() or "")
-
-
-def _pinned_reduce() -> ReducePlan | None:
-    """The live ``REDUCE`` env pin resolved into a :class:`ReducePlan` against the ``WORK`` pin."""
-    raw = REDUCE.raw()
-    if raw is None:
-        return None
-    return ReducePlan.parse(raw, _pinned_workers())
+def _pins() -> RowSlices:
+    """The live env pins for the four schedule families, resolved TOGETHER against the one ``WORK``
+    inventory — :func:`resolve_row` over ``Knob.raw()``. A family whose pin is unset stays ``None``,
+    which is the distinction the enumeration keys on: an unset ``TILE`` offers the catalog, a set
+    one is authoritative. A malformed pin raises, on every family alike."""
+    return resolve_row(WORK.raw(), TILE.raw(), STAGE.raw(), REDUCE.raw())
 
 
 def _filter_work(options: list, work_of) -> list:
@@ -339,7 +323,7 @@ def _free_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
     ladder. ``r`` IS the spelled ``TILE=f<r>`` — the strip is a TERM VARIANT applied at
     materialization, a function of the ROW, not a member of a pre-enumerated variant set."""
     del ctx
-    pin = _pinned_tile()
+    pin = _pins().tile
     strip_ok = _strippable(tile, place)
     ext = place.free[-1].extent.as_static() if strip_ok else 0
     rows = []
@@ -428,7 +412,7 @@ def _reduce_specs(kernel, place, ctx) -> list[ReducePlan]:
             cands.append(p)
     if ReducePlan() not in cands:
         cands.append(ReducePlan())
-    pin = _pinned_reduce()
+    pin = _pins().reduce
     return cands if pin is None else [pin]
 
 
@@ -505,10 +489,10 @@ def _stage_values(kernel, node, place, plan: TilePlan, budget: int, tma_ok: bool
         )
         return r.spell() if r is not None else None
 
-    if STAGE.raw() is not None:
+    pinned = _pins().stage
+    if pinned is not None:
         # A malformed pin RAISES through ``Stage.parse`` — this used to be swallowed into
         # gmem-direct, which made it the only silently-ignored pin in the family.
-        pinned = STAGE.narrow([""])[0]
         r = resolve(pinned) if pinned else None
         return [r] if r else [""]
     out = [""]
@@ -519,21 +503,19 @@ def _stage_values(kernel, node, place, plan: TilePlan, budget: int, tma_ok: bool
     return out
 
 
-def _splitk_pin() -> ReducePlan | None:
+def _splitk_pin(pinned: ReducePlan | None) -> ReducePlan | None:
     """The pinned cross-CTA split-K partition (or ``None``) — a ``REDUCE`` pin resolving to a GRID
     split. A well-formed but FOREIGN codec (a coop pin where split-K is wanted) is legitimately not
-    a split-K request and returns ``None``; a MALFORMED one raises, as it does everywhere else."""
-    plan = _pinned_reduce()
-    return plan if plan is not None and plan.needs_split else None
+    a split-K request and returns ``None``; a MALFORMED one already raised in :func:`_pins`."""
+    return pinned if pinned is not None and pinned.needs_split else None
 
 
-def _coop_reduce_spec() -> ReducePlan | None:
+def _coop_reduce_spec(pinned: ReducePlan | None) -> ReducePlan | None:
     """The pinned cooperative / ILP K partition a NON-output-tiled contraction honors (the split-K
     takes the structural fork instead); ``None`` when the pin is a foreign codec."""
-    plan = _pinned_reduce()
-    if plan is None or plan.needs_split or not (plan.coop > 1 or plan.reg > 1):
+    if pinned is None or pinned.needs_split or not (pinned.coop > 1 or pinned.reg > 1):
         return None
-    return plan
+    return pinned
 
 
 def _reduce_values(kernel, place, plan: TilePlan, node, channels: int = 1) -> list[ReducePlan]:
@@ -543,11 +525,12 @@ def _reduce_values(kernel, place, plan: TilePlan, node, channels: int = 1) -> li
     whose FULL projection tail distributes over the add; the deferred kernel finalize stays legal
     for any epilogue."""
     ext = node.axis.extent
-    if REDUCE.raw() is not None:
-        split = _splitk_pin()
+    pinned_reduce = _pins().reduce
+    if pinned_reduce is not None:
+        split = _splitk_pin(pinned_reduce)
         if split is not None:
             return [split]
-        coop = _coop_reduce_spec()
+        coop = _coop_reduce_spec(pinned_reduce)
         if coop is not None:
             return [coop] if not plan.is_tiled else []
         return [ReducePlan()]
@@ -639,7 +622,7 @@ def _contraction_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
         return []
     proj = _projection(tile.op)
     budget, tma_ok = ctx.max_dynamic_smem, ctx.has_tma
-    pin = _pinned_tile()
+    pin = _pins().tile
     atoms = _warp_atoms(tile, node, proj, ctx)
     warp_moves = [p for p in warp_tile_moves(atoms) if legal.enforce(legal.warp_k_step(node, p), pinned=False)] if atoms else []
     tiles = [pin] if pin is not None else scalar_tile_moves() + warp_moves
@@ -858,10 +841,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
         # The row carries SITE values + the ONE ``WORK`` entry: resolve each family ONCE against
         # that inventory and hand the builders typed plans. The producer band rides WORK's ``+p``.
         tkey, skey, rkey = keys
-        work = Workers.parse(row.get(WORK.name) or "")
-        plan = resolve_site_tile(row.get(tkey, ""), work, row.get(rkey, ""))
-        stage_spec = row.get(skey, "")
-        rplan = ReducePlan.parse(row.get(rkey, ""), work)
+        slices = resolve_row(row.get(WORK.name), row.get(tkey, ""), row.get(skey, ""), row.get(rkey, ""))
+        work, plan, stage_spec, rplan = slices.work, slices.tile, slices.stage or "", slices.reduce
         wspec = f"p{work.producer}" if work is not None and work.producer else ""
         # Structural stamps (``S_warp_eligible``) ride onto the op: fork rows carry them for branch
         # identity, but the MATERIALIZED op is what ``realized_knobs`` reads, and dropping them here

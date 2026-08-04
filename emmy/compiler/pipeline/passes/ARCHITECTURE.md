@@ -8,63 +8,74 @@ specializations**: it dispatches on the fold's DERIVED role (`Fold.role` — `FR
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
-## The tile scheduler is ONE generic row enumerator
+## The tile scheduler is ONE recursive row enumerator
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its
-`schedule` slices, and offers them as a fork — is a single pipeline in `lowering/tile/_schedule.py`, driven by the
-`020_schedule` rule. Every role runs the same four stages, and **no role builds `TileOp`s directly**:
+`schedule` slices, and offers them as a fork — is driven by the `020_schedule` rule. A row is a joint assignment
+across every SITE of the term, and the tree that generates it is the term's own:
 
 ```
-sites  → path.family_sites(family, path.sites(term))   # the ONE node walk (ir/tile/path.py)
-values → per-family typed slices, keyed on the site's AxisRole (the domain is search/space.py's)
-rows   → _assemble: spell each family ONCE, site-local, and DERIVE the one WORK inventory
-fork   → build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
+rows(site, inherited) = [ merge(v, *child_rows)                       # spelled through ops.Sched.key, site-local
+                          for v in values(site.role, site)            # the domain: search/space.py
+                          if legal(v, inherited)                      # DOWNWARD: the parent's tier bounds the child
+                          for child_rows in product(rows(c, ctx(site, v)) for c in children(site))
+                          if derive_inventory(...) succeeds ]         # UPWARD: the ONE WORK inventory folds up
+fork = build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
 ```
+
+**No role builds `TileOp`s directly, and no term shape gets its own path.** The recursion is what lets a term whose
+operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its transport
+is enumerated at the parent's `STAGE`; a computed operand IS a site, so it enumerates its own families and the
+parent's `STAGE` narrows to the compute fill.
 
 Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
 
 - **The candidate DOMAIN** is `search/space.py`. The two families with multiplicative coupling — the scalar and warp
   tile grids — are GENERATED from their bounds (`search/domain.py`'s `Dimension` / `Bound` / `Space`); the families
   with no products to couple (stage spellings, split widths, the coop partitions, the raster orders) stay listed.
+  The domain knows integers and products only: it is per-family and term-blind, and does NOT recurse.
 - **Per-node LEGALITY** is `lowering/tile/_legality.py`: one function per rule, each returning the refusal REASON or
   `None`, with `enforce(reason, pinned=…)` choosing the severity — an env pin raises it, the unpinned enumeration
   drops the candidate. One predicate, one home; the "pin says yes, enumeration says no" class of bug has nowhere to
   live. The multiplicative rules are `Bound`s (a thread budget, a K-step that must tile a static extent, a 16 B
   inner stride); the categorical ones (operand dtype, transport, a fragment-unrealizable gather epilogue) are plain
   predicates. The smem budget is enforced by the stage RESOLVERS there, which return the largest legal `Stage` or
-  decline — a size, not a yes/no.
-- **`_schedule.py` chooses**: which families a role offers, the conservative option-0 each leads with, and how a row
-  becomes a `TileOp`. Role dispatch is a table keyed on the derived `AxisRole` (`_ROWS`), never on a node type.
+  decline — a size, not a yes/no. These are also the recursion's downward filter.
+- **CHOICE** is the walk itself: which families a SITE offers, the conservative option-0 each leads with, and how a
+  row becomes a `TileOp`. Dispatch is keyed on the derived `AxisRole`, never on a node type.
 
-Three properties this shape enforces, each of which the previous hand-written scheduler violated in at least one
-arm:
+Three properties this shape enforces:
 
 - **`WORK` is derived, never a free variable.** The codec's dependency runs slice → work
-  (`plan_workers` → `derive_workers` → `ops.seal_workers`), so `_assemble` derives the inventory from the row's own
-  slices and DROPS the row when they disagree (a tiled scalar site and a coop reduce are co-representable only when
-  `par_m == 1 and par_n == coop`). That is also what makes `WORK` legal as the outermost fork level.
+  (`plan_workers` → `derive_workers` → `ops.seal_workers`), so the inventory folds UP out of every site's slices and
+  a combination whose slices disagree is never built (a tiled scalar site and a coop reduce are co-representable
+  only when `par_m == 1 and par_n == coop`). That is also what makes `WORK` legal as the outermost fork level.
 - **Uniform key sets per fork, `""` a DECIDED empty.** The evidence pick's prefix-consistency depends on it: an
   absent key reads as "free" and would let a gmem-direct leaf inherit a staged row's measurement.
 - **Enumeration produces a SET; ranking is the prior's job.** The only ordering obligation is that each family's
   FIRST value is its conservative default (per-family, not global — the reduce tier deliberately leads with its
-  cooperative pick).
+  cooperative pick). The recursion decides the row set; `build_fork_tree` decides the evidence hierarchy, and the
+  two are deliberately not the same shape.
 
 A predicate has ONE home and ONE severity: each legality function returns its refusal, and the caller picks
 raise-vs-drop from whether the family is PINNED (an unpinned warp move with an indivisible K-step is dropped;
 the same defect in a pin raises). That is the bug class — "the pin says yes and the enumeration says no" — the
 single-home rule exists to prevent.
 
-**Still incomplete.** The enumerator schedules the roles whose operand edges are all MATERIALIZED: `FREE` (the
-pointwise cell + the register-strip term variant), `PLANAR` / `TWISTED` (the reduce partition), and `CONTRACTION`
-(the tile × stage × reduce × raster product over the scalar and warp tiers, with split-K routing through the
-structural `Fold ⊃ Fold` composition `030_split_reduce` consumes). Two families still yield NO rows, and
-`020_schedule` then leaves the term unmapped rather than guessing — the guardrail contract, `[]` and never a raise:
+**Under reconstruction.** The row enumerator is being rebuilt on the recursive shape above; until it lands,
+`020_schedule` enumerates NOTHING and every term stays unmapped. That is the guardrail contract, not a failure:
+kernels still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a
+compile. The rebuild restores the single-site roles first — `FREE` (the pointwise cell + the register-strip term
+variant), `PLANAR` / `TWISTED` (the reduce partition) and `CONTRACTION` (the tile × stage × reduce × raster product
+over the scalar and warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition
+`030_split_reduce` consumes) — gated on reproducing their rows byte-identically. The two MULTI-SITE families, a
+**COMPUTED operand edge** (the fused norm→linear / gate⊗up cone) and the **flash streaming pair**, follow; they are
+the reason the enumerator recurses.
 
-- a **COMPUTED operand edge** (the fused norm→linear / gate⊗up cone and its sync compute-fill rows);
-- the **flash streaming pair** (the `TWISTED` warp / chain / split-KV forms).
-
-Those tests ride `tests/xfail_registry.py`, whose node-id list is the acceptance obligation for the rest — it
-shrinking to empty is the completion gate.
+Every casualty rides `tests/xfail_registry.py`, whose node-id list is the acceptance obligation — it shrinking to
+empty is the completion gate. `scripts/digest_kernels.py` is the other half: it pins each case's rendered kernel
+byte-for-byte AND asserts the case's pins actually reached a kernel, so a role that is merely rendering rather than
+scheduling cannot pass unnoticed.
 
 ## No shape-specific pattern matching
 

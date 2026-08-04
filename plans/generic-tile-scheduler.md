@@ -1,29 +1,14 @@
 # Generic tile scheduler — every role emits rows
 
-## The actual defect
+## The claim
 
-The tile IR is compositional (one `Fold` node kind — see the next section) and the schedule output is compositional
-(`TileOp.schedule`, per-node slices keyed by the tree-path codec). The deleted `_schedule.py` was compositional in
-ONE of its three arms and not in the other two, and that asymmetry — not "hand-written whole-tree paths" in general —
-is where the complexity lived:
+The tile IR is compositional — ONE `Fold` node kind, nested (see the next section). The schedule output is
+compositional — `TileOp.schedule`, per-node slices keyed by the tree-path codec. **The enumeration between them must
+be compositional too, or the two ends do not meet.**
 
-- **CONTRACTION was already tabular.** `_tile_rows` was a five-deep product over per-family candidate functions
-  (`tiles × _stage_candidates × _reduce_candidates × _wspec_candidates × _raster_candidates`), each row assembled by
-  `_site_row` and handed to `build_fork_tree` with `WORK` as the outermost level. That arm is the model to copy.
-- **TWISTED built `TileOp`s eagerly.** `schedule()`'s tail constructed `_option` siblings directly — the warp move
-  grid, the chain form, the reduce tiers — never producing rows. ~570 lines, all flash-specific.
-- **FREE built `TileOp`s eagerly too**, via `_map_strip_fork`.
-
-Because two arms never produced rows, the fused-term merge had to be a flat `[*maps, *con]` list of ops rather than a
-row union, pins had to be narrowed per path, and every new composition needed another whole-tree path.
-
-**The goal, stated precisely: every role emits `list[dict]` rows through ONE `build_fork_tree`; no role builds
-`TileOp`s directly.** That is a smaller and more defensible claim than "replace the scheduler with a solver", and it
-is the one the corpus supports.
-
-**Read the Status section before costing anything.** The rebuild has LANDED for the materialized-edge roles and the
-scheduler has since been re-layered onto a generated domain; what remains is the computed-edge and flash-streaming
-families (phases 4-6).
+Stated as the success criterion: **every role emits rows through ONE recursive walk of the site tree; no role builds
+`TileOp`s directly, and no term shape gets its own path.** A row is a joint assignment across every site of a term;
+the tree that generates it is the term's own.
 
 ## The IR beneath it — the unified `Fold`
 
@@ -86,7 +71,7 @@ variant mechanism and the role derivation are not two mechanisms.
 
 **`Fold.demoted()` does not exist** — it was dead once the scheduler was deleted (zero callers) and went in the
 minimization pass. It is ~15 lines and fully specified here: move each operand edge into the lift body before the
-first read of its bound name, ties in operand order. Phase 3 re-adds it as part of the collapse variant.
+first read of its bound name, ties in operand order. The collapse variant re-adds it (phase 2).
 
 ### What it means for this plan
 
@@ -133,24 +118,62 @@ but for the header word.
 changed class name and the projection's changed nesting changed the key for every term — and with it `op_cache_key`
 and `Graph.structural_key`'s op field. **The cubin cache and every recorded DB / reservoir measurement keyed on
 `(ctx.structural_key, op_cache_key)` are orphaned**; the golden corpus survives untouched because it keys on knob
-spellings. Phase 2's measurement work therefore starts from an empty reservoir — a cost already sunk, not a risk
+spellings. Measurement therefore starts from an empty reservoir — a cost already sunk, not a risk
 still to manage.
 
-## Design
+## Design — the north star
+
+**The enumeration is a RECURSION over the site tree.** A row is a joint assignment across every site of the term;
+the tree that generates it is the term's own. Two things thread through the recursion in opposite directions, and
+they are the whole design:
 
 ```
-def rows(tile, ctx) -> list[dict]:
+def rows(site, inherited, ctx) -> list[Row]:            # Row = {canonical key -> spelled value}, multi-site
+    local = [v for v in values(site.role, site, ctx)    # the per-family catalogs — search/space.py, unchanged
+             if legal(v, inherited)]                    # DOWNWARD: the parent's tier constrains the child
     out = []
-    for term in variants(tile.op, ctx):                 # collapse / mixed-A promotion — a finite set
-        sites = {f: family_sites(f, path.sites(term)) for f in ("TILE", "REDUCE", "STAGE")}
-        for combo in product(*(values(f, site, ctx) for f, site in flat(sites)), raster_values(term, ctx)):
-            row = assemble(term, combo, ctx)            # = the old `_site_row`: derives WORK, returns None on conflict
-            if row is not None:
+    for v in local:
+        for combo in product(*(rows(c, ctx_of(site, v), ctx) for c in children(site))):
+            row = merge(site, v, combo)                 # spells each slice at ITS canonical path (ops.Sched.key)
+            if derive_inventory(slices(row)) is not CONFLICT:   # UPWARD: WORK folds up out of all the slices
                 out.append(row)
     return out
+
+def enumerate(tile, ctx) -> list[Row]:
+    return uniform_keys([r for term in variants(tile.op, ctx)   # collapse / mixed-A — a finite set, unioned
+                           for r in rows(root_site(term), TOP, ctx)])
 ```
 
-Four pieces, three of which already exist:
+- **Downward context** turns generate-and-drop into generate-only-legal. A child's candidate set is a function of
+  what the parent already chose: the cone's inner statistic `REDUCE` is bounded by the parent's worker inventory
+  (`ReducePlan.parse` binds `coop` to `work.count` and refuses a non-thread kind), and a warp parent fixes the
+  child edge's fill kind. Under a flat product those are late `_assemble` drops — or, for the cone, nothing at all.
+- **Upward derivation** is `WORK`. It is kernel-global and derived from the union of ALL sites' slices, so
+  `derive_inventory` folds on the way up and a disagreeing combination is never built. A `TILE@dd` / `TILE@pj` pair
+  that cannot share one inventory stops being a droppable row and becomes an unrepresentable one.
+
+Two things stay OUTSIDE the recursion, deliberately:
+
+- **Term variants** (collapse, mixed-A promotion) rewrite the tree, so they sit above the fold as a union of whole
+  enumerations, with the uniform-key-set / decided-empty reconciliation at the top. Recursion does not absorb them.
+- **The fork LEVEL order.** The recursion decides the row SET; `build_fork_tree` decides the evidence hierarchy.
+  Conflating them would tie the prior's prefix structure to the term's tree depth. Levels stay
+  `[WORK, *site keys, RASTER]`, derived from the site list — a flat order over a recursively generated set.
+
+The wire format does not move: rows stay flat dicts of canonical codec keys, so goldens, the tune DB,
+`canonical_row_key` and the prior's key space are untouched by the whole rebuild.
+
+### Why a flat product cannot do this
+
+A flat product over one node's families covers exactly the terms with one site. Every role that is scheduled today is
+such a term — which is why a single-site builder could serve them, and why it is not evidence the shape generalizes.
+
+The two families that remain are precisely the ones where **two sites must agree**: the fused cone carries a statistic
+fold inside its A edge, and flash carries a hoisted QK operand edge plus a derived PV contraction. Neither is a product
+over one node's families. Under a flat builder each needs its own bespoke emitter, and the "one generic enumerator"
+claim becomes four hand-written products — the exact defect the rebuild exists to remove.
+
+### The pieces — three of four already exist
 
 - **`path.family_sites(family, path.sites(term))`** — already written and tested. `TILE` eligibility is already keyed
   on `role is AxisRole.CONTRACTION` (plus the root operandless zero-axis fold for the strip tier); `REDUCE`/`STAGE` on
@@ -158,9 +181,10 @@ Four pieces, three of which already exist:
 - **`values(family, site, ctx) -> list[TilePlan | ReducePlan | Stage | str]`** — four implementations, keyed on the
   site's `AxisRole` (see below). The surviving catalogs in `search/space.py` already hand out typed slices in exactly
   this currency.
-- **`assemble`** — the old `_site_row`: spell each slice at its canonical path, derive `WORK` from the slices, return
-  `None` when they disagree. Eight lines. Its docstring already said "today's enumeration never builds one … so this
-  is a guard, not a path".
+- **`merge` / `derive_inventory`** — spell each slice at its canonical path (`ops.Sched.key` already spells ANY
+  site, so no new keys and no new codec), fold the inventory out of all of them, drop the combination when they
+  disagree. This is the piece the deleted builder got wrong: it took a fixed three-key tuple instead of merging
+  what the recursion produced.
 - **`variants`** — the one genuinely new idea; see below.
 
 `build_fork_tree` then groups rows into the fork tree with levels `[WORK, *site keys, RASTER]` — the pre-deletion
@@ -179,41 +203,42 @@ The escapes depend on this. For an un-recognized loop-IR cell, `030`'s finalize 
 single scalar row — as today. This is the case the collapse makes MORE important, not less: pre-collapse they were
 all `Map`, and a type key would have sent them to the strip fork (a silently wrong entry, worse than an omission);
 post-collapse they are zero-axis folds indistinguishable from a real pointwise cell by shape alone, so the
-`Loop.role` fallback is the only thing separating them. Phase 3 must assert it directly.
+`Loop.role` fallback is the only thing separating them. Phase 1 must assert it directly.
 
 ### Term variants — the one new mechanism
 
 Four moves rewrite the term rather than decorating it, and each therefore yields a different `term_key`, a different
 `op_cache_key`, and a different SITE SET:
 
-| variant | what it does | who did it |
-| --- | --- | --- |
-| strip | unrolls the zero-axis fold's `lift` ×r, α-renames SSA, fans out `TileOp.stores`, divides the inner extent | `_map_strip_option` |
-| split-K | wraps the sliced contraction fold in an identity-lift `Fold(axis=ksplit)`, σ-reindexes operands | `_splitk_option` + `_factor_k` |
-| collapse | splices a computed edge inline (re-add `Fold.demoted()`), removing its schedule site | `_demote_planar` / `_demoted_warp_option` |
-| mixed-A promotion | turns a MATERIALIZED f32 A edge into a computed cone so the sync compute-fill can convert it | `_demote_mixed_a` |
+| variant | what it does |
+| --- | --- |
+| strip | unrolls the zero-axis fold's `lift` ×r, α-renames SSA, fans out `TileOp.stores`, divides the inner extent |
+| split-K | wraps the sliced contraction fold in an identity-lift `Fold(axis=ksplit)`, σ-reindexes operands |
+| collapse | splices a computed edge inline (`Fold.demoted()`), removing its schedule site |
+| mixed-A promotion | turns a MATERIALIZED f32 A edge into a computed cone so the sync compute-fill can convert it |
 
 **The first two are functions of the ROW, not members of a pre-enumerated set.** This is the correction that
 matters: `r` (strip ratio) IS the spelled `TILE=f<r>`, and `w` (split width) IS the spelled `REDUCE=g<w>`. They are
-candidate VALUES, and the rewrite happens at materialization — exactly as the deleted code did it (`_map_strip_option`
-and `_splitk_option` both received the plan and built the rewritten term from it). Only collapse and the mixed-A
+candidate VALUES, and the rewrite happens at materialization, from the plan the row already carries. Only collapse and
+the mixed-A
 promotion are a genuine finite set: two extra readings of one term, unioned. Treating `r` and `w` as variants would
 make `variants()` a product and reintroduce the combinatorics this design removes.
 
 Three obligations the union carries, all of which the deleted code enforced and none of which are free:
 
 - **Uniform key sets.** Every leaf of one fork must spell the SAME family keys, with `""` as a DECIDED empty.
-  `_tile_rows`' own comment says why: *"The evidence pick's prefix-consistency depends on it: an absent key reads as
-  'free' and would let a gmem-direct leaf inherit a staged row's measurement."* A collapsed variant lacks `TILE@dd`,
+  The evidence pick's prefix-consistency depends on it: an absent key reads as "free" and would let a gmem-direct
+  leaf inherit a staged row's measurement. A collapsed variant lacks `TILE@dd`,
   so the union must stamp the union of all variants' keys, decided-empty where a variant lacks the site.
-- **No cross-variant suppression.** `_tile_rows` did `if demoted_rows: tiles = [p for p in tiles if not p.is_warp]`
-  — the base term's rows depended on whether the mixed-A sibling produced any. That has no home under a union; it
-  becomes a local predicate on the base term (*no warp tile when A's dtype ≠ the atom's a-dtype and the transport
-  cannot convert*), evaluable without sibling knowledge.
+- **No cross-variant suppression.** A variant's rows may not depend on whether a SIBLING variant produced any —
+  that has no home under a union. Where suppression is genuinely wanted it becomes a local predicate on the base
+  term (*no warp tile when A's dtype ≠ the atom's a-dtype and the transport cannot convert*), evaluable without
+  sibling knowledge.
 - **Variant identity must survive into the prior's key space.** `build_fork_tree` keys leaves on the knob dict
   ALONE; measurement identity is `(ctx.structural_key, op_cache_key)` and distinguishes variants, but variant
   identity is `(context, knobs)` and may not. Two structurally different kernels averaging under one feature row is a
-  real hazard. **Check it in phase 2** (`canonical_row_key(a) != canonical_row_key(b)` across variant pairs on each
+  real hazard. **Check it as each variant lands** (`canonical_row_key(a) != canonical_row_key(b)` across variant pairs
+  on each
   corpus shape); if they collide, the fix is an `S_*` stamp — like the existing `S_warp_eligible`, whose absence on
   materialized ops once cost a 330× fp16 misdeploy — never a new knob key.
 
@@ -314,7 +339,7 @@ defers materialization to the chosen leaf), and `Pipeline.run`'s blocklist + re-
 that only fails when picked. Row 10 has no model anywhere in scheduling (`gpu.py` has `regs_per_block` but nothing in
 enumeration or `validate` reads it), and this plan does not add one.
 
-### Predicates: one home, one severity — **LANDED**
+### Predicates: one home, one severity
 
 `lowering/tile/_legality.py`: one function per rule, each returning the refusal REASON or `None`,
 with `enforce(reason, pinned=…)` choosing the severity — an env pin raises it, the unpinned
@@ -336,15 +361,16 @@ Two corrections the rebuild forced:
   enforcement point for the smem budget (table row 9). Merging them with the two boolean transport
   predicates would fuse a predicate with a search.
 
-The term-reading analyses (`_matvec_b_kstride`, `_shared_row_buf`, `_fragment_epilogue_ok`,
-`_has_contraction_tail`) stay in the scheduler: they read the TERM, not a candidate.
+Term-reading analyses (the matvec B k-stride, the shared-row buffer, the fragment-epilogue check) stay in the
+CHOICE layer: they read the TERM, not a candidate. `has_contraction_tail` and `projection_distributes` are the
+exception — pure statement-shape predicates, so they live in `ir/stmt/passes.py`.
 
 ### Placement
 
 `Placement` is a `TileOp` field, not a schedule slice, and each family constructs it at materialization from the
 row's own slices — the flash warp shrink (`ceil_div(um·fm·atom_m)`, value axis dropped, `Window(parent=...)`), the
-chain grid truncation, the strip's re-derived `free`. **Split-K adds no placement** — `_splitk_option` reuses
-`place` verbatim, `_factor_k` puts `ksplit` on the fold's axis, and `030_split_reduce` owns the grid.
+chain grid truncation, the strip's re-derived `free`. **Split-K adds no placement** — it reuses `place` verbatim,
+puts `ksplit` on the fold's axis, and `030_split_reduce` owns the grid.
 
 Grid RANK varies with the row on the chain and warp-flash families. That is fine when placement is built at
 materialization. State the obligation: every placement construction is a closed-form function of (row, term).
@@ -360,7 +386,9 @@ its `(m, n)` output axes ALREADY set, so no reader states a placement rule of it
 | nested edge (flash QK, `TILE@dd`) | `free[-2]` | the PARENT fold's axis, through its window parent |
 
 `TilePlan.axes` stays `compare=False` / `repr=False`, so binding cannot reach `spell()`, a stamped row, a golden or
-a prior key. **This path has no digest coverage** (see Status) — it is pinned by unit tests instead.
+a prior key. The depth-1 rule has ONE home — `Placement.root_mn`, read by both `TilePlan.placed_on` (binding at option
+assembly)
+and `Sched._mn_for` (binding for a reader that takes the slice off the tree).
 
 ### Order — the prior ranks; position is a safety net
 
@@ -378,31 +406,19 @@ default.** `space.py` already states this as an invariant, and it is PER-FAMILY,
 deliberately leads with its cooperative pick, not a serial one. Mechanize it: `stamp_schedule_families(rows[0])` is
 all-`off`, with the reduce exception encoded explicitly.
 
-### `Stage.alt` — split out of this plan
+## Where the tree is now
 
-Retiring `alt` for a derived `top`/`late` refill policy is removed entirely. Four reasons: it ADDS rows rather than
-re-spelling them (`stage_moves()` does not offer `alt`; it reaches the compiler only via pins and 33 golden rows —
-28 `d1/cp/alt`, 5 `d1/tma/alt`); `late` cannot be derived from def-use alone (`alt` also implies staging the A
-operand, motivated by register pressure); `Stage` is one object per reduce loop with a single depth and a SET of
-staged names, so a per-buffer derivation is unspellable, and on a single-phase step `late ≡ top` would emit
-duplicate rows; and it reaches `features.py`'s `D_stage_alt` and `_stage_sig`, orphaning every recorded `d1/*/alt`
-row of DB evidence. **Consequence: keys and value spellings are ALL frozen**, so no gate is forfeited and no
-correctness budget is spent on churn.
+**The CHOICE layer is DELETED and being rebuilt recursively.** `_schedule.py` is gone; `020_schedule` enumerates
+nothing, so every term stays unmapped and lowers on the materializer's per-cell path. The other two layers survive
+untouched and phase 1 reuses both:
 
-## Status — what the tree actually holds
+| layer | owns | where | state |
+| --- | --- | --- | --- |
+| DOMAIN | which candidate values exist at all | `search/space.py` (+ `search/domain.py` for the two coupled families) | KEPT — no change planned |
+| LEGALITY | what this term's K / N / dtype / smem cap refuses | `lowering/tile/_legality.py`, raise-vs-drop by `pinned` | KEPT, currently unimported — becomes the recursion's downward filter |
+| CHOICE | which families a site offers, each option-0, row → `TileOp` | (was `lowering/tile/_schedule.py`) | **DELETED** — phase 1 rebuilds it |
 
-**The materialized-edge phases have LANDED, and the scheduler has since been rebuilt a second time**
-onto the generated domain. `_schedule.py` is the `rows` / `values` / `_assemble` shape above (one
-`build_fork_tree`, levels `[WORK, *site keys, RASTER]`), `020_schedule.py` drives it, and the module
-now splits three ways, each layer owning one question:
-
-| layer | owns | where |
-| --- | --- | --- |
-| DOMAIN | which candidate values exist at all | `search/space.py` (+ `search/domain.py` for the two coupled families) |
-| LEGALITY | what this term's K / N / dtype / smem cap refuses | `lowering/tile/_legality.py`, raise-vs-drop by `pinned` |
-| CHOICE | which families a role offers, each option-0, row → `TileOp` | `lowering/tile/_schedule.py` |
-
-What it schedules today:
+Phase 1's acceptance set — the roles whose correct output is already committed as a digest baseline:
 
 | role | covered |
 | --- | --- |
@@ -410,96 +426,25 @@ What it schedules today:
 | `PLANAR` / `TWISTED` | the reduce partition (heuristic option-0 + coop / ILP catalog + the matvec layout gate) |
 | `CONTRACTION`, materialized edges | tile × stage × reduce × wspec × raster, scalar + warp tiers, split-K through the `Fold ⊃ Fold` composition |
 
-**Two families still yield NO rows** and `020_schedule` leaves those terms unmapped rather than
-guessing (the guardrail contract): a COMPUTED operand edge (phase 4 — the fused cone) and the flash
-streaming pair (phase 5). Everything else registered in `tests/xfail_registry.py` is a CONSEQUENCE of
-those two.
+Every one of those is a SINGLE-SITE term. The two that remain — a COMPUTED operand edge (the fused cone) and the
+flash streaming pair — are the multi-site ones, and are why the enumeration is recursive.
 
-### The gate is now real, and so is the registry
+### The gates that hold the rebuild
 
-**A kernel-digest baseline is committed** (`scripts/kernel_digests.txt`, 28 kernels;
-`scripts/digest_kernels.py --check` diffs a fresh run and reports drifted / missing / unexpected
-separately). It was the P0 item this plan listed as open, and it earned its keep immediately: the
-second rebuild and every simplification after it are byte-identical against it, and it caught two
-real behaviour changes mid-flight (a uniform `WSPEC` band re-offered beside a pin; a dead `STAGE`
-mask in a test).
+| gate | what it pins | where |
+| --- | --- | --- |
+| kernel-source digests | every case's rendered kernel, byte for byte, against a committed baseline | `scripts/kernel_digests.txt` (23 cases); `digest_kernels.py --check` reports drifted / missing / unexpected separately |
+| pin LIVENESS | that a case's pins actually REACHED a kernel — all of them, on one emitted op (the `__partial` under split-K) | same harness; a digest alone cannot tell a covered path from an unmapped one, since both render and both hash stably |
+| the xfail registry | every scheduler casualty as an exact node id, `strict=True` — an id that starts passing FAILS until deleted | `tests/xfail_registry.py`; the file shrinking to empty IS the completion gate |
 
-**The liveness assertion has LANDED, and it re-measures that blind spot smaller than the earlier
-`Sched.tile_of` instrumentation suggested.** Every case now asserts its pins reached a kernel — all
-of them together, on ONE emitted op (under split-K that op is the `__partial`) — because a digest
-cannot tell a covered path from an unmapped one: both render and both hash stably. Measured against
-the harness as committed:
+The liveness half is what makes the digest baseline mean something during a rebuild: at the demolition it reports
+**0 of 23** cases landing their pins, and each role that returns moves that number. The 10 cases that stayed dark
+under the previous builder are recorded in a STRICT `UNSCHEDULED` set, so phases 2 and 3 report their own completion.
 
-- **13 cases land their pins**, so the scalar / warp / f16acc / split-K / raster / dynM contraction
-  tiers, the coop reduce tiers and the coop flash form ARE covered, contrary to the earlier reading.
-  What `tile_of` returned `None` for was the un-scheduled cases below, not the tiered path.
-- **10 cases do not**, each a consequence of one of the two enumerator gaps — `norm_linear` ×4 and
-  `mlp_geglu` (phase 4), the four flash warp forms and `flash_chain` (phase 5). They are recorded in
-  a `UNSCHEDULED` set that is STRICT like the xfail registry: a case that starts landing its pins
-  FAILS until it is deleted, so phases 4 and 5 report their own completion here.
-- **One case was pinning a retired key.** `matmul_wspec` pinned `WSPEC=p1`, which no longer lands
-  anything: the row fell through to an unrelated split-K leaf, so the "warp-specialization" digest
-  was digesting a split-K kernel with no producer band at all. Re-pinned as `matmul_pband` with the
-  live `WORK=w2x4+p1` spelling — `__launch_bounds__(288)` and the `threadIdx.x < 256` band split
-  confirm the band is realized. It is the third defect this class of check has found, after the
-  uniform band re-offered beside a pin and the dead `STAGE` mask.
+**A Hopper run is owed** before the merge: verification so far is sm_89, where every `d*/tma*` row declines, leaving
+the staged-TMA tiers unexercised.
 
-Every other digest is unchanged across the fix, so the baseline's byte-identity claim survives it.
-
-**The registry is `strict=True`** — an id that starts passing now FAILS until it is deleted, so "the
-file shrinking to empty IS the completion gate" is enforced rather than aspirational (measured: 0
-xpass on sm_120, sm_89 and CPU before the flip). Its `CONSEQUENCE_MODULES` additionally do not run:
-recording the expectation without executing it took `make test` 241 s → 54 s and the GPU suite
-476 s → 305 s, nearly all of it the drift gate reaching its own xfail. Card-conditional expectations
-stay inline and non-strict at their own test, where the reason can name the condition.
-
-**GPU-verified, paired.** RTX 4090 / sm_89 / CUDA 13.3, the same tree at `fc0ade05` and at HEAD, same
-box and nvcc flags: zero new failures, the one failure shared by both runs being an unrelated
-pre-existing `bench_block` case. Note sm_89 leaves the TMA rows unexercised (Hopper+ only) while the
-f16acc fork IS offered there, so a Hopper run is still owed for the staged-TMA tiers.
-
-### Defects the rebuild and the simplification pass found
-
-Worth recording because each was invisible to the type checker and to the suite:
-
-- `_assemble` and `ops.seal_workers` derived the SAME worker inventory with different comparisons —
-  full tuple equality vs a headcount — so a `t8x4` tile against a 32-wide coop was dropped
-  pre-materialization and accepted post-, and the headcount form would have called a `w4x8` WARP
-  tile compatible with a 32-wide coop. Both now route through `ir/schedule.derive_inventory`.
-- The producer band's thread budget was checked at MATERIALIZATION, after `_assemble` had already
-  spelled `+p<n>` into the row's `WORK` — so an over-budget band produced a row whose stamped
-  inventory claimed a producer its op did not have. It is an enumeration-time check now.
-- A malformed `STAGE` pin was silently degraded to gmem-direct (the only such pin in the family),
-  which had left `test_staged_scalar_matmul_matches_reference` parametrized over a RETIRED stage
-  mask — four cases compiling one unstaged kernel and passing on accuracy, which is identical
-  either way.
-- `ctx=None` was unreachable (one caller; `Pipeline.run` probes) yet carried four fallbacks that
-  each meant something different.
-
-### What was still hand-written — **all three LANDED**
-
-The simplification review's remaining list, now closed (digest-identical across all three):
-
-- the depth-1 `(m, n)` rule has ONE home: `Placement.root_mn` (the grid's trailing pair, or `None`
-  when the grid cannot supply it). `TilePlan.placed_on` binds through it at option assembly and
-  `Sched._mn_for` reads it for a reader that takes the slice off the tree, so the rule and its
-  degradation are stated once instead of twice with different failure modes; `_placed` is gone.
-- `search/features.py` resolves through `ir/schedule.resolve_row` (`_row_slices`), so the hand-rolled
-  `Workers.parse` + `resolve_site_tile` + `ReducePlan.parse` triple is gone. Because a featurizer only
-  ever sees a REALIZED row, an absent family reads there as its decided empty `""`, not the unset-pin
-  `None` the enumeration reads it as — that difference is the one thing the shared resolver cannot
-  infer, so it is stated at the featurizer's edge. The resolver keeps its one severity (raise) and
-  each caller chooses: the geometry readers catch, `_reduce_decomp` keeps its coop-without-`WORK`
-  escape and otherwise raises.
-- `has_contraction_tail` moved to `ir/stmt/passes.py` beside `projection_distributes` — both are
-  statement-SHAPE predicates, neither belongs to the scheduler that asks.
-
-The old scheduler was DELETED at `e27d8fdc`: `_schedule.py` (2458 lines), `_view.py` (96),
-`020_schedule.py` (109). Recognition, the codec, the materializer and `030_split_reduce` were
-untouched by that commit. What exists today is ~880 + ~290 lines across `_schedule.py` and
-`_legality.py`.
-
-**Far more survives than an earlier revision of this plan claimed**, and it changes both the cost and the gates:
+### What already exists — do not rebuild it
 
 | the plan does NOT need to build | it already exists |
 | --- | --- |
@@ -509,7 +454,7 @@ untouched by that commit. What exists today is ~880 + ~290 lines across `_schedu
 | an enumeration dump | `golden_eval.enumerate_graph(graph, ctx, family=)` |
 | a site walker | `path.family_sites` / `path.sites` / `ops.Sched` |
 | worker sealing / inventory derivation | `ops.seal_workers`, `ir/schedule.derive_inventory`, `derive_workers`, `plan_workers` |
-| a row → typed slices resolver | `ir/schedule.resolve_row` (both the env pins and an enumerated row) |
+| a row → typed slices resolver | `ir/schedule.resolve_row` (both the env pins and an enumerated row) — single-site today, generalizes in phase 1 |
 | the scheduled-`TileOp` constructor | `ops.scheduled` (construct + key slices through `Sched` + seal) |
 | the `""`-TILE ambiguity resolver | `schedule.resolve_site_tile` |
 | smem footprint | `pack_smem`, `KernelOp.smem_bytes()` |
@@ -528,7 +473,7 @@ untouched by that commit. What exists today is ~880 + ~290 lines across `_schedu
 | `test_golden_knobs_are_members_of_the_move_catalog` (live today) | a golden becoming unreachable | non-golden losses |
 | per-key value-domain snapshot (new, ~80 lines) | which family lost which value, localized | ranking quality |
 | `xfail_registry` shrink (107 ids) | a restored behavior regressing | the 605 CPU skips; GPU-only; silent XPASS under `strict=False` |
-| `digest_kernels.py` vs a committed baseline (+ its per-case pin liveness) | a pinned/golden row materializing differently; a case whose pins stop reaching a kernel, or an `UNSCHEDULED` one that starts | the 10 `UNSCHEDULED` cases' materialization, until phases 4–5 land and they leave the set |
+| `digest_kernels.py` vs a committed baseline (+ its per-case pin liveness) | a pinned/golden row materializing differently; a case whose pins stop reaching a kernel, or an `UNSCHEDULED` one that starts | the 10 `UNSCHEDULED` cases' materialization, until phases 2–3 land and they leave the set |
 | eval-golden MATCH sweep (GPU) | the deployed pick drifting | non-golden shapes |
 | option-0 assertion (`stamp_schedule_families(rows[0])` all-`off`, per-family) | the safety-net pick becoming non-degenerate | — |
 
@@ -566,22 +511,38 @@ regression list that runs exhaustively thereafter, so the gate strengthens monot
 
 Rows 9–10 must NOT be asserted in tier 0 — row 9 is enforced by the resolvers and row 10 by nothing.
 
-## Migration — what remains
+## Migration — the clean reimplementation
 
-Phases 1–3 and the SPIKE are DONE (see Status). What is left:
+`_schedule.py` is DELETED. `020_schedule` enumerates nothing and every term stays unmapped — the guardrail contract,
+so kernels still compile on the materializer's per-cell path and what fails is coverage, never a compile. The tree's
+measured state at the demolition commit: `make test` green with **241 registered xfails** (52 added), and
+`digest_kernels.py` reporting **0 of 23 cases landing their pins** (from 13). Those two numbers are the progress
+meter for everything below.
 
 | phase | scope | gate |
 | --- | --- | --- |
-| P0-rest | LANDED for the liveness assertion (see Status — 13 cases land, 10 recorded `UNSCHEDULED`, one stale `WSPEC` pin fixed). Still open: `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have; unreachable until the flash warp realizer runs, and it has no obtainable baseline until fixed) | the gate stops lying |
-| 4 | CONTRACTION with computed edges — the fused norm→linear / gate⊗up cone, whose A edge is an inline node rather than a gmem `Load`. The `020` merge becomes a row union under ONE spelling | 4 `norm_linear` + `mlp_geglu` digest cases + 6 recognize-boundary ids |
-| 5 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction | 40 attention-pin ids + 4 attention-coverage ids; digest only after P0-rest |
-| 6 | `schedule()`'s own dispatch and flash-form selection once 4–5 exist | registry empty + `make test` + `make lint` |
+| **1** | **The recursive enumerator — the target design, built once.** `rows(site, inherited, ctx)` over the site tree with downward context and upward `WORK` derivation; `merge` spelling every slice through `ops.Sched.key`; `values(role, site, ctx)` reading the unchanged `search/space.py` catalogs; `_legality.py`'s predicates reused as the downward filter. Restores the four single-site roles ONLY — `FREE` + the strip variant, `PLANAR`/`TWISTED`'s reduce partition, `CONTRACTION`'s tile × stage × reduce × raster over the scalar and warp tiers with split-K | **row-set identity, three independent ways**: the 13 liveness cases land again AND their digests are byte-identical to the committed baseline; `test_move_catalog`'s per-family set equality **plus its row-count equation**; `test_golden_knobs_are_members_of_the_move_catalog`. 52 registry ids deleted |
+| 2 | CONTRACTION with computed edges — the fused norm→linear / gate⊗up cone, whose A edge is an inline node rather than a gmem `Load`. Under the recursion this is a `values` entry for the cone's sites plus legality (warp-only, sync fill mandatory, multi-channel ⇒ no cp.async/TMA) — NOT a new emitter | 4 `norm_linear` + `mlp_geglu` digest cases leave `UNSCHEDULED` + 6 recognize-boundary ids |
+| 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
+| 4 | `schedule()`'s own dispatch and flash-form selection once 2–3 exist; `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have — unreachable until the flash warp realizer runs, so it has no obtainable baseline until then) | registry EMPTY + `make test` + `make lint` |
 
-Phase 4 and 5 both need the term-variant union this plan specifies (`variants()` — the collapse and
+**Phase 1 is the whole bet.** It must land with no new behaviour whatsoever: same rows, same order-independent set,
+same kernels byte-for-byte. That is what makes it verifiable without a GPU and without judgement — the roles it
+rebuilds are exactly the roles whose correct output is already committed as a baseline. Any row the recursion emits
+that the single-site builder did not is a phase-1 bug, not a bonus; any row it drops is a regression the row-count
+equation catches. Phases 2 and 3 then add `values` entries and legality predicates to a structure that is already
+proven, instead of adding a third and fourth hand-written product.
+
+Phases 2 and 3 both need the term-variant union this plan specifies (`variants()` — the collapse and
 mixed-A promotion readings) and its three obligations: uniform key sets with `""` as a DECIDED
 empty, no cross-variant suppression, and variant identity surviving into the prior's key space
 (check `canonical_row_key(a) != canonical_row_key(b)` across variant pairs; if they collide the fix
 is an `S_*` stamp, never a new knob key).
+
+**Watch the row count.** The recursion GENERATES the cross-site product that the flat builder structurally avoided.
+The downward context is what keeps it bounded, and `test_move_catalog`'s row-count equation is what makes growth
+visible instead of silent — extend it to a per-site equation in phase 1, before there is anything multi-site to
+count.
 
 **Before any GPU sweep is trusted: refit the offline prior.** `commands/fit.py::build_golden_groups`
 reconstructs each golden's candidate pool by RE-ENUMERATING (`enumerate_graph`) and fits
@@ -628,7 +589,7 @@ Previously unstated and each otherwise discovered mid-phase:
   yields ≥ 1 row except the documented computed-A-no-legal-warp case.
 - **Split-K re-entry**: `030_split_reduce` produces a `__partial` kernel that re-enters as its own `TileOp` and must
   itself be enumerable, without further splitting. Its `__partial` kernels are absent from `digest_kernels` output
-  today; P0's baseline must include them (they appear at `e27d8fdc^`).
+  today; the baseline must include them.
 
 ## Worked examples
 
@@ -650,6 +611,20 @@ on the tile view is a decision the loop form does not yet contain.
 Codec reminders for reading the annotations: thread `WORK` is `t<N>x<M>` and scalar `TILE` is `f<fn>[x<fm>]` — both
 **n-then-m**; warp `WORK` `w<M>x<N>` and warp `TILE` `<atom>/f<FM>x<FN>` are m-then-n. `operand[a]` / `operand[b]`
 are the bilinear reading's edge labels — the `a` / `b` path segments `PLACE@a` is keyed against.
+
+**Each example carries a SITE TABLE** — the recursion's job for that shape, stated as `site → variables →
+constraints`.
+Read it as the contract phase 1 must satisfy: one row per site the walk visits, the families that site offers, and
+what bounds them (`↓` = inherited from the parent, `↑` = folded up to the kernel, otherwise site-local legality).
+
+The rule the tables make concrete, and the one reason the walk must recurse:
+
+- **A MATERIALIZED operand is not a site.** It is a gmem `Load`, so there is nothing below to schedule and its
+  transport is enumerated AT THE PARENT — the parent's `STAGE` family (`d<depth>` / `sync` | `cp` | `tma` / `ring`)
+  covers every operand it stages.
+- **A COMPUTED operand IS a site.** It is a node, so it enumerates its OWN families (its reduce partition, its
+  register geometry), and the parent's `STAGE` collapses to the compute-fill it can actually use. Transport for
+  whatever *that* subtree reads is then enumerated one level further down, at ITS sites.
 
 ### 1. Bare reduction — one axis, no edges, PLANAR
 
@@ -683,12 +658,20 @@ Tile IR:
     └─ y[a0, 0] = acc0
 ```
 
-No operands, so the arity table lands the inner node on PLANAR. The reduce emitter produces `_reduce_specs`' rows
-verbatim: serial option-0 (past `_FREE_CAP` the heuristic stays scalar), then the coop catalog — each `t<n>` row's
-worker demand IS its `WORK` inventory, nothing to unify against — then guarded `g<n>` / `r<n>`.
+No operands, so the arity table lands the inner node on PLANAR: serial option-0 (past the free-cell cap the
+heuristic stays scalar), then the coop catalog — each `t<n>` row's worker demand IS its `WORK` inventory, nothing to
+unify against — then guarded `g<n>` / `r<n>`.
 
 Note the bare reduce is ALREADY wrapped by an identity zero-axis node. That is not new: it is what the projection
 wrapper always did, and it means the FREE and PLANAR emitters compose at depth 0/1 on even the simplest shape.
+
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` (depth 0) | — (it has an operand, so no strip `TILE`); owns the free-axis → grid mapping | — |
+| `Fold[a1] planar` — bare `REDUCE` | the reduce partition: serial, `coop` at `t<n>`, `g<n>[k\|a]` cta split, `r<n>` register fold | coop ≤ the CTA cap and a power of two; `g<n>` needs a STATIC extent; the option-0 heuristic declines coop past the free-cell cap. `↑` the coop width IS the kernel's `WORK` inventory |
+| same fold — bare `STAGE` | nothing to stage: the operand is INLINE in the lift, not an edge | decided empty |
+| `RASTER` | — | CONTRACTION-scoped; a pure reduce offers no rows |
+
 
 ### 2. RMSNorm — the same two depths, a real projection
 
@@ -748,6 +731,13 @@ Tile IR:
 Structurally identical to example 1 — only the outer lift has a body. The two nodes are the same kind at two
 depths, dispatched by `ops.axis_role` (FREE outer, PLANAR inner) with no wrapper type in between.
 
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` | — (has an operand); its lift is the per-cell normalize, its `stores` the sweep | the sweep's lane mapping follows the inner fold's `↑` inventory — one CTA, one row |
+| `Fold[a1] planar` — bare `REDUCE` | as example 1 | as example 1 |
+| same fold — bare `STAGE` | the SHARED-ROW slab: the input read in BOTH the inner lift and the outer sweep | offered only over a cooperative partition AND a contraction tail (`has_contraction_tail`); declines here, so decided empty |
+
+
 ### 3. Softmax — the same shape again, twisted combine
 
 ```python
@@ -801,6 +791,13 @@ Twisted changes what the combine COSTS, never which fold moves are legal, so no 
 Post-collapse the claim "same node kind as example 1, only the monoid arity differs" is literally true of the
 storage, not just of the algebra.
 
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` | — | — |
+| `Fold[a1] twisted` — bare `REDUCE` | the SAME partition catalog as examples 1–2 | identical legality; the twist changes the combine's cost, not any move's legality — no twisted-only value exists |
+| same fold — bare `STAGE` | shared-row slab | declines (no contraction tail) |
+
+
 ### 4. Matmul — one axis, two edges, CONTRACTION
 
 ```python
@@ -835,15 +832,26 @@ Tile IR:
 ```
 
 The role is read off the shape — two operands, a `multiply` lift over distinct params, an `add` combine — and the
-A/B labels off the stored operand ORDER `(b, a)`. **Note what the dump makes plain and my earlier draft of this plan
-got wrong:** A/B is *not* derived from the accesses. Node-locally `x[a0, a2]` and `w[a2, a1]` are symmetric — each
+A/B labels off the stored operand ORDER `(b, a)`. **Note what the dump makes plain:** A/B is *not* derived from the
+accesses. Node-locally `x[a0, a2]` and `w[a2, a1]` are symmetric — each
 carries the K axis plus one free axis — and telling M from N needs the PLACEMENT, which is a caller fact on the
 `TileOp` and deliberately absent here. Order is what `Fold.contraction(...)` generates and what the gate pins.
 
-Depth-0: the CONTRACTION emitter's tile × stage × reduce × raster product — `_tile_rows` almost unchanged, minus
-the `contraction_view` shape-probe. The warp sibling family maps the same axes differently: `WORK=w<M>x<N>` puts
+Depth-0 is the tile × stage × reduce × raster product. The warp sibling family maps the same axes differently:
+`WORK=w<M>x<N>` puts
 32-lane warps on an (m, n) warp grid, `TILE=<atom>/f<FM>x<FN>[/k<bk>]` gives each warp an
 (FM·atom_m) × (FN·atom_n) fragment tile, and a2 advances in `atom_k`-element mma steps, `bk` per smem stage.
+
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold[a2] contraction` — bare `TILE` | scalar `f<fn>[x<fm>]` (`par × reg`) OR warp `<atom>/f<FM>x<FN>[/k<bk>]` per eligible atom | `par_n·par_m ≤ 1024`; `FM·FN ≤ 32`; `32·WM·WN ≤ 1024`; the atom's operand dtype must match A/B; `bk·atom_k` divides a static K. `↑` the tile's units ARE the `WORK` inventory |
+| same node — bare `STAGE` | `d<depth>` × `sync` \| `cp` \| `tma` × `ring` — **the transport for BOTH materialized operands**, since neither is a site | the resolver returns the largest slab that fits `ctx.max_dynamic_smem`, or declines to gmem-direct; TMA needs `ctx.has_tma`; `↓` warp `TILE` only |
+| same node — bare `REDUCE` | `""` (serial K) or `g<n>[k\|a]` split-K | `n` divides K; atomic finalize only when the projection distributes; `↑` no coop beside a warp inventory |
+| kernel-global `WORK` | — DERIVED, never chosen | `↑` folded from the slices; the row drops if they disagree |
+| root-global `RASTER` | `""`, `gm<G>`, `gn<G>` | static grid only |
+| `+p<np>` producer band (in `WORK`) | aux warp counts | warp `TILE` + a RESOLVED TMA `STAGE`, no cross-CTA split, `block_threads + 32·np ≤ 1024` |
+| `operand[a]`, `operand[b]` | **NOT SITES** — gmem `Load`s | their transport is the parent's `STAGE`, above |
+
 
 ### 5. Epilogue fusion — a zero-axis fold over example 4
 
@@ -876,6 +884,12 @@ The enumeration is example 4's product plus one local filter at the outer node: 
 (a warp row folds the outer lift into the per-fragment `RegEpilogue`, so a data-dependent gather index refuses the
 warp tier). The operand subtree is byte-identical to example 4's, so the candidate enumeration is identical **by
 construction** — and post-collapse that means the same emitter ran, not that two emitters agreed.
+
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` (the epilogue) | — (has an operand) | its lift becomes the per-fragment `RegEpilogue`; a data-dependent gather in it `↓` REFUSES the child's warp tier — the one cross-level constraint this shape adds |
+| child `Fold[a2] contraction` | example 4's four families verbatim | example 4's constraints, plus the `↓` epilogue filter above |
+
 
 ### 6. SwiGLU — the fused gate⊗up edge, where sharing IS arity
 
@@ -942,10 +956,21 @@ the fused node pre-scheduler — its cone/contraction recognition lives in `_ato
          acc_u = add(acc_u, acc_u__o)
 ```
 
-The cone's inner stat fold answers with its own `REDUCE@<axis>` slice from its own emitter (retiring
-`prologue_knob_bases`' hand-threading), and the `020` MONOID-producer merge (two term readings of one loop) reduces
-to "run `candidates` on each reading, union the rows". `PLACE@cone` and `PLACE@a` are exactly the segment spellings
-the collapse had to preserve.
+The cone's inner stat fold answers with its own `REDUCE@<axis>` slice, from the same recursion that answers the
+outer node — no hand-threaded prologue keys. The two term readings of one loop reduce to "recurse on each reading,
+union the rows". `PLACE@cone` and `PLACE@a` are the segment spellings the collapse must preserve.
+
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` (silu ⊗ multiply) | — (has an operand) | the ⊗-combine defers into the finalize under split-K |
+| `Fold[k] contraction` — bare `TILE` | warp tiles only | **no scalar tier**: the fill is a compute fill, which only the warp realizer has; `↑` its units are the inventory both channels share |
+| same node — bare `STAGE` | `d1` (compute fill) and the asymmetric B-only ring `d2` | `↓` a COMPUTED `a` edge ⇒ `sync` compute-fill is MANDATORY; multi-channel (gate⊗up) ⇒ no `cp.async` / TMA at all; no producer band (the band assumes a copying producer) |
+| same node — bare `REDUCE` | `""` or `g<n>k` — the redundant-statistic split | single-channel for the classic arm; multi-channel splits with per-channel raw `C` partials; the k-invariant prologue is RECOMPUTED per partition, so only the small-free decode shapes admit it |
+| `operand[a]` — the cone, `PLACE@a` | **IS a site**: the seam is real, so cut legality is spelled here | edge iff closed — structural, by construction |
+| the cone's statistic fold — `REDUCE@<axis>` / `STAGE@<axis>` | its OWN reduce partition + the row-invariant prologue's placement (hoisted above the K loop, published by a CTA barrier) | `↓` `coop` binds to the parent's inventory (`ReducePlan.parse` requires a THREAD kind and `coop == work.count`) — the codec-imposed limit, unchanged by this plan |
+| `operand[b0]`, `operand[b1]` | **NOT SITES** — gmem `Load`s, one per channel | plain-copy fills issued BEFORE the compute fill, under the parent's `STAGE` |
+| root-global `RASTER` | `""`, `gm<G>`, `gn<G>` | load-bearing here: B re-streams per M-tile row, so the grouped order's L2 reuse is real (`gn8` measured −8% on the gemma gate_up edge, 5090) |
+
 
 ### 7. Pure pointwise — a zero-axis fold with no operands
 
@@ -977,7 +1002,13 @@ Tile IR:
 
 **This is the shape that now collides with the loop-IR escapes** — `030`'s finalize and the un-recognized flat cell
 are also zero-axis folds with no operands. They are separated only by `ops.axis_role`'s `Loop.role` fallback and
-`family_sites`' root-only rule. Phase 3 must assert it directly.
+`family_sites`' root-only rule. Phase 1 must assert it directly.
+
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` (no operands, depth 1) — bare `TILE` | the register-STRIP ratios `f<r>` — the one case a zero-axis fold is a `TILE` site | `r` divides the inner free extent statically; the cell body must be stateless (no sweep, no carried state); a warp codec is illegal on a pointwise cell |
+| everything else | — | no axis ⇒ no `REDUCE`/`STAGE`; no operands ⇒ no child sites; `RASTER` is CONTRACTION-scoped |
+
 
 ### 8. Causal SDPA — one node kind at three depths
 
@@ -1068,12 +1099,12 @@ select to the twisted lift.)
 
 The fold's move families and their axis mappings:
 
-- **WARP streaming** (`_twisted_warp_options` today; dtype-gated): grid = (b0·b1, m/bm). m → bm query rows held as
+- **WARP streaming** (dtype-gated): grid = (b0·b1, m/bm). m → bm query rows held as
   warp mma fragments (bm = WM·FM·atom_m from `WORK` + `TILE@dd`); kv → serial stream, bn keys per step
-  (bn = WN·FN·atom_n — the kv-block ↔ score-tile coupling `_stamp_twisted_split` hand-computes IS the unification
-  check on the QK edge); dd → mma k-steps; d → PV fragment columns via `TILE@pj`. ONE `WORK=w<M>x<N>` shared by the
+  (bn = WN·FN·atom_n — the kv-block ↔ score-tile coupling IS the downward constraint on the QK child); dd → mma
+  k-steps; d → PV fragment columns via `TILE@pj`. ONE `WORK=w<M>x<N>` shared by the
   QK child and the derived PV. Constraint-table row 15 applies: `WN = 1`.
-- **CHAIN** (FA-2 scalar, `_twisted_chain_option`): grid = (b0, b1, m) — one THREAD per query row; d → a per-thread
+- **CHAIN** (FA-2 scalar): grid = (b0, b1, m) — one THREAD per query row; d → a per-thread
   register vector (`TILE@pj=f64`, legal since d = 64 ≤ the register budget); kv → serial per thread, the score
   computed ONCE per key and shared across all 64 columns. `WORK=""`.
 - **Per-cell**: grid = (b0, b1, m, d) — one thread per output cell; kv serial; the QK edge collapses inline (the
@@ -1083,29 +1114,25 @@ The fold's move families and their axis mappings:
   (m, l, O) triples is the fold's own combine λ — carrier-generic, same machinery as examples 1–3.
 - **Split-KV** (`g<n>k`): composes with the warp rows — kv → n CTAs × serial stream; each partial keeps fragment
   residency; `030_split_reduce` realizes the partial + LSE-combine finalize. The same `g<n>` move as matmul
-  split-K — legality (kv divides, slices block-whole) plus unification replace `_stamp_twisted_split`.
+  split-K, under legality (kv divides, slices block-whole) plus the inventory fold.
 
-Pins (`TILE@dd` / `TILE@pj` / `REDUCE@<kv>`) narrow at their paths like every other kernel; `_narrow_flash_forms`
-and the warp/stage-pin routing block at the top of the twisted branch retire.
+Pins (`TILE@dd` / `TILE@pj` / `REDUCE@<kv>`) narrow at their paths like every other kernel — no per-form routing
+block, no flash-specific pin escape.
+
+| site | enumerate | constraints |
+| --- | --- | --- |
+| root `Fold free` (the `divide(O, l)` projection) | — (has an operand) | — |
+| `Fold[kv] twisted` — `REDUCE@<kv>` | the form family: warp streaming / chain / per-cell / coop, plus `g<n>k` split-KV | `g<n>`: kv divides, slices block-whole; coop: a `t<n>` band within the CTA; `↑` ONE inventory shared by every site below |
+| same fold — `STAGE` | `d<depth>` × `cp` \| `tma` × `ring` \| `alt` for the K/V stream | slab fits smem; `↓` warp forms only — the chain and per-cell forms stage nothing |
+| `operand` — the hoisted QK score, `TILE@dd` | **IS a site**: its own warp fragment tile + `bk` | `↓` bn = WN·FN·atom_n must equal the parent's streaming key block — the kv-block ↔ score-tile coupling, the archetypal downward constraint; `WN = 1` |
+| the DERIVED PV contraction, `TILE@pj` | its own fragment tile (`f<FM>x<FN>[/k<bk>]`), including the f16-acc atom sibling | `↓` shares the QK child's warp map by construction; `Site.derived` ⇒ EXCLUDED from `PLACE` (it lies below the seam lattice, so it is not a cut) |
+| `Q`, `K`, `V` loads | **NOT SITES** | transport is the parent fold's `STAGE` |
 
 
-### Summary — what each hand-written path becomes
 
-| Today | Under the walk |
-| --- | --- |
-| `_tile_rows` (contraction product) | the CONTRACTION emitter, depth-0 |
-| `_reduce_specs` + `_coop_carrier` | the PLANAR emitter, depth-0 |
-| `_row_stage` / `_shared_row_buf` shape-match | stage move on a twice-read materialized edge (gate kept) |
-| `_computed_a_rows` + `prologue_knob_bases` | depth-1 recursion; the child fold spells its own slices |
-| `020`'s MONOID-producer merge | candidate-union of two term readings; decided-empty generic |
-| `twisted_pair` + `_twisted_warp_options` | TWISTED emitter + child recursion + unification |
-| `_twisted_chain_option` | a row in the TWISTED emitter |
-| `_stamp_twisted_split` + matmul split-K | ONE `g<n>` fold move (atomic / kernel-finalize legality) |
-| `_narrow_flash_forms` + per-path pin escapes | per-path narrowing of local candidate lists |
-| `_demote_planar` / `_demoted_warp_option` | the collapse variant — edges inline, role falls to PLANAR |
-| `Contraction.a` / `.channels` / `.b_trans` | derived readings of `operands` (A/B by stored order; `b_trans` off B's index) |
+### Obligations the eight examples do not cover
 
-Not covered by these eight and not to be dropped: the `PLACE=cut` re-recognized pieces (18 golden rows, each its own
+Not covered above, and not to be dropped: the `PLACE=cut` re-recognized pieces (18 golden rows, each its own
 kernel), `rope` / `embedding` (which record `{WORK: ''}` and nothing else — a zero-choice enumeration, benign but it
 must not crash), `lm_head`'s coop-cap lift, `qknorm.k256/k512`, `mlp_ch`, `mlp_geglu`, `mlp_gate_up_split`, and
 every `.dynM` twin. The completeness test must also FILTER the 57 golden rows carrying non-scheduler keys
@@ -1114,9 +1141,9 @@ and recognition, not from this enumeration.
 
 ## Risks
 
-- **The measured evidence is already orphaned** (see "The IR beneath it"): the collapse changed `term_key`, so no
-  DB / reservoir row and no cubin keyed on `(ctx.structural_key, op_cache_key)` still matches. Phase 2 measures from
-  empty; goldens are unaffected. Sunk, not pending — but every "regression vs recorded evidence" reading is void.
+- **The measured evidence is orphaned**: the collapse changed `term_key`, so no DB / reservoir row and no cubin
+  keyed on `(ctx.structural_key, op_cache_key)` still matches. Measurement restarts from empty; goldens are
+  unaffected. Sunk, not pending — but every "regression vs recorded evidence" reading is void until refilled.
 - **A path segment can be silently lost.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and the stored corpus
   depends on `a` (`PLACE@a`, 9 rows) while depending on `map` / `fold` nowhere. If `path._walk`'s derived labelling
   regresses, those nine rows do not fail loudly — they re-spell to a path form and read as a different site. Assert
@@ -1124,11 +1151,11 @@ and recognition, not from this enumeration.
 - **Zero-axis folds are ambiguous by shape.** The pointwise cell, `030`'s finalize and the un-recognized escape are
   all operandless zero-axis folds; only `ops.axis_role`'s `Loop.role` fallback and `family_sites`' root-only rule
   separate them. Pre-collapse the type distinguished nothing either, but the failure was loud; now it is a wrong
-  emitter. Phase 3 asserts it directly.
-- **The remaining reconstruction is the risk**, and it is now concentrated: phases 4-5 are the paths for which
+  recursion. Phase 1 asserts it directly.
+- **The remaining reconstruction is the risk**, and it is concentrated: phases 2-3 are the paths for which
   NOTHING in the registry re-asserts the deleted predicates (`_demote_mixed_a` above all). `_legality.py` and the
   committed digest baseline are the mitigations — but see the baseline's blind spot in Status: it does not reach the
-  tiered/placed contraction path, so phase 5 needs the liveness assertion first or it has no gate at all.
+  tiered/placed contraction path, so the flash phase leans on the liveness assertion for its gate.
 - **`validate` enforces smem only.** Row 1 is enforced by the emitters and by nothing else until P1 restores the
   thread/CTA checks; registers are unenforced at every tier below 3.
 - **Variant identity may collide in the prior's key space** (see Design). Cheap to check, expensive if real.
@@ -1138,7 +1165,7 @@ and recognition, not from this enumeration.
 - **Some flash goldens may not be enumerator-reachable**, and the gate cannot currently tell. `dit_xl_2.attn.s256`'s
   `k5` cannot come from `_FLASH_KEY_ATOMS = (2,4,8,16)`; it may be a hand pin. This is invisible today because
   `test_golden_knobs_are_members_of_the_move_catalog` skips every non-`MatmulGoldenConfig`, so no flash `TILE@dd` /
-  `TILE@pj` value is checked against any domain at all. Phase 5 must extend the gate to the flash sites AND classify
+  `TILE@pj` value is checked against any domain at all. Phase 3 must extend the gate to the flash sites AND classify
   pin-only goldens explicitly, rather than leaving them silently unchecked.
 - **The prior is downstream.** See the refit obligation; skipping it makes every post-refactor rank number suspect.
 - **Order accidents will surface.** Resolve each explicitly — semantic (encode it) or not (document the diff);
@@ -1146,7 +1173,7 @@ and recognition, not from this enumeration.
 
 ## Out of scope
 
-- **Materialization**, except P0's `qk.acc` repair — a fix, not a change. `030_split_reduce` keeps consuming the
+- **Materialization**, except the `qk.acc` repair — a fix, not a change. `030_split_reduce` keeps consuming the
   same slices.
 - **`Stage.alt` → `top`/`late`** — its own plan, when a second inhabitant exists.
 - **Widening any candidate domain.** The catalog is the domain; widening is a separate, benchmarked change that

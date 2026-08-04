@@ -1,23 +1,32 @@
 """Registry of tests expected to fail while the tile scheduler is INCOMPLETE.
 
-The tile scheduler was deleted wholesale and is being rebuilt as ONE generic row enumerator
-(``_schedule.py`` + the ``020_schedule`` rule): sites → per-family typed slices → assembled rows →
-one ``build_fork_tree``. The first cut restored the roles whose operand edges are all MATERIALIZED —
-``FREE`` (pointwise + the register strip), ``PLANAR`` / ``TWISTED`` (the reduce partition) and
-``CONTRACTION`` (the tile × stage × reduce × raster product, scalar and warp tiers, split-K) — and
-those ids were deleted from this list.
+The row enumerator has been deleted a SECOND time, and the list is correspondingly larger.
 
-What remains below is what the enumerator still declines to schedule, leaving the term unmapped:
+The first rebuild restored four roles but did so with a SINGLE-SITE row builder: ``_site_keys``
+returned three keys for ``ops.head`` alone and ``_assemble`` took one ``(TilePlan, stage,
+ReducePlan)`` triple, so every emitter hand-wrote a flat product over ONE node's families. The two
+families that never landed — a COMPUTED operand edge (the fused norm→linear / gate⊗up cone) and the
+flash streaming pair — are both cases where two SITES must agree, which that shape cannot express;
+each would have needed its own bespoke emitter. So the enumerator is being rebuilt once more, this
+time RECURSIVELY over the site tree, and ``_schedule.py`` is deleted rather than extended.
 
-- **COMPUTED operand edges** — the fused norm→linear / gate⊗up cone, whose A edge is an inline node
-  rather than a gmem ``Load`` (the sync compute-fill rows and the two-reading merge).
-- **The flash streaming pair** — the ``TWISTED`` warp / chain / split-KV forms over a hoisted QK
-  operand edge and a derived PV contraction. The cooperative-KV cases additionally pin the RETIRED
+In the meantime ``020_schedule`` enumerates nothing and every term stays unmapped. That is the
+guardrail contract, not a crash: kernels still compile on the materializer's per-cell path, so
+what fails below is coverage — a pinned tier, a stamped knob, an enumerated fork — never a
+compile. The ids fall in three bands:
+
+- **The four roles the single-site builder covered** — ``FREE`` (pointwise + the register strip),
+  ``PLANAR`` / ``TWISTED`` (the reduce partition) and ``CONTRACTION`` (tile × stage × reduce ×
+  raster, scalar and warp tiers, split-K). These are the phase-1 acceptance set: the recursive
+  builder must reproduce their row sets EXACTLY, which ``digest_kernels.py`` and
+  ``test_move_catalog.py``'s row-count equation check independently.
+- **COMPUTED operand edges and the flash streaming pair** — never scheduled by either builder,
+  and the reason the rebuild is recursive. The cooperative-KV cases additionally pin the RETIRED
   ``REDUCE=b<N>`` spelling, which the site-local codec no longer decodes; they need re-spelling
   against the restored flash rows, not before them.
-- **Whole-model and serving end-to-end** — every graph that CONTAINS one of the two above (the qwen
+- **Whole-model and serving end-to-end** — every graph that CONTAINS one of the above (the qwen
   / tinyllama block and dynamic-shape chains, the generation runner and its batched twins). These
-  fail as CONSEQUENCES, so they clear on their own once the two gaps close; none of them is an
+  fail as CONSEQUENCES, so they clear on their own once the enumerator returns; none of them is an
   independent obligation.
 
 The registry is deliberately a LIST OF EXACT NODE IDS, not a module or path glob: each id is a
@@ -35,10 +44,10 @@ the PRIMARY ids — which is where it should be signalled anyway.
 
 Two limits to know about:
 
-- **Collection errors cannot be xfailed.** Three modules unit-tested private helpers of the deleted
-  scheduler; those cases were deleted with the helpers (the surviving cases in
-  ``test_node_vs_slice.py`` / ``test_split_cast_from_indexmap.py``, and the one end-to-end pin
-  contract in ``test_flash_form_narrowing.py``, stayed).
+- **Collection errors cannot be xfailed.** The first demolition took three modules that unit-tested
+  private helpers of the scheduler with it. The second one costs nothing here: no test imports
+  ``_schedule`` internals any more, so every module still collects and every casualty is an
+  ordinary xfail.
 - **GPU-gated ids were measured on one card.** The original list came off a CPU-only box, where the
   CUDA suite skips; the ``@cuda``-grouped ids were added from a full GPU run (sm_120). A card whose
   goldens route a different form can surface ids not listed here — append them with the same reason.
@@ -55,6 +64,13 @@ REASON = "tile scheduler removed - awaiting the generic demand-driven enumerator
 # Node ids that fail because scheduling is missing. Sorted by module, then case.
 NODEIDS: frozenset[str] = frozenset(
     {
+        # tests/compiler/backend/test_source_determinism.py
+        "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes",
+        # tests/compiler/cli/test_compile.py
+        "tests/compiler/cli/test_compile.py::test_compile_dynamic_emits_runtime_arg",
+        "tests/compiler/cli/test_compile.py::test_compile_golden_substring_resolves_dynamic",
+        # tests/compiler/cli/test_eval.py
+        "tests/compiler/cli/test_eval.py::test_offer_audit_flags_pin_only_and_fall_through",
         # tests/compiler/e2e/test_attention_coverage.py
         "tests/compiler/e2e/test_attention_coverage.py::test_bare_sibling_pin_selects_the_f16acc_pv_plan[dynM]",
         "tests/compiler/e2e/test_attention_coverage.py::test_bare_sibling_pin_selects_the_f16acc_pv_plan[static]",
@@ -177,24 +193,77 @@ NODEIDS: frozenset[str] = frozenset(
         "tests/compiler/e2e/test_fused_edge.py::test_fused_sync_fill_slab_swizzle[a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4]",
         "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[warp]",
         "tests/compiler/e2e/test_fused_edge.py::test_sdpa_consumer_projection_reaches_mma",
+        # tests/compiler/e2e/test_knob_pinning.py
+        "tests/compiler/e2e/test_knob_pinning.py::test_sgemm_inner_reduce_is_unrolled",
+        # tests/compiler/e2e/test_matmul_coverage.py
+        "tests/compiler/e2e/test_matmul_coverage.py::test_batched_symbolic_mk_reaches_warp",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_cp_staged_slab_is_swizzled",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_f16acc_enumeration_gate",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_m_structure[cp]",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_m_structure[tma]",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[dynamic-cp.async]",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[dynamic-tma]",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[static-cp.async]",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[static-tma]",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_raster_default_is_the_flat_order",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_raster_fork_offers_both_orders",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gm_pin_groups_the_launch_order",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_raster_symbolic_grid_stays_flat",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_masked_n_stage_declines",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_matmul_stages_through_pipeline",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_tma_stage_declines_below_sm90",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_tma_staged_slab_is_swizzled",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_trans_b_offers_staged_rows",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_b_symbolic_k_zero_fills",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_warp_matmul_stamps_wspec",
+        "tests/compiler/e2e/test_matmul_coverage.py::test_warp_static_k_indivisible_rejected",
         # tests/compiler/ir/test_dynamic_shapes.py
         "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b2",
         "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b4",
         "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_layer_dynamic_compiles_and_matches_eager",
         "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_whole_model_capture_replay_cache_matches_eager",
         "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_whole_model_dynamic_compiles_and_matches_eager",
+        # tests/compiler/passes/test_delegate_zero_init.py
+        "tests/compiler/passes/test_delegate_zero_init.py::test_first_atomic_keeps_its_memset",
+        "tests/compiler/passes/test_delegate_zero_init.py::test_oversized_accumulator_keeps_its_memset",
+        "tests/compiler/passes/test_delegate_zero_init.py::test_second_atomic_delegates_to_first",
+        # tests/compiler/passes/test_move_catalog.py
+        "tests/compiler/passes/test_move_catalog.py::test_bare_reduce_forks_the_coop_catalog",
+        "tests/compiler/passes/test_move_catalog.py::test_schedule_leaf_set_equals_catalog",
+        "tests/compiler/passes/test_move_catalog.py::test_schedule_leaves_key_tile_canonically",
+        "tests/compiler/passes/test_move_catalog.py::test_warp_staged_rows_fit_the_smem_budget",
         # tests/compiler/passes/test_recognize_boundary_rules.py
         "tests/compiler/passes/test_recognize_boundary_rules.py::test_mlp_gate_up_nodifies_as_two_channel_product_contraction",
         "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_cone_is_an_inline_node_tree",
+        "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_fp32_keeps_map_rows_only",
         "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_offers_map_rows_then_warp_contraction_rows",
         "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_symbolic_m_offers_warp_rows",
+        "tests/compiler/passes/test_recognize_boundary_rules.py::test_wide_m1_flinear_uses_single_warp_k_fold",
+        # tests/compiler/passes/test_warp_eligible_stamp.py
+        "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp",
         # tests/compiler/pipeline/search/policy/test_dit_golden_deploy.py
         "tests/compiler/pipeline/search/policy/test_dit_golden_deploy.py::test_the_shipped_dit_flash_golden_decides_the_live_deploy",
+        "tests/compiler/pipeline/search/policy/test_dit_golden_deploy.py::test_the_shipped_dit_golden_decides_the_live_deploy[dit_xl_2.attn_out_proj.s256-256-1152-1152]",
+        "tests/compiler/pipeline/search/policy/test_dit_golden_deploy.py::test_the_shipped_dit_golden_decides_the_live_deploy[dit_xl_2.ff_out_proj.s256-256-1152-4608]",
         # tests/compiler/pipeline/search/policy/test_golden_evidence.py
         "tests/compiler/pipeline/search/policy/test_golden_evidence.py::test_attention_golden_decides_the_live_flash_fork[dynM]",
         "tests/compiler/pipeline/search/policy/test_golden_evidence.py::test_attention_golden_decides_the_live_flash_fork[static]",
+        # tests/compiler/pipeline/search/prior/test_offline_prior.py
+        "tests/compiler/pipeline/search/prior/test_offline_prior.py::test_offline_ranks_mma_above_every_scalar_split[dynamic]",
+        "tests/compiler/pipeline/search/prior/test_offline_prior.py::test_offline_ranks_mma_above_every_scalar_split[static]",
+        "tests/compiler/pipeline/search/prior/test_offline_prior.py::test_warp_eligible_stamp_fp16_present_fp32_absent",
+        # tests/compiler/pipeline/search/test_bench_record.py
+        "tests/compiler/pipeline/search/test_bench_record.py::test_bench_leaves_keys_by_offer_site",
+        "tests/compiler/pipeline/search/test_bench_record.py::test_mma_path_records_and_joins_the_scalar_pool",
         # tests/compiler/pipeline/search/test_golden_spelling_canonical.py
         "tests/compiler/pipeline/search/test_golden_spelling_canonical.py::test_every_stored_golden_spelling_is_canonical",
+        # tests/compiler/pipeline/search/test_keys.py
+        "tests/compiler/pipeline/search/test_keys.py::test_static_and_symbolic_twins_never_collide_cuda_stage",
+        # tests/compiler/pipeline/search/test_two_level.py
+        "tests/compiler/pipeline/search/test_two_level.py::test_inner_reward_deeper_patience_benches_new_variants",
+        "tests/compiler/pipeline/search/test_two_level.py::test_inner_reward_is_separable_not_a_product",
         # tests/compiler/pipeline/test_flash_form_narrowing.py
         "tests/compiler/pipeline/test_flash_form_narrowing.py::test_stage_pin_does_not_bypass_keyed_tile_pins",
         # tests/compiler/pipeline/test_golden_attention_pins.py
@@ -238,6 +307,12 @@ NODEIDS: frozenset[str] = frozenset(
         "tests/compiler/pipeline/test_golden_attention_pins.py::test_static_attention_golden_pins_bind[gemma4_12b.attention.hd512@4090_1]",
         "tests/compiler/pipeline/test_golden_attention_pins.py::test_static_attention_golden_pins_bind[gemma4_12b.attention.hd512@4090_2]",
         "tests/compiler/pipeline/test_golden_attention_pins.py::test_static_attention_golden_pins_bind[gemma4_12b.attention.hd512@5090]",
+        # tests/compiler/pipeline/test_resolve.py
+        "tests/compiler/pipeline/test_resolve.py::test_decide_score_lands_on_trace",
+        "tests/compiler/pipeline/test_resolve.py::test_resolve_applies_in_place",
+        "tests/compiler/pipeline/test_resolve.py::test_trace_records_partition_fork",
+        # tests/compiler/test_golden_configs.py
+        "tests/compiler/test_golden_configs.py::test_fast_math_golden_ranks_in_gated_enumeration",
         # tests/compiler/test_golden_drift_gate.py
         "tests/compiler/test_golden_drift_gate.py::test_gemma4_goldens_deploy_in_serving_twins[rtx4090]",
         "tests/compiler/test_golden_drift_gate.py::test_gemma4_goldens_deploy_in_serving_twins[rtx5090]",

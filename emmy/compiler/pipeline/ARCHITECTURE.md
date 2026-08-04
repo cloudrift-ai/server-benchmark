@@ -1004,8 +1004,8 @@ a wrong or un-launchable kernel:
 ### Registered knobs
 
 All declared in `search/space.py`; see [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the per-rule mechanics.
-The "owning rule" for the schedule codecs is the tile scheduler (`lowering/tile/_schedule.py`, driven by
-`020_schedule`), whose row enumerator spells each family exactly once, site-local, where a row becomes stored state.
+The "owning rule" for the schedule codecs is the tile scheduler (the `020_schedule` rule), whose recursive row
+enumerator spells each family exactly once, site-local, where a row becomes stored state.
 
 **`WORK`** (STR codec, stamped by `seal_workers` at option assembly) — the kernel-global **worker inventory**,
 spelled exactly once per row (step 7): `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer

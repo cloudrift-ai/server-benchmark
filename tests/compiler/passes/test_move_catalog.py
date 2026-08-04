@@ -23,19 +23,27 @@ from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
-from emmy.compiler.pipeline.search.space import scalar_tile_moves
+from emmy.compiler.pipeline.search.space import scalar_tile_moves, warp_tile_moves
 
-# The hand-computed legal product as explicit literals — per-cell option-0, then the (par × reg) grid
+# The hand-computed legal product as explicit literals — per-cell option-0, then the (par × reg) box
 # as the pair each move STORES: its site-local ``TILE`` value (the register sub-tile; the default
-# ``f1x1`` suppresses, so ``reg=(1,1)`` spells empty) and the ``WORK`` thread inventory its parallel
-# widths imply. Written out (not recomputed from ``_SCALAR_*``) so a change to the grid, the
-# ordering, or the legality filter is caught here explicitly. The per-par register list is the
-# square/skewed core plus the golden-informed deep-FM points (f2x6..f2x14, f4x6..f4x26).
-_REGS = [
-    "", "f2x2", "f4x4", "f2x4", "f4x2",
-    "f2x6", "f2x8", "f2x14", "f4x6", "f4x8", "f4x10", "f4x12", "f4x14", "f4x26",
-]  # fmt: skip
-_EXPECTED_MOVES = [("", "")] + [(reg, f"t{pn}x{pm}") for pn, pm in ((16, 8), (16, 16), (32, 8), (32, 16), (64, 16)) for reg in _REGS]
+# ``f1x1`` suppresses to empty and a unit ``reg_m`` drops the ``x`` half) and the ``WORK`` thread
+# inventory its parallel widths imply. The two ladders and the one bound are restated by hand here —
+# NOT recomputed from ``_SCALAR_TILE_SPACE`` — so a change to either dimension, to the thread budget,
+# or to the enumeration order is caught explicitly.
+_PARS = [(pn, pm) for pn in (16, 32, 64) for pm in (8, 16) if pn * pm <= _MAX_BLOCK_THREADS]
+_REGS = [(rn, rm) for rn in (1, 2, 4) for rm in (1, 2, 4, 6, 8, 10, 12, 14, 26)]
+
+
+def _reg_spelling(rn: int, rm: int) -> str:
+    """How a register sub-tile spells site-locally: the ``f1x1`` default suppresses entirely and a
+    unit ``reg_m`` drops the ``x`` half."""
+    if (rn, rm) == (1, 1):
+        return ""
+    return f"f{rn}" if rm == 1 else f"f{rn}x{rm}"
+
+
+_EXPECTED_MOVES = [("", "")] + [(_reg_spelling(*reg), f"t{pn}x{pm}") for pn, pm in _PARS for reg in _REGS]
 
 
 def _stored(plan: TilePlan) -> tuple[str, str]:
@@ -54,6 +62,19 @@ def test_scalar_tile_moves_equals_hand_product():
         site, work = _stored(plan)
         assert resolve_site_tile(site, Workers.parse(work)) == plan
         assert plan.units_n * plan.units_m <= _MAX_BLOCK_THREADS
+
+
+def test_tile_spaces_respect_their_multiplicative_bounds():
+    """The two budgets that bound the tile spaces hold on every generated point: a scalar tile
+    spends ``par_n·par_m`` threads of the CTA budget, a warp tile ``32·WM·WN`` of the same budget
+    plus ``FM·FN`` cells of the C fragment."""
+    from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_CELLS, WARP_LANES
+
+    for plan in scalar_tile_moves():
+        assert plan.units_n * plan.units_m <= _MAX_BLOCK_THREADS
+    for plan in warp_tile_moves(("mma_m16n8k16_f16_f32",)):
+        assert WARP_LANES * plan.units_m * plan.units_n <= _MAX_BLOCK_THREADS
+        assert plan.reg_m * plan.reg_n <= MAX_FRAGMENT_CELLS
 
 
 def _matmul_graph() -> Graph:

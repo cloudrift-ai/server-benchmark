@@ -40,6 +40,7 @@ import logging
 
 from emmy.compiler.ir.schedule import ReducePlan, TilePlan
 from emmy.compiler.pipeline.knob import Knob, KnobType
+from emmy.compiler.pipeline.search.domain import Bound, Dimension, Space
 
 logger = logging.getLogger(__name__)
 
@@ -309,80 +310,82 @@ LOOPIFY = Knob(
 # pinned tile (imported there — one constant, two enforcement points).
 MAX_BLOCK_THREADS = 1024
 
-# The scalar register-tile candidate grid: ``(par_n, par_m)`` parallel thread-tile widths ×
-# ``(reg_n, reg_m)`` per-thread register sub-tile widths. Bounded and hand-computable — the product the
-# structural-coverage test recomputes independently. The parallel widths stay inside the thread budget
-# (``64·16 = 1024 ≤ 1024``); the register widths span the square + skewed sub-tiles the prior ranks by
-# occupancy / reuse PLUS the golden-informed deep-FM points — every ``(reg_n, reg_m)`` here is a
-# recorded golden winner on some card (the ``f2x14`` / ``f4x8`` / ``f4x10`` / ``f4x26`` family that the
-# post-rebuild grid orphaned — the sixth sweep's 1.29-1.49× reachability losses). The permanence test
-# (``tests/compiler/test_golden_configs.py``) asserts every golden TILE stays a member of this product.
-_SCALAR_PAR: tuple[tuple[int, int], ...] = ((16, 8), (16, 16), (32, 8), (32, 16), (64, 16))  # (par_n, par_m)
-_SCALAR_REG: tuple[tuple[int, int], ...] = (
-    (1, 1), (2, 2), (4, 4), (2, 4), (4, 2),  # the square / skewed core
-    (2, 6), (2, 8), (2, 14),  # golden-informed deep-FM, narrow-par rows
-    (4, 6), (4, 8), (4, 10), (4, 12), (4, 14), (4, 26),  # golden-informed deep-FM, wide rows
-)  # fmt: skip  # (reg_n, reg_m)
+# The lanes one warp spends of that budget — the coefficient a warp-tile bound multiplies by.
+WARP_LANES = 32
+
+# The mma C fragment's per-warp register budget, in accumulator cells (``FM·FN``). Above this the
+# fragment no longer fits the register file at any useful occupancy.
+MAX_FRAGMENT_CELLS = 32
+
+# The scalar register-tile candidate SPACE: ``(par_n, par_m)`` parallel thread-tile widths ×
+# ``(reg_n, reg_m)`` per-thread register sub-tile widths, generated from the one constraint that
+# bounds it — the CTA thread budget, which a scalar tile spends ``par_n·par_m`` of. The register
+# widths carry no budget (the register file is unmodeled everywhere in scheduling), so their
+# dimensions are the value ladders themselves: the square / skewed core plus the deep-FM points
+# (``f2x14`` / ``f4x8`` / ``f4x10`` / ``f4x26``) that are recorded golden winners.
+#
+# ``tests/compiler/test_golden_configs.py`` asserts every golden TILE stays a member of this space;
+# ``test_move_catalog.py`` recomputes the product independently.
+_SCALAR_TILE_SPACE = Space(
+    dims=(
+        Dimension("par_n", (16, 32, 64)),
+        Dimension("par_m", (8, 16)),
+        Dimension("reg_n", (1, 2, 4)),
+        Dimension("reg_m", (1, 2, 4, 6, 8, 10, 12, 14, 26)),
+    ),
+    bounds=(Bound(("par_n", "par_m"), limit=MAX_BLOCK_THREADS),),
+)
 
 
 def scalar_tile_moves() -> list[TilePlan]:
     """The scalar-contraction output-tile candidates: the per-cell tile first — the conservative
-    option-0 — then the register-tile grid (:data:`_SCALAR_PAR` × :data:`_SCALAR_REG`) filtered by
-    the ``par_n·par_m ≤ 1024`` thread budget."""
+    option-0 — then :data:`_SCALAR_TILE_SPACE`'s points, parallel widths varying slowest."""
     moves = [TilePlan()]
-    for par in _SCALAR_PAR:
-        if par[0] * par[1] > MAX_BLOCK_THREADS:
-            continue
-        for reg in _SCALAR_REG:
-            moves.append(TilePlan(units=par, regs=reg))
+    moves.extend(TilePlan(units=(p["par_n"], p["par_m"]), regs=(p["reg_n"], p["reg_m"])) for p in _SCALAR_TILE_SPACE)
     return moves
 
 
-# The warp (tensor-core) tile candidate grid: ``(WM, WN)`` warp counts × ``(FM, FN)`` per-warp
-# register fragments × ``bk`` K-chunks, spelled ``a:<atom>/w..x../f..x../k..``. Bounded to shapes the
-# golden sweeps have deployed (``FM·FN ≤ 32`` C-fragment cells, shallow pipelined bk; ``(8, 2)`` and
-# ``(2, 8)`` are recorded golden winners on the RTX 4090 / PRO 6000 — the permanence test keeps them).
-# ``(1, 16)`` is the thin-M / wide-N decode geometry (16 warps down the N axis, 1 down M — the same
-# 16-warp CTA as ``(8, 2)``): a decode-M computed-A (fused norm→linear) contraction wants its warps
-# spread across the wide output columns, and it beat the ``(1, 8)`` sibling ~5% on both the q-proj
-# (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). ``(2, 8)`` is its M=64 sibling (a second
-# M warp-unit once the decode bucket doubles): the lm_head.m64 golden winner — w1x8 leaves 2x on the
-# table there (2392 vs 1215 µs, 5090) — and the best fused-geglu tile at the same M. Per-node legality — the atom's operand
-# dtype and the warp static-K divisibility — is the scheduler's, not the grid's.
-# (WM, WN) / (FM, FN)
-_WARP_UNITS: tuple[tuple[int, int], ...] = (
-    (1, 1),
-    (2, 1),
-    (1, 2),
-    (2, 2),
-    (4, 1),
-    (1, 4),
-    (2, 4),
-    (4, 2),
-    (4, 4),
-    (1, 8),
-    (2, 8),
-    (8, 2),
-    (1, 16),
+# The warp (tensor-core) tile candidate SPACE: ``(WM, WN)`` warp counts × ``(FM, FN)`` per-warp
+# register fragments × ``bk`` K-chunks, spelled ``a:<atom>/w..x../f..x../k..``. Two multiplicative
+# budgets bound it and both are real hardware/codegen limits rather than deployment history: a warp
+# tile spends ``32·WM·WN`` threads of the CTA budget, and the C fragment holds ``FM·FN ≤ 32`` cells.
+# ``bk`` carries no budget of its own — the staged slab it implies is sized by the stage resolvers
+# against the live smem cap, per node.
+#
+# Recorded golden winners, for why the ladders reach as far as they do: ``(8, 2)`` and
+# ``(2, 8)`` (RTX 4090 / PRO 6000); ``(1, 16)``, the thin-M / wide-N decode geometry — a decode-M
+# computed-A (fused norm->linear) contraction wants its warps spread across the wide output columns,
+# and it beat the ``(1, 8)`` sibling ~5% on both the q_proj (N=4096) and gate/up (N=15360) fused
+# edges at M=32 (5090); ``(2, 8)``, its M=64 sibling, the lm_head.m64 winner where ``w1x8`` leaves 2x
+# on the table (2392 vs 1215 us, 5090) and the best fused-geglu tile at the same M.
+#
+# Per-node legality — the atom's operand dtype, the warp static-K divisibility, whether a slab fits
+# smem — stays the scheduler's, not the space's.
+_WARP_TILE_SPACE = Space(
+    dims=(
+        Dimension("wm", (1, 2, 4, 8, 16)),
+        Dimension("wn", (1, 2, 4, 8, 16)),
+        Dimension("fm", (1, 2, 4, 8)),
+        Dimension("fn", (1, 2, 4, 8)),
+        Dimension("bk", (1, 2, 4, 8)),
+    ),
+    bounds=(
+        Bound(("wm", "wn"), limit=MAX_BLOCK_THREADS, coeff=WARP_LANES),  # the CTA thread budget
+        Bound(("fm", "fn"), limit=MAX_FRAGMENT_CELLS),  # the C-fragment register budget
+    ),
 )
-_WARP_REGS: tuple[tuple[int, int], ...] = ((1, 1), (2, 2), (1, 4), (4, 1), (2, 4), (4, 2), (4, 4), (4, 8), (2, 8))
-_WARP_BK: tuple[int, ...] = (1, 2, 4, 8)
 
 
 def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     """The warp-contraction output-tile candidates over the (already dtype-eligible)
-    ``atom_names``: the :data:`_WARP_UNITS` × :data:`_WARP_REGS` × :data:`_WARP_BK` grid per atom.
-    No conservative option-0 of its own — these EXTEND :func:`scalar_tile_moves` (whose per-cell
-    tile leads the combined list)."""
+    ``atom_names``: :data:`_WARP_TILE_SPACE`'s points per atom. No conservative option-0 of its own
+    — these EXTEND :func:`scalar_tile_moves` (whose per-cell tile leads the combined list)."""
     from emmy.compiler.ir.atom import ATOM_REGISTRY  # noqa: PLC0415
 
     moves = []
     for name in atom_names:
         atom = ATOM_REGISTRY[name]
-        for units in _WARP_UNITS:
-            for regs in _WARP_REGS:
-                for bk in _WARP_BK:
-                    moves.append(TilePlan(atom=atom, units=units, regs=regs, bk=bk))
+        moves.extend(TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"]) for p in _WARP_TILE_SPACE)
     return moves
 
 

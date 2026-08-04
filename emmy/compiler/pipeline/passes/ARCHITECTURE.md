@@ -16,10 +16,25 @@ Schedule **enumeration and composition** — the step that decides a `TileOp`'s 
 
 ```
 sites  → path.family_sites(family, path.sites(term))   # the ONE node walk (ir/tile/path.py)
-values → per-family typed slices, keyed on the site's AxisRole (the domain is search/space.py's catalog)
+values → per-family typed slices, keyed on the site's AxisRole (the domain is search/space.py's)
 rows   → _assemble: spell each family ONCE, site-local, and DERIVE the one WORK inventory
 fork   → build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
 ```
+
+Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
+
+- **The candidate DOMAIN** is `search/space.py`. The two families with multiplicative coupling — the scalar and warp
+  tile grids — are GENERATED from their bounds (`search/domain.py`'s `Dimension` / `Bound` / `Space`); the families
+  with no products to couple (stage spellings, split widths, the coop partitions, the raster orders) stay listed.
+- **Per-node LEGALITY** is `lowering/tile/_legality.py`: one function per rule, each returning the refusal REASON or
+  `None`, with `enforce(reason, pinned=…)` choosing the severity — an env pin raises it, the unpinned enumeration
+  drops the candidate. One predicate, one home; the "pin says yes, enumeration says no" class of bug has nowhere to
+  live. The multiplicative rules are `Bound`s (a thread budget, a K-step that must tile a static extent, a 16 B
+  inner stride); the categorical ones (operand dtype, transport, a fragment-unrealizable gather epilogue) are plain
+  predicates. The smem budget is enforced by the stage RESOLVERS there, which return the largest legal `Stage` or
+  decline — a size, not a yes/no.
+- **`_schedule.py` chooses**: which families a role offers, the conservative option-0 each leads with, and how a row
+  becomes a `TileOp`. Role dispatch is a table keyed on the derived `AxisRole` (`_ROWS`), never on a node type.
 
 Three properties this shape enforces, each of which the previous hand-written scheduler violated in at least one
 arm:

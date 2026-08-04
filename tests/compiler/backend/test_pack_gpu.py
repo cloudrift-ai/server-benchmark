@@ -62,6 +62,23 @@ def test_pack_key_mismatch_falls_back(tmp_path):
     assert load_pack(pdir, key={**_KEY, "max_seq_len": 64}) is None
 
 
+def test_pack_path_separates_environments(tmp_path, monkeypatch):
+    """Two lanes differing only in ENVIRONMENT must not share a directory. The precision gate
+    is the live case: ``FAST_MATH`` changes which kernel forks the compile enumerates but not
+    the serving-shape key, so a shared path let the second warm silently overwrite the first
+    (found baking a multi-shape image, 2026-08-02: 5 directories for 8 shapes, and the pinned
+    boot then mismatched its own pack)."""
+    from emmy.compiler.pipeline.search.space import FAST_MATH
+
+    std = pack_path(tmp_path, _KEY)
+    monkeypatch.setenv(f"EMMY_{FAST_MATH.name}", "1")
+    fm = pack_path(tmp_path, _KEY)
+    assert std != fm, "the precision gate must reach the pack directory, not only the manifest"
+    # ...and each still round-trips under its own lane.
+    save_pack(fm, {"trunk": _plan()}, key=_KEY)
+    assert load_pack(fm, key=_KEY) is not None
+
+
 def test_pack_missing_cubin_falls_back(tmp_path, monkeypatch):
     # A private cubin cache so evicting the pack's cubins can't race parallel test workers.
     monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path / "cubin"))

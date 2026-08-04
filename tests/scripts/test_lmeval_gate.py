@@ -60,6 +60,10 @@ def test_build_model_args():
         "model": "google/gemma-4-12B-it",
         "num_concurrent": 8,
         "tokenized_requests": False,
+        # Overrides lm-eval's 300 s default: the emmy lane's slower request tails timed out
+        # under it, and the retry storm that followed died on a closed session, sinking a
+        # whole gate with no score (2026-08-01).
+        "timeout": 900,
     }
 
 

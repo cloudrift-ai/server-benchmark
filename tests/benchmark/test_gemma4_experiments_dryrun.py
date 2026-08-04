@@ -49,8 +49,10 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
     # Lane split: 6 stock variants, 12 emmy variants (6 + 6 fastmath). Equal-tuning
     # protocol: EVERY lane at util 0.96; the emmy cells carry the two documented
     # per-workload knobs — the decode bucket matched to the concurrency, and the 2048
-    # chunk quantum (EMMY_GEN_PREFILL_BUCKET=2048 + mnbt 2056) on the mixed 4K/4K
-    # c=4/c=8 cells.
+    # chunk quantum on the cells a same-box A/B measured it to help: the mixed 4K/4K
+    # c=4/c=8 cells (mnbt 2056), and since 2026-08-02 the 256/256 c=64 cell as well
+    # (mnbt 2112 = the quantum plus its bucket-64 rider; wave TTFT 1834 -> 1688 ms
+    # fast-math, 2263 -> 1986 standard).
     stock = [t for t in tasks if "vllm-openai" in t.recipe.engine.llm.vllm.image]
     emmy = [t for t in tasks if "vllm-emmy" in t.recipe.engine.llm.vllm.image]
     assert len(stock) == 6 and len(emmy) == 12
@@ -58,18 +60,23 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
         assert t.recipe.engine.llm.gpu_memory_utilization == 0.96
     for t in emmy:
         env = t.recipe.engine.llm.vllm.extra_env or ""
+        args = t.recipe.engine.llm.vllm.extra_args or ""
         conc = t.recipe.benchmark.max_concurrency
+        quantum = t.recipe.benchmark.random_input_len == 4096 and conc in (4, 8)
         if conc == 64:
             assert "EMMY_GEN_DECODE_BUCKET=64" in env
+            # The c=64 cell runs the quantum with its own rider width (bucket 64), so its
+            # mnbt differs from the c=4/c=8 cells' 2056.
+            assert "EMMY_GEN_PREFILL_BUCKET=2048" in env
+            assert "--max-num-batched-tokens 2112" in args
         elif conc == 1:
             assert "EMMY_GEN_DECODE_BUCKET=32" in env
         else:
             assert "EMMY_GEN_DECODE_BUCKET=8" in env
-        args = t.recipe.engine.llm.vllm.extra_args or ""
-        if t.recipe.benchmark.random_input_len == 4096 and conc in (4, 8):
+        if quantum:
             assert "EMMY_GEN_PREFILL_BUCKET=2048" in env
             assert "--max-num-batched-tokens 2056" in args
-        else:
+        elif conc != 64:
             assert "EMMY_GEN_PREFILL_BUCKET" not in env
     fm = [t for t in emmy if "EMMY_FAST_MATH=1" in (t.recipe.engine.llm.vllm.extra_env or "")]
     assert len(fm) == 6

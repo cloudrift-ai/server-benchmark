@@ -41,9 +41,10 @@ engine:
       # healthcheck. Change any of them and you are choosing to re-warm the image (see
       # docker/vllm-emmy-serve/ARCHITECTURE.md), not just editing a flag.
       #
-      # PENDING RE-WARM: context was raised 8448 -> 16384 and the currently published image
-      # is still warmed at 8448, so until the next release session re-warms it, boots take
-      # the pack-miss path described above. Context is capped by KV, not by the compiler:
+      # The published image is warmed at this exact shape — verified 2026-08-03 on a 5090:
+      # `emmy deploy local` on this recipe boots pack-hit (384 program plans, no trace or
+      # compile) in 178 s total, and pulls nothing from the hub. Context is capped by KV,
+      # not by the compiler:
       # the measured pool is 25,131 tokens at this utilization, so 16384 leaves room for
       # roughly 1.5 full-length sequences and anything at/above ~25k fails vLLM's KV
       # min-fit check at boot. Full native context does not fit a 32 GB card at FP16.
@@ -56,10 +57,9 @@ engine:
       # should reconsider it, but doing so changes the shape and wants a re-warm.
       extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
       extra_env:
-        # The fast-math kernel fork. NOTE: the published image's baked cubins are the
-        # STANDARD fork, so this lane compiles its own on first boot (cubin-cached after
-        # that). Re-warming the release image under EMMY_FAST_MATH=1 removes that cost and
-        # is the right fix if this config is deployed often.
+        # The fast-math kernel fork. The precision gate is part of the pack key, so a
+        # fast-math boot can never hit a standard-lane pack — which is why the image bakes
+        # this shape under fast math too (the `:::fm` row in models/gemma-4-12b-it.env).
         EMMY_FAST_MATH: "1"
         # The static decode-twin width. 32 is the image's warmed bucket and the tuned
         # default; it suits low-concurrency interactive serving. Higher concurrency wants a

@@ -185,6 +185,25 @@ def test_routing_golden_cuts_without_a_pin(monkeypatch) -> None:
     assert any("__cut_" in k for k in _kernel_ids(out)), "the routing entry cuts with no pin present"
 
 
+def test_schedule_pin_suppresses_the_routing_entry(monkeypatch) -> None:
+    """Any live schedule-family pin marks a pinned re-record / ``--ab`` compile, and pins are
+    authoritative over every golden tier — the recorded routing entry must not reroute it. This
+    is the 2026-07-31 fused re-record dead end: with a same-shape ``.cut`` row recorded, every
+    pinned fused golden replay silently compiled the cut's pieces and gated ``realized (off)``."""
+    from emmy import config
+    from emmy.compiler.pipeline.search import golden as golden_mod
+
+    entry = RmsNormGoldenConfig(
+        name="rms.routing", M=64, K=4096, dtype="fp16", knobs={"PLACE": "cut"}, emmy_us=3.8, gpu_name="NVIDIA GeForce RTX 5090"
+    )
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [entry])
+    monkeypatch.setenv("EMMY_STAGE", "")  # the OFF spelling — any schedule-family pin, PLACE excluded
+    with config.nvcc_flags_override(""):
+        ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
+        out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
+    assert len(_kernel_ids(out)) == 1, "a live schedule pin is authoritative — the routing entry must not cut"
+
+
 def test_routing_golden_ignored_off_its_card(monkeypatch) -> None:
     from emmy.compiler.pipeline.search import golden as golden_mod
 

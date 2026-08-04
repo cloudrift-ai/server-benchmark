@@ -145,7 +145,7 @@ serve-image: git-sha-guard serve-config-guard
 	@test -n "$$(ls -A $(SERVE_DIR)/warm/hf 2>/dev/null)" -a -n "$$(ls -A $(SERVE_DIR)/warm/cubin 2>/dev/null)" || \
 		(echo "$(SERVE_DIR)/warm/ is empty — run 'make serve-warm MODEL=$(MODEL)' on the target GPU first"; exit 1)
 	@mkdir -p $(SERVE_DIR)/warm/pack  # pack is optional (COPY needs the dir); empty -> boot falls back to full compile
-	docker run --rm -v $(PWD)/$(SERVE_DIR)/warm/hf:/hf \
+	docker run --rm --user $$(id -u):$$(id -g) -v $(PWD)/$(SERVE_DIR)/warm/hf:/hf \
 		-v $(PWD)/$(SERVE_DIR)/reshard_snapshot.py:/reshard.py \
 		--entrypoint python3 $(VLLM_EMMY_TAG) /reshard.py /hf
 	$(SERVE_DIR)/split_hf.sh

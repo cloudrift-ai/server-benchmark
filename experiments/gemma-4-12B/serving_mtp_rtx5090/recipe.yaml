@@ -32,16 +32,19 @@
 # m32) rather than 16 (m16 carries only the unfused projections) — worth +41% at depth 2 and
 # +78% at depth 3 against m16, on a same-box A/B.
 #
-# c=64 is the exception, and it stays at 192 DESPITE having no golden records at that width.
-# The same reasoning says it should use 256 (near-full set at m256) and that is measurably
-# faster, but bucket 256 FAILS the output-quality gate: GSM8K collapses to 0.0 with empty
-# completions where bucket 32 scores 0.665-0.670 and stock scores 0.640-0.665 on the same
-# harness. Bucket 192's number is therefore a poor one (its kernels resolve cold, and the
-# same configuration has measured anywhere from 10.7 to 332.7 tok/s) but it is a *correct*
-# one. Do not widen this lane again without re-running the quality gate — the leading
-# explanation is that a width outside the image's warmed execution-plan pack resolves its
-# kernels cold and is not accuracy-gated, so any uncovered width carries the same risk.
-# See plans/gemma4-mtp-batched-serving-findings.md.
+# c=64 stays at 192. The same reasoning says it should use 256 (near-full set at m256) and that
+# is measurably faster, but bucket 256 FAILS the output-quality gate: GSM8K collapses to 0.0
+# with empty completions where bucket 32 scores 0.665-0.670 and stock scores 0.640-0.665 on the
+# same harness. Do not widen this lane again without re-running the quality gate.
+#
+# 2026-08-01/02: the two reasons bucket 192 used to be a poor number are BOTH closed. It is no
+# longer an unseeded width — the m192 golden tier was recorded (matmuls, fused cut routings, and
+# the o_proj pair the first sweep missed) — and it is no longer an unwarmed width, since the
+# serving image now bakes one execution-plan pack per serving shape (SERVE_WARM_SHAPES) and 192
+# is one of them, so this lane pack-hits instead of cold-resolving. Together those took the cell
+# from a non-reproducible 10.7-332.7 tok/s lottery to a deterministic 878.5 (2.6x the published
+# 332.7). See plans/gemma4-mtp-batched-serving-findings.md and
+# plans/gemma4-article-repro-16k-findings.md.
 #
 # Acceptance caveat (also in the article): on random-token prompts, long outputs collapse
 # into repetition the drafter predicts near-perfectly, so the 4k-output cells run at

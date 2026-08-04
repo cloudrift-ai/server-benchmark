@@ -64,7 +64,7 @@ from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import Fold, Placement, ReducePlan, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction
-from emmy.compiler.ir.tile.ops import Sched, axis_role, head, projection_tail, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import Sched, axis_role, head, projection_tail, scheduled
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
@@ -135,13 +135,18 @@ def _filter_work(options: list, work_of) -> list:
 def _node_loads(node) -> list[Load]:
     """Every gmem ``Load`` the term reads, as a deep walk over the STORED structure: an operand
     edge's MATERIALIZED inhabitant plus the loads sitting inline in a lift body, recursing through
-    a COMPUTED edge's own node. The node-native equivalent of scanning a lowered nest."""
+    a COMPUTED edge's own node.
+
+    Deliberately hand-written rather than a ``Body`` walk: an operand edge is not a body
+    dependency, and ``Fold.nested()`` withholds a contraction's edges precisely so generic walkers
+    do not read its multiply arguments as statements. Crossing the edges is the whole point here,
+    so the walk alternates node-wise and statement-wise and visits each node exactly once."""
     out: list[Load] = []
 
     def walk_stmts(stmts) -> None:
         for s in stmts:
             if isinstance(s, Fold):
-                walk(s)
+                walk(s)  # an inline COMPUTED edge is a node, not a statement — one visit, over there
                 continue
             if isinstance(s, Load):
                 out.append(s)
@@ -154,7 +159,8 @@ def _node_loads(node) -> list[Load]:
         elif isinstance(n, Fold):
             for e in n.operands:
                 walk(e)
-            if n._contraction is None:
+            # A contraction's lift IS the synthesized multiply — its reads are the edges above.
+            if not is_contraction(n):
                 walk_stmts(list(n.lift.body))
 
     walk(node)
@@ -679,16 +685,9 @@ def _rows(tile: TileOp, place: Placement, ctx) -> tuple[list[dict], tuple[str, s
 
 
 def _stamp(tile: TileOp, op, place, name, knobs: dict, slices, workers=None) -> TileOp:
-    """Build the scheduled ``TileOp``: the term + placement + the resolved slices in
-    ``TileOp.schedule`` (keyed through :class:`Sched`, the canonical codec spelling) + the sealed
-    ``WORK`` inventory. The term stays pure algebra — no slice is ever a node field."""
-    out = TileOp(op=op, name=name, place=place, workers=workers, knobs=_site_knobs(knobs), stores=tile.stores)
-    sched = sched_of(out)
-    for family, node, value in slices:
-        if value is not None:
-            sched.put(family, node, value)
-    seal_workers(out)
-    return out
+    """Build the scheduled ``TileOp`` — :func:`ops.scheduled` with this module's knob grammar
+    applied. The term stays pure algebra; no slice is ever a node field."""
+    return scheduled(op, name=name, place=place, knobs=_site_knobs(knobs), stores=tile.stores, slices=slices, workers=workers)
 
 
 def _strip_variant(tile: TileOp, place: Placement, plan: TilePlan, name: str, knobs: dict) -> TileOp:
@@ -720,11 +719,9 @@ def _strip_variant(tile: TileOp, place: Placement, plan: TilePlan, name: str, kn
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    out = TileOp(
-        op=Fold.projection(body=Body((*loads, *computes))), name=name, place=new_place, knobs=_site_knobs(knobs), stores=tuple(stores)
+    return scheduled(
+        Fold.projection(body=Body((*loads, *computes))), name=name, place=new_place, knobs=_site_knobs(knobs), stores=tuple(stores)
     )
-    seal_workers(out)
-    return out
 
 
 def _free_option(tile: TileOp, place: Placement, plan: TilePlan, name: str, knobs: dict) -> TileOp:
@@ -732,9 +729,7 @@ def _free_option(tile: TileOp, place: Placement, plan: TilePlan, name: str, knob
     ``TILE`` names a register width."""
     if _strip_width(plan) > 1:
         return _strip_variant(tile, place, plan, name, knobs)
-    out = TileOp(op=tile.op, name=name, place=place, knobs=_site_knobs(knobs), stores=tile.stores)
-    seal_workers(out)
-    return out
+    return scheduled(tile.op, name=name, place=place, knobs=_site_knobs(knobs), stores=tile.stores)
 
 
 def _reduce_option(tile: TileOp, place: Placement, plan: ReducePlan, name: str, knobs: dict) -> TileOp:

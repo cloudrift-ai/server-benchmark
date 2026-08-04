@@ -65,7 +65,7 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, scheduled
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
@@ -158,9 +158,7 @@ def _mapped(op, grid, *, name: str = "", knobs: dict | None = None, free=None, s
     them and the deployed split kernels record no schedule identity (the A/B table / ``--json``
     then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel)."""
     place = Placement(free=tuple(free) if free is not None else tuple(grid), grid=tuple(grid))
-    out = TileOp(op=op, name=name, place=place, knobs=dict(knobs or {}), schedule=dict(schedule or {}), stores=tuple(stores))
-    seal_workers(out)
-    return out
+    return scheduled(op, name=name, place=place, knobs=dict(knobs or {}), schedule=schedule, stores=tuple(stores))
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold, plan: ReducePlan, split: Axis, projection=()):

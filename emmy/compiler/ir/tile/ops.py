@@ -143,6 +143,28 @@ def sched_of(tile) -> Sched:
     return Sched(tile.op, tile.schedule, place=tile.place)
 
 
+def scheduled(op, *, name: str, place, knobs: dict, stores: tuple = (), slices=(), schedule: dict | None = None, workers=None):
+    """Build a SCHEDULED ``TileOp``: the term + placement, its schedule slices written through
+    :class:`Sched` (the canonical key spelling), and the ``WORK`` inventory sealed.
+
+    The one constructor every option builder and split realizer shares. Sealing is what makes a
+    ``TileOp`` scheduled — an unsealed one carries no ``work`` and stamps no ``WORK`` knob — so
+    pairing it with construction here is what stops a new builder forgetting it.
+
+    ``slices`` are ``(family, node, value)`` triples keyed on the way in; ``schedule`` is an
+    ALREADY-KEYED dict (``030_split_reduce`` re-keys against the partial's own tree before it gets
+    here). ``None`` slice values are skipped, so a resolver that declined needs no guard."""
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415 — ir.py defines the op this builds
+
+    out = TileOp(op=op, name=name, place=place, workers=workers, knobs=knobs, schedule=dict(schedule or {}), stores=tuple(stores))
+    sched = sched_of(out)
+    for family, node, value in slices:
+        if value is not None:
+            sched.put(family, node, value)
+    seal_workers(out)
+    return out
+
+
 def axis_names(root) -> set[str]:
     """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
     induction variable in their bodies, over the ONE node walk (``path.sites``). An induction

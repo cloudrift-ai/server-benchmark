@@ -21,7 +21,9 @@ row union, pins had to be narrowed per path, and every new composition needed an
 `TileOp`s directly.** That is a smaller and more defensible claim than "replace the scheduler with a solver", and it
 is the one the corpus supports.
 
-**Read the Status section before costing anything.** The old scheduler is DELETED; this is a reconstruction.
+**Read the Status section before costing anything.** The rebuild has LANDED for the materialized-edge roles and the
+scheduler has since been re-layered onto a generated domain; what remains is the computed-edge and flash-streaming
+families (phases 4-6).
 
 ## The IR beneath it — the unified `Fold`
 
@@ -231,36 +233,50 @@ Two facts this must carry:
   case can express the inner stat fold's coop reduce only at a width equal to the whole inventory — a codec-imposed
   expressiveness limit, unchanged by this plan.
 
-### The candidate domain stays the catalog
+### The candidate domain — generated where the constraints couple, listed where they do not
 
-`search/space.py`'s catalogs are the domain. They are not arbitrary: their comments record provenance —
-`f2x14`/`f4x8`/`f4x10`/`f4x26` are golden winners a previous rebuild orphaned (1.29–1.49× reachability losses),
-`(1,16)` is the thin-M decode geometry, `(2,8)` the lm_head.m64 winner (2392 → 1215 µs). A generated lattice
-reproduces a box and discards the measurements that justify its points.
+**Settled, and the earlier revision of this section was half wrong.** It rejected generating the
+domain from constraints on three grounds; only one survives contact with the code.
 
-**Do not generate the domain from constraints.** An earlier revision of this plan proposed deriving the `(wm, wn)`
-domain from a linear system in exponent coordinates, taking flash's `WORK` level from 4 options to 19. Three reasons
-that is wrong, and the first is fatal:
+The rejected proposal was a linear system in **exponent coordinates**, and its fatal objection —
+"the geometry is not a power-of-two lattice" (`f2x9`, `f4x26`, `bk = 5`) — is an objection to *that
+encoding*, not to generation. Prime-exponent coordinates hold 9 = 3² and 26 = 2·13 exactly; the
+corpus's prime support is `{2, 3, 5, 7, 13}`. What no coordinate change buys is **both** the
+products and the budgets at once: the exponent map is a monoid iso, so `≤` becomes divisibility (a
+partial order), and real logs linearize both but leave the feasible points off any lattice. ℕ⁺ is
+free abelian of infinite rank under multiplication and rank 1 under addition-and-order; there is no
+simultaneous linearization. So: **keep integer coordinates, keep the products multiplicative, and
+enumerate** — `search/domain.py`'s `Dimension` / `Bound` / `Space`, with prefix pruning (every value
+is ≥ 1, so a final product is a multiple of any partial one).
 
-1. **The geometry is not a power-of-two lattice.** `_codec_width` requires only `int >= 1`; the only power-of-two
-   requirement anywhere is `ReduceStage.width` at `Level.BLOCK`. The corpus proves it: goldens carry `f2x6`, `f2x9`,
-   `f4x6`, `f4x10`, `f4x12`, `f4x26`, six `d3/` rows, and — on a flash shape, on exactly the two sites an exponent
-   table would model — `rtx4080_sm89.yaml:132` spells `TILE@dd: mma_m16n8k16_f16_f32/f2x8/k5` with
-   `TILE@pj: .../f2x9/k4`. `bk = 5` and `fn_pv = 9` are not points in an exponent space. `_SCALAR_REG` in the
-   SURVIVING catalog carries the same non-powers of two, commented "golden-informed".
-2. **Tiles do not divide extents.** 35 golden rows over-cover (`q_proj.m16`: `M=16`, `tile_m=32` — masked partial
-   tiles, which is what `Side.mask` exists for), and real extents are not products of tile factors
-   (`qk_global_cat` has `N = 8704 = 2^9·17`). The governing relation is `ceil_div` + masking: neither an equality
-   nor linear.
-3. **It breaks the tree's only live completeness anchor.**
-   `test_golden_configs.py::test_golden_knobs_are_members_of_the_move_catalog` — *"Permanence: every recorded golden
-   knob set stays REACHABLE by the search"* — passes today, against the catalog. Generating the domain dissolves its
-   referent.
+Two families have genuine multiplicative coupling and are now GENERATED from their bounds:
 
-Note `a602874a` deleted `map_tile_moves` and `wspec_moves` from `space.py` (they went unread the moment the
-scheduler did), so the strip-tile and `+p` producer-band domains must be reconstructed with the rest. The reduce
-catalog SURVIVES — `coop_reduce_moves` / `splitk_moves` — as do `scalar_tile_moves`, `warp_tile_moves`,
-`twisted_warp_moves`, `stage_moves` and `raster_moves`.
+| family | bounds | was → is |
+| --- | --- | --- |
+| scalar tile | `par_n·par_m ≤ 1024` | 71 → 163 moves |
+| warp tile | `32·WM·WN ≤ 1024`, `FM·FN ≤ 32` | 468 → 1140 per atom |
+
+Everything else stays a LIST, and that is not a compromise: stage spellings, split widths, the coop
+partitions, the raster orders and the strip ladder have no products to couple, so a `Space` over
+them would be ceremony.
+
+The empirical case for the old section was also thinner than it read. Of ~700 golden `TILE`
+register spellings only ten are non-powers-of-two, and its headline example (`f2x9`,
+`rtx4080_sm89.yaml:132`) is a flash `TILE@pj` site that
+`test_golden_knobs_are_members_of_the_move_catalog` **skips** (`MatmulGoldenConfig` only) and that
+the scheduler does not enumerate at all. The permanence gate covers scalar/warp matmul `TILE` and
+reduce `REDUCE` — not the shapes the argument leaned on.
+
+What DOES survive from the old section, and is now the operative constraint: the curated lists were
+strict subsets of their own boxes **with no stated rule for the omissions**, which is exactly how
+the sixth sweep's `f2x14`/`f4x8`/`f4x10`/`f4x26` orphaning (1.29–1.49× reachability loss) happened
+unnoticed. Generation removes the failure mode; the value ladders keep the measured points as
+`Dimension` values, where they are visible.
+
+**Cost, paid once and stated plainly:** `commands/fit.py::build_golden_groups` re-enumerates to fit
+`prior/offline_weights.json`, so a widened pool changes the fit's training data and makes recorded
+`emmy eval offline` rank/pool columns incomparable. An `emmy fit --artifact` refit plus golden
+rank / top-1/10/25/50 re-verification is owed before any GPU sweep is trusted.
 
 ### The constraint table — documentation and assertions, not a space
 
@@ -298,22 +314,30 @@ defers materialization to the chosen leaf), and `Pipeline.run`'s blocklist + re-
 that only fails when picked. Row 10 has no model anywhere in scheduling (`gpu.py` has `regs_per_block` but nothing in
 enumeration or `validate` reads it), and this plan does not add one.
 
-### Predicates: one home, one severity
+### Predicates: one home, one severity — **LANDED**
 
-The one genuine mess the deleted code carried is worth fixing, and it is cheaper than any of the above: several
-predicates existed TWICE — once as a silent drop in the enumerator, once as a loud raise on the pin path
-(`_check_warp_static_k`, `_fragment_epilogue_ok`). That is the bug class producing "the pin says yes and the
-enumeration says no".
+`lowering/tile/_legality.py`: one function per rule, each returning the refusal REASON or `None`,
+with `enforce(reason, pinned=…)` choosing the severity — an env pin raises it, the unpinned
+enumeration drops the candidate. The duplicated raise/drop pairs the old scheduler carried
+(`_check_warp_static_k` vs `_warp_move_ok`; `_fragment_epilogue_ok` checked once as a silent `()`
+and once as a raise) are gone, and with them the "the pin says yes and the enumeration says no" bug
+class.
 
-**One predicate module, one function per predicate, each returning `str | None` (the refusal reason), with the
-caller choosing raise-vs-drop from a single `pinned: bool`.** The table's "where checked" column then cites a
-function name, and a dropped constraint is a dead function visible in review.
+Two corrections the rebuild forced:
 
-The term-reading predicates live here too, and they are real symbolic analyses — not lookups. Budget them as such:
-`_matvec_b_kstride` (enumerates loads, takes `free_vars()` of each index, calls `gmem_row_stride`; TRI-VALUED —
-`none` means "no layout gate applies"), `_shared_row_buf` (index-tuple equality returning a buffer name),
-`_fragment_epilogue_ok` (epilogue def/use dataflow), `_tma_operand_rank_ok`, `_warp_atoms`' dtype scan,
-`_has_contraction_tail`. Precompute them once per kernel into a feature record; the emitters then read fields.
+- **The rules are ordinary arithmetic, not `domain.Bound`s.** An early cut routed every scalar
+  divisibility test through a constructed `Bound(("_",), …)` "to state them in the same currency as
+  the domain". The currency was shared in name only — `Bound` is consumed by `Space` and no legality
+  rule is ever installed into one — and it cost a second file open to read `k % step == 0`, at 13
+  sites, some inside a per-candidate search loop. `domain.py` is for GENERATION; `_legality` is a
+  checker over term facts a `Space` cannot see.
+- **The stage resolvers stay resolvers.** `resolve_warp_stage` / `resolve_scalar_stage` return the
+  largest legal `Stage` or decline: the legal answer is a SIZE, not a yes/no, and this is the one
+  enforcement point for the smem budget (table row 9). Merging them with the two boolean transport
+  predicates would fuse a predicate with a search.
+
+The term-reading analyses (`_matvec_b_kstride`, `_shared_row_buf`, `_fragment_epilogue_ok`,
+`_has_contraction_tail`) stay in the scheduler: they read the TERM, not a candidate.
 
 ### Placement
 
@@ -367,87 +391,112 @@ correctness budget is spent on churn.
 
 ## Status — what the tree actually holds
 
-**The SPIKE and the materialized-edge phases have LANDED.** `_schedule.py` is rebuilt in the `rows` / `values` /
-`_assemble` shape above (one `build_fork_tree`, levels `[WORK, *site keys, RASTER]`, `WORK` derived by `_assemble`),
-and `020_schedule.py` drives it. What it schedules today:
+**The materialized-edge phases have LANDED, and the scheduler has since been rebuilt a second time**
+onto the generated domain. `_schedule.py` is the `rows` / `values` / `_assemble` shape above (one
+`build_fork_tree`, levels `[WORK, *site keys, RASTER]`), `020_schedule.py` drives it, and the module
+now splits three ways, each layer owning one question:
 
-| role | covered | gate that proved it |
+| layer | owns | where |
 | --- | --- | --- |
-| `FREE` | pointwise cell + the register-strip TERM VARIANT (`TILE=f<r>`) | `pointwise` digest byte-identical to `e27d8fdc^` |
-| `PLANAR` / `TWISTED` | the reduce partition (heuristic option-0 + coop / ILP catalog + the matvec layout gate) | `rms_norm` / `softmax` / `reduce` / `matvec_coopt` / `flash_scalar` / `norm_linear_coop` digests byte-identical |
-| `CONTRACTION`, materialized edges | tile × stage × reduce × wspec × raster, scalar + warp tiers, split-K through the `Fold ⊃ Fold` composition | `matmul_scalar` / `_warp_tma` / `_warp_f16acc` / `_splitk` (+ `__partial`) / `_raster` / `_wspec` / `_dynm` digests byte-identical |
+| DOMAIN | which candidate values exist at all | `search/space.py` (+ `search/domain.py` for the two coupled families) |
+| LEGALITY | what this term's K / N / dtype / smem cap refuses | `lowering/tile/_legality.py`, raise-vs-drop by `pinned` |
+| CHOICE | which families a role offers, each option-0, row → `TileOp` | `lowering/tile/_schedule.py` |
 
-52 ids left `tests/xfail_registry.py` (107 → 55); `make test` is green with zero XPASS. On a 4090 the CUDA suite went
-**414 → 121 failures with ZERO new ones** (measured against the same tree at `e829694c`, same box, same nvcc flags) —
-so the restored rows execute and match torch, not merely render. 33 of that delta came from migrating
-`test_reduce_coverage` / `test_matmul_coverage`'s reduce pins off the retired embedded-width spelling (`b32` →
-`REDUCE=coop` + `WORK=t32`), a step-7 grammar drift the xfail masking had been hiding.
+What it schedules today:
 
-**Two families still yield NO rows**, and `020_schedule` leaves those terms unmapped rather than guessing (the
-guardrail contract): a COMPUTED operand edge (phase 4 — the fused cone, 16 GPU failures) and the flash streaming pair
-(phase 5, 83). The remaining 22 are whole-model / serving tests that contain both. Their digests therefore still
-differ from the `e27d8fdc^` baseline, and that difference is the remaining work — phases 4–6 below, plus P0's
-`qk.acc` repair, which the flash warp path needs before it has any obtainable baseline.
+| role | covered |
+| --- | --- |
+| `FREE` | pointwise cell + the register-strip TERM VARIANT (`TILE=f<r>`) |
+| `PLANAR` / `TWISTED` | the reduce partition (heuristic option-0 + coop / ILP catalog + the matvec layout gate) |
+| `CONTRACTION`, materialized edges | tile × stage × reduce × wspec × raster, scalar + warp tiers, split-K through the `Fold ⊃ Fold` composition |
 
-The old scheduler was DELETED at `e27d8fdc`: `_schedule.py` (2458 lines), `_view.py` (96), `020_schedule.py` (109).
-Recognition, the codec, the materializer and `030_split_reduce` were untouched by that commit.
+**Two families still yield NO rows** and `020_schedule` leaves those terms unmapped rather than
+guessing (the guardrail contract): a COMPUTED operand edge (phase 4 — the fused cone) and the flash
+streaming pair (phase 5). Everything else registered in `tests/xfail_registry.py` is a CONSEQUENCE of
+those two.
 
-**Every helper this plan reconstructs returns zero greps at HEAD** — `_tile_rows`, `_reduce_specs`,
-`_map_strip_fork`, `_computed_a_rows`, `_twisted_warp_options`, `_stamp_twisted_split`, `_narrow_flash_forms`,
-`_demote_planar`, `_demote_mixed_a`, `_demoted_warp_option`, `_twisted_chain_option`, `prologue_knob_bases`,
-`_shared_row_buf`, `_row_stage`, `_coop_carrier`, `_pick_coop`, `_warp_atoms`, `_f16acc_allowed`,
-`_fragment_epilogue_ok`, `twisted_pair`, `contraction_view`, `_FREE_CAP`, `_has_contraction_tail`. So every "port"
-is "read `git show e27d8fdc^:…/_schedule.py` and rewrite".
+### The gate is now real, and so is the registry
 
-**But far more survives than an earlier revision of this plan claimed**, and it changes both the cost and the gates:
+**A kernel-digest baseline is committed** (`scripts/kernel_digests.txt`, 28 kernels;
+`scripts/digest_kernels.py --check` diffs a fresh run and reports drifted / missing / unexpected
+separately). It was the P0 item this plan listed as open, and it earned its keep immediately: the
+second rebuild and every simplification after it are byte-identical against it, and it caught two
+real behaviour changes mid-flight (a uniform `WSPEC` band re-offered beside a pin; a dead `STAGE`
+mask in a test).
+
+**Its blind spot, measured not assumed:** instrumenting `Sched.tile_of` across a digest run shows it
+reached on every contraction site and returning `None` every time — the pins do not land, so the
+harness pins recognition, term storage and the UN-SCHEDULED lowering path, and does **not** exercise
+the tiered/placed contraction path. A change to `_factor`'s tiled arm or `_twist`'s warp realizer is
+invisible to it. Adding the liveness assertion (each case asserts its pinned knobs landed on the
+emitted `TileOp`) is the half of P0 that stays open, and it should land before phases 4–5.
+
+**The registry is `strict=True`** — an id that starts passing now FAILS until it is deleted, so "the
+file shrinking to empty IS the completion gate" is enforced rather than aspirational (measured: 0
+xpass on sm_120, sm_89 and CPU before the flip). Its `CONSEQUENCE_MODULES` additionally do not run:
+recording the expectation without executing it took `make test` 241 s → 54 s and the GPU suite
+476 s → 305 s, nearly all of it the drift gate reaching its own xfail. Card-conditional expectations
+stay inline and non-strict at their own test, where the reason can name the condition.
+
+**GPU-verified, paired.** RTX 4090 / sm_89 / CUDA 13.3, the same tree at `fc0ade05` and at HEAD, same
+box and nvcc flags: zero new failures, the one failure shared by both runs being an unrelated
+pre-existing `bench_block` case. Note sm_89 leaves the TMA rows unexercised (Hopper+ only) while the
+f16acc fork IS offered there, so a Hopper run is still owed for the staged-TMA tiers.
+
+### Defects the rebuild and the simplification pass found
+
+Worth recording because each was invisible to the type checker and to the suite:
+
+- `_assemble` and `ops.seal_workers` derived the SAME worker inventory with different comparisons —
+  full tuple equality vs a headcount — so a `t8x4` tile against a 32-wide coop was dropped
+  pre-materialization and accepted post-, and the headcount form would have called a `w4x8` WARP
+  tile compatible with a 32-wide coop. Both now route through `ir/schedule.derive_inventory`.
+- The producer band's thread budget was checked at MATERIALIZATION, after `_assemble` had already
+  spelled `+p<n>` into the row's `WORK` — so an over-budget band produced a row whose stamped
+  inventory claimed a producer its op did not have. It is an enumeration-time check now.
+- A malformed `STAGE` pin was silently degraded to gmem-direct (the only such pin in the family),
+  which had left `test_staged_scalar_matmul_matches_reference` parametrized over a RETIRED stage
+  mask — four cases compiling one unstaged kernel and passing on accuracy, which is identical
+  either way.
+- `ctx=None` was unreachable (one caller; `Pipeline.run` probes) yet carried four fallbacks that
+  each meant something different.
+
+### What is still hand-written that need not be
+
+Ranked, from the simplification review:
+
+- `TilePlan.at` / `_placed` restate `Sched._mn_for`'s depth-1 rule in two places with DIFFERENT
+  degradation (`None` vs an unplaced plan that raises later, inside a stage resolver).
+- `search/features.py`'s `_row_workers` / `_tile_plan` duplicate what `ir/schedule.resolve_row` now
+  does for the scheduler; one resolver could serve both, with the featurizer catching.
+- `_has_contraction_tail` and the loop-shape predicates belong beside `projection_distributes` in
+  `ir/stmt/passes.py`.
+
+The old scheduler was DELETED at `e27d8fdc`: `_schedule.py` (2458 lines), `_view.py` (96),
+`020_schedule.py` (109). Recognition, the codec, the materializer and `030_split_reduce` were
+untouched by that commit. What exists today is ~880 + ~290 lines across `_schedule.py` and
+`_legality.py`.
+
+**Far more survives than an earlier revision of this plan claimed**, and it changes both the cost and the gates:
 
 | the plan does NOT need to build | it already exists |
 | --- | --- |
-| a row-set oracle | `test_move_catalog.py::test_schedule_leaf_set_equals_catalog` — per-family set equality **plus a row-count equation** (`len(tiled) == len(stages) * n_reduces * len(raster_moves())`), xfailed at `xfail_registry.py:79` |
-| a golden reachability test | `test_golden_configs.py::test_golden_knobs_are_members_of_the_move_catalog` — **passes today** |
-| an enumeration dump | `golden_eval.enumerate_graph(graph, ctx, family=)` — returns every row keyed by canonical spelling; already the join point for `emmy fit` / `eval` / `golden_neighbor_bench` |
+| a row-set oracle | `test_move_catalog.py::test_schedule_leaf_set_equals_catalog` — per-family set equality **plus a row-count equation** |
+| a golden reachability test | `test_golden_configs.py::test_golden_knobs_are_members_of_the_move_catalog` — **passes today** (matmul + reduce goldens only; flash `TILE@dd`/`TILE@pj` are NOT covered) |
+| a byte-identity gate | `scripts/digest_kernels.py --check` against the committed baseline |
+| an enumeration dump | `golden_eval.enumerate_graph(graph, ctx, family=)` |
 | a site walker | `path.family_sites` / `path.sites` / `ops.Sched` |
-| worker sealing | `ops.seal_workers`, `derive_workers`, `plan_workers` |
-| the `""`-TILE ambiguity resolver | `schedule.resolve_site_tile` — and round-trip assertions must go through IT, not `TilePlan.parse` |
+| worker sealing / inventory derivation | `ops.seal_workers`, `ir/schedule.derive_inventory`, `derive_workers`, `plan_workers` |
+| a row → typed slices resolver | `ir/schedule.resolve_row` (both the env pins and an enumerated row) |
+| the scheduled-`TileOp` constructor | `ops.scheduled` (construct + key slices through `Sched` + seal) |
+| the `""`-TILE ambiguity resolver | `schedule.resolve_site_tile` |
 | smem footprint | `pack_smem`, `KernelOp.smem_bytes()` |
 | split-K carrier legality | `ir/stmt/passes.py::projection_distributes` + `030_split_reduce`'s own gates |
 | pin narrowing / no-match-keeps-full-list | `Knob.narrow`, `pin_key_matches`, `family_value` |
 | row dedup / tie-break | `knob.canonical_row_key` |
 | the recording view | `knob.stamp_schedule_families` |
-| the loop → term parser | `passes/lowering/tile/_fromloop.py::fold_from_loop` / `nodify_reduce` (moved out of the IR) |
-| the `(m, n)` binding | `ops.Sched.tile_of` returns a PLACED slice; readers state no placement rule (see Placement) |
-
-Three things the deleted scheduler leaned on do NOT exist and must be written, not ported:
-
-- `Fold.demoted()` — the collapse variant. Fully specified above; ~15 lines (phase 3).
-- `Fold.operand_lift(i)` — the per-operand prologue reading (derived; phase 2 exposes it for the fused prologue).
-- any consumer that expected `Map` / `Contraction` as *types*: the readings are `axis is None` and
-  `is_contraction(x)`.
-
-Three tooling facts that decide what a gate can mean:
-
-- **`tests/xfail_registry.py` holds 107 ids**, applied `strict=False` — a restored test passes UNNOTICED. On this
-  box the suite reports 605 skips, concentrated in the scheduler-dependent modules (`test_attention_coverage.py`
-  120 tests, `test_matmul_coverage.py` 142). "Registry empty" is not a completion criterion.
-- **`scripts/digest_kernels.py` runs green and prints garbage.** Measured at HEAD: exit 0, 24 lines, no `<ERROR>`
-  line, but only **15 distinct digests** — `matmul_scalar`/`warp_tma`/`splitk` collide, as do
-  `warp_f16acc`/`raster`/`wspec`, `norm_linear`/`_splitk`/`_coop`, `flash_hd128`/`_cp`, `flash_hd256_alt`/`_fm`, and
-  `flash_chain`/`flash_scalar`. The pins are ignored and the un-recognized escape renders. No baseline exists in the
-  tree. Measured at `e27d8fdc^`: exit 1, 24 kernel lines all with DISTINCT digests, four of them `__partial`, plus
-  four errored cases (next bullet). The script already exits nonzero when a case raises — what it lacks is a
-  liveness check that the pins actually landed, which is the half of P0 that stays open.
-
-  **What that means for the rebuild, measured rather than assumed:** instrumenting `Sched.tile_of` across a
-  full digest run shows it reached on every contraction site (matmul `a2`; flash `dd` and `pj`) and returning
-  `None` every time — there is no `TILE` slice to return, because nothing consumes the pins. So the digest gate
-  pins RECOGNITION, term storage and the UN-SCHEDULED lowering path, and does **not** exercise the tiered/placed
-  contraction path at all. Any change to `_factor`'s tiled arm or `_twist`'s warp realizer is invisible to it, and
-  needs its own unit coverage until P0 restores the harness.
-- **The materializer has a live regression on the flash warp path.** `kernel/_twist._realize_prologue` reads
-  `qk.acc` off a parameter annotated `TilePlan`, which has no such field (`atom, units, regs, bk, axes`) — ONE site;
-  its siblings take the node, which does have it. It is unreachable at HEAD (nothing schedules, so the warp realizer
-  never runs), but at `e27d8fdc^` all four flash warp cases error with `AttributeError`, so the flash warp path has
-  no obtainable baseline until it is fixed.
+| the loop → term parser | `passes/lowering/tile/_fromloop.py::fold_from_loop` / `nodify_reduce` |
+| the `(m, n)` binding | `ops.Sched.tile_of` returns a PLACED slice |
 
 ## Gates
 
@@ -475,7 +524,8 @@ of that key's domain"** — ~3000 per-key assertions instead of 747 set-membersh
 
 Two directions. SOUNDNESS: every emitted row is materializable and legal — and it matters more here than usual
 because `validate` checks smem ONLY (the thread and CTA checks are documented but "pending rebuild" — they walked
-the demolished tile-flavor wrappers; `ctx.max_threads_per_cta` still exists as a field, read by nothing). COMPLETENESS: every row that should exist is emitted — covered by
+the demolished tile-flavor wrappers; `ctx.max_threads_per_cta` still exists as a field, read by nothing).
+COMPLETENESS: every row that should exist is emitted — covered by
 the two catalog tests above.
 
 Costs are MEASURED, not guessed:
@@ -494,47 +544,34 @@ regression list that runs exhaustively thereafter, so the gate strengthens monot
 
 Rows 9–10 must NOT be asserted in tier 0 — row 9 is enforced by the resolvers and row 10 by nothing.
 
-## Migration
+## Migration — what remains
 
-**Spike first. The generic machinery is not the risk; the reconstruction is.**
+Phases 1–3 and the SPIKE are DONE (see Status). What is left:
 
-**P0 — make the harness honest (independent, land this week).** Fix `kernel/_twist.py`'s `qk.acc`. Add a liveness
-assertion to `digest_kernels.py` — each case asserts its pinned knobs landed on the emitted `TileOp` (the nonzero
-exit on a raising case already exists). Commit a baseline from `e27d8fdc^` (needs `PYTHONPATH=.` from a worktree,
-and record which mode it runs in — the deploy/tune reduce narrowing differs). Flip the registry to `strict=True`.
-Write the full-corpus golden-reachability loop over `GOLDEN_CONFIGS` asserting `evaluate_golden(...).rank is not
-None` — ~10 lines on existing API; it xfails until phase 2 and then gates for free. **Nothing here depends on the
-design.**
+| phase | scope | gate |
+| --- | --- | --- |
+| P0-rest | the digest LIVENESS assertion — each case asserts its pinned knobs landed on the emitted `TileOp`. Without it the baseline does not cover the tiered/placed contraction path at all. Also `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have; unreachable until the flash warp realizer runs, and it has no obtainable baseline until fixed) | the gate stops lying |
+| 4 | CONTRACTION with computed edges — the fused norm→linear / gate⊗up cone, whose A edge is an inline node rather than a gmem `Load`. The `020` merge becomes a row union under ONE spelling | 4 `norm_linear` + `mlp_geglu` digest cases + 6 recognize-boundary ids |
+| 5 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction | 40 attention-pin ids + 4 attention-coverage ids; digest only after P0-rest |
+| 6 | `schedule()`'s own dispatch and flash-form selection once 4–5 exist | registry empty + `make test` + `make lint` |
 
-**SPIKE (1–2 days) — one shape end to end.** Restore `020_schedule` + `assemble` + the three CONTRACTION candidate
-functions for a plain matmul only. Gate: `pytest tests/compiler/passes/test_move_catalog.py
-tests/compiler/e2e/test_matmul_coverage.py`. This proves site enumeration → typed slices → `seal_workers` →
-`build_fork_tree` → materialize → `validate` → digest against checked-in per-family set assertions and a row-count
-equation, before any generic code exists. It also produces the `020` rule as a by-product, which is otherwise a
-gateless prerequisite.
+Phase 4 and 5 both need the term-variant union this plan specifies (`variants()` — the collapse and
+mixed-A promotion readings) and its three obligations: uniform key sets with `""` as a DECIDED
+empty, no cross-variant suppression, and variant identity surviving into the prior's key space
+(check `canonical_row_key(a) != canonical_row_key(b)` across variant pairs; if they collide the fix
+is an `S_*` stamp, never a new knob key).
 
-Then, one phase per EMITTER KEY (not per recursion depth — the walk is flat):
+**Before any GPU sweep is trusted: refit the offline prior.** `commands/fit.py::build_golden_groups`
+reconstructs each golden's candidate pool by RE-ENUMERATING (`enumerate_graph`) and fits
+`prior/offline_weights.json` against it, so a changed enumeration silently changes the fit's
+training data and `emmy eval offline`'s rank/pool columns are measured against the new pool — a rank
+"improvement" can be an artifact of a shrunken pool. **This is now OWED, not pending**: generating
+the two tile domains widened them (71 → 163 scalar, 468 → 1140 warp per atom). Run `emmy fit
+--artifact` and re-verify golden rank + top-1/10/25/50.
 
-| phase | scope | reconstruct | gate |
-| --- | --- | --- | --- |
-| 1 | generalize the spike: the `values`/`assemble`/`variants` shape, predicate module, term-variant union + the key-collision check | ~290 | the spike's tests still green; snapshot checked in |
-| 2 | CONTRACTION, no computed edges — incl. split-K and mixed-A variants, raster, `+p` | ~985 | 23 matmul-coverage ids + ~11 digest cases + `test_schedule_leaf_set_equals_catalog` |
-| 3 | FREE + PLANAR — strip variant, coop catalog, **`coop-t`** + `_matvec_b_kstride`, deploy narrowing | ~332 | rms_norm / softmax / reduce / pointwise / matvec digest cases + the coop-catalog test |
-| 4 | CONTRACTION with computed edges — the fused cone; the `020` merge becomes a row union under ONE spelling | ~97 | 4 norm_linear + mlp_geglu digest cases + 6 recognize-boundary ids |
-| 5 | TWISTED — streaming / chain / per-cell / split-KV; retire the eager `_option` construction | ~570 | 40 attention-pin ids + 4 attention-coverage ids; digest only after P0 |
-| 6 | `schedule()`'s own dispatch, pin narrowing, flash-form selection | ~190 | registry + `make test` + `make lint` |
-
-Measured from the deleted source; total ≈ **2460 lines reconstructed**, plus new code. Budget it as "read 2458 lines
-of history, write 2000–2500 lines in a different shape" — not as a port.
-
-**After phase 6, before any GPU sweep is trusted: refit the offline prior.** `commands/fit.py::build_golden_groups`
-reconstructs each golden's candidate pool by RE-ENUMERATING (`enumerate_graph`), pins the golden's index in it, and
-fits `prior/offline_weights.json` against that. A changed enumeration silently changes the fit's training data, and
-`emmy eval offline`'s rank/pool columns are measured against the new pool — so a rank "improvement" can be an
-artifact of a shrunken pool. Run `emmy fit --artifact` and re-verify golden rank + top1/10/25/50.
-
-Merge gate (GPU): `make bench-kernels`, a flash/attention compile + tune probe on the 5090, the eval-golden MATCH
-sweep.
+Merge gate (GPU): `make bench-kernels`, a flash/attention compile + tune probe, the eval-golden MATCH
+sweep. A **Hopper** run is specifically owed — the paired verification ran on sm_89, where every
+`d*/tma*` row declines, so the staged-TMA tiers are unexercised.
 
 ## Invariants
 
@@ -1066,18 +1103,21 @@ and recognition, not from this enumeration.
   all operandless zero-axis folds; only `ops.axis_role`'s `Loop.role` fallback and `family_sites`' root-only rule
   separate them. Pre-collapse the type distinguished nothing either, but the failure was loud; now it is a wrong
   emitter. Phase 3 asserts it directly.
-- **The reconstruction is the risk.** ~2460 lines exist only in `git show`, their tests were deleted with them, and
-  for several predicates — `_demote_mixed_a` above all — NOTHING in the 107-id registry re-asserts them. The
-  predicate module and the spike are the mitigations.
+- **The remaining reconstruction is the risk**, and it is now concentrated: phases 4-5 are the paths for which
+  NOTHING in the registry re-asserts the deleted predicates (`_demote_mixed_a` above all). `_legality.py` and the
+  committed digest baseline are the mitigations — but see the baseline's blind spot in Status: it does not reach the
+  tiered/placed contraction path, so phase 5 needs the liveness assertion first or it has no gate at all.
 - **`validate` enforces smem only.** Row 1 is enforced by the emitters and by nothing else until P1 restores the
   thread/CTA checks; registers are unenforced at every tier below 3.
 - **Variant identity may collide in the prior's key space** (see Design). Cheap to check, expensive if real.
 - **`_resolve_scalar_stage` invents `bk_elems`** — a real schedule decision no codec spells, found by a search loop
   with depth step-down. It is why the resolvers are projections, not filters, and why row dedup on the RESOLVED
   spelling is mandatory (`d2` clamping to `d1` is one row, not two).
-- **Non-power-of-two goldens may not be enumerator-reachable.** `dit_xl_2.attn.s256`'s `k5` cannot come from
-  `_FLASH_KEY_ATOMS = (2,4,8,16)`; it may be a hand pin. Determine this in phase 5 — if it is pin-only, the
-  reachability gate must classify it, not silently fail.
+- **Some flash goldens may not be enumerator-reachable**, and the gate cannot currently tell. `dit_xl_2.attn.s256`'s
+  `k5` cannot come from `_FLASH_KEY_ATOMS = (2,4,8,16)`; it may be a hand pin. This is invisible today because
+  `test_golden_knobs_are_members_of_the_move_catalog` skips every non-`MatmulGoldenConfig`, so no flash `TILE@dd` /
+  `TILE@pj` value is checked against any domain at all. Phase 5 must extend the gate to the flash sites AND classify
+  pin-only goldens explicitly, rather than leaving them silently unchecked.
 - **The prior is downstream.** See the refit obligation; skipping it makes every post-refactor rank number suspect.
 - **Order accidents will surface.** Resolve each explicitly — semantic (encode it) or not (document the diff);
   never let a harness pass by sorting.

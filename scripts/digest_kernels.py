@@ -194,21 +194,48 @@ def run_case(name, build, pins):
     return lines
 
 
+BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel_digests.txt")
+
+
+def _check(lines: list[str]) -> int:
+    """Diff the rendered digests against the committed baseline. Reports every drifted, missing and
+    unexpected kernel, and returns a nonzero exit when any differ."""
+    with open(BASELINE) as f:
+        want = dict(ln.split() for ln in f.read().splitlines() if ln.strip())
+    got = dict(ln.split() for ln in lines)
+    drift = [(k, want[k], got[k]) for k in sorted(want.keys() & got.keys()) if want[k] != got[k]]
+    for k, w, g in drift:
+        print(f"DRIFT {k}\n  baseline {w}\n  rendered {g}")
+    for k in sorted(want.keys() - got.keys()):
+        print(f"MISSING {k} (baseline {want[k]})")
+    for k in sorted(got.keys() - want.keys()):
+        print(f"UNEXPECTED {k} ({got[k]})")
+    ok = not drift and want.keys() == got.keys()
+    print("digests match the baseline" if ok else f"{len(drift)} drifted, {len(want.keys() ^ got.keys())} added/removed")
+    return 0 if ok else 1
+
+
 def main():
-    only = sys.argv[1:] or None
-    failures = 0
+    argv = sys.argv[1:]
+    check = "--check" in argv
+    only = [a for a in argv if not a.startswith("-")] or None
+    failures, lines = 0, []
     for name, build, pins in CASES:
         if only and name not in only:
             continue
         try:
-            for line in run_case(name, build, pins):
-                print(line)
+            lines.extend(run_case(name, build, pins))
         except Exception as e:  # noqa: BLE001
             failures += 1
-            print(f"{name}/<ERROR> {type(e).__name__}: {e}")
+            lines.append(f"{name}/<ERROR> {type(e).__name__}: {e}")
             traceback.print_exc(file=sys.stderr)
+    if not check:
+        for line in lines:
+            print(line)
     sys.stdout.flush()
-    return 1 if failures else 0
+    if failures:
+        return 1
+    return _check(lines) if check else 0
 
 
 if __name__ == "__main__":

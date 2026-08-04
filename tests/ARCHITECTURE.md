@@ -86,11 +86,19 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   removed or broken and when it should come back.
 - **One exception: the xfail registry** (`tests/xfail_registry.py`). When a whole subsystem is removed on purpose,
   the casualties span dozens of files and inline marks would bury the intent in unrelated modules; the registry
-  lists the exact node ids in one place with one reason, and the root `conftest.py` applies a non-strict
-  `xfail` mark at collection. Exact ids, never path globs — each id is an acceptance obligation for the
-  replacement, and the file shrinking to empty is the completion gate. Today it holds the tests the removed tile
-  scheduler took down. Reach for it only for a deliberate removal of that size; an ordinary known failure still
-  gets an inline mark.
+  lists the exact node ids in one place with one reason, and the root `conftest.py` applies a **strict** `xfail`
+  mark at collection. Exact ids, never path globs — each id is an acceptance obligation for the replacement, and
+  the file shrinking to empty is the completion gate. Strictness is what makes that a gate rather than a wish: an
+  id that starts passing fails the run until it is deleted from the list. Today it holds the tests the removed
+  tile scheduler took down. Reach for it only for a deliberate removal of that size; an ordinary known failure
+  still gets an inline mark.
+- **Consequence ids do not run.** `CONSEQUENCE_MODULES` in the registry names the modules whose ids fail only
+  because their graph contains a gap the primary ids already track — whole-model and serving end-to-end, the
+  golden drift gate. Those get `run=False`: the expectation is recorded, the minutes are not spent (the drift
+  gate alone spent ~190 s per run reaching its own xfail). The trade is that a consequence id can no longer
+  report XPASS, so recovery is signalled by the primary ids.
+- **Card-conditional expectations stay inline**, non-strict, at their own test — the registry is for structural
+  gaps that hold on every card, and a flaky or SKU-specific failure needs a reason that names the condition.
 
 ## Running
 

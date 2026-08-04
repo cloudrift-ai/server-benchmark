@@ -883,6 +883,33 @@ def derive_workers(tiles) -> Workers | None:
     return work
 
 
+def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | None:
+    """The kernel's ONE worker inventory, folded out of its resolved ``TILE`` slices and then
+    reconciled with a cooperative ``REDUCE`` width and a ``+p`` producer band. ``None`` when
+    nothing tiles and no band cooperates (the per-cell / pure-reduce forms keep their derived
+    launch geometry).
+
+    Raises on DISAGREEMENT, and the rule is EXACT rather than a headcount: a cooperative reduce is
+    the 1-D thread inventory ``t<coop>``, so it is co-representable with a tiled site only when
+    that site's own inventory IS ``(coop, 1)`` threads. Comparing worker COUNTS instead would call
+    a ``t8x4`` scalar tile — or worse, a ``w4x8`` warp tile — compatible with a 32-wide coop that
+    neither realizes.
+
+    ONE home for the rule: the enumerator wraps this to DROP a row whose slices disagree and
+    ``ops.seal_workers`` lets it raise, so the two can no longer answer differently."""
+    work = derive_workers(tiles)
+    if coop > 1:
+        band = Workers(kind="thread", units=(coop, 1))
+        if work is not None and work != band:
+            raise ValueError(f"disagreeing worker geometry: TILE workers {work.spell()} vs coop width {coop} — one kernel, one inventory")
+        work = band
+    if producer:
+        if work is None or work.kind != "warp":
+            raise ValueError(f"a +p{producer} producer band needs a warp inventory; got {work.spell() if work else 'none'}")
+        work = dc_replace(work, producer=producer)
+    return work
+
+
 @dataclass(frozen=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid

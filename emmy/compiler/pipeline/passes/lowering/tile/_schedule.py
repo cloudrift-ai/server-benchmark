@@ -45,7 +45,6 @@ from dataclasses import replace
 from math import prod
 from types import SimpleNamespace
 
-from emmy.compiler.context import STATIC_SMEM_CAP
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -55,7 +54,7 @@ from emmy.compiler.ir.schedule import (
     TilePlan,
     WarpSpec,
     Workers,
-    plan_workers,
+    derive_inventory,
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
@@ -92,28 +91,11 @@ logger = logging.getLogger(__name__)
 # ---- target / pin reads ------------------------------------------------------------------------ #
 
 
-def _smem_budget(ctx) -> int:
-    """The per-block smem budget the stage resolvers size against — the device's dynamic-smem
-    opt-in cap, or the 48 KiB static floor when no ``Context`` reaches the schedule."""
-    return ctx.max_dynamic_smem if ctx is not None else STATIC_SMEM_CAP
-
-
-def _tma_allowed(ctx) -> bool:
-    """Whether ``d*/tma*`` stage moves may be offered. TMA (``cp.async.bulk.tensor``) is a Hopper
-    (sm_90) feature — Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage there fails
-    to compile. ``ctx is None`` (a direct unit-test drive) allows it: those paths never reach nvcc."""
-    return ctx is None or ctx.compute_capability >= (9, 0)
-
-
 def _pinned_workers() -> Workers | None:
-    """The live ``WORK`` env pin's inventory, or ``None`` (unset / unparseable)."""
+    """The live ``WORK`` env pin's inventory, or ``None`` when unset. A MALFORMED pin raises — one
+    severity per pin, the same doctrine :func:`._legality.enforce` states."""
     raw = WORK.raw()
-    if not raw:
-        return None
-    try:
-        return Workers.parse(raw)
-    except ValueError:
-        return None
+    return Workers.parse(raw) if raw else None
 
 
 def _pinned_tile() -> TilePlan | None:
@@ -178,17 +160,6 @@ def _node_loads(node) -> list[Load]:
     return out
 
 
-def _node_loads_in(stmts) -> list[Load]:
-    """Every scalar ``Load`` reachable in ``stmts`` (deep) — the projection tail's own reads."""
-    out: list[Load] = []
-    for s in stmts:
-        if isinstance(s, Load) and s.is_scalar:
-            out.append(s)
-        for b in s.nested():
-            out.extend(_node_loads_in(list(b)))
-    return out
-
-
 def _projection(op) -> Body:
     """The kernel's per-cell projection — the wrapping zero-axis fold's body, or empty when the
     term is a bare node. A projection has ONE home (the wrapper's lift), never a node field."""
@@ -232,18 +203,12 @@ def _inner_free(place: Placement) -> Axis | None:
     return next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
 
 
-def _has_accum(stmts) -> bool:
-    from emmy.compiler.ir.stmt import Accum  # noqa: PLC0415
-
-    return any(isinstance(s, Accum) or any(_has_accum(list(b)) for b in s.nested()) for s in stmts)
-
-
 def _has_contraction_tail(stmts) -> bool:
     """The post-reduce tail contracts over a NEW free axis — a ``Loop`` whose body holds an inner
     reduce ``Loop``. This is the fused norm→linear shape, distinguished from a plain softmax tail
-    (a single sweep over the SAME axis)."""
+    (a single sweep over the SAME axis). ``Body.accums`` supplies the deep accumulator scan."""
     for s in stmts:
-        if isinstance(s, Loop) and any(isinstance(c, Loop) and _has_accum(list(c.body)) for c in s.body):
+        if isinstance(s, Loop) and any(isinstance(c, Loop) and Body(c.body).accums for c in s.body):
             return True
         if any(_has_contraction_tail(list(b)) for b in s.nested()):
             return True
@@ -282,7 +247,7 @@ def _shared_row_buf(carrier_loads, tail, grid_vars, raxis: Axis, inputs) -> str 
     carrier_bufs = {
         s.input for s in carrier_loads if len(s.index) == n + 1 and tuple(s.index[:n]) == grid_vars and s.index[-1] == Var(raxis.name)
     }
-    for s in _node_loads_in(tail):
+    for s in (ld for ld in Body(tail).loads if ld.is_scalar):
         if s.input in carrier_bufs and len(s.index) == n + 1 and tuple(s.index[:n]) == grid_vars:
             t = inputs.get(s.input)
             if t is not None and t.shape and t.shape[-1].is_static and t.shape[-1].as_static() == raxis.extent.as_static():
@@ -327,16 +292,10 @@ def _assemble(keys: tuple[str, str, str], plan: TilePlan, stage: str, rplan: Red
     vs a differing coop width, a producer band with no warp inventory) drops the row (``None``):
     ``WORK`` is derived from the slices, so a row whose slices disagree is not co-representable."""
     tkey, skey, rkey = keys
-    work = plan_workers(plan)
-    if rplan.coop > 1:
-        coop = Workers(kind="thread", units=(rplan.coop, 1))
-        if work is not None and work != coop:
-            return None
-        work = coop
-    if aux:
-        if work is None or work.kind != "warp":
-            return None
-        work = replace(work, producer=aux)
+    try:
+        work = derive_inventory((plan,), coop=rplan.coop, producer=aux)
+    except ValueError:
+        return None  # the enumerator DROPS what ``seal_workers`` raises on — same rule, one home
     return {
         tkey: plan.spell(),
         skey: stage,
@@ -416,7 +375,7 @@ def _pick_coop(extent: int, free: int, *, has_tail: bool = False) -> int:
     return coop if coop >= 2 else 1
 
 
-def _reduce_specs(kernel, place, ctx=None) -> list[ReducePlan]:
+def _reduce_specs(kernel, place, ctx) -> list[ReducePlan]:
     """The ``PLANAR`` / ``TWISTED`` reduce-partition candidates — option-0 is the conservative
     heuristic pick (:func:`_pick_coop`, so a cold greedy compile keeps its historical deploy), then
     the legal :func:`coop_reduce_moves` catalog + serial as fork siblings. The catalog rows are what
@@ -433,7 +392,7 @@ def _reduce_specs(kernel, place, ctx=None) -> list[ReducePlan]:
     # band sweeps lanes along the output axis. Enumeration is the single choke point every tier
     # resolves through, so the gate lives here; an env pin stays authoritative and un-gated.
     kstride = _matvec_b_kstride(kernel, carrier, place)
-    deploy = ctx is None or ctx.validate_pins
+    deploy = ctx.validate_pins
     if deploy and REDUCE.raw() is None and kstride == 1 and extent >= _COOP_MIN_EXTENT and free >= _FREE_CAP:
         return [ReducePlan.of(coop=32)]
     if coop > 1 and kstride is not None and kstride != 1:
@@ -507,7 +466,7 @@ def _f16acc_allowed(ctx) -> bool:
         return F16_MMA_F32_ACC.parse(raw)
     if not precision_pin(F16_MMA_F32_ACC):
         return False
-    return ctx is not None and ctx.compute_capability in _F16ACC_CCS
+    return ctx.compute_capability in _F16ACC_CCS
 
 
 def _warp_atoms(kernel, node, proj: Body, ctx) -> tuple[str, ...]:
@@ -532,19 +491,6 @@ def _tile_area(plan: TilePlan) -> int:
     return max(plan.units_m * plan.reg_m * am * plan.units_n * plan.reg_n * an, 1)
 
 
-def _stage_spec() -> str:
-    """The pinned ``STAGE`` codec spelling, or ``""``. A pin that doesn't parse as the codec is
-    structurally invalid for this tier and degrades to gmem-direct rather than failing lowering."""
-    pinned = STAGE.narrow([""])[0]
-    if not pinned:
-        return ""
-    try:
-        Stage.parse(pinned)
-    except ValueError:
-        return ""
-    return pinned
-
-
 def _stage_values(kernel, node, place, plan: TilePlan, budget: int, tma_ok: bool) -> list[str]:
     """The RESOLVED ``STAGE`` spellings for one tile candidate — gmem-direct ``""`` first, then
     every catalog move that RESOLVES against the node with this ``plan``, so the leaf identity, the
@@ -566,7 +512,9 @@ def _stage_values(kernel, node, place, plan: TilePlan, budget: int, tma_ok: bool
         return r.spell() if r is not None else None
 
     if STAGE.raw() is not None:
-        pinned = _stage_spec()
+        # A malformed pin RAISES through ``Stage.parse`` — this used to be swallowed into
+        # gmem-direct, which made it the only silently-ignored pin in the family.
+        pinned = STAGE.narrow([""])[0]
         r = resolve(pinned) if pinned else None
         return [r] if r else [""]
     out = [""]
@@ -579,21 +527,16 @@ def _stage_values(kernel, node, place, plan: TilePlan, budget: int, tma_ok: bool
 
 def _splitk_pin() -> ReducePlan | None:
     """The pinned cross-CTA split-K partition (or ``None``) — a ``REDUCE`` pin resolving to a GRID
-    split. A non-split coop / ILP pin is not a split-K request: ignore it rather than fail."""
-    try:
-        plan = _pinned_reduce()
-    except ValueError:
-        return None
+    split. A well-formed but FOREIGN codec (a coop pin where split-K is wanted) is legitimately not
+    a split-K request and returns ``None``; a MALFORMED one raises, as it does everywhere else."""
+    plan = _pinned_reduce()
     return plan if plan is not None and plan.needs_split else None
 
 
 def _coop_reduce_spec() -> ReducePlan | None:
     """The pinned cooperative / ILP K partition a NON-output-tiled contraction honors (the split-K
     takes the structural fork instead); ``None`` when the pin is a foreign codec."""
-    try:
-        plan = _pinned_reduce()
-    except ValueError:
-        return None
+    plan = _pinned_reduce()
     if plan is None or plan.needs_split or not (plan.coop > 1 or plan.reg > 1):
         return None
     return plan
@@ -659,40 +602,39 @@ def _raster_values(place) -> list[str]:
     return list(RASTER.narrow(raster_moves()))
 
 
-def _wspec_values(plan: TilePlan, stage_spelling: str, red: ReducePlan) -> list[str]:
-    """The ``WSPEC`` candidates for one enumerated row — uniform ``""`` alone unless the row can
-    drive a producer band: a warp tile over a resolved TMA stage and no cross-CTA split."""
+def _wspec_bands(plan: TilePlan, placed: TilePlan, stage_spelling: str, red: ReducePlan) -> list[int]:
+    """The producer-band widths (in warps) one enumerated row may carry — ``[0]`` (uniform SIMT)
+    alone unless the row can drive a band: a warp tile over a resolved TMA stage and no cross-CTA
+    split, whose thread budget the band fits.
+
+    The budget is checked HERE, at enumeration, not at materialization. ``_assemble`` spells the
+    band into the row's ``WORK`` as ``+p<n>``, so an over-budget band checked later yields a row
+    whose stamped inventory claims a producer while its op carries none — the knob row and the
+    kernel disagree, which is the ``S_warp_eligible`` fracture in another costume.
+
+    The catalog's own ``""`` IS the uniform band, and ``Knob.narrow`` drops it under a ``WSPEC``
+    pin — so the pin stays authoritative and uniform is never re-offered beside it."""
     if not (plan.is_warp and "tma" in stage_spelling and not red.needs_split):
-        return [""]
-    return list(WSPEC.narrow(wspec_moves()))
-
-
-def _aux_warps(wspec: str) -> int:
-    """The dedicated producer-warp count a ``WSPEC`` candidate asks for (``0`` for uniform / an
-    unparseable spelling) — the band the row's ``WORK`` inventory carries as its ``+p`` suffix."""
-    if not wspec:
-        return 0
-    try:
-        return WarpSpec.parse(wspec).aux_warps
-    except ValueError:
-        return 0
-
-
-def _wspec_workers(spec: str, stage, block_threads: int | None) -> tuple[WarpSpec | None, str]:
-    """The resolved ``WSPEC`` worker split, or ``(None, "")`` — uniform SIMT. A spec that doesn't
-    parse, names no role, carries a reserved per-role param, or whose roles are illegal (a producer
-    drives a resolved TMA stage only) degrades to uniform silently, as do the thread budgets."""
-    if not spec:
-        return None, ""
-    try:
+        return [0]
+    out = []
+    for spec in WSPEC.narrow(wspec_moves()):
+        if not spec:
+            out.append(0)
+            continue
         ws = WarpSpec.parse(spec)
-    except ValueError:
-        return None, ""
-    if not ws.roles or any(a.params for a in ws.roles) or not ws.is_legal(SimpleNamespace(stage=stage)):
-        return None, ""
-    if not legal.enforce(legal.producer_band(ws, block_threads), pinned=False):
-        return None, ""
-    return ws, spec
+        if legal.enforce(legal.producer_band(ws, placed.launch_threads), pinned=WSPEC.raw() is not None):
+            out.append(ws.aux_warps)
+    return out or [0]
+
+
+def _wspec_workers(spec: str, stage) -> WarpSpec | None:
+    """The ``WSPEC`` worker split a materialized row carries, or ``None`` (uniform SIMT). The spec
+    is one this module SPELLED (``p<n>``, from :func:`_wspec_bands`), so only the stage-role
+    legality — a producer drives a resolved TMA stage only — can still refuse it here."""
+    if not spec:
+        return None
+    ws = WarpSpec.parse(spec)
+    return ws if ws.is_legal(SimpleNamespace(stage=stage)) else None
 
 
 def _contraction_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
@@ -702,7 +644,7 @@ def _contraction_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
     if node is None or not is_contraction(node) or not isinstance(node.a, Load):
         return []
     proj = _projection(tile.op)
-    budget, tma_ok = _smem_budget(ctx), _tma_allowed(ctx)
+    budget, tma_ok = ctx.max_dynamic_smem, ctx.has_tma
     pin = _pinned_tile()
     atoms = _warp_atoms(tile, node, proj, ctx)
     warp_moves = [p for p in warp_tile_moves(atoms) if legal.enforce(legal.warp_k_step(node, p), pinned=False)] if atoms else []
@@ -719,11 +661,12 @@ def _contraction_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
             # unpinned path above drops on, one home each.
             legal.enforce(legal.warp_k_step(node, plan), pinned=True)
             legal.enforce(legal.fragment_epilogue(proj), pinned=True)
+        placed = _placed(place, plan)
         for stage in _stage_values(tile, node, place, plan, budget, tma_ok):
             for red in _reduce_values(tile, place, plan, node, len(node.channels)):
-                for wspec in _wspec_values(plan, stage, red):
+                for aux in _wspec_bands(plan, placed, stage, red):
                     for raster in _raster_values(place):
-                        row = _assemble(keys, plan, stage, red, _aux_warps(wspec), raster, stamp)
+                        row = _assemble(keys, plan, stage, red, aux, raster, stamp)
                         if row is not None:
                             rows.append(row)
     return rows
@@ -846,7 +789,7 @@ def _warp_option(tile: TileOp, place, plan: TilePlan, node, name: str, knobs: di
     legal.enforce(legal.warp_k_step(node, plan), pinned=True)
     placed = _placed(place, plan)
     stage = legal.resolve_warp_stage(node, placed, Stage.parse(stage_spec), budget) if stage_spec else None
-    workers, _ = _wspec_workers(wspec, stage, placed.launch_threads)
+    workers = _wspec_workers(wspec, stage)
     return _stamp(tile, tile.op, place, name, knobs, [("TILE", node, placed), ("STAGE", node, stage)], workers=workers)
 
 
@@ -913,7 +856,7 @@ def _splitk_option(
 # ---- the entry point --------------------------------------------------------------------------- #
 
 
-def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[TileOp] | TileOp:
+def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] | TileOp:
     """Map a freshly-recognized (UNMAPPED) ``tile`` onto the grid and offer its scheduling fork.
 
     Returns the lazy fork tree over the enumerated rows (levels ``[WORK, *site keys, RASTER]`` — the
@@ -926,7 +869,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         return []
     role = axis_role(tile.op)
     node = head(tile.op)
-    budget = _smem_budget(ctx)
+    budget = ctx.max_dynamic_smem
 
     def _materialize(row: dict) -> TileOp:
         # The row carries SITE values + the ONE ``WORK`` entry: resolve each family ONCE against

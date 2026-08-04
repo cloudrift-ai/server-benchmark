@@ -190,23 +190,18 @@ def seal_workers(tile) -> None:
     inventory (a bare register strip) keeps ``None`` — the per-cell forms' launch geometry stays
     derived. Called by every option builder / split realizer after the schedule dict is
     assembled."""
-    from dataclasses import replace  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import derive_inventory  # noqa: PLC0415
 
-    from emmy.compiler.ir.schedule import Workers, derive_workers  # noqa: PLC0415
-
-    work = derive_workers(v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE")
     coop = max(
         (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE" and hasattr(v, "coop")),
         default=1,
     )
-    if coop > 1:
-        if work is not None and work.count != coop:
-            raise ValueError(f"disagreeing worker geometry: TILE workers {work.spell()} vs coop width {coop} — one kernel, one inventory")
-        if work is None:
-            work = Workers(kind="thread", units=(coop, 1))
     ws = getattr(tile, "workers", None)
-    if work is not None and ws is not None and getattr(ws, "aux_warps", 0):
-        work = replace(work, producer=ws.aux_warps)
+    work = derive_inventory(
+        (v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE"),
+        coop=coop,
+        producer=getattr(ws, "aux_warps", 0) if ws is not None else 0,
+    )
     tile.work = work
     tile.knobs["WORK"] = work.spell() if work is not None else ""
 

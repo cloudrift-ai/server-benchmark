@@ -163,6 +163,13 @@ class Context:
             compile_flags=_env_compile_flags(),
         )
 
+    @property
+    def has_tma(self) -> bool:
+        """Whether the target can issue TMA (``cp.async.bulk.tensor``) — a Hopper (sm_90) feature.
+        Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage below sm_90 fails to
+        compile: the schedule declines those rows rather than emitting them."""
+        return self.compute_capability >= (9, 0)
+
     def structural_key(self) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
 

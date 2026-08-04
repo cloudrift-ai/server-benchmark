@@ -4,7 +4,7 @@
   <a href="https://discord.gg/cloudrift"><img src="https://img.shields.io/discord/1150997934113030174?label=Discord" alt="Discord"></a>
 </p>
 
-**Compile → Benchmark → Deploy** any LLM on any GPU. Optimized compiler, LLM benchmarking, and deployment stack. Optimize inference via kernel fusion, autotuning, and advanced scheduling. See the blog post: [*Optimizing Gemma 4-12B on RTX GPUs*](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
+**Compile → Benchmark → Deploy** any LLM on any GPU. Optimized compiler, LLM benchmarking, and deployment stack. Optimize inference via kernel fusion, autotuning, and advanced scheduling. See the blog post: [*Outperforming vLLM (cuBLAS and FlashAttention) on Gemma4-12B*](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
 
 ## Install
 

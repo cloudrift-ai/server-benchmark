@@ -49,6 +49,9 @@ format: setup
 test: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
 
+# The name the docs reference; the stock (no tune DB) lane is the default.
+bench-kernels: bench-kernels-clean
+
 bench-kernels-clean: setup
 	@rm -f /tmp/emmy-gpu.lock
 	./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header

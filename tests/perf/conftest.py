@@ -1,10 +1,12 @@
-"""Conftest for ``tests/perf/``: marker gating, ``bench_pair`` fixture,
-session-end summary table, and JSON dump.
+"""Conftest for ``tests/perf/``: ``bench_pair`` fixture, session-end
+summary table, and JSON dump.
 
 Tests in this directory carry ``pytestmark = [pytest.mark.perf,
 requires_cuda]``. The ``perf`` marker is **deselected by default** —
-plain ``pytest tests/`` skips them so ``make test`` stays fast. Run
-explicitly with ``pytest -m perf`` (or ``make bench-kernels``).
+the root ``tests/conftest.py`` hook skips perf-marked items for any
+``tests/`` collection unless ``-m perf`` is passed, so ``make test``
+stays fast. Run explicitly with ``pytest -m perf`` (or ``make
+bench-kernels``).
 
 The ``bench_pair`` fixture drives ``emmy run --bench`` (and
 ``--profile`` when ``EMMY_BENCH_NCU=1``) as a subprocess per
@@ -80,21 +82,6 @@ def _collector(config) -> list[PerfRow]:
     if not hasattr(config, "_perf_rows"):
         config._perf_rows = []
     return config._perf_rows
-
-
-# ---------------------------------------------------------------------------
-# Marker gating: deselect `perf` unless explicitly requested
-# ---------------------------------------------------------------------------
-
-
-def pytest_collection_modifyitems(config, items):
-    selected = config.getoption("-m") or ""
-    if "perf" in selected:
-        return
-    skip_perf = pytest.mark.skip(reason="perf marker not selected; run with `pytest -m perf`")
-    for item in items:
-        if "perf" in item.keywords:
-            item.add_marker(skip_perf)
 
 
 # ---------------------------------------------------------------------------

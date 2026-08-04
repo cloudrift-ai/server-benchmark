@@ -46,6 +46,7 @@ from math import prod
 from types import SimpleNamespace
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
+from emmy.compiler.ir.atom import atoms_for
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import (
@@ -437,36 +438,22 @@ def _reduce_rows(tile: TileOp, place: Placement, keys, ctx) -> list[dict]:
 
 # ---- CONTRACTION: the tile × stage × reduce × wspec × raster product --------------------------- #
 
-# The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
-_ATOMS_BY_DTYPE = {"f16": ("mma_m16n8k16_f16_f32",), "bf16": ("mma_m16n8k16_bf16_f32",)}
-
 # Emit unpinned split-K candidates only when the output grid alone leaves the GPU under-occupied.
 _SPLITK_MAX_CTAS = 1024
-
-# The consumer-die compute capabilities where f32-accumulate HMMA runs at HALF the f16-accumulate
-# rate (GA102/AD102/GB202 silicon). On the datacenter parts f32-accumulate is full rate, so the
-# f16acc fork is pure search noise there.
-_F16ACC_CCS = frozenset({(8, 6), (8, 9), (12, 0)})
-
-# The f16-accumulate sibling of each base atom (f16 only — mma.sync has no bf16-accumulate form).
-_F16ACC_ATOMS = {"mma_m16n8k16_f16_f32": "mma_m16n8k16_f16_f16"}
 
 
 def _f16acc_allowed(ctx) -> bool:
     """Whether the f16-accumulate atom forks may be OFFERED — a precision-trading gate, off by
     default: the precise ``F16_MMA_F32_ACC`` pin is authoritative on every target; unset, the
-    ``FAST_MATH`` umbrella offers it on the consumer dies (:data:`_F16ACC_CCS`) where the
-    f32-accumulate half-rate nerf makes it profitable. ``ctx is None`` stays off — enumeration must
-    not grow under a bare umbrella with no known target. A ``TILE`` pin naming the atom bypasses
-    this gate entirely (pins are authoritative)."""
+    ``FAST_MATH`` umbrella offers it on the consumer dies (``Context.f16acc_is_faster``) where the
+    f32-accumulate half-rate nerf makes it profitable. A ``TILE`` pin naming the atom bypasses this
+    gate entirely (pins are authoritative)."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, precision_pin  # noqa: PLC0415
 
     raw = F16_MMA_F32_ACC.raw()
     if raw is not None:
         return F16_MMA_F32_ACC.parse(raw)
-    if not precision_pin(F16_MMA_F32_ACC):
-        return False
-    return ctx.compute_capability in _F16ACC_CCS
+    return precision_pin(F16_MMA_F32_ACC) and ctx.f16acc_is_faster
 
 
 def _warp_atoms(kernel, node, proj: Body, ctx) -> tuple[str, ...]:
@@ -479,10 +466,11 @@ def _warp_atoms(kernel, node, proj: Body, ctx) -> tuple[str, ...]:
     if not isinstance(node.a, Load):
         return ()  # a computed cone is out of this cut's scope (see the module docstring)
     t = kernel.inputs.get(node.a.input)
-    atoms = _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
+    ab = t.dtype if t is not None else None
+    atoms = atoms_for(ab)
     if not atoms or not _f16acc_allowed(ctx):
         return atoms
-    return atoms + tuple(_F16ACC_ATOMS[a] for a in atoms if a in _F16ACC_ATOMS)
+    return atoms + atoms_for(ab, acc=ab)  # the f16-accumulate siblings, registry order preserved
 
 
 def _tile_area(plan: TilePlan) -> int:

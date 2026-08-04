@@ -139,6 +139,23 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
     "mma_m16n8k16_f16_f16": AtomKind("mma_m16n8k16_f16_f16", (16, 8, 16), (("a", F16), ("b", F16), ("c", F16))),
 }
 
+
+def atoms_for(ab_dtype: DataType | None, *, acc: DataType = F32) -> tuple[str, ...]:
+    """Every registered atom whose MULTIPLICAND dtype is ``ab_dtype`` and whose accumulator is
+    ``acc``, in REGISTRY INSERTION ORDER — the schedule offers them in that order, so the first is
+    its option-0 and reordering the registry would move a deployed pick.
+
+    ``None`` (an operand whose dtype the caller could not read) yields ``()``, as does any dtype
+    with no tensor-core cell: the warp tier simply does not apply."""
+    if ab_dtype is None:
+        return ()
+    return tuple(
+        name
+        for name, atom in ATOM_REGISTRY.items()
+        if atom.operand_dtype("a") == ab_dtype and atom.operand_dtype("b") == ab_dtype and atom.operand_dtype("c") == acc
+    )
+
+
 #: Convenience aliases — the historical acc-unspecified spellings resolve to the common
 #: f32-accumulate atoms (they are also what every pre-convention golden / tune-DB row / pin
 #: spells). Accepted by :func:`atom_for`, so parse canonicalizes: an aliased ``TILE`` spelling

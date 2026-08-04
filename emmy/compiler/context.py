@@ -41,6 +41,11 @@ _TENSOR_CORE_GEN = gpu.TENSOR_CORE_GEN
 DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
+# The consumer-die compute capabilities where f32-accumulate HMMA runs at HALF the f16-accumulate
+# rate (GA102 / AD102 / GB202 silicon) — a hardware fact, read through ``Context.f16acc_is_faster``.
+_F16ACC_HALF_RATE_CCS = frozenset({(8, 6), (8, 9), (12, 0)})
+
+
 def _env_compile_flags() -> str:
     """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``). Set by the
     CLI commands (via :func:`emmy.config.set_nvcc_flags`); folded into
@@ -162,6 +167,14 @@ class Context:
             gpu_name=spec.name if spec else gpu_name,
             compile_flags=_env_compile_flags(),
         )
+
+    @property
+    def f16acc_is_faster(self) -> bool:
+        """Whether f16-accumulate HMMA outruns f32-accumulate on this target. True on the consumer
+        dies (GA102 / AD102 / GB202), where f32-accumulate runs at HALF rate; on the datacenter
+        parts f32-accumulate is full rate, so trading precision for it buys nothing and the fork is
+        pure search noise."""
+        return self.compute_capability in _F16ACC_HALF_RATE_CCS
 
     @property
     def has_tma(self) -> bool:

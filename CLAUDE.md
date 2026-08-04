@@ -201,7 +201,8 @@ Quick test models / scripts (for local iteration):
 - Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_model_kernels.py`, `bench_golden_set.py`,
   `bench_gen_*.py`, `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`,
   `remote_node_collect.py`, `golden_neighbor_bench.py`, `digest_kernels.py` — the kernel-source byte-identity
-  gate for tile-IR storage migrations) — run with `--help` for usage;
+  gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
+  usage;
   the skills that drive them document the flows.
 
 ## Key Make Targets

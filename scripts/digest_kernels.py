@@ -4,9 +4,12 @@ Compiles a battery of representative kernels OFF-GPU (sources render without a d
 sm_120) at a pinned knob config each, and prints ``case/kernel_name sha1`` per rendered kernel
 source. Run at the baseline commit and after each migration commit; diff the outputs — a
 byte-neutral storage migration must leave every digest unchanged. Covers the scalar/warp/f16acc/
-split-K/raster/wspec matmuls, the coop-t matvec, dynM forms, the reduce tiers (rms/softmax/
-reduce/pointwise), the computed-A fused kinds (norm_linear canonical + .lin + split-K + coop,
-mlp_geglu) and flash (hd128 tma/cp, hd256 alt, fm sibling, chain, scalar).
+split-K/raster matmuls and the producer band, the coop-t matvec, dynM forms, the reduce tiers
+(rms/softmax/reduce/pointwise), the computed-A fused kinds (norm_linear canonical + .lin +
+split-K + coop, mlp_geglu) and flash (hd128 tma/cp, hd256 alt, fm sibling, chain, scalar).
+
+Every case additionally asserts LIVENESS — that its pins reached a kernel (see :func:`_liveness`).
+A digest alone cannot tell a covered path from an unscheduled one: both render, both hash stably.
 
 Usage: venv/bin/python scripts/digest_kernels.py [case ...] > digests.txt
 """
@@ -138,7 +141,12 @@ CASES = [
         lambda: matmul(2048, 2048, 2048),
         {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4", "STAGE": "d2/tma/ring", "RASTER": "gm8"},
     ),
-    ("matmul_wspec", lambda: matmul(2048, 2048, 2048), {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4", "STAGE": "d2/tma/ring", "WSPEC": "p1"}),
+    # The producer band is inventory: it rides WORK's ``+p`` suffix, never the retired WSPEC key.
+    (
+        "matmul_pband",
+        lambda: matmul(2048, 2048, 2048),
+        {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4+p1", "STAGE": "d2/tma/ring", "REDUCE": ""},
+    ),
     ("matvec_coopt", lambda: matmul(1, 4096, 4096, lin=True), {"REDUCE": "g16k/coop-t", "WORK": "t256"}),
     ("matmul_dynm", lambda: matmul(Dim("seq_len"), 512, 512), {"TILE": f"{WARP}/f4x1/k4", "WORK": "w1x8"}),
     ("rms_norm", lambda: rms_norm(), {"REDUCE": "coop", "WORK": "t256"}),
@@ -172,6 +180,44 @@ CASES = [
 ]
 
 
+# The cases whose pins reach NO kernel today, each a consequence of one of the two enumerator gaps:
+# a COMPUTED operand edge (the fused norm→linear / gate⊗up cone) and the flash streaming pair emit no
+# schedule rows, so ``020_schedule`` leaves those terms unmapped and the case digests the un-scheduled
+# lowering path instead. Recorded, not tolerated — like the xfail registry this set is STRICT: a case
+# that starts landing its pins FAILS here until it is deleted, so phases 4 and 5 report themselves.
+UNSCHEDULED = frozenset(
+    {
+        "norm_linear",
+        "norm_linear_lin",
+        "norm_linear_splitk",
+        "norm_linear_dynm",
+        "mlp_geglu",
+        "flash_hd128",
+        "flash_hd128_cp",
+        "flash_hd256_alt",
+        "flash_hd256_fm",
+        "flash_chain",
+    }
+)
+
+
+def _liveness(name, pins, realized):
+    """Did this case's pins reach a kernel? Returns a message when the answer is not the expected one.
+
+    A digest is blind to the difference: an unmapped term still renders and still hashes stably, so
+    without this the baseline would pin recognition, term storage and the un-scheduled lowering path
+    while leaving the tiered/placed contraction path — the one the pins name — entirely uncovered.
+    The pins must land TOGETHER on one kernel; under split-K that kernel is the ``__partial``.
+    """
+    landed = [kname for kname, knobs in realized if all(knobs.get(f) == v for f, v in pins.items())]
+    if name in UNSCHEDULED:
+        return None if not landed else f"{name}: pins now land on {landed[0]} — delete it from UNSCHEDULED"
+    if landed:
+        return None
+    got = {kname: {f: knobs.get(f) for f in pins} for kname, knobs in realized}
+    return f"{name}: no kernel stamped {pins}; realized {got}"
+
+
 def run_case(name, build, pins):
     from emmy.commands.run import _pinned_knobs
 
@@ -183,15 +229,16 @@ def run_case(name, build, pins):
 
     with _pinned_knobs(pins):
         out, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(g, decide)
-    lines = []
+    lines, realized = [], []
     for nid, node in sorted(out.nodes.items()):
         src = getattr(node.op, "kernel_source", None)
         if src:
             kname = getattr(node.op, "kernel_name", nid)
             lines.append(f"{name}/{kname} {hashlib.sha1(src.encode()).hexdigest()}")
+            realized.append((kname, getattr(node.op, "knobs", None) or {}))
     if not lines:
         lines.append(f"{name}/<no-kernel-source> -")
-    return lines
+    return lines, _liveness(name, pins, realized)
 
 
 BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel_digests.txt")
@@ -219,12 +266,15 @@ def main():
     argv = sys.argv[1:]
     check = "--check" in argv
     only = [a for a in argv if not a.startswith("-")] or None
-    failures, lines = 0, []
+    failures, lines, dead = 0, [], []
     for name, build, pins in CASES:
         if only and name not in only:
             continue
         try:
-            lines.extend(run_case(name, build, pins))
+            case_lines, verdict = run_case(name, build, pins)
+            lines.extend(case_lines)
+            if verdict:
+                dead.append(verdict)
         except Exception as e:  # noqa: BLE001
             failures += 1
             lines.append(f"{name}/<ERROR> {type(e).__name__}: {e}")
@@ -233,7 +283,9 @@ def main():
         for line in lines:
             print(line)
     sys.stdout.flush()
-    if failures:
+    for verdict in dead:
+        print(f"LIVENESS {verdict}", file=sys.stderr)
+    if failures or dead:
         return 1
     return _check(lines) if check else 0
 

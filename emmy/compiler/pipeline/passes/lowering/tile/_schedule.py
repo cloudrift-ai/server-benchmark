@@ -90,7 +90,6 @@ from emmy.compiler.pipeline.search.space import (
     STAGE,
     TILE,
     WORK,
-    WSPEC,
     coop_reduce_moves,
     map_tile_moves,
     raster_moves,
@@ -838,14 +837,9 @@ def _enumerate(term: _Term) -> tuple[list[dict], list[str]]:
 
 
 def _site_knobs(stamped: dict) -> dict:
-    """A row's knob dict flipped to the site grammar: TILE/REDUCE values re-spell SITE-LOCAL (the
-    worker halves live in the ``WORK`` entry ``seal_workers`` stamps), and the ``WSPEC`` key never
-    stamps (the producer band is ``WORK``'s ``+p`` suffix)."""
-    return {
-        k: canon_family_value(k, v) if isinstance(v, str) and family_of(k) in ("TILE", "REDUCE") else v
-        for k, v in stamped.items()
-        if k != WSPEC.name
-    }
+    """A row's knob dict flipped to the site grammar: TILE/REDUCE values re-spell SITE-LOCAL — the
+    worker halves live in the ``WORK`` entry ``seal_workers`` stamps."""
+    return {k: canon_family_value(k, v) if isinstance(v, str) and family_of(k) in ("TILE", "REDUCE") else v for k, v in stamped.items()}
 
 
 def _stamp(term: _Term, op, name, knobs: dict, slices, workers=None) -> TileOp:

@@ -18,12 +18,13 @@ function of the node.
 The ``TILE`` / ``REDUCE`` grids hand out the **typed schedule slices** themselves
 (:class:`~emmy.compiler.ir.schedule.TilePlan` / :class:`~emmy.compiler.ir.schedule.ReducePlan`,
 built structurally — never a parsed literal), so the enumeration never speaks a codec spelling; the
-scheduler spells each row ONCE, site-local, where it becomes stored state. The ``STAGE`` / ``WSPEC``
-/ ``RASTER`` grids stay codec strings — those families have no worker half to factor out.
+scheduler spells each row ONCE, site-local, where it becomes stored state. ``STAGE`` hands out typed
+:class:`~emmy.compiler.ir.schedule.Stage` slices in the same currency; ``RASTER`` stays a codec string
+(it has no slice type of its own).
 
 Two groups:
 
-- **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
+- **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
   tile schedule and materialized in ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
@@ -84,23 +85,10 @@ STAGE = Knob(
     off="",
 )
 
-# Warp specialization — RETIRED as a decision: the role→warp split (``p<np>`` producer warps drive
-# the ``STAGE`` load half; compute warps stay on the mma) is part of the WORK inventory, spelled
-# ``+p<np>``, and that is also how it is pinned. Gated on a warp ``TILE`` + a resolved **TMA**
-# ``STAGE`` (the producer band drives the box-copy mbarrier ring; cp.async's wait-group is
-# issuing-thread-scoped and a sync compute-fill has no async load half).
-WSPEC = Knob(
-    "WSPEC",
-    KnobType.STR,
-    help="RETIRED warp-specialization codec — the producer band is inventory and rides WORK's +p "
-    "suffix (pin EMMY_WORK=w4x2+p2). The declaration survives so legacy stored rows still parse; "
-    "nothing reads the pin and no realized row carries the key.",
-)
-
-
 # The kernel-global worker inventory (the step-7 value-grammar family): the w/n worker tokens
-# factored out of the per-site TILE values, the coop width out of REDUCE, the WSPEC producer band
-# absorbed as ``+p<n>``. Stamped by ``ops.seal_workers`` on every assembled option row; ``off=""``
+# factored out of the per-site TILE values, the coop width out of REDUCE, and the producer band the
+# retired WSPEC family used to spell, absorbed as ``+p<n>``. Stamped by ``ops.seal_workers`` on every
+# assembled option row; ``off=""``
 # = the per-cell / pure-reduce forms' derived launch geometry.
 
 
@@ -153,7 +141,7 @@ RASTER = Knob(
     help="CTA rasterization codec — the launch-order mapping of flat CTA ids onto the 2-D "
     "(m, n) block-tile grid (gm<G>: G M block-tiles iterate fastest per stripe, L2 reuse of the "
     "streamed B operand; gn<G>: the transpose, A streamed; empty = flat N-fastest row-major). "
-    "Kernel-scoped like WSPEC (no @<axis> key); changes no per-CTA work or layout, only the "
+    "Kernel-scoped (no @<axis> key); changes no per-CTA work or layout, only the "
     "block-id decode. Decided by the tile schedule (the row product), applied "
     "at the kernel materializer's grid_tile seal; 2-D-tiled contraction grids only.",
     features=_raster_features,

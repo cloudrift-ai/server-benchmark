@@ -67,11 +67,10 @@ def _place_pins() -> dict[str, str]:
     return pins
 
 
-#: The schedule knob families a golden / ``--ab`` row pins, plus the env-pin-only ``WSPEC`` alias. A
-#: live pin from any of them marks a pinned re-record compile, where the pin — not a recorded routing
-#: entry — must decide the form. The stamped families come from ONE list (``knob.SCHEDULE_FAMILIES``);
-#: only the alias is local, because no realized row carries it.
-_SCHEDULE_FAMILIES = (*SCHEDULE_FAMILIES, "WSPEC")
+#: The schedule knob families a golden / ``--ab`` row pins. A live pin from any of them marks a
+#: pinned re-record compile, where the pin — not a recorded routing entry — must decide the form.
+#: ONE list (``knob.SCHEDULE_FAMILIES``): the retired ``WSPEC`` alias is gone from it because
+#: nothing reads that pin any more, so treating it as live suppressed routing for no decision.
 
 
 def _schedule_pins_live() -> bool:
@@ -82,9 +81,9 @@ def _schedule_pins_live() -> bool:
     where every fused golden replay failed against its own recorded spelling as soon as a
     same-shape ``.cut`` routing row landed). Bare schedule pins apply compile-wide, so this
     suppression is compile-wide too — matching ``Knob.narrow``'s bare-pin scope."""
-    if any(config.knob_raw(f) is not None for f in _SCHEDULE_FAMILIES):
+    if any(config.knob_raw(f) is not None for f in SCHEDULE_FAMILIES):
         return True
-    return any(family_of(k) in _SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
+    return any(family_of(k) in SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
 
 
 def _card_has_routing(gpu_name, cap) -> bool:

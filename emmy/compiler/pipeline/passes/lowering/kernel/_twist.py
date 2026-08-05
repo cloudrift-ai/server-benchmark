@@ -120,17 +120,15 @@ def warp_source(op, sched):
     Returns the STORED ``role=CONTRACTION`` fold — its warp tile is a schedule slice
     (``sched`` — the ``TileOp.schedule`` view, 1r), never a node field;
     :func:`realize_warp_twist` derives the full views itself."""
-    red = (op.operands[0] if op.operands else None) if (isinstance(op, Fold) and op.axis is None) else op
-    if not isinstance(red, Fold):
+    red = head(op)  # the compute node through the projection wrapper — ONE accessor, not a ternary
+    if red is None:
         return None
     stmts = red.step_stmts()
-    if len(stmts) == 0:
-        return None
-    head = stmts[0]
-    if is_contraction(head):
-        htile = sched.tile_of(head)
+    first = stmts[0] if stmts else None
+    if first is not None and is_contraction(first):
+        htile = sched.tile_of(first)
         if htile is not None and htile.is_warp:
-            return head
+            return first
     return None
 
 

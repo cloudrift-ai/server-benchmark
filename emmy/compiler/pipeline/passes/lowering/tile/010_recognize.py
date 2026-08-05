@@ -281,17 +281,13 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
         reduction = fold_from_loop(annotated)
         if reduction is None:  # not λ-representable — the raw-loop-IR escape (the flat zero-axis fold)
             return Fold.projection(body=(annotated, *projection)), ()
-        if bare:
-            return reduction, ()
-        # A projected reduce (softmax / RMSNorm) is the ``source`` of a zero-axis ``Fold`` whose body IS that
-        # projection — pure, its root store (and the output sweep around it) a boundary ``Store``
-        # when the split gate accepts; the composed-tail shapes (norm→linear's column loop) decline
-        # and keep the raw-loop-IR spelling for ``bind_prologue_contraction`` to parse.
-        split = split_effects(projection)
-        if split is not None:
-            pure, stores = split
-            return Fold.projection(body=Body(pure), operands=(reduction,)), stores
-        return Fold.projection(body=Body(projection), operands=(reduction,)), ()
+        # A projected reduce (softmax / RMSNorm) is the ``source`` of a zero-axis ``Fold`` whose
+        # body IS that projection — pure, its root store (and the output sweep around it) a
+        # boundary ``Store`` when the split gate accepts; the composed-tail shapes (norm→linear's
+        # column loop) decline and keep the raw-loop-IR spelling for
+        # ``bind_prologue_contraction`` to parse. ``_project`` is that rule, and a bare reduce
+        # (empty projection) passes straight through it.
+        return _project(reduction, Body(projection))
     return Fold.projection(body=(annotated, *projection)), ()
 
 

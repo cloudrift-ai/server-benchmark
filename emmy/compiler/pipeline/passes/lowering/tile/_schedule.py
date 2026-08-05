@@ -59,7 +59,7 @@ guessing. That is the guardrail contract: empty enumeration returns ``[]``, neve
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import product
 from math import prod
@@ -327,6 +327,14 @@ def _keeps_children(site: Site) -> bool:
     return is_contraction(site.node) or _streams(site.node)
 
 
+def _kids(node: _Node) -> tuple[_Node, ...]:
+    """The children the site tree descends into — :func:`_keeps_children` applied, in ONE place.
+    Four walks need it (the row product, the inventory scan, the key spelling and the
+    materializer's slice stamping) and they must agree exactly: what materializes is what was
+    enumerated, so a walk that pruned differently would stamp a key no row decided."""
+    return node.children if _keeps_children(node.site) else ()
+
+
 # ---- the candidate values, per site ------------------------------------------------------------- #
 
 
@@ -350,6 +358,7 @@ class _Term:
         self.tree = _site_tree(tile.op, self.key)
         self._tiles: dict[int, dict[str, list[TilePlan]]] = {}
         self._streams: dict[int, _Stream | None] = {}
+        self._k_contig: dict[int, bool | None] = {}
         #: The refusal a schedule PIN drew, kept until the walk is done. One inventory declining
         #: a pin is ordinary (the widths are read OFF the inventory, so the pin names a different
         #: plan under each); a pin NO inventory could spell is malformed, and that is loud.
@@ -395,6 +404,17 @@ class _Term:
         if id(node) not in self._streams:
             self._streams[id(node)] = _stream_of(self, node)
         return self._streams[id(node)]
+
+    def k_contiguous(self, node) -> bool | None:
+        """Whether B stores the reduce axis FASTEST (:func:`_k_contiguous`), memoized per node.
+
+        Asked once per TILE CANDIDATE by ``_contraction_reduces``, and the demoted-matvec answer
+        walks every load in the term to get there — so on a wide contraction the enumeration paid
+        for one whole-term scan per candidate. The term is immutable during the walk, so the answer
+        cannot move."""
+        if id(node) not in self._k_contig:
+            self._k_contig[id(node)] = _k_contiguous(self, node)
+        return self._k_contig[id(node)]
 
     def tiles(self, node) -> dict[str, list[TilePlan]]:
         """The contraction node's ``TILE`` catalog, grouped by the ``WORK`` spelling each candidate
@@ -764,7 +784,7 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     # coalesced on ONE B orientation — the plain band interleaves lanes along K, the transposed
     # band sweeps lanes along the output axis. Enumeration is the single choke point every tier
     # resolves through, so the gate lives here; an env pin stays authoritative and un-gated.
-    k_contig = _k_contiguous(term, node)
+    k_contig = term.k_contiguous(node)
     if k_contig and extent >= _COOP_MIN_EXTENT and free >= _FREE_CAP:
         # The wide-K COALESCED matvec: a 32-wide band is the measured deploy, and option-0 is what
         # the prior-free paths take. It is a RANKING decision, so it leads the list rather than
@@ -779,13 +799,14 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     for p in coop_reduce_moves():
         if not legal.enforce(legal.coop_band_layout(p, k_contig), pinned=False):
             continue
-        if p.coop_transposed or p.needs_split:
-            # A cross-CTA split is offered here only in COMPOSITE with the transposed band — every
-            # split candidate in the catalog is one, so this states the catalog's shape rather than
-            # adding a rule. The band's own requirements are the geometry (shared with the
-            # contraction tier) plus this tier's epilogue condition.
-            if not p.coop_transposed:
-                continue
+        if p.needs_split and not p.coop_transposed:
+            # A cross-CTA split is offered on this tier only in COMPOSITE with the transposed band
+            # — every split candidate in the catalog is one, so this states the catalog's shape
+            # rather than adding a rule.
+            continue
+        if p.coop_transposed:
+            # The band's own requirements: the geometry (shared with the contraction tier) plus
+            # this tier's epilogue condition.
             if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
                 continue
             if not legal.enforce(epilogue, pinned=False):
@@ -797,17 +818,12 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     return cands
 
 
-def _reduce_values(term: _Term, node, *, fixed: bool = False) -> list[dict]:
+def _reduce_values(term: _Term, node) -> list[dict]:
     """The reduce-partition values a non-contraction fold offers: the partition itself plus the
     shared-row ``STAGE`` a cooperative band can drive (a resolver, not a choice — see
     :func:`_row_stage`). Which of them SPELL against the kernel's chosen inventory is the row's
     question, not this site's (:func:`_work_holds`) — a serial fold claims no workers at all, so at
-    a NESTED site it composes with any parent inventory.
-
-    ``fixed`` is the one case a site offers nothing but the decided empty: its PARENT form realizes
-    the partition itself (:func:`_fill_realized`)."""
-    if fixed:
-        return [{"REDUCE": ReducePlan(), "STAGE": None}]
+    a NESTED site it composes with any parent inventory."""
     return [{"REDUCE": plan, "STAGE": _row_stage(term, node) if plan.coop > 1 else None} for plan in _reduce_specs(term, node)]
 
 
@@ -863,6 +879,25 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     return legal.resolve_scalar_stage(node, tile, want, term.tile.inputs, budget)
 
 
+def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]:
+    """``moves`` resolved against the term and deduped on the RESOLVED spelling — the shape every
+    stage-value site shares. Dedupe is on the resolved spelling, never the catalog move: a depth
+    that clamps under the smem budget spells identically to its shallower sibling and must yield
+    ONE row, or the fork carries two leaves naming one kernel.
+
+    ``gmem_direct`` seeds the conservative option-0 (``None``, no slab). The compute-fill tier has
+    no gmem-direct sibling — a computed ``a`` edge must land somewhere — so it seeds nothing, and a
+    caller that declines every move returns the empty list rather than a silent fallback."""
+    out: list[Stage | None] = [None] if gmem_direct else []
+    spelled = {""} if gmem_direct else set()
+    for move in moves:
+        r = resolve(move)
+        if r is not None and r.spell() not in spelled:
+            spelled.add(r.spell())
+            out.append(r)
+    return out
+
+
 def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     """The RESOLVED compute-fill stages a COMPUTED ``a`` edge offers — its depths, and nothing else:
     the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no copy transport can
@@ -872,17 +907,14 @@ def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     budget spells identically, so it dedupes to one row."""
     pin = term.pin("STAGE", node)
     depths = [Stage.parse(pin).depth] if pin else [1, 2]
-    out: list[Stage | None] = []
-    spelled: set[str] = set()
-    for want in depths:
-        st = _resolve_stage(term, node, tile, Stage(depth=want))
-        if st is None:
+
+    def resolve(st: Stage) -> Stage | None:
+        r = _resolve_stage(term, node, tile, st)
+        if r is None:  # per DECLINED depth, so a pin that fits no depth names its own budget
             legal.enforce(f"the sync compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=pin is not None)
-            continue
-        if st.spell() not in spelled:
-            spelled.add(st.spell())
-            out.append(st)
-    return out
+        return r
+
+    return _resolved((Stage(depth=d) for d in depths), resolve, gmem_direct=False)
 
 
 def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
@@ -904,14 +936,7 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         # A malformed pin RAISES through ``Stage.parse`` — this used to be swallowed into
         # gmem-direct, which made it the only silently-ignored pin in the family.
         return [resolve(Stage.parse(pinned)) if pinned else None]
-    out: list[Stage | None] = [None]
-    spelled = {""}
-    for move in stage_moves(warp=plan.is_warp):
-        r = resolve(move)
-        if r is not None and r.spell() not in spelled:
-            spelled.add(r.spell())
-            out.append(r)
-    return out
+    return _resolved(stage_moves(warp=plan.is_warp), resolve)
 
 
 def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
@@ -941,7 +966,7 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     splittable = k is not None and legal.enforce(legal.splitk_materialized_b(node), pinned=False)
     if k is not None and not plan.is_tiled:
         inner = _inner_free(term.place)
-        k_contig = _k_contiguous(term, node)
+        k_contig = term.k_contiguous(node)
         for p in coop_reduce_moves():
             if not (p.coop <= k and p.reg <= k):
                 continue
@@ -1139,14 +1164,7 @@ def _stream_stages(term: _Term, node, ctx: _Stream, qk: TilePlan, pv: TilePlan) 
         return [resolve(Stage.parse(pin))] if pin else [None]
     if not ctx.stageable:
         return [None]  # a dtype-mismatched or overhanging operand keeps the tier and drops its stages
-    out: list[Stage | None] = [None]
-    spelled = {""}
-    for move in stage_moves(warp=True):
-        r = resolve(move)
-        if r is not None and r.spell() not in spelled:
-            spelled.add(r.spell())
-            out.append(r)
-    return out
+    return _resolved(stage_moves(warp=True), resolve)
 
 
 def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list[dict]:
@@ -1247,7 +1265,11 @@ def _site_values(term: _Term, site: Site, work: Workers | None, parent: _Node | 
         return _contraction_values(term, node, work)
     if _streams(node):
         return _stream_values(term, node, work, kids)
-    return _reduce_values(term, node, fixed=_fill_realized(parent, site))
+    if _fill_realized(parent, site):
+        # The one site that offers nothing but the decided empty: its PARENT form realizes the
+        # partition itself, so there is no choice left here to spell.
+        return [{"REDUCE": ReducePlan(), "STAGE": None}]
+    return _reduce_values(term, node)
 
 
 # ---- the recursion: one row is a joint assignment across the site tree --------------------------- #
@@ -1279,31 +1301,48 @@ class _Row:
         """The row's resolved ``TILE`` slices — what the inventory folds out of."""
         return tuple(self.plans.values())
 
+    @classmethod
+    def union(cls, parts: Iterable[_Row]) -> _Row | None:
+        """Several rows as ONE — knobs and slices unioned, the cooperative claim RECONCILED.
+        ``None`` when the parts cannot share one inventory.
+
+        The claim is a CONSISTENCY, not a maximum. Since step 7 a ``REDUCE`` value spells no coop
+        width — the width lives once in ``WORK`` — so two sites claiming DIFFERENT cooperative
+        bands spell identically while naming kernels the wire format cannot tell apart. Folding
+        them with ``max`` admitted all of them: on the two-site fixture four child widths rode one
+        ``t32`` parent as four byte-identical rows. A serial part claims nothing (``coop == 1``)
+        and still composes with any other, which is what lets a nested serial fold sit under a warp
+        inventory at all.
+
+        Used at BOTH levels a row is assembled — a site with its children (:func:`_merge`) and the
+        forest of a term's root sites (:func:`_term_rows`). They stated the rule differently until
+        this existed, and the looser of the two was the one that ran on multi-root terms."""
+        knobs: dict = {}
+        plans: dict = {}
+        coop = 1
+        for part in parts:
+            knobs.update(part.knobs)
+            plans.update(part.plans)
+            if part.coop > 1:
+                if coop > 1 and part.coop != coop:
+                    return None  # two sites, two widths, one WORK entry to spell them in
+                coop = part.coop
+        return cls(knobs=knobs, plans=plans, coop=coop)
+
 
 def _merge(node: _Node, value: dict, combo: tuple[_Row, ...]) -> _Row | None:
     """One site's row: each family's slice spelled at ITS canonical path key (``Sched.key`` spells
     ANY site, so there are no new keys and no new codec), unioned with the child rows — and with
     them the inventory claim, which is a fact about the whole row, never one site's. ``None`` when
-    the sites cannot share ONE inventory.
-
-    The claim is a CONSISTENCY, not a maximum. Since step 7 a ``REDUCE`` value spells no coop width
-    — the width lives once in ``WORK`` — so two sites claiming DIFFERENT cooperative bands spell
-    identically while naming kernels the wire format cannot tell apart. Folding them with ``max``
-    admitted all of them: on the two-site fixture four child widths rode one ``t32`` parent as four
-    byte-identical rows. A serial site claims nothing and still composes with any parent, which is
-    what lets a nested serial fold sit under a warp inventory at all."""
-    knobs = {key: _spell(value.get(family)) for family, key in node.keys.items()}
-    tile, red = value.get("TILE"), value.get("REDUCE")
-    plans = {node.keys["TILE"]: tile} if tile is not None and "TILE" in node.keys else {}
-    coop = red.coop if red is not None else 1
-    for child in combo:
-        knobs.update(child.knobs)
-        plans.update(child.plans)
-        if child.coop > 1:
-            if coop > 1 and child.coop != coop:
-                return None  # two sites, two widths, one WORK entry to spell them in
-            coop = child.coop
-    return _Row(knobs=knobs, plans=plans, coop=coop)
+    the sites cannot share ONE inventory (:meth:`_Row.union` owns that rule)."""
+    red = value.get("REDUCE")
+    tile = value.get("TILE")
+    own = _Row(
+        knobs={key: _spell(value.get(family)) for family, key in node.keys.items()},
+        plans={node.keys["TILE"]: tile} if tile is not None and "TILE" in node.keys else {},
+        coop=red.coop if red is not None else 1,
+    )
+    return _Row.union((own, *combo))
 
 
 def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | None = None) -> list[_Row]:
@@ -1313,7 +1352,7 @@ def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | Non
     is what choosing the inventory at the root buys). The dependency that DOES exist runs the other
     way — a site's values may read what its subtree decided (:func:`_site_values`) — so the child
     rows lead and this site's values are asked per combination."""
-    children = node.children if _keeps_children(node.site) else ()
+    children = _kids(node)
     child_rows = [_rows_at(term, c, work, node) for c in children]
     out: list[_Row] = []
     for combo in product(*child_rows):
@@ -1360,7 +1399,7 @@ def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> 
             # through (which is why the widths live in the ONE ``WORK`` entry and neither ``TILE``
             # value carries them). m-only — the twisted carrier has no cross-warp merge.
             out.extend(Workers(kind="warp", units=(um, 1)) for um in dict.fromkeys(m for m, _, _ in twisted_warp_moves()))
-    for child in node.children if _keeps_children(site) else ():
+    for child in _kids(node):
         out.extend(_site_inventories(term, child, node))
     return out
 
@@ -1424,7 +1463,7 @@ def _level_keys(term: _Term) -> list[str]:
     def walk(node: _Node) -> None:
         for family, key in node.keys.items():
             decided[family].append(key)
-        for child in node.children if _keeps_children(node.site) else ():
+        for child in _kids(node):
             walk(child)
 
     for node in term.tree:
@@ -1447,20 +1486,16 @@ def _union_keys(terms: list[_Term]) -> list[str]:
 
 
 def _term_rows(term: _Term, work: Workers | None, rasters: list[str], spelled: str) -> list[dict]:
-    """One reading's rows at one inventory — the site product, filtered by the row-level inventory
-    validation, closed by the kernel-global ``RASTER``."""
+    """One reading's rows at one inventory — the site product over the term's ROOT sites, filtered
+    by the row-level inventory validation, closed by the kernel-global ``RASTER``. The roots
+    reconcile through the same :meth:`_Row.union` a site uses for its children: one rule, whichever
+    level of the tree assembles the row."""
     out: list[dict] = []
     for combo in product(*(_rows_at(term, node, work) for node in term.tree)):
-        knobs: dict = {}
-        plans: dict = {}
-        coop = 1
-        for part in combo:
-            knobs.update(part.knobs)
-            plans.update(part.plans)
-            coop = max(coop, part.coop)
-        if not _work_holds(_Row(knobs=knobs, plans=plans, coop=coop), work):
+        row = _Row.union(combo)
+        if row is None or not _work_holds(row, work):
             continue
-        out.extend({**knobs, WORK.name: spelled, RASTER.name: raster} for raster in rasters)
+        out.extend({**row.knobs, WORK.name: spelled, RASTER.name: raster} for raster in rasters)
     return out
 
 
@@ -1621,14 +1656,25 @@ def _node_option(
     return _stamp(term, term.tile.op, name, knobs, [*own, *nested], workers=workers)
 
 
-def _row_stream_tiles(term: _Term, node: _Node, row: dict, work: Workers | None) -> tuple[TilePlan | None, TilePlan | None]:
+def _row_stream_tiles(node: _Node, row: dict, work: Workers | None) -> tuple[TilePlan | None, TilePlan | None]:
     """The ``(score, P@V)`` slices a materializing row carries — ``None`` where the site spelled the
     decided empty. Read by SITE (``Site.derived`` tells the synthesized P@V from the hoisted score
-    edge), never by position."""
+    edge), never by position. The materialization twin of :func:`_stream_tiles`, and it ends at the
+    same post-condition: each half is ``None`` or a TILED plan.
+
+    The two read "decided" from different places, and that is not drift — it is what each one has.
+    The enumeration reads a decided SLICE out of ``_Row.plans``, where an absent key means the site
+    chose nothing; here there are only spelled values, and the empty spelling IS the decided empty.
+    Resolving ``""`` instead of guarding on it would answer a different question: an empty ``TILE``
+    beside a thread inventory legally resolves to a unit-register tile (``resolve_site_tile``'s one
+    ambiguity), so every per-cell flash row would come back claiming a stream geometry it never
+    chose — which is what the digest and the explicit-mask attention cases say when this guard is
+    dropped."""
     out: dict[bool, TilePlan | None] = {False: None, True: None}
-    for child in node.children:
+    for child in _kids(node):
         spec = row.get(child.keys.get("TILE"), "") or ""
-        out[child.site.derived] = resolve_site_tile(spec, work) if spec else None
+        plan = resolve_site_tile(spec, work) if spec else None
+        out[child.site.derived] = plan if plan is not None and plan.is_tiled else None
     return out[False], out[True]
 
 
@@ -1654,7 +1700,7 @@ def _stream_option(
     they stay ``_node_option``'s), and both stamp the pair's slices through ``nested`` exactly as
     the enumeration keyed them; the stream's own ``REDUCE`` is the cross-CTA split-KV or nothing,
     and its ``STAGE`` is the K/V transport re-resolved against the same geometry."""
-    qk, pv = _row_stream_tiles(term, root, row, work)
+    qk, pv = _row_stream_tiles(root, row, work)
     ctx = term.stream(node)
     spec = row.get(root.keys.get("STAGE"), "") or ""
     stage = None
@@ -1761,6 +1807,16 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
 
     # The row's own keys — spelled ONCE, when the site tree was built. A family the site does not
     # carry keys the BARE name, which is the decided empty every row spells.
+    #
+    # ONE root, and it is checked rather than assumed: ``_term_rows`` products over EVERY root of
+    # ``term.tree``, so a second root would contribute knobs to the row and then be dropped here —
+    # its nested slices never stamped, form dispatch reading the wrong node, and both silently. No
+    # live term has one; if a reading ever produces one, this says so instead of mis-materializing.
+    if len(term.tree) > 1:
+        raise ValueError(
+            f"{term.tile.name!r}: {len(term.tree)} root site trees — materialization stamps ONE. "
+            "Walk the forest here (as _term_rows does) before a reading may produce this shape."
+        )
     root = term.tree[0] if term.tree else None
     keys = root.keys if root is not None else {}
 
@@ -1776,7 +1832,7 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
     if is_contraction(node) and rplan.needs_split:
         split_plan = resolve_site_tile(value("TILE"), work, rplan.spell())
         return _splitk_option(term, split_plan, node, rplan, name, op_knobs, value("STAGE"), nested)
-    if _streams(node) and any(t is not None for t in _row_stream_tiles(term, root, row, work)):
+    if _streams(node) and any(t is not None for t in _row_stream_tiles(root, row, work)):
         return _stream_option(term, node, root, row, rplan, work, name, op_knobs, nested)
     plan = resolve_site_tile(value("TILE"), work, rplan.spell())
     return _node_option(term, node, plan, rplan, _stage_of(term, node, plan, value("STAGE")), work, name, op_knobs, nested)
@@ -1788,12 +1844,12 @@ def _nested_slices(term: _Term, node: _Node, row: dict, work: Workers | None) ->
 
     The enumeration walks the whole site tree, so a row DECIDES every site; stamping the root alone
     left a nested key as a knob no kernel realized — the row said ``REDUCE@j=r2`` and the op's
-    schedule came back empty. The walk mirrors ``_rows_at`` exactly, ``_keeps_children`` included,
-    so what materializes is what was enumerated. A site whose value is the decided empty resolves
+    schedule came back empty. The walk descends through :func:`_kids`, the same accessor
+    ``_rows_at`` uses, so what materializes is what was enumerated. A site whose value is the decided empty resolves
     to ``None`` and ``scheduled`` skips it, which is why the corpus terms — whose one nested site is
     the cone statistic the parent fill realizes — stamp nothing new."""
     out: list[tuple] = []
-    for child in node.children if _keeps_children(node.site) else ():
+    for child in _kids(node):
         cnode, keys = child.site.node, child.keys
 
         def spec(family: str, keys: dict = keys) -> str:

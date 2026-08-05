@@ -104,12 +104,11 @@ def _has_computed_a(node) -> bool:
     node) rather than materialized (a gmem ``Load``). The structural twin of the offer signal
     ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers enumerate
     the ``sync`` compute-fill): at the routing consult no offer exists yet, but the routing
-    reference tree does, and the edge inhabitant is the same fact."""
-    if is_contraction(node) and not isinstance(node.a, Load):
-        return True
-    if not isinstance(node, Fold):
-        return False
-    return any(_has_computed_a(e) for e in node.operands)
+    reference tree does, and the edge inhabitant is the same fact.
+
+    Walked through ``path.sites`` — the ONE node walk in the layer, already imported here — rather
+    than a private recursion over ``operands``."""
+    return any(is_contraction(s.node) and not isinstance(s.node.a, Load) for s in sites(node))
 
 
 def _routing_entry(ctx, knobs: dict, root=None):

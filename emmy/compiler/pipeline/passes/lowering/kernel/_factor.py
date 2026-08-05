@@ -57,7 +57,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import Fold, effect_tail, is_contraction
-from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.ir.tile.ops import cone_seam, head
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -585,8 +585,8 @@ def chain_source(op, sched):
     output column axis (the chain schedule — the column axis rides a per-thread register vector),
     or ``None``. The structural schedule read the one binder keys the chain realization on; the
     tile is a schedule slice (``sched``), never a node field."""
-    red = (op.operands[0] if op.operands else None) if (isinstance(op, Fold) and op.axis is None) else op
-    if not isinstance(red, Fold) or red.role is not AxisRole.TWISTED:
+    red = head(op)  # the compute node through the projection wrapper — ONE accessor, not a ternary
+    if red is None or red.role is not AxisRole.TWISTED:
         return None
     pv = next((s for s in list(red.step_stmts())[1:] if is_contraction(s)), None)
     if pv is None:

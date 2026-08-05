@@ -46,12 +46,26 @@ from emmy.compiler.ir.tile.ir import Fold, is_contraction
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
 #: NON-ROOT node — each in-tree child names its parent↔child seam — and its values are
 #: ``cut | fuse``, resolved from ROUTING golden entries / pins, never a schedule slice.
-PATH_FAMILIES = ("TILE", "REDUCE", "STAGE", "PLACE")
+#: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
+#: ``pipeline/`` and every reader on both sides of that line needs the same three.
+SLICE_FAMILIES = ("TILE", "REDUCE", "STAGE")
+
+#: What a tree path may address: the slice families plus ``PLACE``, the placement seam, which keys
+#: no slice of its own.
+PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 
-_ORDINAL_RE = re.compile(r"^([a-z]+)(\d+)$")
+#: A SEGMENT token carrying an ordinal (``a2``) — strict, because :func:`parse_key` only splits one
+#: off when the head is a known segment token. Anything else on the final component is an axis NAME.
+_SEGMENT_ORDINAL_RE = re.compile(r"^([a-z]+)(\d+)$")
+
+#: The same split, LOOSER, for :func:`resolve`'s retry: any prefix plus a trailing number. The two
+#: are deliberately different strictnesses of one question, and the difference IS the rule — a key
+#: is read as a literal axis name FIRST (so an axis genuinely called ``k2`` wins), and only when
+#: that matches no site is the trailing number reconsidered as an ordinal.
+_AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
 
 
 @dataclass(frozen=True)
@@ -234,7 +248,7 @@ def parse_key(key: str) -> _Key:
                 raise ValueError(f"knob key {key!r}: path segment {comp!r} after the axis")
             segments.append(comp)
         elif last:
-            m = _ORDINAL_RE.match(comp)
+            m = _SEGMENT_ORDINAL_RE.match(comp)
             if m and m.group(1) in _SEGMENT_TOKENS:
                 segments.append(m.group(1))
                 ordinal = int(m.group(2))
@@ -348,7 +362,7 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
         raise ValueError(f"{parsed.family} is ambiguous: use {cands}")
     matches = _match(parsed, fam_sites)
     if not matches and parsed.axis is not None and parsed.ordinal is None:
-        m = re.match(r"^(.*?)(\d+)$", parsed.axis)
+        m = _AXIS_ORDINAL_RE.match(parsed.axis)
         if m and m.group(1):
             retry = _Key(family=parsed.family, segments=parsed.segments, axis=m.group(1), ordinal=int(m.group(2)))
             matches = _match(retry, fam_sites)
@@ -370,4 +384,4 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
     return spell(root, parse_key(key).family, site.node, all_sites=all_sites)
 
 
-__all__ = ["PATH_FAMILIES", "Site", "canonical", "family_sites", "parse_key", "primary", "resolve", "sites", "spell"]
+__all__ = ["PATH_FAMILIES", "SLICE_FAMILIES", "Site", "canonical", "family_sites", "parse_key", "primary", "resolve", "sites", "spell"]

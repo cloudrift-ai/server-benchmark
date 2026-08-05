@@ -224,9 +224,16 @@ through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a `Fol
 `identities`, and `loop_state_head` — the loop-body read of the carried state's head), consumed
 only by the kernel materializer and `030_split_reduce`. A *degenerate* fold is a plain
 `sum`/`max`/`mean` reduce; a *twisted* one is online-softmax / flash; a contraction's algebra is
-the degenerate algebra of its additive fold. The neutral element (seed) is NOT stored — a
-degenerate fold dissolves into its `Accum`s and each fold's seed is its `op.identity`, so there
-is one source of truth for the seed.
+the degenerate algebra of its additive fold.
+
+The neutral element IS stored, as `Fold.init` — a monoid is `(S, ⊕, e)`, and a term that kept only
+`combine` would be storing a semigroup while calling it a monoid. What is NOT stored is any
+emitter's use of it: a degenerate fold dissolves into its `Accum`s and takes each fold's seed from
+its `op.identity`, and a twisted fold's streaming merge regenerates its own (`_reduction` reads the
+generated merge's `Accum`s, never the stored `init`'s `−inf`). So `init` is algebra the term owes
+its own definition, not a value the lowering path consults — which is why removing it would change
+every `term_key`, and with it every `op_cache_key` the tune DB's measurement replay and the cubin
+cache are keyed on, in exchange for a field nothing reads.
 
 **The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
 conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation

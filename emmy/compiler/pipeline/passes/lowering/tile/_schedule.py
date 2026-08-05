@@ -110,9 +110,13 @@ from emmy.compiler.pipeline.search.space import (
 
 logger = logging.getLogger(__name__)
 
-#: The per-site schedule families this enumeration decides, in the order their keys lead the fork
+#: The per-site schedule families this enumeration decides, IN THE ORDER their keys lead the fork
 #: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the seam
 #: family — resolved from routing goldens / pins, never enumerated here.
+#:
+#: Not a copy of ``path.SLICE_FAMILIES`` even though the members match: that one answers "which
+#: families key a slice" (a set) and this one "in what order do their levels nest" (a sequence).
+#: Aliasing them would make a fork-level reordering look like an edit to the addressing vocabulary.
 FAMILIES = ("TILE", "STAGE", "REDUCE")
 
 #: The ``Knob`` each family pins through.
@@ -996,7 +1000,7 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
     pin = term.pin("TILE", node)
     if pin is not None:
         try:
-            plans = [resolve_site_tile(pin, work, term.pin("REDUCE", node) or "")]
+            plans = [resolve_site_tile(pin, work, ReducePlan.parse(term.pin("REDUCE", node) or "", work).coop)]
         except ValueError as e:
             # The pin cannot SPELL against this inventory (a warp atom needs a warp ``WORK``), so
             # the candidate is simply not in ``values(site, work)`` — the same rule every other
@@ -1850,7 +1854,7 @@ def _materialize(term: _Term, resolved: _Row, row: dict, name: str, knobs: dict)
     rplan = decided("REDUCE") or ReducePlan.parse(value("REDUCE"), work)
     plan = decided("TILE")
     if plan is None:
-        plan = resolve_site_tile(value("TILE"), work, rplan.spell())
+        plan = resolve_site_tile(value("TILE"), work, rplan.coop)
     if is_contraction(node) and rplan.needs_split:
         # The stage is re-resolved INSIDE against the sliced node, so it stays a spelling here.
         return _splitk_option(term, plan, node, rplan, name, op_knobs, value("STAGE"), nested)
@@ -1883,7 +1887,7 @@ def _nested_slices(term: _Term, resolved: _Row, node: _Node, row: dict, work: Wo
         tile_spec = spec("TILE")
         plan = resolved.slices.get(keys.get("TILE"))
         if plan is None:
-            plan = resolve_site_tile(tile_spec, work, rplan.spell())
+            plan = resolve_site_tile(tile_spec, work, rplan.coop)
         stage = resolved.slices.get(keys.get("STAGE"))
         if stage is None and spec("STAGE"):
             stage = _stage_of(term, cnode, plan, spec("STAGE"))

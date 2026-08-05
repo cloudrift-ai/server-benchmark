@@ -32,6 +32,7 @@ from enum import Enum
 from typing import Any
 
 from emmy import config
+from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
 # ``loop/stamp/020_stamp_structural_features`` — distinct from any tuning Knob
@@ -257,7 +258,7 @@ class Knob:
 
 # The per-node schedule codec families that carry an ``@<axis>`` element (``WORK`` / ``RASTER`` are
 # root-global, always bare).
-_AXIS_FAMILIES = ("TILE", "REDUCE", "STAGE")
+_AXIS_FAMILIES = SLICE_FAMILIES  # the one list, defined in ``ir/tile/path.py``
 
 
 def family_of(key: str) -> str:
@@ -380,7 +381,7 @@ def values_equal(name: str, want, got) -> bool:
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
-    if family_of(name) in ("TILE", "REDUCE", "STAGE"):
+    if family_of(name) in _AXIS_FAMILIES:
         return canon_family_value(name, w) == canon_family_value(name, g)
     if family_of(name) == "WORK":
         from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415

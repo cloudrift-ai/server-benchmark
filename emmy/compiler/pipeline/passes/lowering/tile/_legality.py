@@ -16,7 +16,15 @@ read ``k % step == 0``. If a legality rule ever does become a generated bound, c
 a line.
 
 What does NOT live here: anything that CHOOSES rather than checks. The conservative cooperative
-pick, the atom ladder and the stage catalog are the schedule's; this module only ever refuses.
+pick, the atom ladder and the stage catalog are the schedule's.
+
+**With ONE stated exception: the stage RESOLVERS** (``resolve_warp_stage`` / ``resolve_scalar_stage``
+/ ``resolve_sync_stage`` / ``resolve_twisted_stage``). They return a SIZED :class:`Stage` rather
+than a reason, because for the smem budget the legal answer is a size and not a yes/no — the
+largest depth and slab chunk that fit. Handing back the largest legal stage is what keeps an
+over-budget row out of the fork instead of failing at materialization, and splitting "how big may
+this be" from "is this legal" would put the budget in two places. They are resolvers, they are
+named so, and they clamp through the one shared :func:`clamp_depth`; everything else here refuses.
 """
 
 from __future__ import annotations
@@ -304,8 +312,15 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> St
     slot_bytes = (m.tile + n.tile) * bk_elems * a_nbytes
     if slot_bytes > budget:
         return None
-    depth = min(stage.depth, budget // slot_bytes)
+    depth = clamp_depth(stage, slot_bytes, budget)
     return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+
+
+def clamp_depth(stage: Stage, slot_bytes: int, budget: int) -> int:
+    """The deepest ring the smem ``budget`` affords at ``slot_bytes`` per slot, never deeper than
+    the stage asked for. The ONE clamp every stage resolver ends in — a budget stated once, so a
+    tier cannot drift into affording a slot the others refuse."""
+    return min(stage.depth, budget // slot_bytes)
 
 
 def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
@@ -536,7 +551,7 @@ def resolve_twisted_stage(stream: Fold, qk: Fold, qk_tile: TilePlan, pv_tile: Ti
     # ``reg_depth`` <= 2: the streaming drains support the two-slot ldmatrix ping-pong (the next
     # atom-K step's B fragments load while the current step's mmas consume, breaking the WAR hazard
     # on the fragment registers); deeper ping-pongs cost registers the fm chains do not have.
-    return replace(stage, depth=min(stage.depth, budget // slot_bytes), reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
+    return replace(stage, depth=clamp_depth(stage, slot_bytes, budget), reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
 
 
 def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:

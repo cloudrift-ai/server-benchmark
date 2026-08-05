@@ -107,7 +107,7 @@ def test_schedule_leaf_set_equals_catalog():
     # hands out.
     def full_tile(r: dict) -> TilePlan:
         work = Workers.parse(str(r.get("WORK", "")))
-        return resolve_site_tile(str(family_value(r, "TILE") or ""), work, str(family_value(r, "REDUCE") or ""))
+        return resolve_site_tile(str(family_value(r, "TILE") or ""), work, full_reduce(r).coop)
 
     def full_reduce(r: dict) -> ReducePlan:
         return ReducePlan.parse(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", ""))))

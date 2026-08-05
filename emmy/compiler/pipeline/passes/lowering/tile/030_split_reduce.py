@@ -68,6 +68,7 @@ from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, scheduled, stream_pair
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
+from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
 
 PATTERN = [Pattern("root", TileOp)]
@@ -296,13 +297,15 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
     head_tile = src_sched.tile_of(score)
     atom_n = head_tile.atom.shape[1]
     bn = head_tile.regs[1] * atom_n
+    # What a split-KV partition demands is stated ONCE, in ``_legality.splitkv_slice`` — the
+    # deferred-kernel finalize (the twisted state has no atomic), a divisible kv extent, and
+    # block-whole slices. The enumeration DROPS a row it refuses; here the row is already chosen,
+    # so the same predicate raises. Restating it as three local checks is precisely the "one rule,
+    # once as a drop and once as a raise" defect that module exists to remove.
+    legal.enforce(legal.splitkv_slice(red, head_tile, plan), pinned=True)
     ext = red.axis.extent
     if ext.is_static:
         b_dim = Dim(ext.as_static() // cta)
-        if ext.as_static() % cta != 0:
-            raise NotImplementedError(f"flash split-KV needs a divisible kv extent ({ext.as_static()} % cta {cta})")
-        if b_dim.as_static() % bn != 0:
-            raise NotImplementedError(f"flash split-KV slice ({b_dim.as_static()}) must be divisible by the streaming key block ({bn})")
         bound = None  # the shrunk static extent alone bounds the slice
     else:
         # Symbolic kv: the slice width is the bn-ALIGNED ceil split ``B = ceil(S / (cta·bn)) · bn``
@@ -315,10 +318,6 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
         b_dim = ext.ceil_div(cta * bn) * bn
         nxt = BinaryExpr("*", BinaryExpr("+", Var(_SPLIT), Literal(1, "int")), b_dim.expr)
         bound = TernaryExpr(cond=BinaryExpr("<", nxt, ext.expr), if_true=nxt, if_false=ext.expr)
-    (cross_move,) = next(st for st in plan.stages if st.level is Level.GRID).combine(warp_size=32)
-    if cross_move is FoldMove.ATOMIC:
-        raise NotImplementedError("the twisted (m, l, O) state can't finalize atomically; pin the deferred kernel (REDUCE=g<n>k)")
-
     out = root.output
     grid = tile.place.grid  # (batch…, m_blocks) — the warp placement's shrunk query axis, d folded away
     alg = Reduction(red)

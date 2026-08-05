@@ -538,22 +538,20 @@ class Workers:
         return cls(kind=kind, units=units, producer=producer)
 
 
-def resolve_site_tile(spec: str | None, work: Workers | None, reduce_spec: str | None = "") -> TilePlan:
+def resolve_site_tile(spec: str | None, work: Workers | None, coop: int = 1) -> TilePlan:
     """The :class:`TilePlan` a row denotes — :meth:`TilePlan.parse` plus the ONE ambiguity the
     site spelling has: an EMPTY ``TILE`` beside a THREAD ``WORK`` inventory is the unit-register
     parallel thread tile (a tile whose register sub-tile is ``f1x1`` spells ``""``), UNLESS the
-    row's ``REDUCE`` value claims those threads as a cooperative band (a ``coop`` token) — then
-    ``TILE`` stays the per-cell tier. Every reader that reconstructs a plan from a row (the
-    scheduler's materialize, the featurizers) resolves through this one rule."""
+    row's ``REDUCE`` claims those threads as a cooperative band — then ``TILE`` stays the per-cell
+    tier. Every reader that reconstructs a plan from a row (the scheduler's materialize, the
+    featurizers) resolves through this one rule.
+
+    ``coop`` is the reduce's cooperative WIDTH, not its spelling: every caller with a resolved
+    ``ReducePlan`` in hand passes ``red.coop``, and the one caller holding only strings parses it
+    once, where it already handles a malformed value."""
     plan = TilePlan.parse(spec, work)
-    if (spec or "").strip() or work is None or work.kind != "thread":
-        return plan
-    try:
-        red = ReducePlan.parse(reduce_spec, work)
-    except ValueError:
-        return plan
-    if red.coop > 1:
-        return plan  # the thread inventory is the coop band — TILE stays per-cell
+    if (spec or "").strip() or work is None or work.kind != "thread" or coop > 1:
+        return plan  # a claimed thread inventory IS the coop band — TILE stays per-cell
     return TilePlan(units=(work.units[1], work.units[0]))  # WORK's t<n>x<m> onto the plan's (m, n)
 
 

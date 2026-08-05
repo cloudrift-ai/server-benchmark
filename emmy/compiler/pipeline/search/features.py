@@ -98,11 +98,12 @@ def _tile_plan(knobs: dict):
     row that does not resolve — a geometry featurizer degrades to "no tile geometry" rather than
     failing a whole fit on one unreadable row. Resolving through ``resolve_site_tile`` is what
     disambiguates the empty-``TILE``-beside-thread-``WORK`` unit-register tile from the coop tier."""
-    from emmy.compiler.ir.schedule import Workers, resolve_site_tile  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import ReducePlan, Workers, resolve_site_tile  # noqa: PLC0415
 
     work, tile, _stage, reduce = _row_values(knobs)
     try:
-        plan = resolve_site_tile(tile, Workers.parse(work), reduce)
+        inv = Workers.parse(work)
+        plan = resolve_site_tile(tile, inv, ReducePlan.parse(reduce, inv).coop)
     except ValueError:
         return None
     return plan if plan.is_tiled else None

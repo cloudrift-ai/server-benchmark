@@ -32,21 +32,6 @@ def test_le_bound_applies_the_coefficient():
     assert {(p["wm"], p["wn"]) for p in space} == {(m, n) for m in (1, 2, 4, 8, 16) for n in (1, 2, 4, 8, 16) if m * n <= 32}
 
 
-def test_eq_bound_covers_the_extent_exactly():
-    """``8·wn·fn = 64`` — the tile must cover d=64 at ``atom_n=8``, no over- and no under-cover."""
-    space = Space(
-        dims=(Dimension("wn", (1, 2, 4, 8)), Dimension("fn", tuple(range(1, 33)))),
-        bounds=(Bound(("wn", "fn"), limit=64, op="==", coeff=8),),
-    )
-    assert {(p["wn"], p["fn"]) for p in space} == {(1, 8), (2, 4), (4, 2), (8, 1)}
-
-
-def test_divides_bound_keeps_the_k_step_tiling_a_static_extent():
-    """``bk·atom_k`` divides K=512 at ``atom_k=16`` ⇒ bk ∈ the divisors of 32."""
-    space = Space(dims=(Dimension("bk", tuple(range(1, 17))),), bounds=(Bound(("bk",), limit=512, op="divides", coeff=16),))
-    assert [p["bk"] for p in space] == [1, 2, 4, 8, 16]
-
-
 def test_a_repeated_dimension_contributes_once_per_occurrence():
     """``x·x ≤ 16`` is a square budget, not a linear one."""
     space = Space(dims=(Dimension("x", (1, 2, 3, 4, 5, 6)),), bounds=(Bound(("x", "x"), limit=16),))
@@ -80,10 +65,10 @@ def test_pruning_makes_a_tightly_bounded_large_space_enumerable():
 def test_multiple_bounds_all_apply():
     space = Space(
         dims=(Dimension("wm", (1, 2, 4, 8)), Dimension("wn", (1, 2, 4, 8)), Dimension("fn", (1, 2, 4, 8))),
-        bounds=(Bound(("wm", "wn"), limit=256, coeff=32), Bound(("wn", "fn"), limit=16, op="==")),
+        bounds=(Bound(("wm", "wn"), limit=256, coeff=32), Bound(("wn", "fn"), limit=16)),
     )
     assert {(p["wm"], p["wn"], p["fn"]) for p in space} == {
-        (m, n, f) for m in (1, 2, 4, 8) for n in (1, 2, 4, 8) for f in (1, 2, 4, 8) if m * n <= 8 and n * f == 16
+        (m, n, f) for m in (1, 2, 4, 8) for n in (1, 2, 4, 8) for f in (1, 2, 4, 8) if m * n <= 8 and n * f <= 16
     }
 
 
@@ -104,9 +89,9 @@ def test_prefix_pruning_drops_no_legal_point():
     by the bounds, computed here independently of the walk that produced them."""
     space = Space(
         dims=(Dimension("a", (1, 2, 3, 4)), Dimension("b", (1, 2, 3, 4)), Dimension("c", (1, 2, 3, 4))),
-        bounds=(Bound(("a", "b"), limit=8), Bound(("b", "c"), limit=12, op="divides")),
+        bounds=(Bound(("a", "b"), limit=8), Bound(("b", "c", "c"), limit=12, coeff=2)),
     )
-    brute = {(a, b, c) for a in (1, 2, 3, 4) for b in (1, 2, 3, 4) for c in (1, 2, 3, 4) if a * b <= 8 and 12 % (b * c) == 0}
+    brute = {(a, b, c) for a in (1, 2, 3, 4) for b in (1, 2, 3, 4) for c in (1, 2, 3, 4) if a * b <= 8 and 2 * b * c * c <= 12}
     assert {(p["a"], p["b"], p["c"]) for p in space} == brute
 
 
@@ -127,7 +112,6 @@ def test_dimension_rejects_an_unusable_domain(kwargs, message):
     ("kwargs", "message"),
     [
         ({"dims": (), "limit": 8}, "names no dimension"),
-        ({"dims": ("a",), "limit": 8, "op": "<"}, "is not one of"),
         ({"dims": ("a",), "limit": 0}, "positive limit"),
         ({"dims": ("a",), "limit": 8, "coeff": 0}, "positive limit"),
     ],
@@ -154,4 +138,4 @@ def test_an_over_tight_bound_yields_the_empty_set():
 
 def test_bound_spelling_reads_back():
     assert Bound(("wm", "wn"), limit=1024, coeff=32).spell() == "32*wm*wn <= 1024"
-    assert Bound(("bk",), limit=512, op="divides").spell() == "bk divides 512"
+    assert Bound(("bk",), limit=512).spell() == "bk <= 512"

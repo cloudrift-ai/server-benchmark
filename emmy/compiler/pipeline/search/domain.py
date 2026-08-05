@@ -4,8 +4,7 @@ multiplicative bounds that couple them, enumerate the legal points.
 This is the machinery for generating a family's candidate values from its stated constraints
 instead of curating them by hand (:mod:`~emmy.compiler.pipeline.search.space`'s move grids). The
 constraints that bound a schedule family are products of the unknowns — ``wm·wn·32 ≤ 1024`` (the
-CTA thread budget), ``fm·fn ≤ 32`` (the C-fragment budget), ``wn·fn·atom_n = d`` (a tile that must
-cover the head dimension), ``bk·atom_k`` divides a static K — so the feasible set is not convex and
+CTA thread budget), ``fm·fn ≤ 32`` (the C-fragment budget) — so the feasible set is not convex and
 there is no coordinate change that makes both the products and the bounds affine at once: prime
 exponents linearize the products but turn ``≤`` into divisibility (a partial order), and real logs
 linearize both but leave the feasible points off any lattice. What survives is the honest thing:
@@ -25,15 +24,15 @@ Worked example — a warp tile's free geometry, generated rather than listed::
             Dimension("wn", (1, 2, 4, 8, 16)),
             Dimension("fn", tuple(range(1, 33))),
         ),
-        bounds=(
-            Bound(("wm", "wn"), limit=1024, coeff=32),          # the CTA thread budget
-            Bound(("wn", "fn"), limit=64, op="==", coeff=8),    # cover d=64 at atom_n=8
-        ),
+        bounds=(Bound(("wm", "wn"), limit=1024, coeff=32),),  # the CTA thread budget
     )
 
-:meth:`Space.contains` is the other half: the membership check a RECORDED configuration is tested
-against, so a generated domain can be gated on "every golden stays reachable" the way the curated
-catalog is today.
+A bound states ONE comparison, ``coeff · Πdims ≤ limit``, because that is the only one any live
+domain needs. Equality and divisibility were spelled here too, for constraints the curated grids
+still carry (a flash tile covering the head dimension exactly; a K-step dividing a static extent).
+They had no caller, and a comparison nothing states is a comparison nobody has had to get right —
+so they went. Both are a few lines to restore, and the pruning contract each would need is written
+on :meth:`Bound.holds`: a partial product prunes only because the final one is a multiple of it.
 
 Scope: this module knows integers and products only. Categorical legality (an operand dtype, a
 transport's eligibility, a repack rule) and anything that reads the term is the scheduler's, exactly
@@ -44,9 +43,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-
-# The comparisons a bound may state against its product.
-_OPS = ("<=", "==", "divides")
 
 
 @dataclass(frozen=True)
@@ -70,13 +66,9 @@ class Dimension:
 
 @dataclass(frozen=True)
 class Bound:
-    """A multiplicative constraint over the dimensions: ``coeff · ∏ dims  <op>  limit``.
-
-    ``op`` is one of:
-
-    - ``"<="`` — the product is at most ``limit`` (a thread, fragment or box budget).
-    - ``"=="`` — the product covers ``limit`` exactly (a tile that must tile an extent).
-    - ``"divides"`` — the product divides ``limit`` (a K-step that must tile a static extent).
+    """A multiplicative budget over the dimensions: ``coeff · ∏ dims ≤ limit`` — a thread,
+    fragment or box budget, the only comparison a live domain states (see the module docstring for
+    the two that were spelled here and had no caller).
 
     A dimension may repeat in ``dims`` and then contributes its value once per occurrence.
     ``coeff`` folds in the constants the bound multiplies by (an atom's ``atom_n``, a warp's 32
@@ -85,34 +77,26 @@ class Bound:
 
     dims: tuple[str, ...]
     limit: int
-    op: str = "<="
     coeff: int = 1
 
     def __post_init__(self) -> None:
         if not self.dims:
-            raise ValueError(f"bound {self.op} {self.limit} names no dimension")
-        if self.op not in _OPS:
-            raise ValueError(f"bound op {self.op!r} is not one of {_OPS}")
+            raise ValueError(f"bound <= {self.limit} names no dimension")
         if self.limit < 1 or self.coeff < 1:
             raise ValueError(f"bound {self.spell()} needs a positive limit and coeff")
 
     def spell(self) -> str:
         """The bound as text — for error messages, not a stored codec."""
         lhs = "*".join(self.dims) if self.coeff == 1 else f"{self.coeff}*{'*'.join(self.dims)}"
-        return f"{lhs} {self.op} {self.limit}"
+        return f"{lhs} <= {self.limit}"
 
-    def holds(self, product: int, *, complete: bool) -> bool:
+    def holds(self, product: int) -> bool:
         """Whether ``product`` — ``coeff`` times the dims bound SO FAR — can still satisfy this
-        bound. ``complete`` marks it final (every dim this bound names is bound).
-
-        A partial product prunes because the final one is a multiple of it: over-budget stays
-        over-budget, and a product that does not divide ``limit`` never will.
-        """
-        if self.op == "<=":
-            return product <= self.limit
-        if self.op == "==":
-            return product == self.limit if complete else self.limit % product == 0
-        return self.limit % product == 0
+        bound. A budget needs to know nothing else: over-budget stays over-budget, since every
+        value is ``≥ 1`` and the final product is a multiple of any partial one. That is the whole
+        pruning contract, and a comparison that does NOT have it (an equality, testable at a
+        partial product only through divisibility) would have to say so here."""
+        return product <= self.limit
 
 
 @dataclass(frozen=True)
@@ -140,9 +124,7 @@ class Space:
                 raise ValueError(f"bound {b.spell()} names undeclared dimension(s) {unknown}")
 
     def __iter__(self) -> Iterator[dict[str, int]]:
-        # Per bound: the depth at which it becomes COMPLETE (the walk has bound the last dimension
-        # it names) and how many times each dimension occurs in it.
-        last = [max(i for i, d in enumerate(self.dims) if d.name in b.dims) for b in self.bounds]
+        # Per bound: how many times each dimension occurs in it.
         reps = [tuple(b.dims.count(d.name) for d in self.dims) for b in self.bounds]
 
         def walk(i: int, point: dict[str, int], products: tuple[int, ...]) -> Iterator[dict[str, int]]:
@@ -156,7 +138,7 @@ class Space:
                     if not reps[bi][i]:
                         continue
                     running[bi] *= v ** reps[bi][i]
-                    if not bound.holds(running[bi], complete=i == last[bi]):
+                    if not bound.holds(running[bi]):
                         break
                 else:
                     yield from walk(i + 1, {**point, dim.name: v}, tuple(running))

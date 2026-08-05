@@ -537,34 +537,24 @@ def _assert_close(out: np.ndarray, ref: np.ndarray, *, atol_rel: float = 0.05, a
     np.testing.assert_allclose(out, ref, atol=atol, rtol=atol_rel)
 
 
-# (label, knobs, N, line-budget, assert-single-x-smem). The fused RMSNorm+Linear prologue must
-# fold to ONE body-level chain (+ short per-cell guarded multiplies) rather than duplicate per
-# register cell — else the rendered kernel blows the ~2 s nvcc budget.
+# (label, knobs, N, line-budget, assert-single-x-smem, env pins). The fused RMSNorm+Linear
+# prologue must fold to ONE body-level chain (+ short per-cell guarded multiplies) rather than
+# duplicate per register cell — else the rendered kernel blows the ~2 s nvcc budget. The n4096
+# case PINS the stat site's cooperative row (``WORK=t128`` + ``REDUCE@a1=coop`` — the one-smem
+# shared-row staging exists only there, and ``coop`` spells only against a thread inventory, so
+# the pair pins together): the codegen under test is the fused-prologue fold, and the cold pick
+# that used to reach the coop row by itself is evidence-dependent (the site-keyed rows tie under
+# the cold prior and the tie-break sorts the serial row first), so the pin keeps this a codegen
+# gate rather than a prior gate.
 _FUSED_PROLOGUE = {
-    "rmsnorm_linear_n4096": {"N": 4096, "lines": 360, "one_smem": True},
+    "rmsnorm_linear_n4096": {"N": 4096, "lines": 360, "one_smem": True, "pins": {"EMMY_WORK": "t128", "EMMY_REDUCE@A1": "coop"}},
     "qwen_lmhead_n4099": {"N": 4099, "lines": 850, "one_smem": False},
 }
 
 
 @requires_cuda
-@pytest.mark.parametrize(
-    "case",
-    [
-        pytest.param(
-            "rmsnorm_linear_n4096",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="the shared-row lift no longer DEPLOYS cold on this shape: the site-keyed rows "
-                "(REDUCE@<stat> + the promoted STAGE@<stat>) tie under the cold prior, and a tie breaks on "
-                "canonical_row_key — where the serial row's empty values sort ahead of 'coop'. The row is "
-                "enumerated and materializes correctly (pin REDUCE@<stat>=coop and this passes); what is "
-                "missing is evidence or a refit prior that prices it. Owed: the `emmy fit --artifact` refit.",
-            ),
-        ),
-        "qwen_lmhead_n4099",
-    ],
-)
-def test_fused_prologue_compiles_in_budget(case):
+@pytest.mark.parametrize("case", ["rmsnorm_linear_n4096", "qwen_lmhead_n4099"])
+def test_fused_prologue_compiles_in_budget(case, monkeypatch):
     """A fused RMSNorm→Linear at lm_head-style shapes keeps the N-invariant prologue chain (mean
     reduce + rsqrt + ``norm_weight·v``) as ONE body-level copy, so the rendered kernel stays under
     the nvcc budget (line count below threshold) and matches the numpy reference. The
@@ -576,6 +566,8 @@ def test_fused_prologue_compiles_in_budget(case):
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
     spec = _FUSED_PROLOGUE[case]
+    for var, value in spec.get("pins", {}).items():
+        monkeypatch.setenv(var, value)
     M, K, N = 2, 1024, spec["N"]
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (M, K)), node_id="x")

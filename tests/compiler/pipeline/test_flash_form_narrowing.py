@@ -4,7 +4,7 @@ The unit tests over the old flash-form narrowing helper went with the scheduler;
 survives is the end-to-end pin contract, which is a property of ANY scheduler: a static attention
 golden pins ``TILE@dd`` / ``TILE@pj`` AND ``STAGE``, and the resolved row must stamp exactly the
 pinned pair (a stage-pinned fast path must not bypass the tile narrowing — the findings-5 F2
-regression). It is scheduler-shaped, so it rides the xfail registry until enumeration returns.
+regression).
 """
 
 from __future__ import annotations

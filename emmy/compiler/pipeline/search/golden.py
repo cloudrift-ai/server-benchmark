@@ -57,12 +57,6 @@ import yaml
 
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 
-# Qwen3-Embedding-0.6B linear dims (mirrors ``tests/perf/cases.py``).
-QWEN3_06B_HIDDEN = 1024  # hidden_size
-QWEN3_06B_INTER = 3072  # intermediate_size (gate / up / down)
-QWEN3_06B_Q_DIM = 2048  # fused Q-projection output (16 heads * 128)
-QWEN3_06B_KV_DIM = 1024  # fused K/V-projection output (8 heads * 128)
-
 
 def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = False) -> str:
     """The torch expression a matmul golden config tunes / benches / reproduces.

@@ -159,8 +159,8 @@ truncates. The product across sites is generated rather than hand-written, so a 
 flat builder would have added, and a silent truncation would read as "covered everything" while dropping whichever
 rows the walk reached last. The widest live term (a static f16 square matmul over both tiers) measures ~133k rows.
 
-Every casualty rides `tests/xfail_registry.py`, whose node-id list is the acceptance obligation — it shrinking to
-empty is the completion gate. `scripts/digest_kernels.py` is the other half: it pins each case's rendered kernel
+The rebuild's acceptance gate — a strict node-id xfail registry that had to shrink to empty — is MET and the
+registry is deleted. `scripts/digest_kernels.py` remains the standing gate: it pins each case's rendered kernel
 byte-for-byte AND asserts the case's pins actually reached a kernel, so a role that is merely rendering rather than
 scheduling cannot pass unnoticed.
 

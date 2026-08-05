@@ -60,8 +60,10 @@ def _tile_pipeline():
 # complete schedule row at the contraction fork (the one hierarchical tile → stage → reduce
 # fork the tile schedule offers) is the per-kernel cost the
 # structural pricing sums (defined here, not in ``two_level``, because that module imports
-# this package at module scope — the reverse would cycle).
-PARTITION_RULE = "010_recognize"
+# this package at module scope — the reverse would cycle). The fork moved out of recognition
+# when the two halves split: ``010_recognize`` emits the unmapped ``TileOp`` and
+# ``020_schedule`` offers the row fork, so the scored trace decision records under the latter.
+PARTITION_RULE = "020_schedule"
 
 
 def tile_identity(knobs: dict) -> frozenset:

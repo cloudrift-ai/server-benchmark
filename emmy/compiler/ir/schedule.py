@@ -248,12 +248,6 @@ class ReducePlan:
         return self._width(Level.BLOCK)
 
     @property
-    def coop_transposed(self) -> bool:
-        """True iff the BLOCK stage carries the ``b<n>t`` k-major lane swap."""
-        s = self.block_stage
-        return s is not None and s.transposed
-
-    @property
     def cta(self) -> int:
         """The GRID (cross-CTA split) width, or 1 if no GRID stage."""
         return self._width(Level.GRID)
@@ -273,12 +267,9 @@ class ReducePlan:
         return self._width(Level.REG)
 
     @property
-    def block_stage(self) -> ReduceStage | None:
-        """The single BLOCK :class:`ReduceStage`, or ``None`` (scalar serial)."""
-        for s in self.stages:
-            if s.level is Level.BLOCK:
-                return s
-        return None
+    def coop_transposed(self) -> bool:
+        """True iff the BLOCK stage carries the ``b<n>t`` k-major lane swap."""
+        return any(s.transposed for s in self.stages if s.level is Level.BLOCK)
 
 
 #: Pin-input aliases for the scalar tier — an explicit ``a:``-prefixed spelling of the (atom-less)
@@ -842,10 +833,6 @@ class Raster:
             raise ValueError(f"RASTER: expected gm<G> / gn<G> with G >= 2 (or empty for the flat order), got {spec!r}")
         return cls(orient=m.group(1), group=int(m.group(2)))
 
-    def spell(self) -> str:
-        """The ``RASTER`` codec string (inverse of :meth:`parse`)."""
-        return f"g{self.orient}{self.group}"
-
 
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
 
@@ -911,7 +898,5 @@ __all__ = [
     "TilePlan",
     "WarpSpec",
     "Workers",
-    "_codec_width",
-    "atom_for",
     "derive_workers",
 ]

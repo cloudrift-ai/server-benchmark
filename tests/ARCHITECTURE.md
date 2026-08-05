@@ -83,24 +83,12 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   files re-declaring the same fixtures is the signal to merge them; a file whose sections share no scaffolding
   and no subject is the signal to leave them apart.
 - **Known failures are marked inline** with `@pytest.mark.xfail`, carrying a reason that says what was
-  removed or broken and when it should come back.
-- **One exception: the xfail registry** (`tests/xfail_registry.py`). When a whole subsystem is removed on purpose,
-  the casualties span dozens of files and inline marks would bury the intent in unrelated modules; the registry
-  lists the exact node ids in one place with one reason, and the root `conftest.py` applies a **strict** `xfail`
-  mark at collection. Exact ids, never path globs — each id is an acceptance obligation for the replacement, and
-  the file shrinking to empty is the completion gate. Strictness is what makes that a gate rather than a wish: an
-  id that starts passing fails the run until it is deleted from the list. It is EMPTY today — the tile schedule
-  enumeration covers every family the demolition took, including the flash streaming pair — and the file is kept as
-  the shape the next deliberate removal of that size is recorded in. An ordinary known failure still gets an inline
-  mark, where the reason can name its own condition (the fused prologue's cold deploy pick, the gemma-4 fused forks'
-  5090 golden join).
-- **Consequence ids do not run.** `CONSEQUENCE_MODULES` in the registry names the modules whose ids fail only
-  because their graph contains a gap the primary ids already track — whole-model and serving end-to-end, the
-  golden drift gate. Those get `run=False`: the expectation is recorded, the minutes are not spent (the drift
-  gate alone spent ~190 s per run reaching its own xfail). The trade is that a consequence id can no longer
-  report XPASS, so recovery is signalled by the primary ids.
-- **Card-conditional expectations stay inline**, non-strict, at their own test — the registry is for structural
-  gaps that hold on every card, and a flaky or SKU-specific failure needs a reason that names the condition.
+  removed or broken and when it should come back. For a deliberate whole-subsystem removal whose casualties span
+  dozens of files, prefer one registry module of exact node ids applied as a **strict** xfail from the root
+  `conftest.py` — exact ids, never path globs, so each id is an acceptance obligation and the list shrinking to
+  empty is the completion gate (the tile-scheduler rebuild ran this way; the registry was deleted when it emptied).
+- **Card-conditional expectations stay inline**, non-strict, at their own test — a flaky or SKU-specific failure
+  needs a reason that names the condition.
 
 ## Running
 

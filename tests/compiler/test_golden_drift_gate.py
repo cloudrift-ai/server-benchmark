@@ -61,6 +61,16 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 # burn them down by recording aux rows opportunistically (manual --ab), majors stay zero.
 EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 5090": {
+        # 2026-08-05: the m1 (gemv-tier) SCALAR siblings of the re-keyed fused forks — the
+        # computed-A re-keying that orphaned the eleven warp majors above also dropped these
+        # non-warp m1 joins (static + dynM at the qkv / qk_global / gate_up widths). Same
+        # burn-down: the 5090 fused re-seed; delete with the major entries.
+        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=30720),
+        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
         ShapeKey(free_prod=33554432, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=35651584, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=557056, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
@@ -189,12 +199,25 @@ EXPECTED_GAPS = {
 # fused serving fork and the gate stayed green precisely because those keys blended into a
 # routine baseline edit (``test_no_major_key_hides_in_the_generic_baseline``).
 EXPECTED_MAJOR_GAPS = {
-    # 2026-08-02: the 5090 major baseline is EMPTY — the last four #446-reopened keys (the
-    # mlp_down_fused widths, un-closable by cut rows and un-benchable while recorded ``.cut``
-    # routing rows fired inside pinned replay compiles) burned down once route_cut made
-    # schedule-family pins authoritative: fused d*/sync rows benched honestly again and the
-    # four widths were seeded on a vast.ai 5090 (the 2026-08-02 block in the gemma4 YAML).
-    "NVIDIA GeForce RTX 5090": set(),
+    # 2026-08-05: eleven fused (computed-A) warp-contraction forks — the gemma-4 norm→linear /
+    # gate⊗up edges at the m8 / m64 / m2048 / m4096 serving widths — lost their 5090 golden join
+    # in the computed-A re-keying (the map reading's cooperative row moved onto ``REDUCE@<stat>``
+    # and re-keyed the fused rows; reproduced identically at the pre-rebuild commit, so it is not
+    # an enumeration regression). Burn-down: a 5090 card sweep re-seeding the fused widths (the
+    # 2026-08-02 seeding recipe in the gemma4 YAML); delete these entries when it lands.
+    "NVIDIA GeForce RTX 5090": {
+        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=524288, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=557056, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=33554432, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=35651584, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=125829120, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+    },
     "NVIDIA GeForce RTX 4090": {
         # The 4090 majors are all one deferral: the card's mirror re-tune (box lost its GPU at
         # the PCI level; several widths have no 24 GB serving at all — m1, m192 — and the
@@ -255,25 +278,7 @@ EXPECTED_DRIFTS: dict[str, set[tuple[str, str]]] = {
 MIN_MATCH = {"NVIDIA GeForce RTX 5090": 70, "NVIDIA GeForce RTX 4090": 70}
 
 CARDS = [
-    pytest.param(
-        "NVIDIA GeForce RTX 5090",
-        (12, 0),
-        id="rtx5090",
-        # 2026-08-05: eleven `kind="fused"` warp-contraction forks (the gemma-4 computed-A
-        # norm->linear / gate-up edges at every serving width) audit UNCOVERED on this card. The
-        # cause predates the flash-streaming work — it is the computed-A re-keying, which moved the
-        # map reading's cooperative row onto `REDUCE@<stat>` and re-keyed the fused rows, so the
-        # recorded 5090 goldens no longer join their forks. Reproduced identically at the
-        # pre-change commit, which is why it is expected here rather than fixed here: closing it is
-        # a CARD sweep (re-seed the fused widths on a 5090, the ratchet the assertion asks for),
-        # not an enumeration change. Burn-down: the re-seed lands with the owed
-        # `emmy fit --artifact` refit; delete this mark then. The 4090 param stays live.
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="gemma-4 fused (computed-A) forks lost their 5090 golden join in the computed-A re-keying; "
-            "closing it is a card re-seed, tracked with the owed offline-prior refit",
-        ),
-    ),
+    pytest.param("NVIDIA GeForce RTX 5090", (12, 0), id="rtx5090"),
     pytest.param("NVIDIA GeForce RTX 4090", (8, 9), id="rtx4090"),
 ]
 

@@ -51,32 +51,6 @@ from emmy.compiler.pipeline.knob import (
 FEATURIZER_VERSION = 3
 
 
-def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -> dict[str, float]:
-    """The per-role boundary-masked structural features (``S_masked_m/n/k``).
-
-    A tile boundary-masks an output / reduce axis when the extent is symbolic or a
-    static non-divisor of the chosen tile — a *consequence* of the shape/tile
-    pairing, not a tunable choice — so it belongs with the ``S_`` structural
-    identity, not a tuning knob. Masking is only known once the tile geometry is
-    chosen, so the producers stamp it at materialize / enumeration time; the
-    feature definition lives here, beside the featurizer that reads it
-    (``_geom_feats`` → ``D_neg_masked_*``).
-
-    Split per role so the prior can learn that K-masking (SYNC-pinned, ring-declined) prices
-    differently from M / N output masking. Only the masked roles are emitted — an unmasked kernel
-    carries none, so its structural identity is unchanged and the featurizer defaults a missing flag
-    to ``0.0``. ``S_masked_*`` pass through :func:`knob_features` as raw floats via the
-    ``STRUCT_PREFIX`` branch automatically."""
-    feats: dict[str, float] = {}
-    if m:
-        feats[f"{STRUCT_PREFIX}masked_m"] = 1.0
-    if n:
-        feats[f"{STRUCT_PREFIX}masked_n"] = 1.0
-    if k:
-        feats[f"{STRUCT_PREFIX}masked_k"] = 1.0
-    return feats
-
-
 def _row_values(knobs: dict) -> tuple:
     """This row's ``(WORK, TILE, STAGE, REDUCE)`` values, family keys read axis-aware so flash's
     ``TILE@dd`` reads like a bare one — the pooled read; a per-node featurizer loops the keys

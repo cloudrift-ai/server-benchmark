@@ -26,8 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ENV_VAR = config.DUMP_DIR
-
 
 @dataclass
 class CompilerDump:

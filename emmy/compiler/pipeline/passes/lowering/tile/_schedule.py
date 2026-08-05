@@ -584,14 +584,6 @@ def _reading(tile: TileOp, op, ctx, *, free=None, stores=None, ref: Sched | None
     return _Term(alt, place.on_grid(), ctx, ref=ref)
 
 
-def _fused_op(tile: TileOp):
-    """The MONOID-producer composition of this term — the fused norm→linear / gate⊗up reading, whose
-    contraction reads its normalized row off a COMPUTED ``a`` edge (``bind_prologue_contraction``);
-    ``None`` when the term is not that shape. It ADDS the contraction and the cone's statistic sites
-    to the map form's single reduce site, so it is a READING, not a value."""
-    return bind_prologue_contraction(tile.op, tuple(tile.place.free))
-
-
 def _promoted(node, inputs):
     """A mixed-dtype contraction — a plain **f32** ``a`` ``Load`` against 16-bit channels — with its
     ``a`` edge re-expressed as a one-``Load`` COMPUTED cone, so it rides the mandatory ``sync``
@@ -607,7 +599,7 @@ def _promoted(node, inputs):
     if node is None or not isinstance(node.a, Load) or not inputs:
         return None
     t = inputs.get(node.a.input)
-    if getattr(getattr(t, "dtype", None), "name", None) != "f32" or not _channel_atoms(node, inputs):
+    if getattr(getattr(t, "dtype", None), "name", None) != "f32" or not atoms_for(_channel_dtype(node, inputs)):
         return None
     # ``a`` is a DERIVED reading, so the rewrite REBUILDS the bilinear fold over the new edge — the
     # one-``Load`` cone keeps the edge's bound name, so the regenerated lift is the same program.
@@ -622,7 +614,7 @@ def _readings(tile: TileOp, ctx) -> list[_Term]:
     The base reading is the stored term. Its sibling is whichever rewrite applies — they are
     mutually exclusive by shape:
 
-    - the MONOID-producer composition (:func:`_fused_op`) — the map form's reduce site plus the
+    - the MONOID-producer composition (``bind_prologue_contraction``) — the map form's reduce site plus the
       fused contraction's own tree. Its tree is the REFERENCE namespace: bare ``REDUCE`` must mean
       the contraction's K fold, so the map reading spells its statistic at ``REDUCE@<axis>`` too;
     - the COLLAPSE (:meth:`Fold.demoted`) — a computed ``a`` edge spliced back inline, REMOVING its
@@ -634,7 +626,7 @@ def _readings(tile: TileOp, ctx) -> list[_Term]:
     No reading's rows depend on whether its sibling produced any: each gate is a local predicate on
     its own term (a 16-bit atom, a resolvable fill, an inventory a value can spell against)."""
     base = _Term(tile, tile.place.on_grid(), ctx)
-    pro = _fused_op(tile)
+    pro = bind_prologue_contraction(tile.op, tuple(tile.place.free))
     if pro is not None:
         fused = _reading(tile, pro[0], ctx, free=(*tile.place.free, pro[1]), stores=pro[2])
         return [_Term(tile, tile.place.on_grid(), ctx, ref=fused.sched), fused]
@@ -703,12 +695,6 @@ def _channel_dtype(node, inputs):
         return None
     dts = {getattr(inputs.get(b.input), "dtype", None) for b in bs}
     return next(iter(dts)) if len(dts) == 1 else None
-
-
-def _channel_atoms(node, inputs) -> tuple[str, ...]:
-    """The atoms every channel's B agrees on — what the mixed-A promotion would BUY, and ``()`` when
-    it would buy nothing (so the promotion is not offered)."""
-    return atoms_for(_channel_dtype(node, inputs))
 
 
 def _warp_atoms(term: _Term, node) -> tuple[str, ...]:

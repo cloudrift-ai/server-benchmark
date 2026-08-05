@@ -199,7 +199,7 @@ def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
         {"TILE@a0": "f4x8", "WORK": "t32x16"},  # the golden, emitted third
         {"TILE@a0": "f4x8", "WORK": "t64x16"},
     ]
-    monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx: (rows, ()))
+    monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx: rows)
     golden = {"TILE": "f4x8", "WORK": "t32x16"}
 
     _, rank_tied, pool, rank_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=lambda r: 1.0)
@@ -243,16 +243,16 @@ def _base(M: int, N: int, K: int, *, dynamic: bool) -> dict:
 def test_warp_eligible_stamp_fp16_present_fp32_absent():
     """Every row of a warp-eligible f16 contraction (scalar rows included) carries the
     ``S_warp_eligible`` kernel stamp; an fp32 contraction (no atoms) carries none."""
-    rows16, _ = _enumerate(512, 1024, 1024, "fp16", CTX)
+    rows16 = _enumerate(512, 1024, 1024, "fp16", CTX)
     assert rows16, "f16 matmul must enumerate"
     assert all(r.get("S_warp_eligible") == 1.0 for r in rows16)
     assert any(_is_warp(r) for r in rows16), "warp rows must be offered"
-    rows32, _ = _enumerate(512, 1024, 1024, "fp32", CTX)
+    rows32 = _enumerate(512, 1024, 1024, "fp32", CTX)
     assert rows32 and all("S_warp_eligible" not in r for r in rows32)
 
 
 def test_scalar_on_warp_eligible_feature_fires_on_scalar_rows_only():
-    rows, _ = _enumerate(512, 1024, 1024, "fp16", CTX)
+    rows = _enumerate(512, 1024, 1024, "fp16", CTX)
     base = _base(512, 1024, 1024, dynamic=False)
     for r in rows[:200]:
         tile = _tile_of(r)
@@ -267,7 +267,7 @@ def test_offline_ranks_mma_above_every_scalar_split(dynamic):
     """The deploy-critical property: some mma row outranks EVERY scalar row (g?a / g?k
     splits included) on a warp-eligible f16 projection shape — in BOTH weight regimes.
     The dynamic (symbolic-M) regime is the one that historically ranked all-scalar."""
-    rows, _ = _enumerate(512, 1024, 1024, "fp16", CTX)
+    rows = _enumerate(512, 1024, 1024, "fp16", CTX)
     ap = OfflinePrior()
     base = _base(512, 1024, 1024, dynamic=dynamic)
     scored = sorted(rows, key=lambda r: ap.score({**base, **r}))

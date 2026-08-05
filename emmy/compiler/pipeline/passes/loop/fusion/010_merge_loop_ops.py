@@ -295,14 +295,42 @@ def _is_flash_offer_shaped(op) -> bool:
     )
 
 
+def _accum_feed_names(op: LoopOp) -> set[str]:
+    """SSA names that transitively FEED an add-``Accum``'s value — the contraction's own
+    dataflow. A post-reduce epilogue operand (a residual add's other input, combined with the
+    finalized accumulator AFTER the reduce loop) never lands in this set."""
+    sources: dict[str, tuple[str, ...]] = {}
+    for s in op.body.iter():
+        if isinstance(s, Assign):
+            sources[s.name] = s.args
+        elif isinstance(s, Select):
+            sources[s.name] = tuple(b.value for b in s.branches)
+    feed: set[str] = set()
+    frontier = [s.value for s in op.body.iter() if isinstance(s, Accum) and s.op.reduce_canon == "add"]
+    while frontier:
+        nm = frontier.pop()
+        if nm in feed:
+            continue
+        feed.add(nm)
+        frontier.extend(sources.get(nm, ()))
+    return feed
+
+
 def _sum_contracts_exp_producer(graph: Graph, consumer: Node, producer: Node) -> bool:
-    """``consumer`` is a sum-contraction one of whose OTHER operands is (or is one producer hop
-    away from) an exp-bearing ``LoopOp`` — the P@V kernel before its softmax fuses in, at any
-    point of the softmax's own assembly. Once it does, the kernel is the flash offer site; a
-    compute producer fused into the V side in the meantime breaks the certification just as
-    surely, so it is deferred the same way. The softmax-side operand itself (``producer``) is
+    """``consumer`` is a sum-contraction one of whose OTHER contraction operands is (or is one
+    producer hop away from) an exp-bearing ``LoopOp`` — the P@V kernel before its softmax fuses
+    in, at any point of the softmax's own assembly. Once it does, the kernel is the flash offer
+    site; a compute producer fused into the V side in the meantime breaks the certification just
+    as surely, so it is deferred the same way. The softmax-side operand itself (``producer``) is
     exempt — that IS the softmax fusing in. A gelu chain feeding a contraction stays fuseable:
-    the gelu IS the producer there, so the other-input scan never sees its exp."""
+    the gelu IS the producer there, so the other-input scan never sees its exp.
+
+    Only operands whose loads feed the add-``Accum`` count (:func:`_accum_feed_names`): a
+    post-reduce EPILOGUE operand is not part of the contraction, so an exp upstream of it says
+    nothing about a future flash site. The residual stream is the load-bearing case — every
+    residual add past layer 0 sits within two producer hops of the previous layer's silu (its
+    sigmoid's exp) or softmax, and treating it as a V operand kept every o_proj product
+    materialized (a (b, s, k, n) gmem scratch per layer)."""
     op = consumer.op
     if not any(isinstance(s, Accum) and s.op.reduce_canon == "add" for s in op.body.iter()):
         return False
@@ -310,9 +338,12 @@ def _sum_contracts_exp_producer(graph: Graph, consumer: Node, producer: Node) ->
     def has_exp(node) -> bool:
         return isinstance(node.op, LoopOp) and any(isinstance(s, Assign) and s.op.name == "exp" for s in node.op.body.iter())
 
+    feed = _accum_feed_names(op)
     for inp in consumer.inputs:
         if inp == producer.id:
             continue
+        if not any(nm in feed for ld in op.body.loads if ld.input == inp for nm in ld.names):
+            continue  # post-reduce epilogue operand — not a contraction operand
         n = graph.producer(inp)
         if n is None or not isinstance(n.op, LoopOp):
             continue

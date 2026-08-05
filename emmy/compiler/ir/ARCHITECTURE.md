@@ -412,6 +412,10 @@ LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
 
 ## `tile/`
 
+**The layer has its own doc — [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md)** — for the one stored kind, its
+derived readings, the operand edge's two inhabitants, term identity and the tree-path codec. What follows is the
+module map and the parts that touch the rest of `ir/`.
+
 Tile IR keeps the stored term pure algebra and the schedule beside it. The layer is **one concern per module**:
 `tile/ir.py` the term vocabulary (`Fold`, `Channel`, `Store`, `TileOp`), `tile/ops.py` the geometry-free compute reads
 and the `Sched` accessor, `tile/path.py` the tree-path codec, `tile/_key.py` kernel identity (`term_key`),

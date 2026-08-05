@@ -293,6 +293,8 @@ def _stmt_eval_scope() -> dict:
     global _STMT_EVAL_SCOPE
     if _STMT_EVAL_SCOPE is not None:
         return _STMT_EVAL_SCOPE
+    import math as _math
+
     import numpy as _np
 
     from emmy.compiler.dim import Dim
@@ -363,6 +365,10 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
+        # ``repr(float('-inf'))`` is ``-inf`` — the online-softmax ``Fold.init`` running max, and
+        # any other non-finite literal, needs the bare names in scope to round-trip.
+        "inf": _math.inf,
+        "nan": _math.nan,
         # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
         # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
         # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.

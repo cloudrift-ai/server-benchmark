@@ -185,6 +185,18 @@ def test_kernel_op_windowed_axis_roundtrip():
     assert op.smem_bytes() == 128 * 32 * 2
 
 
+def test_stmt_eval_scope_reads_non_finite_literals():
+    """``repr(float('-inf'))`` is the bare token ``-inf``, which does not eval without a name.
+
+    The online-softmax ``Fold.init`` running max dumps ``init=(-inf, 0.0, 0.0)``, so every flash
+    tile-stage dump raised ``NameError: name 'inf' is not defined`` on reload."""
+    from emmy.compiler.graph import _stmt_eval_scope
+
+    scope = _stmt_eval_scope()
+    assert eval("(-inf, 0.0, 0.0)", dict(scope)) == (float("-inf"), 0.0, 0.0)
+    assert eval("nan", dict(scope)) != eval("nan", dict(scope))  # NaN is not equal to itself
+
+
 def test_to_dict_serializes_composite_shape_dim():
     """A node whose output shape carries a COMPOSITE Dim (``BinaryExpr``-backed —
     e.g. the demoted symbolic-N B operand's TMA-padded ``round_up(seq_len, 64)``

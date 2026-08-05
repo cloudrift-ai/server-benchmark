@@ -461,21 +461,23 @@ partitioned across, coarse→fine: `GRID` (split-K across CTAs), `BLOCK` (cooper
 or tuned. The single `REDUCE` codec knob decides the plan schedule-side; the combine itself stays in the op
 tree.
 
-`STAGE` is the one codec still served by the schema-driven ser/de engine (the codec half of `schedule.py`): a
-`Schema` of typed `Field`s plus generic `desugar` / `decode` / `encode`. The value class keeps its `parse` / `spell`
-API and its semantics, delegating only the string ↔ struct conversion to the engine. The grammar collapses int and
-pair widths into one tuple kind; the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept
-inside the value
-so the round-trip stays byte-identical. Binding is order-free but each field binds at most ONCE — a repeated token
-(`d2/cp/d3`, `sync/tma`) raises rather than letting the last one win, since an order-free grammar gives a silent
-overwrite no reading the pin could have meant. The `expect <grammar>` hint every parse error carries is DERIVED from
-the schema's own fields, so it cannot fall out of step with them, and no field is mandatory — an absent node takes
-its kind's default, which is what lets a codec add a field without invalidating values spelled before it. Since step
+**Every codec parses and spells by hand**, and they all read the same way: one `/`-separated token string, order-free,
+each field binding at most ONCE — a repeated token (`d2/cp/d3`, `sync/tma`) raises rather than letting the last one
+win, since an order-free grammar gives a silent overwrite no reading the pin could have meant. No field is mandatory:
+an absent token takes its default, which is what lets a codec add a field without invalidating values spelled before
+it. Each parse error names its codec and offers the grammar, because the featurizers degrade on a `ValueError` and a
+bad pin has to say which knob it came from. The one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize
+letter, kept inside the value so the round-trip stays byte-identical.
+
+There was a schema engine here — `Schema` / `Field` / `decode` / `encode` — and it is gone. It served four codecs; the
+site-local rewrite hand-wrote `TILE`, `REDUCE` and `WORK` (they parse *against* a `Workers`, which a generic decoder
+cannot express), the `WSPEC` collapse took the fourth, and a general mechanism serving one caller is a worse
+statement of that caller's grammar than the grammar itself. Since step
 7 the WIRE forms are site-local: `Workers` is the kernel-global
 inventory (`WORK` — `Workers.spell`/`parse`, the `+p<n>` producer band absorbing the retired per-row `WSPEC` key), and
 `TilePlan.spell`/`parse` + `ReducePlan.spell`/`parse` are the worker-token-free site values the stamped rows and the
-golden corpus carry — they parse **against** a `Workers`, and are hand-written rather than schema-driven for exactly
-that reason. There is no second, self-contained reading: the retired embedded-worker spellings raise. The
+golden corpus carry — they parse **against** a `Workers`, which is why a generic decoder never fit them. There is no
+second, self-contained reading: the retired embedded-worker spellings raise. The
 `a:scalar` / `a:none` aliases stay pin-only vocabulary for the scalar tier.
 
 The **producer band** is warp specialization, and it is one integer: `WarpSpec.producer_warps`, carried on an

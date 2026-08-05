@@ -1,5 +1,5 @@
-"""Tile schedule type system — how a kernel's axes bind to the hardware — plus the codec engine that
-ser/des the schedule knobs.
+"""Tile schedule type system — how a kernel's axes bind to the hardware, and the codecs that ser/des
+the schedule knobs.
 
 This root ``ir`` module is the merge of the former ``ir/tile/{codec,role,schedule}.py``. The schedule
 value types are used by both the tile IR and the kernel materializer, so they live at the ir root
@@ -35,15 +35,15 @@ hand-written here; :func:`resolve_site_tile` is the one rule resolving the singl
 spelling has (an empty ``TILE`` beside a thread inventory). There is no second, self-contained
 reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
 
-**The codec engine** (:func:`decode` / :func:`encode` / :class:`Schema` / :class:`Field`) is the
-ser/de source of truth for the one inventory-free codec, ``STAGE``: one ``/``-separated string of
-``TOKEN`` nodes (grammar at :func:`desugar` / :func:`decode`), declared as a :class:`Schema` of
-typed :class:`Field`\\s so the value type keeps only its own semantics (``is_async`` / validation),
-and its ``expect`` hint is derived from the fields rather than restated. The tunable knob
-*declarations* that spell the live codecs (``WORK`` / ``TILE`` / ``STAGE`` / ``REDUCE``) live one
-layer up in :mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search
-concern; the retired ``WSPEC`` knob is gone from that list, its producer band absorbed into
-``WORK``'s ``+p<n>`` and its one surviving field into :class:`WarpSpec`.
+``STAGE`` — the one codec that needs no inventory — parses and spells by hand for the same reason,
+so **every** codec here is now read the same way: one ``/``-separated token string, order-free, each
+field binding at most once. There is no schema engine any more; it was built to serve four codecs,
+and the site-local rewrite left it serving one.
+
+The tunable knob *declarations* that spell the live codecs (``WORK`` / ``TILE`` / ``STAGE`` /
+``REDUCE``) live one layer up in :mod:`emmy.compiler.pipeline.search.space` — they are ``Knob``
+instances, a search concern; the retired ``WSPEC`` knob is gone from that list, its producer band
+absorbed into ``WORK``'s ``+p<n>`` and its one surviving field into :class:`WarpSpec`.
 """
 
 from __future__ import annotations
@@ -53,18 +53,15 @@ import re
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from dataclasses import replace as dc_replace
-from typing import Any
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal
 
 # ===========================================================================================
-# Codec engine — the ser/de source of truth for the inventory-free schedule codecs below (STAGE /
-# WSPEC). The site-local TILE / REDUCE values parse against a Workers inventory and are hand-written.
+# The one rule every codec below shares. Each value type parses and spells its own grammar by
+# hand — the site-local TILE / REDUCE against a Workers inventory, STAGE on its own.
 # ===========================================================================================
-
-_TOKEN_RE = re.compile(r"^([A-Za-z]+)(.*)$")
 
 
 def _codec_width(num: str, *, tok: str, codec: str) -> int:
@@ -75,262 +72,6 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
     if not num.isdigit() or int(num) < 1:
         raise ValueError(f"bad {codec} token {tok!r}: expected a positive integer width, got {num!r}")
     return int(num)
-
-
-class FieldKind(enum.Enum):
-    """The four leaf shapes a codec field can take."""
-
-    TUPLE = "tuple"  # int(xint)* — arity-1 scalar or arity-n pair (the STAGE d/p, the WSPEC role warp counts)
-    CHOICE = "choice"  # a bare token that IS the value (the STAGE transport sync|cp|tma)
-    FLAG = "flag"  # a valueless bare token → bool (the STAGE split)
-    GROUP = "group"  # a value plus named sub-fields (the WSPEC roles, p<np>[:<param>,...])
-
-
-class Emit(enum.Enum):
-    """When :func:`encode` renders a field (the byte-identity lever — mirrors the old ``spell``)."""
-
-    ALWAYS = "always"  # render unconditionally (the STAGE depth / transport)
-    NONDEFAULT = "nondefault"  # render iff the value differs from the field default (the STAGE p, the WSPEC roles)
-    TRUE = "true"  # render iff truthy (the split flag)
-
-
-@dataclass(frozen=True)
-class Field:
-    """One node slot in a codec :class:`Schema`."""
-
-    token: str
-    kind: FieldKind
-    arity: int = 1  # TUPLE: number of int elements (1 = scalar int value, ≥2 = tuple value)
-    emit: Emit = Emit.NONDEFAULT
-    suppress_trailing: bool = True  # TUPLE arity≥2: drop trailing ``x<m>`` when it equals 1
-    suffix: tuple[tuple[str, str], ...] = ()  # TUPLE arity-1 enum letter: ((codec, canonical), ...)
-    suffix_default: str = ""  # the canonical suffix when the letter is omitted
-    choices: tuple[tuple[str, str], ...] = ()  # CHOICE: ((codec-token, canonical), ...)
-    default: Any = None  # CHOICE: the canonical default; others derive via :func:`_default`
-    params: tuple[Field, ...] = ()  # GROUP sub-fields
-
-    @property
-    def is_bare(self) -> bool:
-        """True for the no-leading-letter-token kinds matched whole (CHOICE / FLAG)."""
-        return self.kind in (FieldKind.CHOICE, FieldKind.FLAG)
-
-
-def _field_hint(field: Field) -> str:
-    """The grammar fragment for one field — what a bad token's message offers as the expected
-    spelling. DERIVED from the field itself: a hand-written copy of the field list falsifies
-    itself the first time a field is added, renamed or deleted."""
-    if field.kind is FieldKind.CHOICE:
-        return "|".join(codec for codec, _ in field.choices)
-    if field.kind is FieldKind.FLAG:
-        return field.token
-    if field.kind is FieldKind.GROUP:
-        return f"{field.token}<n>[:<param>,...]"
-    if field.suffix:
-        return f"{field.token}<n>[{'|'.join(codec for codec, _ in field.suffix)}]"
-    tail = "".join(f"x<{name}>" for name in ("m", "p")[: field.arity - 1])
-    if tail and field.suppress_trailing:
-        tail = f"[{tail}]"
-    return f"{field.token}<n>{tail}"
-
-
-@dataclass(frozen=True)
-class Schema:
-    """A codec's field list + its name (rides parse errors)."""
-
-    name: str
-    fields: tuple[Field, ...]
-
-    @property
-    def expect(self) -> str:
-        """The ``expect <grammar>`` hint rendered into every parse error, derived from the fields."""
-        return "expect " + " / ".join(_field_hint(f) for f in self.fields)
-
-    def by_token(self) -> dict[str, Field]:
-        return {f.token: f for f in self.fields}
-
-
-def _default(field: Field) -> Any:
-    """The value of an absent field (decode fills these so the IR glue reads every token)."""
-    if field.kind is FieldKind.TUPLE:
-        if field.suffix:
-            return (1, field.suffix_default)
-        return 1 if field.arity == 1 else tuple([1] * field.arity)
-    if field.kind is FieldKind.FLAG:
-        return False
-    if field.kind is FieldKind.CHOICE:
-        return field.default
-    return None  # GROUP absent → None
-
-
-def desugar(node: str) -> str:
-    """Rewrite a glued node into canonical ``TOKEN:value[,params]`` form.
-
-    ``w2x2`` → ``w:2x2``; ``g2a`` → ``g:2a``; ``p2:q8`` → ``p:2,q8``. A node with no glued value
-    (``cp`` / ``split`` / ``a:mma...`` — already colon-form) is returned unchanged."""
-    m = _TOKEN_RE.match(node)
-    if not m:
-        return node
-    token, rest = m.group(1), m.group(2)
-    if rest and rest[0].isdigit():
-        value, _, tail = rest.partition(":")
-        return f"{token}:{value}" + (f",{tail}" if tail else "")
-    return node
-
-
-def _split_top(s: str) -> list[str]:
-    return [t.strip() for t in s.split("/") if t.strip()]
-
-
-def _decode_tuple(field: Field, body: str, *, tok: str, codec: str) -> Any:
-    """Decode an ``int(xint)*`` value (peeling a suffix letter first when the field has one)."""
-    if field.suffix:
-        suf = dict(field.suffix)
-        tag = field.suffix_default
-        if body and body[-1] in suf:
-            tag = suf[body[-1]]
-            body = body[:-1]
-        return (_codec_width(body, tok=tok, codec=codec), tag)
-    parts = body.split("x") if body else [""]
-    if len(parts) > field.arity:
-        raise ValueError(f"bad {codec} token {tok!r}: expected ≤{field.arity} dims, got {len(parts)}")
-    nums = [_codec_width(p, tok=tok, codec=codec) for p in parts]
-    nums += [1] * (field.arity - len(nums))
-    return nums[0] if field.arity == 1 else tuple(nums)
-
-
-def _decode_value(field: Field, body: str, *, tok: str, schema: Schema) -> Any:
-    if field.kind is FieldKind.TUPLE:
-        return _decode_tuple(field, body, tok=tok, codec=schema.name)
-    if field.kind is FieldKind.GROUP:
-        return _decode_group(field, body, tok=tok, schema=schema)
-    raise ValueError(f"bad {schema.name} token {tok!r} ({schema.expect})")
-
-
-def _decode_group(field: Field, body: str, *, tok: str, schema: Schema) -> dict[str, Any]:
-    """Decode a GROUP body ``2,q8`` into ``{"": <own value>, <sub-token>: <sub value>, ...}``,
-    binding the single bare-tuple positional to the field's own value and named params by token."""
-    sub_by_token = {p.token: p for p in field.params}
-    out: dict[str, Any] = {"": 1 if field.arity == 1 else tuple([1] * field.arity)}
-    out.update({p.token: _default(p) for p in field.params})
-    for raw in body.split(",") if body else []:
-        part = raw.strip()
-        if not part:
-            continue
-        if part[0].isdigit():  # the positional own-value tuple
-            out[""] = _decode_tuple(field, part, tok=tok, codec=schema.name)
-            continue
-        sub = desugar(part)
-        sub_tok, _, sub_body = sub.partition(":")
-        pf = sub_by_token.get(sub_tok)
-        if pf is None:
-            raise ValueError(f"bad {schema.name} role param {part!r} on {tok!r} ({schema.expect})")
-        out[sub_tok] = _decode_value(pf, sub_body, tok=part, schema=schema)
-    return out
-
-
-def _match_bare(schema: Schema, node: str) -> Field | None:
-    """Match a whole bare node against a FLAG token or a CHOICE codec-token."""
-    for f in schema.fields:
-        if f.kind is FieldKind.FLAG and node == f.token:
-            return f
-        if f.kind is FieldKind.CHOICE and node in dict(f.choices):
-            return f
-    return None
-
-
-def decode(schema: Schema, spec: str | None) -> dict[str, Any]:
-    """Decode a codec string into ``{token: value}`` (defaults filled for absent fields).
-
-    Every field appears at most ONCE: a repeated token is a malformed spec, not a last-one-wins
-    override. Binding is order-free, so a silent overwrite has no reading a caller could have
-    meant — ``d2/cp/d3`` would land ``d3/cp`` and ``sync/tma`` would land ``d1/tma``, each
-    quietly deploying a kernel the pin did not name.
-
-    Raises ``ValueError`` — and only ``ValueError`` — on any malformed input (the featurizer
-    degrades on ``ValueError``); the message names ``schema.name`` so a bad pin names its knob."""
-    result: dict[str, Any] = {f.token: _default(f) for f in schema.fields}
-    present: set[str] = set()
-    by_token = schema.by_token()
-    for node in _split_top((spec or "").strip()):
-        bare = _match_bare(schema, node)
-        if bare is not None:
-            field, value = bare, True if bare.kind is FieldKind.FLAG else dict(bare.choices)[node]
-        else:
-            token, _, body = desugar(node).partition(":")
-            field = by_token.get(token)
-            if field is None or field.is_bare:
-                raise ValueError(f"bad {schema.name} token {node!r} ({schema.expect})")
-            value = _decode_value(field, body, tok=node, schema=schema)
-        if field.token in present:
-            raise ValueError(f"bad {schema.name} codec {spec!r}: {field.token!r} is spelled twice (at {node!r})")
-        result[field.token] = value
-        present.add(field.token)
-    return result
-
-
-def _is_default(field: Field, value: Any) -> bool:
-    if field.kind is FieldKind.TUPLE:
-        if field.suffix:
-            return value[0] == 1  # the width drives presence; the suffix rides an emitted token
-        return value == 1 if field.arity == 1 else all(v == 1 for v in value)
-    if field.kind is FieldKind.CHOICE:
-        return value == field.default
-    return not value
-
-
-def _render_tuple(field: Field, value: Any) -> str:
-    if field.suffix:
-        width, tag = value
-        canonical_to_codec = {canonical: codec for codec, canonical in field.suffix}
-        # A ``suffix_default`` canonical that has NO codec letter (e.g. the ``b`` field's
-        # "interleaved") renders bare — only the marked variants carry a letter. Fields
-        # listing every canonical (``g``: a/k) keep re-emitting theirs.
-        return f"{width}{canonical_to_codec.get(tag, '')}"
-    if field.arity == 1:
-        return str(value)
-    nums = list(value)
-    if field.suppress_trailing:
-        while len(nums) > 1 and nums[-1] == 1:
-            nums.pop()
-    return "x".join(str(n) for n in nums)
-
-
-def _encode_field(field: Field, value: Any) -> str | None:
-    if field.emit is Emit.TRUE:
-        return field.token if value else None
-    if field.emit is Emit.NONDEFAULT and _is_default(field, value):
-        return None
-    if field.kind is FieldKind.FLAG:
-        return field.token if value else None
-    if field.kind is FieldKind.CHOICE:
-        return dict((t, c) for c, t in field.choices)[value]
-    if field.kind is FieldKind.GROUP:
-        return _encode_group(field, value)
-    return f"{field.token}{_render_tuple(field, value)}"
-
-
-def _encode_group(field: Field, value: dict[str, Any]) -> str:
-    """Render ``p<own>`` (glued, no params) or ``p<own>:<param>,...`` — the positional value is
-    glued to the token; emitted named params follow after a ``:`` (matching the ``WSPEC`` spelling)."""
-    own = _render_tuple(field, value.get("", 1 if field.arity == 1 else tuple([1] * field.arity)))
-    params = [frag for p in field.params if (frag := _encode_field(p, value.get(p.token, _default(p)))) is not None]
-    return f"{field.token}{own}" + (":" + ",".join(params) if params else "")
-
-
-def encode(schema: Schema, values: dict[str, Any]) -> str:
-    """Encode a ``{token: value}`` map into the canonical codec string (fields in schema order)."""
-    toks: list[str] = []
-    for field in schema.fields:
-        frag = _encode_field(field, values.get(field.token, _default(field)))
-        if frag is not None:
-            toks.append(frag)
-    return "/".join(toks)
-
-
-def field_default(field: Field) -> Any:
-    """The value of an absent ``field`` — the public handle on the engine's default (used to drop
-    default-valued params when building a structured codec object, so they don't spell back)."""
-    return _default(field)
 
 
 # ===========================================================================================
@@ -928,17 +669,8 @@ class Placement:
 _TRANSPORT_CODEC = {"sync": "sync", "cp": "cp.async", "tma": "tma"}
 _TRANSPORT_SPELL = {v: k for k, v in _TRANSPORT_CODEC.items()}
 
-#: The ``STAGE`` codec schema: ``d<depth>`` and the transport always spell; ``split`` only when set;
-#: ``p<reg_depth>`` only at ≥ 2. The transport choices derive from ``_TRANSPORT_CODEC`` (one source).
-_STAGE_SCHEMA = Schema(
-    "STAGE",
-    (
-        Field("d", FieldKind.TUPLE, emit=Emit.ALWAYS),
-        Field("transport", FieldKind.CHOICE, choices=tuple(_TRANSPORT_CODEC.items()), default="sync", emit=Emit.ALWAYS),
-        Field("split", FieldKind.FLAG, emit=Emit.TRUE),
-        Field("p", FieldKind.TUPLE),
-    ),
-)
+#: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
+_STAGE_EXPECT = "expect d<n> / sync|cp|tma / split / p<n>"
 
 
 @dataclass(frozen=True)
@@ -1009,19 +741,49 @@ class Stage:
         optional ``split`` flag (one transport per staged edge), and an optional ``p<reg_depth>``
         (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``sync`` default (the
         caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
-        only reached on a non-empty spec). ``smem`` is filled in later by the scheduler. Ser/de
-        routes through :func:`decode`; ``cls(...)`` then runs :meth:`__post_init__`."""
-        v = decode(_STAGE_SCHEMA, spec)
-        return cls(depth=v["d"], transport=v["transport"], split=v["split"], reg_depth=v["p"])
+        only reached on a non-empty spec). ``smem`` is filled in later by the scheduler.
+
+        Binding is order-free, but each token binds at most ONCE: a repeat has no last-one-wins
+        reading a caller could have meant — ``d2/cp/d3`` would land ``d3/cp`` and ``sync/tma``
+        would land ``d1/tma``, each quietly deploying a kernel the pin did not name. Raises
+        ``ValueError`` and only ``ValueError`` on any malformed input (the featurizers degrade on
+        it), naming the codec so a bad pin names its knob."""
+        s = (spec or "").strip()
+        seen: set[str] = set()
+        depth, transport, split, reg_depth = 1, "sync", False, 1
+
+        def once(field: str, tok: str) -> None:
+            if field in seen:
+                raise ValueError(f"bad STAGE codec {spec!r}: {field!r} is spelled twice (at {tok!r})")
+            seen.add(field)
+
+        for t in s.split("/") if s else ():
+            if t in _TRANSPORT_CODEC:
+                once("transport", t)
+                transport = _TRANSPORT_CODEC[t]
+            elif t == "split":
+                once("split", t)
+                split = True
+            elif t.startswith("d"):
+                once("d", t)
+                depth = _codec_width(t[1:], tok=t, codec="STAGE")
+            elif t.startswith("p"):
+                once("p", t)
+                reg_depth = _codec_width(t[1:], tok=t, codec="STAGE")
+            else:
+                raise ValueError(f"bad STAGE token {t!r} ({_STAGE_EXPECT})")
+        return cls(depth=depth, transport=transport, split=split, reg_depth=reg_depth)
 
     def spell(self) -> str:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
         derived, so it is not spelled; ``reg_depth`` is spelled only when ≥ 2 (the ``p1``
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
-        return encode(
-            _STAGE_SCHEMA,
-            {"d": self.depth, "transport": self.transport, "split": self.split, "p": self.reg_depth},
-        )
+        toks = [f"d{self.depth}", _TRANSPORT_SPELL[self.transport]]
+        if self.split:
+            toks.append("split")
+        if self.reg_depth > 1:
+            toks.append(f"p{self.reg_depth}")
+        return "/".join(toks)
 
     @property
     def is_async(self) -> bool:
@@ -1145,9 +907,6 @@ class Side:
 
 __all__ = [
     "AtomKind",
-    "Emit",
-    "Field",
-    "FieldKind",
     "FoldMove",
     "Level",
     "Placement",
@@ -1155,17 +914,12 @@ __all__ = [
     "ReducePlan",
     "ReduceStage",
     "Raster",
-    "Schema",
     "Stage",
     "TilePlan",
     "WarpSpec",
     "Workers",
     "_codec_width",
     "atom_for",
-    "decode",
     "derive_workers",
-    "desugar",
-    "encode",
-    "field_default",
     "has_scalar_atom_alias",
 ]

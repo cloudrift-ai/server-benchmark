@@ -8,9 +8,11 @@
    pattern matchers, ``_atomize`` the algebra→atom binding, ``_cut`` the placement cut.
 2. **Schedule** (``020_schedule``) — decide that op's ``place`` (free axes → grid) and its per-node
    ``schedule`` slices, and offer them as a fork. ONE generic row enumerator (``_schedule``): the
-   site walk hands each family its typed candidate slices (keyed on the site's ``AxisRole``, the
-   domain being the ``search/space.py`` move catalog), the rows spell each family ONCE and DERIVE
-   the kernel's single ``WORK`` inventory, and one ``build_fork_tree`` turns them into the lazy
+   kernel's single ``WORK`` inventory is CHOSEN first, then a recursive walk of the site tree hands
+   each family its typed candidate slices — dispatched on two stored-param predicates of the node
+   (``axis is None`` / ``is_contraction``), NEVER the ``AxisRole``, which stays a loop annotation
+   and a materializer read — the domain being the ``search/space.py`` move catalog. Each row spells
+   every family ONCE at its canonical path key, and one ``build_fork_tree`` turns them into the lazy
    fork. Every role emits rows; none builds a ``TileOp`` directly.
 3. **Split** (``030_split_reduce``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)
    as a **graph rewrite**: a partial kernel reduces each CTA's slice of the reduce axis and
@@ -20,12 +22,13 @@
    flash ``(m, l, O)`` split-KV). The schedule carries the partition; the graph carries the
    kernel count, so ``lowering/kernel`` only ever sees single-launch kernels.
 
-**The schedule step is INCOMPLETE.** It covers the roles whose operand edges are all MATERIALIZED —
-``FREE`` (pointwise + the register-strip term variant), ``PLANAR`` / ``TWISTED`` (the reduce
-partition) and ``CONTRACTION`` (scalar + warp tiers, staging, split-K, raster). A COMPUTED operand
-edge (the fused norm→linear / gate⊗up cone) and the flash streaming pair still yield NO rows, and
-``020`` then leaves the term unmapped — the guardrail contract, ``[]`` and never a raise. Those
-tests ride ``tests/xfail_registry.py``; the knob / path codec, the move catalog and the whole
+**The schedule step is INCOMPLETE.** It covers every term whose operand edges are all MATERIALIZED —
+the pointwise cell + the register-strip term reading, the reduce partition, and the contraction
+(scalar + warp tiers, staging, split-K, raster) — plus the COMPUTED operand edge (the fused
+norm→linear / gate⊗up cone), which arrives as a ``_site_values`` entry under the term-reading union
+rather than as an emitter of its own. The flash streaming pair still yields NO rows, and ``020``
+then leaves the term unmapped — the guardrail contract, ``[]`` and never a raise. Those tests ride
+``tests/xfail_registry.py``; the knob / path codec, the move catalog and the whole
 ``lowering/kernel`` materializer are frozen — they are the contract the enumerator meets.
 
 Recognition reads algebraic structure; scheduling is geometry; materialization back to

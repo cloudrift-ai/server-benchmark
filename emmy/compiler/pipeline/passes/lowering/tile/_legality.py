@@ -25,7 +25,8 @@ from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.stmt import Body, Load, Loop
+from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
@@ -108,6 +109,46 @@ def coop_band_layout(plan: ReducePlan, k_contiguous: bool | None) -> str | None:
         return "the transposed coop band lane-sweeps the output axis — uncoalesced on a K-contiguous B"
     if not plan.coop_transposed and not k_contiguous:
         return "the plain coop band interleaves lanes along K — uncoalesced on a k-major B[k, n]"
+    return None
+
+
+def coop_band_geometry(plan: ReducePlan, k: int | None, inner: Axis | None) -> str | None:
+    """The TRANSPOSED coop band's structural requirements — the same fact for every tier that
+    offers it. The band swaps the lane mapping so 32 lanes sweep the innermost FREE axis while
+    each lane walks K serially, which fixes three things about the term: the coop width must be a
+    whole number of warps, the swept axis must be static and 32-divisible (there is no partial-warp
+    sweep), and a split composite must divide K.
+
+    One home because it had two: the reduce tier and the contraction tier each spelled a version of
+    this inline, with different conditions and neither of them here — exactly the raise-vs-drop
+    defect class this module exists to remove. The reduce tier's EXTRA requirement, on the shape of
+    the epilogue, is :func:`coop_band_epilogue`; ``coop_band_layout`` still owns the B-orientation
+    half. A plain (non-transposed) band answers ``None`` — it has no such geometry."""
+    if not plan.coop_transposed:
+        return None
+    if plan.coop % WARP_LANES:
+        return f"the transposed coop band sweeps whole warps — coop={plan.coop} is not a multiple of {WARP_LANES}"
+    if inner is None or not inner.extent.is_static or inner.extent.as_static() % WARP_LANES:
+        return f"the transposed coop band needs a static {WARP_LANES}-divisible innermost free axis to sweep"
+    if plan.needs_split and (k is None or k % plan.cta):
+        return f"the transposed split composite g{plan.cta} must divide a static K"
+    return None
+
+
+def coop_band_epilogue(tail) -> str | None:
+    """The reduce tier's EXTRA requirement on a transposed band: the projection epilogue must be
+    per-cell straight-line code. A swept lane owns output cells rather than a row, so a tail that
+    is itself a loop — a sweep, or the nested contraction of a fused norm→linear — has no per-cell
+    form for the swapped mapping to run, and the fused shape's shared-row slab is addressed for the
+    plain band's row-per-CTA layout.
+
+    A statement-SHAPE question, which is why it takes the tail rather than the term: the reduce
+    tier used to ask it by calling the shared-row STAGE resolver and testing for ``None``, wiring a
+    transport decision into a REDUCE candidate gate for a fact about the epilogue alone."""
+    if any(isinstance(s, Loop) for s in tail):
+        return "the transposed coop band needs a per-cell epilogue — this tail sweeps"
+    if has_contraction_tail(tail):
+        return "the transposed coop band needs a per-cell epilogue — this tail contracts over a new axis"
     return None
 
 

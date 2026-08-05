@@ -13,11 +13,10 @@ all three converge here. The engine restarts its rule scan after every functiona
 ``TileOp`` this pass's ``010`` just emitted is matched here on the next sweep, exactly as
 ``030_split_reduce`` already matches the ``TileOp``\\ s this rule produces.
 
-**Empty enumeration is a skip, not a failure.** A term the current enumerator cannot schedule — a
-COMPUTED operand edge (the fused norm→linear / gate⊗up cone) or the flash streaming pair — leaves
-the ``TileOp`` unmapped and the materializer lowers it on its per-cell path, exactly as it does
-today. That is the guardrail contract: the enumeration returns ``[]``, never raises, and this rule
-never guesses a schedule it could not enumerate.
+**Empty enumeration is a skip, not a failure.** A term the current enumerator cannot schedule — the
+flash streaming pair — leaves the ``TileOp`` unmapped and the materializer lowers it on its per-cell
+path, exactly as it does today. That is the guardrail contract: the enumeration returns ``[]``,
+never raises, and this rule never guesses a schedule it could not enumerate.
 """
 
 from __future__ import annotations

@@ -76,7 +76,7 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, Write
 from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
@@ -630,24 +630,23 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     elif coop > 1 and k_contig is False:
         coop = 1  # the heuristic option-0 is a plain band too — uncoalesced on a k-major B
     cands = [ReducePlan.of(coop=coop)]
-    tail_scalar = not any(isinstance(s, Loop) for s in tail)
     inner = _inner_free(term.place)
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
-    bt_ok = (
-        k_static is not None
-        and tail_scalar
-        and inner is not None
-        and inner.extent.is_static
-        and inner.extent.as_static() % 32 == 0
-        and _row_stage(term, node) is None
-    )
+    epilogue = legal.coop_band_epilogue(tail)  # term-wide, so it is asked ONCE, not per candidate
     for p in coop_reduce_moves():
         if not legal.enforce(legal.coop_band_layout(p, k_contig), pinned=False):
             continue
-        if (p.coop_transposed or p.needs_split) and not (
-            bt_ok and p.coop_transposed and p.coop % 32 == 0 and (not p.needs_split or k_static % p.cta == 0)
-        ):
-            continue
+        if p.coop_transposed or p.needs_split:
+            # A cross-CTA split is offered here only in COMPOSITE with the transposed band — every
+            # split candidate in the catalog is one, so this states the catalog's shape rather than
+            # adding a rule. The band's own requirements are the geometry (shared with the
+            # contraction tier) plus this tier's epilogue condition.
+            if not p.coop_transposed:
+                continue
+            if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
+                continue
+            if not legal.enforce(epilogue, pinned=False):
+                continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
     if ReducePlan() not in cands:
@@ -699,6 +698,28 @@ def _tile_area(plan: TilePlan) -> int:
     return max(plan.units_m * plan.reg_m * am * plan.units_n * plan.reg_n * an, 1)
 
 
+def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Stage | None:
+    """The ONE transport-resolver dispatch — which resolver a node's ``a`` edge and tier select.
+
+    A COMPUTED ``a`` edge takes the sync compute-fill, which is MANDATORY (no copy transport can
+    evaluate a cone), so ``want=None`` still resolves and only the DEPTH is ever free. A
+    MATERIALIZED edge takes the mma resolver on a warp tile and the scalar one otherwise, with
+    ``want=None`` the gmem-direct baseline; TMA declines below sm_90 rather than failing to
+    compile. ``tile`` is the PLACED slice.
+
+    Enumeration, the split-K composition and re-materialization all reach the resolvers through
+    here, so a row's resolved spelling is reproducible BY CONSTRUCTION rather than by three copies
+    of the dispatch staying in step."""
+    budget = term.ctx.max_dynamic_smem
+    if not isinstance(node.a, Load):
+        return legal.resolve_sync_stage(node, tile, budget, want.depth if want is not None else 1)
+    if want is None or (want.transport == "tma" and not term.ctx.has_tma):
+        return None
+    if tile.is_warp:
+        return legal.resolve_warp_stage(node, tile, want, budget)
+    return legal.resolve_scalar_stage(node, tile, want, term.tile.inputs, budget)
+
+
 def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     """The RESOLVED compute-fill stages a COMPUTED ``a`` edge offers — its depths, and nothing else:
     the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no copy transport can
@@ -711,7 +732,7 @@ def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     out: list[Stage | None] = []
     spelled: set[str] = set()
     for want in depths:
-        st = legal.resolve_sync_stage(node, tile, term.ctx.max_dynamic_smem, want)
+        st = _resolve_stage(term, node, tile, Stage(depth=want))
         if st is None:
             legal.enforce(f"the sync compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=pin is not None)
             continue
@@ -729,16 +750,11 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
     if not plan.is_tiled:
         return [None]  # per-cell / unbindable — no operand slab to stage
     tile = plan.placed_on(term.place)
-    budget = term.ctx.max_dynamic_smem
     if not isinstance(node.a, Load):
         return _sync_values(term, node, tile)
 
     def resolve(st: Stage) -> Stage | None:
-        if st.transport == "tma" and not term.ctx.has_tma:
-            return None  # TMA is Hopper+ (sm_90) — decline below it rather than fail to compile
-        if plan.is_warp:
-            return legal.resolve_warp_stage(node, tile, st, budget)
-        return legal.resolve_scalar_stage(node, tile, st, term.tile.inputs, budget)
+        return _resolve_stage(term, node, tile, st)
 
     pinned = term.pin("STAGE", node)
     if pinned is not None:
@@ -782,16 +798,9 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
                 continue
             if not legal.enforce(legal.coop_band_layout(p, k_contig), pinned=False):
                 continue
-            # The transposed lane swap also needs the structure its emitter assumes: a static
-            # innermost free axis divisible by the 32-lane sweep and a 32-multiple coop, plus (for
-            # a split composite) the split divisibility.
-            if p.coop_transposed and not (
-                p.coop % 32 == 0
-                and inner is not None
-                and inner.extent.is_static
-                and inner.extent.as_static() % 32 == 0
-                and (not p.needs_split or k % p.cta == 0)
-            ):
+            # The transposed lane swap also needs the structure its emitter assumes — the SAME
+            # geometry the reduce tier requires, stated once in ``_legality``.
+            if not legal.enforce(legal.coop_band_geometry(p, k, inner), pinned=False):
                 continue
             out.append(p)
     if k is not None and _free_cells(term.place) // _tile_area(plan) <= _SPLITK_MAX_CTAS:
@@ -1199,21 +1208,14 @@ def _splitk_option(term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: s
         channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in node.channels),
     )
     placed = plan.placed_on(term.place)
-    budget = term.ctx.max_dynamic_smem
+    # Resolved against the SLICED node, whose K is K/w. A computed-A partial's compute fill is
+    # MANDATORY, so it resolves whether or not the row spelled a depth — :func:`_resolve_stage`
+    # states that, and the enforce is what turns a declining fill into a loud row rather than a
+    # silently gmem-direct one.
+    stage = _resolve_stage(term, inner, placed, Stage.parse(stage_spec) if stage_spec else None)
     if not isinstance(node.a, Load):
-        # The compute fill is MANDATORY for a computed-A partial, so it resolves whether or not the
-        # row spelled a depth — against the SLICED node, whose K is K/w.
-        stage = legal.resolve_sync_stage(inner, placed, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
+        budget = term.ctx.max_dynamic_smem
         legal.enforce(None if stage is not None else f"split-K: the sync slabs exceed the {budget} B smem budget", pinned=True)
-    elif stage_spec:
-        st = Stage.parse(stage_spec)
-        stage = (
-            legal.resolve_warp_stage(inner, placed, st, budget)
-            if plan.is_warp
-            else legal.resolve_scalar_stage(inner, placed, st, term.tile.inputs, budget)
-        )
-    else:
-        stage = None
     # ONE composition rule: the outer reduce is the IDENTITY lift over the sliced contraction
     # operand, its combine the componentwise additive ⊕ over the same accumulator names — the
     # reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``.
@@ -1265,19 +1267,14 @@ def _stage_of(term: _Term, node, plan: TilePlan, spec: str) -> Stage | None:
     """The row's ``STAGE`` re-resolved against the node — the operand pipeline on a tiled
     contraction, the shared ROW buffer on any other fold, dispatched by the same predicate the
     enumeration used. The row carries what the enumeration RESOLVED, so this reproduces the slice
-    the leaf identity was built from."""
+    the leaf identity was built from, through :func:`_resolve_stage`'s one dispatch."""
     if not spec:
         return None
     if not is_contraction(node):
         return _row_stage(term, node)
     if not plan.is_tiled:
         return None
-    placed, budget = plan.placed_on(term.place), term.ctx.max_dynamic_smem
-    if not isinstance(node.a, Load):
-        return legal.resolve_sync_stage(node, placed, budget, Stage.parse(spec).depth)
-    if plan.is_warp:
-        return legal.resolve_warp_stage(node, placed, Stage.parse(spec), budget)
-    return legal.resolve_scalar_stage(node, placed, Stage.parse(spec), term.tile.inputs, budget)
+    return _resolve_stage(term, node, plan.placed_on(term.place), Stage.parse(spec))
 
 
 # ---- the entry point ----------------------------------------------------------------------------- #

@@ -221,7 +221,7 @@ def _deserialize_field(k, v):
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
-        # (``"Map(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
+        # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
     # (``Placement(...)`` / ``TilePlan(...)`` / ``ReducePlan(...)`` / ``Stage(...)`` /

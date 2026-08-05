@@ -14,7 +14,7 @@ one-thread-per-cell fold). All three seal through the one :func:`grid_tile` fina
 body is built by the shared recursion :func:`_emit` (which walks ``source`` AND ``step``,
 reaching flash's Q@K / P@V as nodes).
 
-The output tiling reads its **geometry straight off the** bilinear ``Fold`` **node** (``tile_m`` /
+The output tiling reads its **geometry straight off the** contraction **node** (``tile_m`` /
 ``mask_m`` / ``m_b`` / ``block_threads`` / …, derived there from the ``tile`` schedule + the output
 axes), expands both atoms through the *same* four-level tiling pipeline (``atomize →
 register_tile → unit_tile → grid_tile``, in **``_tiling.py``** — the algebra-free layer that turns
@@ -70,9 +70,9 @@ from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS
 # through ``source`` AND ``step`` — threading a :class:`Ctx` down (the ambient cell environment)
 # and returning a :class:`Frag` up (the per-cell loop-IR body + the produced :class:`Handle` wire +
 # the reduce ``carrier`` when the node folds one). The ONE root binder (:func:`_bind`) consumes the
-# recursion: the output-tiled bilinear ``Fold`` arm splices the atom's codegen through ``grid_tile``,
+# recursion: the output-tiled contraction arm splices the atom's codegen through ``grid_tile``,
 # and the reduce partitioner (:func:`_tile_reduce_axis`) builds its per-cell reduce loop via
-# :func:`_emit`, so a nested bilinear ``Fold`` (flash's Q@K / P@V) is reached AS A NODE — scalar-nested
+# :func:`_emit`, so a nested contraction (flash's Q@K / P@V) is reached AS A NODE — scalar-nested
 # at block=1, while a WARP-TILED tree realizes at fragment residence through ``_twist`` (the
 # ``warp_source`` read in :func:`_bind`), the per-node warp tiles stamped by the scheduler.
 
@@ -107,7 +107,7 @@ class Ctx:
     kernel's grid axes; ``inputs`` the operand buffer table (dtype/shape); ``output`` the root
     output buffer name. The operand smem pipeline is NOT here — it rides the node it decorates
     (the ``STAGE`` slice). (The tensor-core rebuild adds the warp
-    ``bind``/``cell`` register tile — owned per-node by a bilinear ``Fold``'s ``tile`` — and the
+    ``bind``/``cell`` register tile — owned per-node by contraction's ``tile`` — and the
     inbound ``wires`` handles, e.g. flash's score fragment feeding P@V's A operand.)"""
 
     grid: tuple
@@ -169,7 +169,7 @@ def _map_wire(op: Fold) -> Handle:
 
 
 def _emit_wire(op) -> Handle:
-    """The produced-value :class:`Handle` of any node — a ``Fold`` / bilinear ``Fold`` names its
+    """The produced-value :class:`Handle` of any node — a ``Fold`` / contraction names its
     carrier / accumulator; a zero-axis ``Fold`` scans for its last defining stmt (:func:`_map_wire`)."""
     if isinstance(op, Fold) and op.axis is None:
         return _map_wire(op)
@@ -228,9 +228,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tupl
     stored-``Write`` era), and the result prepended to ``tail``;
     everything else is a leaf, bound by :func:`_bind` — the single pipeline, whose form is read off
     the node's SCHEDULE (which axes are tiled), never a kernel kind. There is **no** flash /
-    attention special case: flash is the two-bilinear ``Fold`` ``TWISTED`` reduce tree, so its Q@K /
+    attention special case: flash is the two-contraction ``TWISTED`` reduce tree, so its Q@K /
     P@V contractions and its streaming reduce factorize through this one walk (scalar block=1
-    today; a nested warp-tiled contraction routes through the ``_emit`` bilinear ``Fold`` seam). A
+    today; a nested warp-tiled contraction routes through the ``_emit`` contraction seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
         proj = _emit_body(op.body, ctx)
@@ -274,7 +274,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
     the schedule — never separate emitters:
 
-    - a a bilinear ``Fold`` tiles its OUTPUT ``(m, n)`` axes — register / warp cells through
+    - a contraction tiles its OUTPUT ``(m, n)`` axes — register / warp cells through
       ``atomize → register_tile → unit_tile``, the reduce (K) serial per cell from the atom's
       :func:`reduce_codegen`, ``store`` the per-cell sink (default :func:`store_sink`; the flash
       inner QK/PV pass a sink that bridges the accumulator into the softmax twist). Its projection
@@ -288,7 +288,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
-    # The OUTPUT-tiled dispatch: a bilinear ``Fold`` whose schedule holds a TILE slice, over a
+    # The OUTPUT-tiled dispatch: contraction whose schedule holds a TILE slice, over a
     # grid with an ``(m, n)`` pair to place it on. The node is pure algebra; the tiled reading comes
     # off the slice, which arrives ALREADY PLACED from ``Sched.tile_of`` (the ``(m, n)`` pair is a
     # function of the site, so the binding lives on the scheduling structure, not here) — the

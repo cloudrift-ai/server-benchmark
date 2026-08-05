@@ -346,7 +346,7 @@ def _flash_op(
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
     ``Fold.projection(body=[O/l projection], operands=(Fold(role=TWISTED, axis=kv, step=[Fold.contraction(QK), …,
     Fold.contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
-    holds the NESTED ``Σ_dd Q·K`` a bilinear ``Fold`` at its head (then scaled, optionally
+    holds the NESTED ``Σ_dd Q·K`` contraction at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``
     after the loop. :meth:`Fold.loop` flattens the head QK node the same way it flattens the
     embedded PV, so the scalar tier expands the same loop-in-body nest as before. The free
@@ -371,7 +371,7 @@ def _flash_op(
     else:
         q_idx, k_idx, v_idx = access_indices
 
-    # s = Σ_dd Q·K — the inner contraction as a high-level a bilinear ``Fold`` structural node, the
+    # s = Σ_dd Q·K — the inner contraction as a high-level contraction structural node, the
     # ``source`` of the streaming kv :class:`Fold`. Per-cell scalar (``TilePlan()``): the
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.

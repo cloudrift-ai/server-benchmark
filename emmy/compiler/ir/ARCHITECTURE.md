@@ -12,7 +12,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `frontend/ir`     | after tracing                   | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, `UnsqueezeOp`, `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp` |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
-| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: ONE `Fold` kind) + thin schedule fields (free→grid `Placement`, `workers`, residual `tier`/`stage`; reduce partitions ride the schedule dict) |
+| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: ONE `Fold` kind) + `place` / `work` / `workers` / `knobs` / `schedule` / `stores` — every per-node slice keyed into `schedule` by the tree-path codec |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
@@ -29,12 +29,12 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   op; reductions are `Accum` statements inside a reduce `Loop`).
 - **Loop → tile** (after `lowering/tile`): `LoopOp` nodes replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` —
-  one `Fold` kind) plus thin schedule fields
-  (`place` / `workers` + residual tier/stage; every reduce partition rides its `Reduction` node); a kernel's structure
-  is read off its annotated reduce loop's `AxisRole`, not a Python
-  type. `010_recognize` lifts the `Map` (a thin `Body` wrapper over
-  the annotated loop nest, each reduce `Loop` carrying its `AxisRole` —
-  the ONLY loop annotation; the algebra is the body itself) with an UNMAPPED `Placement`;
+  one `Fold` kind) plus the root-global schedule fields
+  (`place` / `work` / `workers`, with every per-node slice — `TilePlan` / `ReducePlan` / `Stage` — keyed into
+  the `schedule` dict); a kernel's structure is read off the node's derived role, not a Python
+  type. `010_recognize` lifts the `Fold` term (the loop nest reconstructed on demand, each reduce `Loop`
+  carrying its `AxisRole` — the ONLY loop annotation; the algebra is the term's own
+  `lift` / `(init, combine)`) with an UNMAPPED `Placement`;
   The tile schedule maps the free
   axes onto the grid and decides the reduce `ReducePlan` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
@@ -171,34 +171,37 @@ stored `combine`, and `Fold.from_loop` reconstructs it from the body alone). Com
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
-**The algebra is in the body, not a tag** (`ir/stmt/algebra.py` — the consolidated
-algebraic vocabulary). There is no stored / derived `AlgebraKind` and no op-tree node zoo:
-a kernel's compute is ONE `Map` — a thin `Body` wrapper over the per-cell loop-IR stmts
-(operand `Load`s, the lift `Assign`s, an optional annotated reduce `Loop`, then the
-post-reduce projection) — and a pass reads its algebra **structurally** off the annotated
-reduce loop where it needs it, never a Python type:
+**The algebra is in the term, not a tag** (`ir/stmt/algebra.py` — the consolidated algebraic
+vocabulary). There is no stored / derived `AlgebraKind` and no op-tree node zoo. The stored tile IR has
+exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
-- `Map` — the pointwise lift wrapper: a `body` (a `Body` of stmts) + a derived `out`
-  property (the carried state of a trailing reduce `Loop`, else the body's last def). It
-  HAS a `Body`, it is not one; there is no `source` / nested-node field — composition is
-  just stmt order in the body.
-- A reduction is a `Map` whose body holds the **annotated reduce `Loop`** followed by its
-  projection. The `Loop` carries its `AxisRole` (`loop.role`); `ops.axis_role(op)` reads that role —
-  `PLANAR` (plain `sum`/`max`/`mean`), `TWISTED` (online-softmax / flash), `CONTRACTION` (matmul), or
-  `FREE` (pointwise / flat fallback) — off the NODE (`ops.head`, whose `role` is derived), falling back to
-  the annotated `Loop` only for the raw-loop-IR escape. `ops.reduce_loop(op)` still returns the outermost
-  annotated reduce `Loop`, but only for callers that consume a body: reading a node FACT off a synthesized
-  nest is the inversion `ops` exists to prevent (`Fold.loop` splices every edge and flattens every nested
-  node just to hand back the property it was given).
-- A contraction is a `Map` whose reduce `Loop` is `CONTRACTION`: the `⊗` lift `Assign` sits
-  in the loop body and the additive fold `Accum` IS the loop-level algebra spelling. `Fold.loop`
-  derives exactly that `Accum`-in-`Loop` form from the stored algebra — there is no separate
-  loop builder.
+- an OPTIONAL iteration `axis` (`None` = the zero-axis node);
+- a pure `lift` `Lambda` `λ(k, v₁…vₙ) → S` — the element's SINGLETON state (ι is spelled in the lift;
+  softmax's is `(x, 1)`);
+- the monoid's flat `(init, combine)` fields — ONE program, whose results ARE the fold's accumulator names;
+- a symmetric tuple of `operands` — the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params.
 
-`Fold.lower()` is now just the `Map`'s body verbatim — the folds were already
-dissolved into loose fold `Accum`s (and the streaming `merge` for a twisted fold) at
-recognition, and the reduce `Loop`s carry their role annotation, so one `lower`
-call emits the kernel's per-cell body with nothing left to expand.
+**`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a constructor returning a
+`Fold` plus a PREDICATE answering the reading: `axis is None` for the projection, `is_contraction(x)` for the
+bilinear one. A predicate cannot be constructed, subclassed or annotated, which is the point — there is no
+type to dispatch on and no second place for a fact to live.
+
+- A ZERO-AXIS fold is what `Map` was: no iteration and no monoid, its `lift` IS the per-cell projection. So
+  softmax's normalize, RMSNorm's, and flash's `divide(O, l)` are all one kind composed at two depths.
+- The BILINEAR shape — operands `(b₀, a, b₁…)` under a `multiply` lift with a componentwise-additive
+  combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The `⊗` and the
+  additive fold `Accum` appear in the DERIVED `Fold.loop`, never as stored loop syntax.
+- Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis, `TWISTED` off the combine's
+  twist family, `CONTRACTION` off the bilinear reading alone, `PLANAR` otherwise. `ops.head` reaches the node
+  through the projection wrapper; `ops.reduce_loop` still returns the outermost annotated reduce `Loop`, but
+  only for callers that consume a body — reading a node FACT off a synthesized nest is the inversion `ops`
+  exists to prevent (`Fold.loop` splices every edge and flattens every nested node just to hand back the
+  property it was given).
+
+`Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
+from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
+algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
+what makes kernel identity the α-invariant TERM HASH (`ops.term_key`) rather than the lowered nest.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -243,7 +246,7 @@ online softmax: state `(m, l, O)`, partial `(score, value)`, identity `(−inf, 
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
-`Load`/`Assign`/`Select` and the structural nodes `Fold`/`Map` opt in; `Accum`/`Write`/`Init`/`Loop` never do — no
+`Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop` never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
 (`Lambda.canonical` — free names never renumbered). Formation is STRICT everywhere since 1q (the interim
 `effectful_lambda` is deleted; a kernel's root stores ride `TileOp.stores`, and only the tile layer's raw-loop-IR
@@ -505,7 +508,7 @@ at the call site instead — the contraction axis is `fold.axis` (there is no `k
 (only the placement binding is a method — `Sched.placed(node, plan)`, the ONE `(m, n)` rule per site shape, with
 `tile_of` its stored-slice reading and the enumeration passing candidate plans through the same door).
 
-`Fold.lower()` returns the `Map`'s body verbatim — the loop nest with its annotated reduce `Loop`s, the
+`Fold.lower()` returns the derived loop nest with its annotated reduce `Loop`s, the
 carriers already dissolved into loose folds + the streaming `merge` at recognition. The tensor-core, cooperative-combine, staging (cp.async / TMA), and warp-specialization tiers are materialized
 downstream in `lowering/kernel` against the op tree + schedule. The older tile-level `GridTile` / `ThreadTile` /
 `Stage` structures were removed in the tile-IR rebuild and are being rebuilt there as the schedules return (see

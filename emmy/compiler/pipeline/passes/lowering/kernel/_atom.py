@@ -1,6 +1,6 @@
 r"""The per-atom codegen strategies — the one seam every tiled contraction dispatches through.
 
-``_factor._bind`` (the output-tiled contraction arm) reads the tiling geometry off the a bilinear ``Fold``
+``_factor._bind`` (the output-tiled contraction arm) reads the tiling geometry off the contraction
 node and asks this module for the two codegen halves: :func:`reduce_codegen` (the sink-agnostic
 ``(state_decls, reduce_region)`` — the accumulator/operand decls + the shared :func:`_contract_kloop`
 K-loop) and :func:`store_sink` (the per-cell matmul sink). Both resolve through :func:`_atom_ops` to
@@ -179,7 +179,7 @@ def _warp_epilogue(
 # transform**: an ineligible kernel silently falls back to gmem-direct, and a staged kernel is
 # bit-identical to its gmem-direct baseline. The transport primitives (the fill loops + the
 # commit/wait / mbarrier handshakes) live in ``_stage.py``; these functions schedule them onto the
-# K-loop off the a bilinear ``Fold`` geometry.
+# K-loop off the contraction geometry.
 def _fold_frag(base: str, fold: int) -> str:
     """The per-fold-channel fragment name — the primary channel keeps the historic bare spelling
     (``_b0`` / ``_c0_0``), extra channels suffix ``_x<f>`` (the multi-B gate/up node)."""

@@ -166,7 +166,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     already factored (``split`` == ``ksplit``, extent == ``cta``) and the operands offset, so the
     partial is the **bare bilinear fold** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
     partition) and its projection retargeted to the workspace / an atomic output. Because the partial
-    is a bilinear ``Fold``, materialize expands it through ``_factor.factorize`` — **mma** for a warp
+    is contraction, materialize expands it through ``_factor.factorize`` — **mma** for a warp
     atom, scalar otherwise. No ``_slice_loop`` (unlike the residual plain-sum path).
 
     Finalize matches the additive-carrier finalize: ``atomic`` (``g<w>a``) atomicAdds the partition's

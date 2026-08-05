@@ -5,7 +5,7 @@ axis-in-index), the fold accumulator, and the projection epilogue.
 :func:`bind_contraction` reads them **structurally** off the annotated ``CONTRACTION`` reduce loop
 — the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
 the ``(a_load, b_load, acc, epilogue)`` facts ``010_recognize._nodify_contraction`` stamps onto the
-a bilinear ``Fold`` structural node at RECOGNIZE time (the node
+contraction structural node at RECOGNIZE time (the node
 is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕
 algebra a property of the loop, so no per-algebra op-tree node class is needed. The cooperative reduce
@@ -19,7 +19,7 @@ fork construction, alongside the warp static-K divisibility check, instead of fa
 Leading ``_`` so the pass loader skips this module.
 
 **Flash contractions are not recursively atomized.** Flash is a ``TWISTED`` kv
-``Fold`` over a ``Q@K`` a bilinear ``Fold`` ``source`` +
+``Fold`` over a ``Q@K`` contraction ``source`` +
 a ``P@V`` one in the ``step``, lowered on the scalar tier (block=1) — each contraction carries a
 scalar ``TilePlan()`` and factorizes through the one ``_factor`` contraction path. A tensor-core
 flash tier would attach an mma ``TilePlan`` to those same nodes and route through that same path (no
@@ -121,7 +121,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     up projection silently dropped. A stat-bearing cone still binds through
     :func:`bind_prologue_contraction` (it carries a statistic prologue and a column loop this shape
     has no notion of); flash's PV binds at fusion. An unbindable body raises, matching the warp
-    gmem-direct guard. ``b_trans`` is not returned — the bilinear ``Fold`` re-derives it off its
+    gmem-direct guard. ``b_trans`` is not returned — the contraction re-derives it off its
     fold's ``b``."""
     k_name = loop.axis.name
     body = list(loop.body)
@@ -182,7 +182,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     fused gate/up MLP edge (``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold; fusion duplicates the
     cone SSA per channel, deduped by value-tree equality). Returns the same
     ``Fold.projection(body=projection, source=node)`` factorization the ``Fold`` spelling uses: the
-    ``source`` is ONE computed-A product a bilinear ``Fold`` whose A edge holds the cone INLINE —
+    ``source`` is ONE computed-A product contraction whose A edge holds the cone INLINE —
     a real node tree, ``Fold.projection(body=<the per-cell cone>, operands=(<the statistic Fold>,))``, so the
     statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
     with one :class:`Channel` ``(b, acc)`` per ⊗-fold (sharing is the node's arity; the node carries
@@ -298,7 +298,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     # per-cell normalize its body — so the K seam is the node boundary, not a stmt scan.
     # ONE bilinear node with a channel per ⊗-fold: operand sharing is edge reuse (the shared A
     # cone read once per component), and the node schedules / lowers as one unit through its own
-    # derived product loop. STORED as the a bilinear ``Fold`` itself (1s) — pure algebra:
+    # derived product loop. STORED as the contraction itself (1s) — pure algebra:
     # the output axes / tile / stage are caller facts, stamped at the point of use.
     node = Fold.contraction(
         k_axis=k_ax,

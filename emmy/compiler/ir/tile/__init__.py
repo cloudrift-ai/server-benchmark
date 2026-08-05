@@ -2,7 +2,7 @@
 
 See :mod:`.ir` and :mod:`.schedule`. The layer between Loop IR and Kernel IR: a
 :class:`TileOp` holds the structural-IR root ``op`` (a :class:`~.ir.Fold` / :class:`~.ir.Fold` /
-a bilinear ``Fold``, with computed operands stored inline on their edges) plus
+a contraction, with computed operands stored inline on their edges) plus
 ``place`` / ``work`` / ``knobs`` and the tree-path-keyed ``schedule`` dict, so the *schedule*
 (free axes, reduce partition, grid binding) stays separate from the term; dispatch reads
 ``ops.axis_role``, no per-kind type.

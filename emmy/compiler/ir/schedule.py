@@ -10,8 +10,8 @@ beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
 **codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
 :class:`WarpSpec` + :class:`Placement`). The per-node slices live in ``TileOp.schedule`` (1r —
-keyed by the tree-path codec, read through ``ops.Sched``; the derived bilinear ``Fold`` carries
-them as view fields) beside the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
+keyed by the tree-path codec, read through ``ops.Sched`` — the term itself carries no schedule
+field) beside the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
 fields (``place`` / ``work`` / ``workers``).
 
 A reduction's only freedom is **how the reduce axis is partitioned across hardware levels**

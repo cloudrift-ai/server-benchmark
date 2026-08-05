@@ -235,8 +235,8 @@ def seal_workers(tile) -> None:
 
 
 def head(op):
-    """The kernel's compute NODE — a :class:`~emmy.compiler.ir.tile.ir.Fold` /
-    a bilinear ``Fold``, bare or under its projection (zero-axis) fold — or
+    """The kernel's compute NODE — a :class:`~emmy.compiler.ir.tile.ir.Fold` at any role, bare or
+    under its projection (zero-axis) fold — or
     ``None`` for a pure pointwise cell / the raw-loop-IR escape (a zero-axis fold with no operands).
 
     The ONE accessor for "which node is this kernel about", replacing the hand-spelled
@@ -251,7 +251,7 @@ def head(op):
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback zero-axis ``Fold`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Fold` / a bilinear ``Fold`` synthesizes its loop
+    :class:`~emmy.compiler.ir.tile.ir.Fold` with an axis synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
     :attr:`Fold.loop`); a zero-axis ``Fold``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a

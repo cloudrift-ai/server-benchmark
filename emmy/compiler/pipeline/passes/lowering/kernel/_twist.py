@@ -1,7 +1,7 @@
 """The fragment realizer — a TWISTED carrier realized at WARP-FRAGMENT residence.
 
 The one ``_bind`` pipeline calls :func:`realize_warp_twist` when the reduce arm's tree carries a
-warp tile (:func:`warp_source` — the stream's head a bilinear ``Fold`` stamped with an mma
+warp tile (:func:`warp_source` — the stream's head contraction stamped with an mma
 :class:`TilePlan` by the schedule): the streaming reduce keeps its per-step values in mma
 C-fragments instead of scalars, so every piece of the scalar lowering is *realized* at the new
 residence — the fragment row of the placement-keyed fold (a within-warp ``FragmentRowReduce``
@@ -21,7 +21,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   (score, …)``, pivot first): the pivot's per-block fold is a ``FragmentRowReduce`` of its
   ``maximum`` (rowmax) + the running-stat update / rescale; a denominator component (literal-1
   term) row-reduces the exp-weight fragments (rowsum) into ``l = l·α + Σp``; an expectation
-  component (a value term) IS the P@V a bilinear ``Fold`` — its ⊗ lowers to ``mma.sync`` with
+  component (a value term) IS the P@V contraction — its ⊗ lowers to ``mma.sync`` with
   the register-resident probability converted straight into its A-operand fragments by the C→A
   REGISTER repack (``FragmentRepack``, the ``AtomKind.c_to_a_repack`` lane-map compatibility —
   no smem round-trip, no sync; gated at schedule time);
@@ -184,7 +184,7 @@ def _frag_contraction(
     b_swizzle: str = "NONE",
     reg_depth: int = 1,
 ) -> list[Stmt]:
-    """One warp-tiled a bilinear ``Fold`` step as fragment codegen — the ``read → ⊗ → fold`` spine
+    """One warp-tiled contraction step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
     stamped :class:`TilePlan` (``regs`` / ``bk``). ``tiles`` is the ``(acc_frags, a_frags)`` pair
     per REGISTER QUERY TILE (the plan's ``regs[0]``): the A fragments are always resident (flash Q

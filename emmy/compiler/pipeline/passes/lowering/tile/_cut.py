@@ -46,7 +46,7 @@ from emmy.compiler.ir.tile.ir import (
 )
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
-from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
+from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
@@ -67,9 +67,11 @@ def _place_pins() -> dict[str, str]:
     return pins
 
 
-#: The schedule knob families a golden / ``--ab`` row pins. A live pin from any of them marks a
-#: pinned re-record compile, where the pin — not a recorded routing entry — must decide the form.
-_SCHEDULE_FAMILIES = ("TILE", "STAGE", "REDUCE", "WORK", "RASTER", "WSPEC")
+#: The schedule knob families a golden / ``--ab`` row pins, plus the env-pin-only ``WSPEC`` alias. A
+#: live pin from any of them marks a pinned re-record compile, where the pin — not a recorded routing
+#: entry — must decide the form. The stamped families come from ONE list (``knob.SCHEDULE_FAMILIES``);
+#: only the alias is local, because no realized row carries it.
+_SCHEDULE_FAMILIES = (*SCHEDULE_FAMILIES, "WSPEC")
 
 
 def _schedule_pins_live() -> bool:

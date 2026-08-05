@@ -25,8 +25,9 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE monoid's flat **`(init, combine)`** fields
   (ONE program, its results the fold's real accumulator names; the free helpers in `ir/stmt/algebra`), and a symmetric
   tuple of **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params). **`Map` and
-  `Contraction` are DERIVED READINGS, not stored kinds** — constructors that return a `Fold`, with `isinstance`
-  answering the reading. A ZERO-AXIS fold (`axis is None`) is what `Map` was: no monoid, its `lift` IS the per-cell
+  `Contraction` are DERIVED READINGS, not stored kinds** — constructors that return a `Fold`, with PREDICATES
+  answering the reading (`axis is None` for the projection, `is_contraction(x)` for the bilinear one; a predicate
+  cannot be constructed, subclassed or annotated, which is the point). A ZERO-AXIS fold (`axis is None`) is what `Map` was: no monoid, its `lift` IS the per-cell
   projection, so softmax/RMSNorm/flash's `divide(O, l)` are all one kind composed at two depths. The BILINEAR shape —
   operands `(b₀, a, b₁…)` under a `multiply` lift and a componentwise-additive combine — is what `Contraction` was,
   exposing `a` / `channels` / `b_trans` off `operands` (arity N = the fused gate⊗up edge; sharing is the node's arity).
@@ -35,8 +36,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   / the `schedule` dict) with the `(m, n)` axes bound onto the `TilePlan` slice at the point of use (`TilePlan.at`);
   `as_fold()` is now the identity. Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis,
   `TWISTED` off the combine's twist family, `CONTRACTION` off the bilinear reading or the composed split-K operand,
-  `PLANAR` otherwise — so the PLANAR demotion is a formation fact with no role rewrite (`demoted()` moves the edges
-  inline and the same derivation answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
+  `PLANAR` otherwise — so the PLANAR demotion is a formation fact with no role rewrite (moving the edges inline is
+  enough; the same derivation then answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
   segments off those readings — `PLACE@a`'s golden rows depend on it.
   The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
   family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
@@ -107,10 +108,12 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
   synthesized contraction node — a twisted monoid is a monoid,
   selected structurally not as a distinct kind). The SCHEDULE step (the `020_schedule` rule) is ONE RECURSIVE row
-  enumerator over the SITE TREE (`ir/tile/path.py`) — per-site typed slices keyed on the site's `AxisRole` (the
-  domain is `search/space.py`'s move catalog), the parent's choice bounding each child's candidates and the
-  kernel's single `WORK` inventory folding back UP, spelled ONCE per family site-local → one `build_fork_tree`
-  over levels `[WORK, *site keys, RASTER]`. A MATERIALIZED operand is not a site (its transport is the parent's
+  enumerator over the SITE TREE (`ir/tile/path.py`): the kernel's single `WORK` inventory is CHOSEN first (every
+  value resolves against it — `TilePlan.parse(spec, work)` / `ReducePlan.parse(spec, work)` read the widths off
+  it), then the sites are a product under that fixed context, each spelling its typed slice ONCE, site-local →
+  one `build_fork_tree` over levels `[WORK, *site keys, RASTER]`. Dispatch is two stored-param predicates on the
+  node (`axis is None` / `is_contraction`), NOT the `AxisRole` — which stays a loop annotation and a materializer
+  read. The domain is `search/space.py`'s move catalog. A MATERIALIZED operand is not a site (its transport is the parent's
   `STAGE`); a COMPUTED one IS (it enumerates its own families). **No role builds `TileOp`s directly and no term
   shape gets its own path.** It is UNDER RECONSTRUCTION: the enumerator currently emits NOTHING, so `020` leaves
   every term unmapped — the guardrail contract, so kernels still compile on the materializer's per-cell path at

@@ -8,25 +8,34 @@ specializations**: it dispatches on the fold's DERIVED role (`Fold.role` — `FR
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
-## The tile scheduler is ONE recursive row enumerator
+## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its
 `schedule` slices, and offers them as a fork — is driven by the `020_schedule` rule. A row is a joint assignment
-across every SITE of the term, and the tree that generates it is the term's own:
+across every SITE of the term. The kernel's ONE worker inventory is chosen FIRST; the sites are then a product under
+that fixed context:
 
 ```
-rows(site, inherited) = [ merge(v, *child_rows)                       # spelled through ops.Sched.key, site-local
-                          for v in values(site.role, site)            # the domain: search/space.py
-                          if legal(v, inherited)                      # DOWNWARD: the parent's tier bounds the child
-                          for child_rows in product(rows(c, ctx(site, v)) for c in children(site))
-                          if derive_inventory(...) succeeds ]         # UPWARD: the ONE WORK inventory folds up
+enumerate(term) = [ r for reading in readings(term)                  # collapse / mixed-A — the two tree rewrites
+                      for work in inventories(term)                  # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
+                      for r in rows(root_site(reading), work) ]
+rows(site, work) = [ merge(v, *child_rows)                           # spelled through ops.Sched.key, site-local
+                     for v in values(site, work)                     # the domain: search/space.py, RESOLVED vs work
+                     for child_rows in product(rows(c, work) for c in children(site))
+                     if legal(site, v, child_rows) ]
 fork = build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
 ```
 
-**No role builds `TileOp`s directly, and no term shape gets its own path.** The recursion is what lets a term whose
-operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its transport
-is enumerated at the parent's `STAGE`; a computed operand IS a site, so it enumerates its own families and the
-parent's `STAGE` narrows to the compute fill.
+**`WORK` leads because the codec says so**: `TilePlan.parse(spec, work)` and `ReducePlan.parse(spec, work)` read a
+value's unit widths and coop width OFF the inventory, so the dependency runs work → slice. Fixing it at the root also
+removes a cycle — a cooperative candidate cannot be parsed without the inventory it would itself determine — and
+turns three parent/child coupling rules into "the child resolves against the same `work`, and an unspellable
+candidate is simply not in `values(site, work)`".
+
+**No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
+term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its
+transport is enumerated at the parent's `STAGE`; a computed operand IS a site, so it enumerates its own families and
+the parent's `STAGE` narrows to the compute fill.
 
 Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
 
@@ -42,14 +51,17 @@ Three layers own three different questions, and keeping them apart is what stops
   predicates. The smem budget is enforced by the stage RESOLVERS there, which return the largest legal `Stage` or
   decline — a size, not a yes/no. These are also the recursion's downward filter.
 - **CHOICE** is the walk itself: which families a SITE offers, the conservative option-0 each leads with, and how a
-  row becomes a `TileOp`. Dispatch is keyed on the derived `AxisRole`, never on a node type.
+  row becomes a `TileOp`. Dispatch is TWO stored-param predicates on the node — `node.axis is None` (the register
+  strip) and `is_contraction(node)` (tile × stage × reduce), else the reduce partition. **Not `AxisRole`**: the role
+  never selected a fourth arm, `TWISTED` is derived by matching the combine's operation family (an operation match
+  wearing an algebraic name), and `PLANAR` is the residue. The role stays a loop annotation and a materializer read.
 
 Three properties this shape enforces:
 
-- **`WORK` is derived, never a free variable.** The codec's dependency runs slice → work
-  (`plan_workers` → `derive_workers` → `ops.seal_workers`), so the inventory folds UP out of every site's slices and
-  a combination whose slices disagree is never built (a tiled scalar site and a coop reduce are co-representable
-  only when `par_m == 1 and par_n == coop`). That is also what makes `WORK` legal as the outermost fork level.
+- **`WORK` is chosen once, then validated.** Every site resolves against it, so a combination whose slices disagree
+  is never built (a tiled scalar site and a coop reduce are co-representable only when `par_m == 1 and par_n ==
+  coop`); `derive_inventory` checks the chosen inventory is the one the resolved slices imply, and
+  `ops.seal_workers` stamps it. The producer band `+p<np>` is part of the inventory and is CHOSEN with it.
 - **Uniform key sets per fork, `""` a DECIDED empty.** The evidence pick's prefix-consistency depends on it: an
   absent key reads as "free" and would let a gmem-direct leaf inherit a staged row's measurement.
 - **Enumeration produces a SET; ranking is the prior's job.** The only ordering obligation is that each family's
@@ -269,8 +281,9 @@ goes through; `.loop` splices only the operand edges the derived step did not co
 escape, an impure-bodied zero-axis fold), and its byte-identity gate compares the derived body/axis/unroll only —
 the role annotation is the fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and
 derives `PLANAR` (the 1l
-demotion, now a formation fact; `_extract_lift` accepts any PURE prefix, and `Fold.demoted()` un-hoists a
-demoted cone into the lift body). Kernel identity is the α-INVARIANT TERM HASH (`ops.term_key`: canonical
+demotion, now a formation fact; `_extract_lift` accepts any PURE prefix). The inverse — un-hoisting a computed
+edge back into the lift body — has no implementation at present: its only caller was the scheduler's collapse arm,
+and it returns with the enumerator. Kernel identity is the α-INVARIANT TERM HASH (`ops.term_key`: canonical
 renumbering in first-appearance walk order plus hash-time ANF body-order canonicalization — the stored term is never
 reordered, the lowered nest keeps storage order, identity does not; the lowered-nest identity is retired), consumed
 by `op_cache_key`'s TileOp arm and `Graph.structural_key`'s op field. The ZERO-AXIS fold is what `Map` was — no

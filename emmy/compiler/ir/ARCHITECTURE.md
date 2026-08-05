@@ -437,8 +437,9 @@ CELL's reading is a function of the schedule slice alone. `axes` is `compare=Fal
 dimension, so it never reaches `spell()`, a stamped knob row, a golden or a prior key. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
 structurally off the node (`ops.axis_role` — every role DERIVES from arity: no axis is `FREE`, a twisted combine
 `TWISTED`, the bilinear shape `CONTRACTION`, else `PLANAR`), not a bespoke Python type per schedule. The PLANAR
-demotion is therefore a formation fact with no role rewrite: `demoted()` moves the edges inline and the same
-derivation answers `PLANAR` by itself.
+demotion is therefore a formation fact with no role rewrite: moving the edges inline is enough, and the same
+derivation answers `PLANAR` by itself. (The inline-the-edges rewrite itself is not in the tree today — its one
+caller was the deleted scheduler's collapse arm.)
 
 There is exactly ONE node walk over a stored term — `tile/path.py::sites` — shared by the key resolver, the
 stampers, the seam enumerator and every plain "walk the nodes" reader (take `.node` off each site). `tile/ir.py`

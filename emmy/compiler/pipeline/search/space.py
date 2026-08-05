@@ -131,14 +131,6 @@ WORK = Knob(
 )
 
 
-def wspec_moves() -> list[str]:
-    """The warp-specialization ``WSPEC`` codec candidates — uniform ``""`` first (the conservative
-    option-0), then the producer-band splits. Per-row legality (a warp tile over a resolved TMA
-    stage, the ``block_threads + 32·aux ≤ 1024`` and ``32·aux ≤ block_threads`` thread budgets) is
-    the scheduler's."""
-    return ["", "p1", "p2"]
-
-
 def _raster_features(val) -> dict[str, float]:
     """The ``RASTER`` sub-features for the priors — the stripe group size (``0.0`` = the flat
     N-fastest order) and the orientation flag (``1.0`` = ``gn``, the transposed grouping)."""
@@ -441,13 +433,13 @@ def stage_moves(*, warp: bool) -> list[str]:
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
 
-def splitk_moves(*, warp: bool) -> list[ReducePlan]:
+def splitk_moves() -> list[ReducePlan]:
     """The cross-CTA split-K ``REDUCE`` candidates, both tiers each: the deferred-kernel finalize
     (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
     ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
     packed-pair red). The scheduler's ``atomic_ok`` gate keeps atomic rows
-    off multi-fold / non-distributive-projection nodes. These EXTEND the serial option-0."""
-    del warp  # both tiers share the catalog; per-node legality lives in the scheduler's gates
+    off multi-fold / non-distributive-projection nodes. These EXTEND the serial option-0. Both tiers share the
+    catalog — per-node legality lives with the enumeration's gates, not here."""
     return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
 
 

@@ -366,15 +366,15 @@ class _Decomp:
     cta: int = 1
     coop: int = 1
     finalize: str = "atomic"
-    # The ``b<n>t`` transposed cooperative band (k-major matvec lane mapping) — a different
-    # kernel from the interleaved ``b<n>`` at the same width, so it must reach both the features
-    # and the ``tile_signature`` identity (``b<n>t`` goldens are recorded in the per-GPU YAMLs).
+    # The ``coop-t`` transposed cooperative band (k-major matvec lane mapping) — a different
+    # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
+    # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU YAMLs).
     coop_transposed: bool = False
 
 
 def _reduce_decomp(knobs: dict) -> _Decomp:
     """The primary reduce axis's ``(cta, coop, reg)`` partition factors, decoded from the
-    single ``REDUCE`` codec knob (``g<n>`` cta / ``b<n>`` coop / ``r<n>`` reg — the reduce
+    single ``REDUCE`` codec knob (``g<cta>`` cta / ``coop[-t]`` coop / ``r<reg>`` reg — the reduce
     tier's one decomposition knob, decided in the ``_schedule`` helper). The ``serial``
     remainder is derived from the schedule (``ceil(extent / parallel)``), not a knob, so it
     stays the ``_Decomp`` default."""
@@ -648,7 +648,7 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     )
     out = {k: g[k] for k in _REDUCE_FEATURE_KEYS if k in g}
     out["D_reduce_ilp"] = math.log2(max(float(d.fold), 1.0))
-    # The ``b<n>t`` transposed band: same thread count as its interleaved twin, entirely different
+    # The ``coop-t`` transposed band: same thread count as its interleaved twin, entirely different
     # kernel (k-major lane sweep, smem-tree combine) — without this flag the two featurize
     # byte-identically. Coop moves enumerate on the TILE-less / per-cell tier only, so this block
     # is the one place the letter needs to surface.

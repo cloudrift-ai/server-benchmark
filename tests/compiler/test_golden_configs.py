@@ -260,7 +260,7 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         assert not stage or stage in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
         red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
-        assert red is None or red in splitk_moves(warp=warp) + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+        assert red is None or red in splitk_moves() + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
 
 
 # --- dynamic (symbolic-axis) goldens -----------------------------------------

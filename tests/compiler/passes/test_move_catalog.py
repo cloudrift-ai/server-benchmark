@@ -129,7 +129,7 @@ def test_schedule_leaf_set_equals_catalog():
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).
-    n_reduces = 1 + len(splitk_moves(warp=False))
+    n_reduces = 1 + len(splitk_moves())
     for plan, tiled in by_tile.items():
         if not plan.is_tiled:
             continue
@@ -143,7 +143,7 @@ def test_schedule_leaf_set_equals_catalog():
         else:
             assert {"", "d1/cp"} <= stages, f"{where}: missing the base resolved stages: {stages}"
         splits = {full_reduce(r) for r in tiled if full_reduce(r).stages}
-        assert splits == set(splitk_moves(warp=False)), f"{where}: {splits}"
+        assert splits == set(splitk_moves()), f"{where}: {splits}"
         split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r).stages}
         assert split_stages == stages, f"{where}: split rows must carry the same stage spellings"
         # Every contraction row also spells the launch-order codec (``RASTER``, bare/root-global) —

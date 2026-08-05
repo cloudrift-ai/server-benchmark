@@ -179,7 +179,7 @@ def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() 
     reconstructed to hang it on."""
     fold = _stat_fold()
     tile = TileOp(op=fold, name="k_stat")
-    tile.schedule["TILE@pj"] = TilePlan(regs=(64, 1))  # a key no stored node claims
+    tile.schedule["TILE@pj"] = TilePlan(regs=(1, 64))  # a key no stored node claims
     assert unplaced_slices(tile) == [("TILE@pj", tile.schedule["TILE@pj"])]
     text = tile.pretty_body()
     assert "    schedule" in text and "└─ TILE@pj = f64" in text

@@ -25,7 +25,7 @@ def test_alias_is_scalar_not_warp(alias: str) -> None:
 
 @pytest.mark.parametrize(
     ("alias", "work", "body_units", "body_regs"),
-    [("a:scalar/f4x8", None, (1, 1), (4, 8)), ("a:none", _THREADS, (1, 1), (1, 1)), ("a:scalar/f2x2", _THREADS, (8, 16), (2, 2))],
+    [("a:scalar/f4x8", None, (1, 1), (8, 4)), ("a:none", _THREADS, (1, 1), (1, 1)), ("a:scalar/f2x2", _THREADS, (16, 8), (2, 2))],
 )
 def test_alias_composes_with_scalar_body(alias: str, work, body_units: tuple, body_regs: tuple) -> None:
     plan = TilePlan.parse(alias, work)

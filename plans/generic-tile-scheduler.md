@@ -847,19 +847,23 @@ Merge gate (GPU): `make bench-kernels`, a flash/attention compile + tune probe, 
 sweep. A **Hopper** run is specifically owed — the paired verification ran on sm_89, where every
 `d*/tma*` row declines, so the staged-TMA tiers are unexercised.
 
-### Deferred to phase 1, deliberately — no gate exists for them yet
+### Deferred past the demolition window — the gate they were waiting for now exists
 
-Two repairs the panel review identified are correct and are NOT being done during the demolition window, because the
-digest baseline records the SCHEDULED kernels and the tree currently renders unscheduled ones. There is no live
-byte-identity gate, and a coordinate-ordering change without one is how a silent m/n swap ships:
+Two repairs the panel review identified were held back during the demolition, because the digest baseline records
+the SCHEDULED kernels and the tree then rendered unscheduled ones: there was no live byte-identity gate, and a
+coordinate-ordering change without one is how a silent m/n swap ships. The baseline is live now.
 
-- **`TilePlan.units` / `regs` store `(m, n)` in the warp tier and `(n, m)` in the scalar tier**, with four
-  accessors existing only to undo the flip. Store `(m, n)` always and reorder inside `spell()`; the stored spellings
-  are unchanged, so the digests are the gate. Then the "codec reminder" about reading orders deletes itself — it is
-  documentation of a trap, not a design.
-- **The matvec layout gate is stated twice** — an index-shape classifier on the reduce path and `node.b_trans` on
-  the contraction path, one fact with two predicates and opposite answers available. One predicate in `_legality.py`
-  over `(node, plan)`.
+- ~~**`TilePlan.units` / `regs` store `(m, n)` in the warp tier and `(n, m)` in the scalar tier**~~ — **LANDED**.
+  Both tiers store `(m, n)`; `spell` / `parse` apply the tier's own wire order, `plan_workers` and
+  `resolve_site_tile` transpose at the `Workers` boundary (the `WORK` codec keeps ITS order — that is the wire
+  format, not an internal convention), and the four accessors are plain reads. The stored spellings are unchanged,
+  so the digests were the gate. Every raw `regs[0]` that needed a comment to say which axis it meant is gone with
+  it — `_factor`'s chain column count and the strip width now read `reg_n` by name.
+- ~~**The matvec layout gate is stated twice**~~ — **already CLOSED**, before this window. `_k_contiguous(term,
+  node)` is the ONE classifier: a contraction reads `node.b_trans` off its B edge, a demoted matvec (whose loads
+  recognition keeps inline, so there is no edge) walks them instead, and both answers feed the one predicate
+  `_legality.coop_band_layout`. Two ways to READ the term is not the rule stated twice — the evidence available
+  genuinely differs by node shape, and the polarity lives in a single place.
 
 ## Invariants
 
@@ -918,9 +922,11 @@ accumulator statements and gmem `load`/store, no axis roles, no operand edges, n
 makes the collapse legible — recognition's whole job is to turn that nest into ONE node kind, and every `←` mapping
 on the tile view is a decision the loop form does not yet contain.
 
-Codec reminders for reading the annotations: thread `WORK` is `t<N>x<M>` and scalar `TILE` is `f<fn>[x<fm>]` — both
-**n-then-m**; warp `WORK` `w<M>x<N>` and warp `TILE` `<atom>/f<FM>x<FN>` are m-then-n. `operand[a]` / `operand[b]`
-are the bilinear reading's edge labels — the `a` / `b` path segments `PLACE@a` is keyed against.
+Codec reminder for reading the annotations: thread `WORK` is `t<N>x<M>` and scalar `TILE` is `f<fn>[x<fm>]` — both
+**n-then-m** on the WIRE; warp `WORK` `w<M>x<N>` and warp `TILE` `<atom>/f<FM>x<FN>` are m-then-n. That is now a
+fact about the spellings alone — `TilePlan` stores `(m, n)` on both tiers and applies the tier's order inside
+`spell` / `parse`, so no reader states an order of its own. `operand[a]` / `operand[b]` are the bilinear reading's
+edge labels — the `a` / `b` path segments `PLACE@a` is keyed against.
 
 **Each example carries a SITE TABLE** — the recursion's job for that shape, stated as
 `site → variables → constraints`. Read it as the contract phase 1 must satisfy: one row per site the walk visits,

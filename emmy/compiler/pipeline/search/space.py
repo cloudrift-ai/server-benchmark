@@ -321,7 +321,7 @@ def scalar_tile_moves() -> list[TilePlan]:
     """The scalar-contraction output-tile candidates: the per-cell tile first — the conservative
     option-0 — then :data:`_SCALAR_TILE_SPACE`'s points, parallel widths varying slowest."""
     moves = [TilePlan()]
-    moves.extend(TilePlan(units=(p["par_n"], p["par_m"]), regs=(p["reg_n"], p["reg_m"])) for p in _SCALAR_TILE_SPACE)
+    moves.extend(TilePlan(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_TILE_SPACE)
     return moves
 
 
@@ -401,7 +401,7 @@ def map_tile_moves() -> list[TilePlan]:
     per-cell option-0 (``""``, 1 elem/thread) the scheduler leads with; legality (a static inner
     free axis divisible by r) is the scheduler's. The ladder stops at ``f4``: ``f8`` regressed both
     pointwise goldens (register pressure — 22 vs 14 regs — outweighs the wider access)."""
-    return [TilePlan(regs=(2, 1)), TilePlan(regs=(4, 1))]
+    return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4))]  # (m, n): the strip widens the INNER axis
 
 
 def stage_moves(*, warp: bool) -> list[Stage]:

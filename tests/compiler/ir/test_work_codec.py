@@ -39,7 +39,8 @@ def test_tile_site_value_carries_no_worker_tokens() -> None:
     warp = TilePlan(atom=atom, units=(1, 8), regs=(4, 1), bk=4)
     assert warp.spell() == "mma_m16n8k16_f16_f32/f4x1/k4"  # the w1x8 units live in WORK
     assert TilePlan.parse(warp.spell(), Workers.parse("w1x8")) == warp
-    scalar = TilePlan(units=(16, 8), regs=(4, 8))
+    # Both tiers store (m, n); the scalar value spells n-then-m, so ``t16x8``/``f4x8`` is m=8, n=16 / m=8, n=4.
+    scalar = TilePlan(units=(8, 16), regs=(8, 4))
     assert scalar.spell() == "f4x8"
     assert TilePlan.parse("f4x8", Workers.parse("t16x8")) == scalar
     assert TilePlan.parse("", None) == TilePlan()  # the per-cell tier

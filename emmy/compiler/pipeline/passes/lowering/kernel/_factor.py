@@ -664,7 +664,7 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv) -> tuple[list[Stmt], list[Stmt
     store replicated per column (the column index a literal — the axis left the grid). ``pv`` is the
     stored expect fold; its column axis is the placement's trailing free axis (it left the grid)."""
     axis = ctx.free[-1].name
-    count = ctx.sched.tile_of(pv).regs[0]  # scalar reg order (reg_n, reg_m) — the column (n) register vector
+    count = ctx.sched.tile_of(pv).reg_n  # the column (n) register vector
     (rloop,) = _emit(op, ctx).body
     # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store
     # TEMPLATE — its index already places the grid axes at the output buffer's real slots (transpose /

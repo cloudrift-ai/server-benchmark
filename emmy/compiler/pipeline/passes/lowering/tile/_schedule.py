@@ -559,7 +559,7 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
 def _strip_width(plan: TilePlan) -> int:
     """The strip ratio ``r`` a strip row's ``TILE`` names — the inner register width. A warp codec
     names none (there is no fragment on a pointwise cell), so it reads ``0`` and is dropped."""
-    return 0 if plan.is_warp else plan.regs[0]
+    return 0 if plan.is_warp else plan.reg_n
 
 
 def _strip_values(term: _Term, node) -> list[dict]:
@@ -1131,7 +1131,7 @@ def _strip_variant(term: _Term, plan: TilePlan, name: str, knobs: dict) -> TileO
     ``050_vectorize_loads`` / ``080_vectorize_stores``. A different term, hence a different
     ``term_key`` and ``op_cache_key`` — which is why it is applied HERE and not at recognition."""
     inner = term.place.free[-1]
-    r = plan.regs[0]
+    r = plan.reg_n
     op = term.tile.op
     ssa: set[str] = set()
     for s in op.body:

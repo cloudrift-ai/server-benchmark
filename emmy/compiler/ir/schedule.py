@@ -639,17 +639,18 @@ class TilePlan:
     :attr:`regs`); ``bk`` chunks the K (contraction) axis (mma only). The all-``1`` scalar tile (a
     scalar ``atom``, ``units``/``regs`` ``(1, 1)``) is the per-cell tier — one thread per output cell.
 
-    ``units`` / ``regs`` are stored in each tier's **native codec order** — warp ``(WM, WN)`` /
-    ``(FM, FN)`` (m-then-n), scalar ``(par_n, par_m)`` / ``(reg_n, reg_m)`` (n-then-m, the
-    featurizer's inner/coalesced ``n`` vs outer ``m``); the :attr:`units_m` / :attr:`units_n` /
-    :attr:`reg_m` / :attr:`reg_n` accessors normalize that order. Spelled by the unified ``TILE``
-    knob — the warp form ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar ``f<fn>[x<fm>]``; the unit
-    widths ride the kernel's ``WORK`` inventory, so :meth:`parse` needs it and :attr:`is_warp`
-    discriminates the tier on the object. Decided by the tile schedule."""
+    ``units`` / ``regs`` are stored ``(m, n)`` — OUTER axis first — on both tiers, and the tier's
+    own codec order is applied in :meth:`spell` / :meth:`parse`, which is where the wire format
+    belongs (the warp value spells m-then-n, the scalar value n-then-m). They were stored in each
+    tier's native order instead, with four accessors existing only to undo the flip and every raw
+    ``regs[0]`` three files away needing a comment to say which axis it meant. Spelled by the
+    unified ``TILE`` knob — the warp form ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar
+    ``f<fn>[x<fm>]``; the unit widths ride the kernel's ``WORK`` inventory, so :meth:`parse` needs
+    it and :attr:`is_warp` discriminates the tier on the object. Decided by the tile schedule."""
 
     atom: Atom = SCALAR_ATOM
-    units: tuple[int, int] = (1, 1)  # warp (WM, WN) m-then-n / scalar (par_n, par_m) n-then-m
-    regs: tuple[int, int] = (1, 1)  # warp (FM, FN) m-then-n / scalar (reg_n, reg_m) n-then-m
+    units: tuple[int, int] = (1, 1)  # (m, n): warp (WM, WN) / scalar (par_m, par_n)
+    regs: tuple[int, int] = (1, 1)  # (m, n): warp (FM, FN) / scalar (reg_m, reg_n)
     bk: int = 1  # K-chunk per inner mma step, in atom_k units (mma only; 1 for scalar)
     #: The PLACEMENT this tile is over — the ``(m, n)`` output axes the widths above tile. Bound by
     #: the caller that owns the grid (:meth:`at`), so the slice derives its own ``(m, n)`` reading
@@ -667,10 +668,11 @@ class TilePlan:
         ``a:scalar`` alias."""
         if self.is_warp:
             k = f"/k{self.bk}" if self.bk > 1 else ""
-            return f"{self.atom.name}/f{self.regs[0]}x{self.regs[1]}{k}"
+            return f"{self.atom.name}/f{self.reg_m}x{self.reg_n}{k}"
         if not any(v > 1 for v in self.regs):
             return ""
-        return f"f{self.regs[0]}" if self.regs[1] == 1 else f"f{self.regs[0]}x{self.regs[1]}"
+        # The scalar value is n-then-m — the codec's order, applied here rather than stored.
+        return f"f{self.reg_n}" if self.reg_m == 1 else f"f{self.reg_n}x{self.reg_m}"
 
     @classmethod
     def parse(cls, spec: str | None, work: Workers | None) -> TilePlan:
@@ -687,7 +689,9 @@ class TilePlan:
         if not s:
             return cls()
         tokens = s.split("/")
-        units = tuple(work.units) if work is not None else (1, 1)
+        # ``Workers.units`` is the WORK codec's own order (warp m-then-n, thread n-then-m); a plan
+        # stores (m, n), so the thread inventory transposes on the way in.
+        units = (1, 1) if work is None else (tuple(work.units) if work.kind == "warp" else (work.units[1], work.units[0]))
         atom = None
         if not tokens[0].startswith(("f", "k")):
             try:  # a non-atom leading token is a retired ``n<N>x<M>`` / ``a:<atom>`` spelling
@@ -704,7 +708,8 @@ class TilePlan:
                 if len(d) > 2:
                     raise ValueError(f"bad TILE token {t!r}: expected ≤2 dims, got {len(d)}")
                 widths = [_codec_width(x, tok=t, codec="TILE") for x in d]
-                regs = (widths[0], widths[1] if len(widths) == 2 else 1)
+                fst, snd = widths[0], (widths[1] if len(widths) == 2 else 1)
+                regs = (fst, snd) if atom is not None else (snd, fst)  # warp f<FM>x<FN> / scalar f<fn>[x<fm>]
             elif atom is not None and t.startswith("k") and t[1:].isdigit():
                 bk = _codec_width(t[1:], tok=t, codec="TILE")
             else:
@@ -725,22 +730,22 @@ class TilePlan:
     @property
     def units_m(self) -> int:
         """Units on the outer (m) output axis — ``WM`` (warp) / ``par_m`` (scalar)."""
-        return self.units[0] if self.is_warp else self.units[1]
+        return self.units[0]
 
     @property
     def units_n(self) -> int:
         """Units on the inner (n) output axis — ``WN`` (warp) / ``par_n`` (scalar)."""
-        return self.units[1] if self.is_warp else self.units[0]
+        return self.units[1]
 
     @property
     def reg_m(self) -> int:
         """Register sub-cells on the outer (m) axis — ``FM`` (warp) / ``reg_m`` (scalar)."""
-        return self.regs[0] if self.is_warp else self.regs[1]
+        return self.regs[0]
 
     @property
     def reg_n(self) -> int:
         """Register sub-cells on the inner (n) axis — ``FN`` (warp) / ``reg_n`` (scalar)."""
-        return self.regs[1] if self.is_warp else self.regs[0]
+        return self.regs[1]
 
     @property
     def block_threads(self) -> int:
@@ -880,16 +885,18 @@ def resolve_site_tile(spec: str | None, work: Workers | None, reduce_spec: str |
         return plan
     if red.coop > 1:
         return plan  # the thread inventory is the coop band — TILE stays per-cell
-    return TilePlan(units=tuple(work.units))
+    return TilePlan(units=(work.units[1], work.units[0]))  # WORK's t<n>x<m> onto the plan's (m, n)
 
 
 def plan_workers(plan: TilePlan | None) -> Workers | None:
     """The worker inventory ONE tile plan implies — ``None`` for an untiled plan or a 1-thread
     thread inventory (a bare register strip: the per-cell forms keep their derived launch
-    geometry)."""
+    geometry). A plan stores ``(m, n)``; ``Workers.units`` is the ``WORK`` codec's own order, so
+    the thread inventory transposes on the way out — the inverse of :meth:`TilePlan.parse`."""
     if plan is None or not plan.is_tiled:
         return None
-    w = Workers(kind="warp" if plan.is_warp else "thread", units=tuple(plan.units))
+    units = (plan.units_m, plan.units_n) if plan.is_warp else (plan.units_n, plan.units_m)
+    w = Workers(kind="warp" if plan.is_warp else "thread", units=units)
     return None if (w.kind == "thread" and w.count == 1) else w
 
 

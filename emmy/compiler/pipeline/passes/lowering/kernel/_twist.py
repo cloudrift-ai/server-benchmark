@@ -71,7 +71,7 @@ from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Fold, is_contraction
-from emmy.compiler.ir.tile.ops import head
+from emmy.compiler.ir.tile.ops import head, stream_pair
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -425,11 +425,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # slices arrive ALREADY PLACED from ``Sched.tile_of`` — the query / value axes off the
     # placement's free axes, the score's stream axis off its parent fold read through a slice
     # partial's window PARENT — so this reader states no placement rule of its own.
-    qk: Fold = partial[0]
+    qk, pv = stream_pair(red)
     qk_t: TilePlan = ctx.sched.tile_of(qk)
-    pv_fold = next(s for s in partial[1:] if is_contraction(s))
-    pv: Fold = pv_fold
-    pv_t: TilePlan = ctx.sched.tile_of(pv_fold)
+    pv_t: TilePlan = ctx.sched.tile_of(pv)
     atom = qk_t.atom
     shape = atom.shape
     atom_n = shape[1]

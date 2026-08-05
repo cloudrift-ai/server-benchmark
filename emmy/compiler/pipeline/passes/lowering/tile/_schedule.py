@@ -85,7 +85,7 @@ from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction, operand_body
-from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled, stream_pair
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of, values_equal
@@ -487,9 +487,7 @@ def _stream_of(term: _Term, node) -> _Stream | None:
     stride, derived from the index + shape) and a fragment-unrealizable projection. Each is a
     property of the TERM, so it belongs in the choice layer — what a CANDIDATE must satisfy is
     :mod:`._legality`."""
-    steps = list(node.step_stmts())
-    qk = steps[0] if steps and is_contraction(steps[0]) else None
-    pv = next((s for s in steps[1:] if is_contraction(s)), None)
+    qk, pv = stream_pair(node)
     inputs = term.tile.inputs
     if qk is None or pv is None or not inputs or legal.fragment_epilogue(term.proj) is not None:
         return None

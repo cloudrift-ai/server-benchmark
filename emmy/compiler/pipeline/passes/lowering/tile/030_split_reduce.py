@@ -65,7 +65,7 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, scheduled
+from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, scheduled, stream_pair
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
@@ -290,7 +290,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
     projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
     only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
     (red,) = op.operands
-    score = red.step_stmts()[0]  # the role=CONTRACTION score fold (the hoisted operand edge) — its tile is the schedule read
+    score, _ = stream_pair(red)  # the score fold (the hoisted operand edge) — its tile is the schedule read
     cta = plan.cta
     src_sched = sched_of(tile)
     head_tile = src_sched.tile_of(score)
@@ -348,9 +348,8 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
     # resolved K/V pipeline carry over; the GRID stage is consumed (any residual partition would
     # re-key here too, but the stream's plan is GRID-only by construction).
     p_sched = Sched(partial_map, {})
-    sliced_head = sliced.step_stmts()[0]
-    sliced_pv = next(st for st in list(sliced.step_stmts())[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
-    orig_pv = next(st for st in list(red.step_stmts())[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
+    sliced_head, sliced_pv = stream_pair(sliced)
+    _, orig_pv = stream_pair(red)
     p_sched.put("TILE", sliced_head, head_tile)
     p_sched.put("TILE", sliced_pv, src_sched.tile_of(orig_pv))
     p_sched.put("STAGE", sliced, src_sched.get("STAGE", red))

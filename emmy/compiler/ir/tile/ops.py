@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, stmt_axis_names
+from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, is_contraction, stmt_axis_names
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -247,6 +247,26 @@ def head(op):
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
+def stream_pair(node) -> tuple:
+    """The ``(score, expectation)`` contractions a STREAMING fold schedules through — flash's
+    hoisted ``Σ Q·K`` edge at the head of its derived evaluation and the synthesized ``Σ_j P·V``
+    below the merge — or ``(None, None)`` for any other node.
+
+    Found by POSITION, because position is what tells them apart: the score is a hoisted operand
+    edge, so it leads the step; the expectation is synthesized under the merge stmts that produce
+    the softmax weight it reads, which is exactly why it cannot be hoisted above them.
+
+    ONE reading for a question five readers were asking on their own — and asking two different
+    ways, ``is_contraction`` in the tile and kernel layers against ``role is AxisRole.CONTRACTION``
+    in ``030_split_reduce``. Both answer identically for one stored kind, which is the problem: two
+    spellings of one rule stay equal only until one of them is edited."""
+    if not isinstance(node, Fold) or node.axis is None:
+        return None, None  # a zero-axis fold has no monoid, so no derived step to read
+    steps = list(node.step_stmts())
+    score = steps[0] if steps and is_contraction(steps[0]) else None
+    return score, next((s for s in steps[1:] if is_contraction(s)), None)
+
+
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback zero-axis ``Fold`` (no annotated reduce). A
@@ -318,6 +338,7 @@ __all__ = [
     "Sched",
     "axis_names",
     "axis_role",
+    "stream_pair",
     "cone_seam",
     "head",
     "projection_tail",

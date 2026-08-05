@@ -57,7 +57,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import Fold, effect_tail, is_contraction
-from emmy.compiler.ir.tile.ops import cone_seam, head
+from emmy.compiler.ir.tile.ops import cone_seam, head, stream_pair
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -588,7 +588,7 @@ def chain_source(op, sched):
     red = head(op)  # the compute node through the projection wrapper — ONE accessor, not a ternary
     if red is None or red.role is not AxisRole.TWISTED:
         return None
-    pv = next((s for s in list(red.step_stmts())[1:] if is_contraction(s)), None)
+    _, pv = stream_pair(red)
     if pv is None:
         return None
     ptile = sched.tile_of(pv)

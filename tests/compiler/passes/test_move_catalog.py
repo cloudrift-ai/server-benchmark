@@ -313,7 +313,10 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
     """The recursion's merge, asserted on the smallest two-site term:
 
     - every row spells BOTH sites — the contraction's families at the bare (primary) keys and the
-      computed edge's at its own axis-suffixed ones, so no leaf is missing a key another leaf has;
+      computed edge's at its own axis-suffixed ones, so no leaf is missing a key another leaf has.
+      An addressed key NO row decides is not spelled at all (``_decided``): the edge's ``STAGE@j``
+      is absent because a nested fold has no transport of its own to choose, and spelling it empty
+      everywhere would fabricate a second node group for the featurizer to pool;
     - both sites resolve against the SAME ``WORK`` entry (one kernel, one inventory), which is what
       the work-first order buys — a coop edge and a tiled parent are simply never combined;
     - the row count is the PER-SITE product, not a flat one.
@@ -329,7 +332,7 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
 
     # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
     # the stored corpus uses.
-    assert keys == ["TILE", "STAGE", "STAGE@j", "REDUCE", "REDUCE@j"], keys
+    assert keys == ["TILE", "STAGE", "REDUCE", "REDUCE@j"], keys
     assert all(set(r) >= set(keys) for r in rows), "a leaf is missing a key its siblings spell"
 
     # One inventory: every row's edge REDUCE resolves against the row's own WORK, and a cooperative
@@ -351,7 +354,7 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
         """The pair's joint inventory claim, or ``None`` when the two sites want different
         cooperative widths — ``_merge``'s rule, since a ``REDUCE`` value spells no width and the
         kernel has exactly one ``WORK`` entry to carry it."""
-        tiles = tuple(v["TILE"] for v in values if v.get("TILE") is not None)
+        plans = {i: v["TILE"] for i, v in enumerate(values) if v.get("TILE") is not None}
         coop = 1
         for v in values:
             red = v.get("REDUCE")
@@ -360,7 +363,7 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
             if coop > 1 and red.coop != coop:
                 return None
             coop = red.coop
-        return sch._Row(knobs={}, tiles=tiles, coop=coop)
+        return sch._Row(knobs={}, plans=plans, coop=coop)
 
     by_work: dict[str, int] = {}
     for r in rows:
@@ -411,15 +414,13 @@ def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatc
     """A pin NARROWS — except in ``_inventories``' one fallback, where a ``WORK`` pin that matches
     no candidate is offered BESIDE the catalog's own inventories instead of replacing them.
 
-    That branch is a phase-3 crutch, not a contract, so this pins both halves of it. A pin the
-    site DOES offer narrows to exactly that inventory. A pin it cannot offer widens — live today on
-    the twisted streaming fold, whose site enumerates cooperative bands only until
-    ``twisted_warp_moves`` gives it a warp geometry, which is why a ``w<M>x<N>`` pin matches nothing
-    there. The widening is measured, not assumed: narrowing it today drifts 4 of the 5 flash kernels
-    in the digest baseline.
-
-    When phase 3 lands, the widening half starts failing. That is the point — the fix then is to
-    delete the fallback, not to update this test."""
+    That branch is the PIN-BLEED rule: one env pin, several kernels in the graph, and this term is
+    not the one it was written for. A pin the site DOES offer narrows to exactly that inventory; a
+    pin it cannot offer leads and the catalog's own stay as siblings, so the term still maps rather
+    than being left unmapped over a pin that was never about it. The fixture below is a pure reduce
+    — a term with no warp geometry of any kind — which is what makes the second half a statement
+    about pin bleed and not about coverage: the twisted streaming site enumerates its own warp
+    inventories now, so a ``w<M>x<N>`` pin narrows there like anywhere else."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop

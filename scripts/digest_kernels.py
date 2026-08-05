@@ -180,20 +180,11 @@ CASES = [
 ]
 
 
-# The cases whose pins reach NO kernel today, each a consequence of the ONE enumerator gap left: the
-# flash streaming pair emits no schedule rows, so ``020_schedule`` leaves those terms unmapped and the
-# case digests the un-scheduled lowering path instead. Recorded, not tolerated — like the xfail
-# registry this set is STRICT: a case that starts landing its pins FAILS here until it is deleted, so
-# the remaining phase reports itself.
-UNSCHEDULED = frozenset(
-    {
-        "flash_hd128",
-        "flash_hd128_cp",
-        "flash_hd256_alt",
-        "flash_hd256_fm",
-        "flash_chain",
-    }
-)
+# The cases whose pins reach NO kernel — EMPTY: every case in the battery now lands its pins on a
+# scheduled kernel. The set is kept (not deleted) because it is the shape a coverage gap is recorded
+# in, and it is STRICT in both directions: a listed case that starts landing its pins FAILS here
+# until it is deleted, and an unlisted one that stops landing them fails too.
+UNSCHEDULED: frozenset[str] = frozenset()
 
 
 def _liveness(name, pins, realized):

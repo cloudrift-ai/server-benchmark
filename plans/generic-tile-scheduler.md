@@ -620,8 +620,13 @@ fill; the reduce tiers ride the COLLAPSE reading instead), the mandatory `sync` 
 (`_legality.resolve_sync_stage`), `computed_a_cover` for the exact-N/static-K geometry, and the redundant-statistic
 split-K (`_sliced_a` σ-reindexes the cone's per-cell BODY, never its row-invariant prologue).
 
-The one that remains — the flash streaming pair — is why the enumeration is recursive: a `_site_values` entry plus
-legality, not a new emitter.
+**Phase 3 has LANDED, and with it phase 4.** The flash streaming pair is why the enumeration is recursive, and it
+arrived as the plan said it would: `_site_values` entries plus legality, no emitter of its own. The one thing the
+plan did not anticipate is that the dependency between the two sites runs UPWARD as well as sideways — the stream's
+transport is sized by the score tile it feeds — so `_rows_at` enumerates the children first and asks the site's
+values per combination. That is a strictly smaller change than the `legal(site, v, combo)` hook this plan already
+specified, and it subsumes it: a site that refuses a combination returns no values, so the combination is never
+built.
 
 **Measured at the phase-1 commit**: `digest_kernels.py --check` green — all 24 cases byte-identical to the baseline
 and all 14 schedulable cases landing their pins (from 0), the 10 `UNSCHEDULED` still dark; `make test` green with 50
@@ -752,8 +757,25 @@ size** (241 registered xfails at the demolition, 198 after phase 1, 173 now — 
 | --- | --- | --- |
 | ~~**1**~~ | **LANDED — the enumerator, the target design, built once.** `_inventories(term)` at the root, then `_rows_at(site, work)` as a product over the site tree; `_merge` spelling every slice through `ops.Sched.key`; `_site_values(site, work)` returning TYPED slices from the `search/space.py` catalogs; `_legality.py`'s predicates as the `(term, candidate)` filter. Dispatch is the two node predicates. The four IR repairs landed with it: one contraction predicate shared by `path._walk` and `family_sites`; the `composed` arm out of `Fold.role`; the raw-loop escape separated structurally in `family_sites`; `stage_moves` returning `Stage`. `resolve_row` / `RowSlices` deleted and the `WSPEC` pin alias retired | **MET**: byte-identical kernels on all 24 digest cases, 14 of 14 schedulable cases live, `make test` + `make lint` green, 50 registry ids deleted, the row set identical but for the one accepted change above |
 | ~~**2**~~ | **LANDED — the COMPUTED operand edge, plus the term-reading union it needed.** `_readings` above the product (the monoid composition / the collapse / the mixed-A promotion, ≤ 2 per term, one reference key namespace, identity keyed on `canonical_row_key`); `_contraction_values`' computed-`a` inhabitant (warp-only, the mandatory `resolve_sync_stage` at `d1`/`d2`, `computed_a_cover`, the redundant-statistic split through `_sliced_a`); `_fill_realized` for the one nested site the parent form already partitions; the per-value inventory filter became the per-ROW `_work_holds`. `Fold.demoted()` returned; `warp_operand_dtype` made the copy transports' dtype rule a checked predicate | **MET**: 5 digest cases (`norm_linear` ×4 + `mlp_geglu`) left `UNSCHEDULED` landing their pins, the other 19 byte-identical, `make test` + `make lint` green, 25 registry ids deleted (20 fused-edge + 4 recognize-boundary + the golden-spelling gate) |
-| 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry, and `split` as a `stage_moves` member with its structural predicate (the codec rename already LANDED; what remains is the predicate + the catalog entry) | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
-| 4 | `schedule()`'s own dispatch and flash-form selection once 2–3 exist; `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have — unreachable until the flash warp realizer runs, so it has no obtainable baseline until then) | registry EMPTY + `make test` + `make lint` |
+| ~~**3**~~ | **LANDED — the flash streaming pair, as `_site_values` entries and legality.** `_streams` (structural: a fold whose derived evaluation contracts) makes the stream keep its children; `_twisted_values` gives the score edge and the derived P@V each their half of `twisted_warp_moves`' free geometry plus the chain's register vector; `_stream_values` reconciles the pair (`twisted_sites_agree`), resolves the K/V transport against it (`resolve_twisted_stage`, `split` now a `stage_moves` member behind `stage_split_groups`) and offers the split-KV siblings. The recursion gained ONE generalization: a site's values may read what its subtree decided, since a transport is sized by the tile it feeds. `_decided` drops an addressed `REDUCE`/`STAGE` key no row decides. `Sched.placed` gave the enumeration the same `(m, n)` rule `tile_of` reads through; `_twist._realize_prologue` took the node beside its slice (the `qk.acc` repair phase 4 owed) | **MET**: all 5 flash digest cases left `UNSCHEDULED` landing their pins, the other 19 byte-identical, the registry EMPTIED (all 173 ids), `make test` + `make lint` green |
+| ~~**4**~~ | **LANDED WITH 3.** There was no form dispatch left to write — the recursion IS the selection, so `schedule()` never grew a flash arm. `kernel/_twist.py`'s `qk.acc` was repaired the moment the warp realizer first ran (it read the accumulator name off a `TilePlan`; node and slice now travel as a pair, as everywhere else in that layer) | **MET**: registry EMPTY, `make test` + `make lint` green |
+
+**All four phases have landed; what is left is EVIDENCE, not enumeration.** Three obligations survive the rebuild and
+none of them is code the phases owed:
+
+- **The offline prior's refit.** `commands/fit.py::build_golden_groups` re-enumerates to fit
+  `prior/offline_weights.json`, and this rebuild widened two tile domains (71 → 163 scalar, 468 → 1140 warp per atom)
+  and added the flash rows. `emmy fit --artifact` plus a golden rank / top-1/10/25/50 re-verification is owed before
+  any `emmy eval offline` rank column is comparable to a pre-rebuild one. Two known cold picks ride on it: the
+  `rmsnorm_linear_n4096` shared-row lift (enumerated and materializable, xfailed strict because the cold prior ties
+  and the tie breaks on `canonical_row_key`), and any flash shape where the geometry and the per-cell form are close.
+- **A Hopper run.** Verification so far is sm_89 and sm_120; on sm_89 every `d*/tma*` row declines, so the
+  staged-TMA tiers of both the contraction and the streaming pair are exercised on one card only.
+- **The per-key value-domain snapshot** (the gate this plan deferred to phase 3): for each corpus shape,
+  `{codec key → sorted set of spelled values}` + the row count per key, checked in with drift detection on
+  `search/data/freeze.py`'s pattern. It upgrades completeness from "the golden row appears somewhere" to "for each
+  golden key, its value is a member of that key's domain". The loss it would localize is still CAUGHT today — by the
+  leaf-set equality + row-count equation and the two membership gates — just not localized to the key.
 
 **Phase 1 must land with no new BEHAVIOUR — but its row KEYS provably change in three places, and pretending
 otherwise would get the gate argued away at merge.** The three are known and small; each is either accepted with its

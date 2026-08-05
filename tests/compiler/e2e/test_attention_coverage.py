@@ -307,7 +307,8 @@ def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
 
 @requires_cuda
 def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
-    """A ``TILE@<pv_k>=f<D>`` pin (with ``TILE=a:scalar`` covering the score node) selects the CHAIN
+    """A ``TILE@<pv_k>=f<D>`` pin (with ``TILE=a:scalar`` covering the score node and the ``""``
+    inventory the chain rides — one thread per query row) selects the CHAIN
     row on a shape where the mma tier is also on offer — the pinned spelling of the shared-score
     scalar baseline. Regression: the fold dispatch used to route ANY live ``TILE`` pin to the warp
     rows alone, so no pin could reach the chain and the scalar pin degraded to the per-cell tier
@@ -316,7 +317,7 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
     # vars with overwrite=False, so a var another test already set (or left behind) would win over
     # this test's aggregate under xdist; monkeypatch on the individual vars reverts cleanly.
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    monkeypatch.setenv("EMMY_WORK", "")
     monkeypatch.setenv("EMMY_TILE@PJ", "f64")
     monkeypatch.setenv("EMMY_REDUCE", "")
     torch.manual_seed(0)
@@ -423,7 +424,8 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     """A pinned non-conservative warp-flash geometry — several warps per CTA, a wide streaming key
     block (the per-step C→A slices) — still lowers through the one fragment realizer and matches
     torch. Pins the move grid's realizability, not just the conservative option-0 the cold pick takes."""
-    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/w{um}x1/f1x{nt}/k4")
+    monkeypatch.setenv("EMMY_TILE", f"mma_m16n8k16_f16/f1x{nt}/k4")
+    monkeypatch.setenv("EMMY_WORK", f"w{um}x1")
     torch.manual_seed(um * 10 + nt)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
@@ -512,8 +514,9 @@ def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):
     mma targets packed f16 fragments (``_h<j>``) and each streaming KV block promote-folds them
     into the f32 output shadows the rescale / projection / store read. Matches torch over the
     gmem-direct AND staged (cp.async ring) streams."""
-    monkeypatch.setenv("EMMY_TILE@DD", "a:mma_m16n8k16_f16/w1x1/f1x2/k4")
-    monkeypatch.setenv("EMMY_TILE@PJ", "a:mma_m16n8k16_f16_f16/w1x1/f1x8")
+    monkeypatch.setenv("EMMY_TILE@DD", "mma_m16n8k16_f16/f1x2/k4")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f16/f1x8")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     if stage:
         monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(11)
@@ -539,11 +542,11 @@ def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):
 @pytest.mark.parametrize(
     ("geom", "stage", "loopify"),
     [
-        ("w1x1/f1x2/k4", "", 4),  # gmem-direct: O_i_f rescale/divide + P@V load+mma + stores re-roll
-        ("w1x1/f1x2/k4", "", 2),  # LOOPIFY=2 also re-rolls the 2-long QK sacc_f scale
-        ("w1x1/f2x2/k4", "", 4),  # per-query-tile suffixed families (O_i_q0_f / O_i_q1_f)
-        ("w1x1/f1x2/k4", "d2/cp", 4),  # staged: block_threads carried through the re-roll rename
-        ("w1x1/f2x2/k4", "d2/cp", 2),  # staged + partial N-atom runs (arrayed to full family size)
+        ("f1x2/k4", "", 4),  # gmem-direct: O_i_f rescale/divide + P@V load+mma + stores re-roll
+        ("f1x2/k4", "", 2),  # LOOPIFY=2 also re-rolls the 2-long QK sacc_f scale
+        ("f2x2/k4", "", 4),  # per-query-tile suffixed families (O_i_q0_f / O_i_q1_f)
+        ("f1x2/k4", "d2/cp", 4),  # staged: block_threads carried through the re-roll rename
+        ("f2x2/k4", "d2/cp", 2),  # staged + partial N-atom runs (arrayed to full family size)
     ],
 )
 def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
@@ -555,7 +558,8 @@ def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
     the gmem-direct and staged (``cp.async`` ring) tiers, plain and ``f2x2`` per-query-tile geometries —
     the staged tier exercises the ``block_threads`` carry-through and the partial-run arraying-to-full-
     family-size guards."""
-    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_TILE", f"mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_LOOPIFY", str(loopify))
     torch.manual_seed(loopify * 7 + len(geom) + len(stage))
@@ -593,7 +597,7 @@ def test_readable_scalar_chain_fold_matches_torch(monkeypatch):
     while a multi-use temp (``m_i__t0``, read by two subtracts) stays named. SASS-identical, so it
     still matches torch. ``--no-readable`` (the default off) keeps the SSA ladder."""
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    monkeypatch.setenv("EMMY_WORK", "")
     monkeypatch.setenv("EMMY_READABLE", "1")
     torch.manual_seed(7)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
@@ -1483,10 +1487,12 @@ def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
 @pytest.mark.parametrize("br", ["32", "64"])
 @pytest.mark.parametrize(("B", "H", "S", "D"), [(1, 2, 64, 16), (1, 4, 128, 32)])
 def test_cooperative_flash_matches_torch(monkeypatch, br, B, H, S, D):
-    """A cooperative-KV flash (BR>1) fuses to one kernel carrying the monoid cross-thread combine
-    (``__shfl_xor_sync`` for BR≤32, a per-component smem tree for BR>32) and matches torch SDPA —
-    the KV parallelization is accuracy-preserving (the LSE monoid is associative + commutative)."""
-    monkeypatch.setenv("EMMY_REDUCE", f"b{br}")
+    """A cooperative-KV flash (``REDUCE=coop`` over a ``t<N>`` inventory) fuses to one kernel carrying
+    the monoid cross-thread combine (``__shfl_xor_sync`` at a band ≤ 32 lanes, a per-component smem
+    tree above) and matches torch SDPA — the KV parallelization is accuracy-preserving (the LSE
+    monoid is associative + commutative)."""
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
+    monkeypatch.setenv("EMMY_WORK", f"t{br}")
     torch.manual_seed(0)
     q, k, v = (torch.randn(B, H, S, D) for _ in range(3))
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))

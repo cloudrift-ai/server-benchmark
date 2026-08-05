@@ -499,7 +499,8 @@ so there is no `a_body` / `b_body` / `a_name` / `b_name` quartet on the node).
 `step_stmts` all compute; a property that only renames a stored field or wraps one `isinstance` does not, and is spelled
 at the call site instead — the contraction axis is `fold.axis` (there is no `k_axis` alias), a computed A is
 `not isinstance(c.a, Load)` (the same spelling the B side already used), and a schedule slice is `sched.get("STAGE", n)`
-(only `tile_of` is a method, because only it does work — the `(m, n)` placement binding).
+(only the placement binding is a method — `Sched.placed(node, plan)`, the ONE `(m, n)` rule per site shape, with
+`tile_of` its stored-slice reading and the enumeration passing candidate plans through the same door).
 
 `Fold.lower()` returns the `Map`'s body verbatim — the loop nest with its annotated reduce `Loop`s, the
 carriers already dissolved into loose folds + the streaming `merge` at recognition. The tensor-core, cooperative-combine, staging (cp.async / TMA), and warp-specialization tiers are materialized

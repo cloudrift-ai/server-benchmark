@@ -955,11 +955,11 @@ on a matmul / pointwise / attention archetype. The full design lives in
 
 The step BETWEEN those two — schedule enumeration: mapping the free axes onto the grid and forking the per-node
 `TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` families — is ONE recursive row enumerator over the term's own site
-tree (the `020_schedule` rule). It covers every single-site term plus the COMPUTED `a` edge (the fused norm→linear /
-gate⊗up cone); the flash streaming pair is the remaining gap, and a term it cannot schedule enumerates NO rows and
-stays unmapped rather than being guessed at — the guardrail contract, with the coverage gap riding
-`tests/xfail_registry.py`. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the
-design.
+tree (the `020_schedule` rule). It covers every single-site term, the COMPUTED `a` edge (the fused norm→linear /
+gate⊗up cone) and the flash streaming pair — the two-site families are why it recurses. A term it cannot schedule
+enumerates NO rows and stays unmapped rather than being guessed at — the guardrail contract, with any coverage gap
+riding `tests/xfail_registry.py`. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for
+the design.
 
 ## Tunable knobs
 

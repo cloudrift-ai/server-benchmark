@@ -303,24 +303,28 @@ def _frag_contraction(
     return out
 
 
-def _realize_prologue(stmts, qk: TilePlan, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
+def _realize_prologue(stmts, qk: Fold, tile: TilePlan, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
     """Realize the score prologue (the plain stmts between the head contraction and the carrier's
     streaming merge) at fragment residence, stmt kind by stmt kind. Returns ``(hoisted, stream)`` —
     the loop-invariant scalar ``Load``\\ s (hoisted above the stream when a realized stmt reads
     them) and the in-stream fragment stmts. Stops at the first stmt touching a carrier state name —
-    from there the merge is REGENERATED from the channel spec, not walked."""
+    from there the merge is REGENERATED from the channel spec, not walked.
+
+    Node and slice travel as a PAIR, like everywhere else in this layer: the value name the walk
+    threads is the score's own accumulator (algebra — the node's), while the coordinates it
+    substitutes are the placed geometry's (the slice's)."""
     hoisted: list[Load] = []
     stream: list[Stmt] = []
     score = qk.acc
-    m_name, n_name = qk.axes[0].name, qk.axes[1].name
+    m_name, n_name = tile.axes[0].name, tile.axes[1].name
     # An additive score bias (the explicit SDPA ``attn_mask``): a per-``(m, kv)`` tensor ``Load``
     # awaiting its ``add`` — realized as a :class:`FragmentBiasAdd` per score fragment when the add
     # consumes it. The load-index template substitutes the fragment coordinate vars for the axis
     # vars; a SYMBOLIC extent clamps the coordinate to the last valid index (cp-style clamp-read —
     # the duplicates land on cells the boundary FragmentMask / store guard discards).
     pending: dict[str, Load] = {}
-    row_coord: Expr = Var(FRAG_ROW) if qk.axes[0].extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.axes[0]))
-    col_coord: Expr = Var(FRAG_COL) if qk.axes[1].extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.axes[1]))
+    row_coord: Expr = Var(FRAG_ROW) if tile.axes[0].extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(tile.axes[0]))
+    col_coord: Expr = Var(FRAG_COL) if tile.axes[1].extent.is_static else _clamp_last(Var(FRAG_COL), _ext(tile.axes[1]))
     for s in stmts:
         if is_contraction(s):
             continue  # the expect fold — regenerated from its channel
@@ -669,7 +673,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         qk_seg, stream = stream, []
 
         for qi, qt in enumerate(qtiles):
-            hoisted, pro = _realize_prologue(partial[1:], qk_t, qt.sfrags, col_bases, qt.row_base, set(names))
+            hoisted, pro = _realize_prologue(partial[1:], qk, qk_t, qt.sfrags, col_bases, qt.row_base, set(names))
             if qi == 0:  # the hoisted scalar constants (the 1/√d scale) are tile-invariant
                 state.extend(hoisted)
             stream += pro

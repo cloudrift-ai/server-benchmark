@@ -128,8 +128,15 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `canonical_row_key` — a collision RAISES. Covered today: the strip, the reduce partition, the contraction product
   with split-K, and the COMPUTED `a` edge (warp-only over the MANDATORY resolved `sync` compute fill at `d1`/`d2`, the
   redundant-statistic split-K, the cone's statistic a nested site whose only spellable value is the decided empty —
-  the fill realizes that partition itself). The flash streaming pair still emits nothing and arrives as a
-  `_site_values` entry, never a new emitter. A term it cannot schedule stays unmapped — the guardrail contract, so
+  the fill realizes that partition itself) — and the FLASH STREAMING PAIR, which arrived as `_site_values` entries
+  plus legality and no emitter of its own: the hoisted QK edge and the derived PV each enumerate their half of
+  `twisted_warp_moves`' geometry, the pair reconciles at the stream (the sibling equality, which is what the recursion
+  is for), and the stream itself decides the K/V transport (`split` — one group per staged edge — is a
+  `stage_moves` member gated by its structural predicate) and the split-KV partition. The chain is the same PV site
+  under the `""` inventory; the per-cell / cooperative forms are the reduce partition on the same term. An addressed
+  `REDUCE`/`STAGE` key no row decides is not spelled at all — the featurizer reads one node group per `@<axis>`
+  element, so a decided-empty one would fabricate a partitioned reduce at a site that has none.
+  A term it cannot schedule stays unmapped — the guardrail contract, so
   kernels still compile on the materializer's per-cell path at un-scheduled performance, and the coverage gap rides
   `tests/xfail_registry.py` (strict; empty is the completion gate) plus `scripts/digest_kernels.py`'s per-case pin
   liveness. A stated row budget (`MAX_ROWS`) bounds one kernel's enumeration and fails loudly rather than truncating →

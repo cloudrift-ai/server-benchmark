@@ -112,15 +112,37 @@ warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composit
 the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `sync`
 compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
-statistic site is a nested site under the same inventory. The **flash streaming pair** still enumerates nothing; it is
-the reason the enumerator recurses, and it arrives as a `_site_values` entry plus its legality predicates — not as a
-new emitter. A term the enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a
-failure, since kernels still compile on the materializer's per-cell path, so what is missing is schedule coverage,
-never a compile.
+statistic site is a nested site under the same inventory. The **flash streaming pair** is carried too, and it is why
+the enumerator recurses: a `_site_values` entry plus legality predicates, with no emitter of its own. A term the
+enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
+still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.
 
-One nested site answers with the decided empty and nothing else: a cone's statistic under a computed `a` edge, because
-the parent FORM realizes its partition itself — `_stage.sync_stat_fill` stripes the statistic one row per warp with
-the warp's lanes striding the fold, a single hardwired partition (`_schedule._fill_realized`). A value there would
+**The streaming pair, site by site.** A fold whose DERIVED evaluation contracts (`_schedule._streams` — structural,
+never the `TWISTED` role) keeps its children as sites: the hoisted QK score edge and the synthesized P@V. Each
+enumerates its own half of `twisted_warp_moves`' free geometry — the key-atom / query-tile pair, since `warps_m` is
+the inventory and lives once in `WORK` — and the pair is reconciled at the STREAM (`_legality.twisted_sites_agree`:
+the P@V rows are the score's rows, its K-chunk is the streamed key block). That reconciliation is the whole reason
+the enumeration recurses: two sites that must agree cannot be a product over one node's families. The stream itself
+then decides what only it can see — the K/V transport, sized against the geometry its children chose
+(`_legality.resolve_twisted_stage`, including the `split` per-edge groups that also stage Q), and the cross-CTA
+split-KV `030_split_reduce` realizes as partial + LSE finalize. The **chain** is the same P@V site under the `""`
+inventory (the value axis leaves the grid for a per-thread register vector); the **per-cell / cooperative** forms are
+the ordinary reduce partition on the same term, with both children at their decided empty. A form whose derived
+evaluation is scheduled folds the stream ITSELF, so it composes with no partition tier but the split-KV — the
+alternatives are alternatives, not a product, and a `REDUCE` pin the form cannot honor drops those rows rather than
+being ignored (the reduce tiers, which do realize it, carry the term instead).
+
+Two nested sites answer with the decided empty and nothing else. A cone's statistic under a computed `a` edge,
+because the parent FORM realizes its partition itself — `_stage.sync_stat_fill` stripes the statistic one row per
+warp with the warp's lanes striding the fold, a single hardwired partition (`_schedule._fill_realized`). And the
+streaming pair's own `REDUCE` / `STAGE`: their K-step rides `TILE` and their operands ride the stream's `STAGE`, so
+those keys are not spelled at all (`_schedule._decided`). That is not an exception to the uniform-key rule — the rule
+is that every LEAF spells the same keys, not that every site gets one per family — and it is load-bearing rather than
+cosmetic: the featurizer reads one node GROUP per distinct `@<axis>` element and gives each group the reduce geometry
+whenever its slice carries a `REDUCE` key at all, so a decided-empty `REDUCE@dd` fabricates a partitioned reduce at a
+site that has none and sum-pools its occupancy into the row (measured: `D_threads` and `D_splitk` tripled,
+`D_log2_ctas` reading 18 instead of 6, which cost the chain and warp forms their cold deploy). `TILE` keys are never
+dropped — that family is what NAMES the node group and what a golden joins against. A value at either site would
 stamp a knob no kernel realizes.
 
 A row BUDGET (`_schedule.MAX_ROWS`) bounds one kernel's enumeration and fails LOUDLY when exceeded — never
@@ -140,9 +162,11 @@ one encoded exception (it leads with its cooperative heuristic pick, and since s
 spellings, because the band's width moved into `WORK` — so the pair is checked together). **A row is its spelled
 knob dict**, so two candidate combinations spelling identically are one row, not two. And **the `WORK` pin's one
 non-narrowing branch is tracked**: a pin no candidate matches is offered beside the catalog's own inventories rather
-than replacing them, which is right for pin bleed across kernels and wrong for a coverage gap, and nothing at that
-point can tell them apart — so the terms that reach it are pinned by test until phase 3 gives the twisted site a
-warp geometry and the widening can become a plain narrowing.
+than replacing them. That is the PIN-BLEED rule — one env pin, several kernels in a graph, and this term is not the
+one it was written for — so emptying the fork would leave a term unmapped over a pin that was never about it (the
+strip site applies the same degrade to a warp `TILE` pin it cannot spell). The reading that used to share the branch,
+a coverage gap where narrowing would be right, is gone: the streaming site enumerates its own warp inventories, so a
+`w<M>x<N>` pin narrows there like anywhere else.
 
 ## No shape-specific pattern matching
 
@@ -469,11 +493,12 @@ structurally-different schedules as ONE prior-ranked fork — the warp (fragment
 `twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block × query-tiles-per-warp)` geometry grid (option-0 = the
 conservative one-warp / `2·atom_n` block / one tile; the third dimension is the `TILE` codec's `f<FM>x<FN>` reg_m —
 each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragments, FA-2's in-flight ILP; the Q@K /
-P@V mma `TilePlan`s are derived per point), the scalar
+P@V mma `TilePlan`s are the two sites' own values, reconciled at the stream), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
-leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set plus its ONE `WORK` inventory
-(decided-empty where a form doesn't tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows
-instead (pin-driven): the plan stamps
+leaf row spelling the same `TILE@dd` / `TILE@pj` key pair plus the BARE `REDUCE` / `STAGE` the stream is primary for,
+and its ONE `WORK` inventory (decided-empty where a form doesn't tile). The **flash split-KV** rows are fork siblings
+of the un-split warp rows on an under-occupied grid (the occupancy read is the warp row's OWN launch grid — the
+shrunk query axis, the value axis gone), and a cross-CTA `REDUCE=g<n>k` pin selects them: the plan stamps
 onto each row's `Fold` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
 the CTA's slice, its absolute base/bound on the sliced axis's `Axis.window`; raw `(m, l, O)` state to an f32
 `__partial` workspace) plus
@@ -486,13 +511,16 @@ clamp-read overhanging query rows would otherwise write into the next head's wor
 un-split grid starves the SMs (few heads / short query axis: the 2-head hd256 seq-512 shape runs 33.6 → 11.3 µs
 under `g8k`, parity with torch SDPA's internally-split flash; the symbolic hd512 dynM stream 135.2 → 116.7 µs
 under `g2k` on the 5090). Any
-other non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
-divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
-another kernel), while a non-warp `TILE` pin narrows the flash rows by their stamped per-node spellings
-(codec-canonicalized so `a:scalar` ≡ `""` and `f64x1` ≡ `f64`): `TILE=a:scalar` keeps
-the per-cell tier, `TILE=a:scalar,TILE@<pv_k>=f<d>` pins the CHAIN row deterministically, and an unmatched pin keeps
-the full prior-ranked fork. Each warp geometry row crosses with its **K/V operand-stage** candidates (`STAGE@<kv>` —
-gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
+other non-empty `REDUCE` pin drops the streaming rows and stays the reduce-tier escape, which is the tier that
+realizes a partition. `TILE` pins narrow by MATCHING each site's own catalog, codec-canonicalized so `a:scalar` ≡
+`""` and `f64x1` ≡ `f64`: an explicit `TILE@<axis>` pin names one site and is authoritative there, while a BARE pin
+fans out to every eligible site and cannot say which it meant — so it narrows where it matches and leaves a site it
+names nothing at alone (`Knob.narrow`'s no-match-keeps-full-list). That is what lets `TILE=a:scalar` keep the
+per-cell tier, `TILE=a:scalar` + `TILE@<pv_k>=f<d>` pin the CHAIN row deterministically, and one bare pin spelling
+the f16-accumulate P@V plan (the masked-flash golden form) select that variant while the score keeps its own
+f32-accumulate catalog — the pair then reconciling at the stream. A bare pin that named nothing at a site decides
+nothing there, precision gates included. Each warp geometry row crosses with its **K/V operand-stage** candidates
+(the stream's bare `STAGE` — gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
 batched K/V operands encode as rank-N TMA boxes with leading extent-1 dims, the load's own batch/head index exprs
 riding as origin coords; cp.async slabs take the +16 B row pad, TMA slabs stay dense under the hardware swizzle; the
 resolved `Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop` drain, K/V slabs kept in each
@@ -501,9 +529,15 @@ operand's own layout so staging stays bit-identical to gmem-direct). **Both tran
 (which has no OOB zero-fill) clamp-reads the tail chunk's key rows to the last valid key. Either way the streaming
 drain's tail masks (the same clamp the gmem-direct symbolic path makes) zero those keys' P columns exactly, so the
 masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the `staged_kloop` ring allocates the
-full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
-legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
-chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. Staging additionally requires the K/V (and,
+full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; a producer band over a symbolic kv is not
+built). A resolved TMA row additionally rides the `+p` producer band in `WORK` (the matmul tier's legality,
+`32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default; the per-edge
+`split` groups arm one mbarrier each, so they take no band). The `split` transport granularity — one group per staged
+edge, K refilling under softmax + P·V and V under the next step's Q·K, with Q staged through smem too — is a
+`stage_moves` member gated by its STRUCTURAL predicate (`_legality.stage_split_groups`: ≥ 2 staged edges consumed at
+distinct positions of the derived evaluation, which a contraction's single multiply never is, so the matmul
+resolvers decline it). The chain / coop / serial escapes stamp the decided-empty `STAGE: ""`. Staging additionally
+requires the K/V (and,
 for `split`'s staged Q, the A) BUFFER dtypes to match the atom's operand dtypes — the slab fills byte-copy and cannot
 convert, so a wide traced intermediate feeding the stream would deposit garbage; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,

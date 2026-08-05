@@ -223,15 +223,21 @@ class Knob:
             else:
                 config.set_knob(self.name, prev)
 
+    def pin_at(self, element: str) -> str | None:
+        """The env pin for this knob's ``<NAME>@<element>`` key ALONE — no bare fallback. The
+        EXPLICIT half of :meth:`narrow_at`: a bare pin cannot say which site of a multi-site family
+        it meant, so a caller that must tell an authoritative site pin from a fanned-out bare one
+        asks this first. The ``@``-suffixed key is not a valid shell var name, so it rides the
+        ``EMMY_KNOBS`` aggregate; :func:`parse_knob_spec` canonicalizes its element to lowercase,
+        matching the lowercase element spelling producers use."""
+        return config.knob_raw(f"{self.name}@{element}")
+
     def narrow_at(self, element: str) -> str | None:
         """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare
         ``<NAME>`` pin — the per-element read mirroring :func:`family_value`'s precedence
         (``TILE@d`` > bare ``TILE``). Returns the raw pin string (``None`` when neither is
-        set); the caller resolves vocabulary. The
-        ``@``-suffixed key is not a valid shell var name, so it rides the ``EMMY_KNOBS``
-        aggregate; :func:`parse_knob_spec` canonicalizes its element to lowercase, matching the
-        lowercase element spelling producers use."""
-        value = config.knob_raw(f"{self.name}@{element}")
+        set); the caller resolves vocabulary."""
+        value = self.pin_at(element)
         if value is not None:
             return value
         return self.raw()

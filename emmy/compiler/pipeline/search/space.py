@@ -411,11 +411,18 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     scalar stage resolver); the ``p2`` smem→register double-buffer is an ``ldmatrix`` transform,
     warp-only.
 
+    ``split`` — one transport PER staged edge instead of one over all of them — joins the warp list.
+    It resolves only where the fold's edges are consumed at DISTINCT positions of its derived
+    evaluation (``_legality.stage_split_groups``), which a contraction's single multiply never is,
+    so the matmul resolvers decline it and the streaming pair is where it lands.
+
     Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the enumeration
     leads with it as the conservative option-0. Emission is resolver-gated: a candidate is offered
     only when it RESOLVES against the built node, and the row carries the RESOLVED spelling."""
     depths = [Stage.parse(s) for s in ("d1/cp", "d2/cp", "d3/cp", "d4/cp", "d1/tma", "d2/tma", "d3/tma", "d4/tma")]
-    return [*depths, Stage.parse("d2/cp/p2")] if warp else depths
+    if not warp:
+        return depths
+    return [*depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is

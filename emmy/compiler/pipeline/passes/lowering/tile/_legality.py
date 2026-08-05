@@ -28,7 +28,7 @@ from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
-from emmy.compiler.ir.tile.ir import operand_name
+from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
@@ -39,6 +39,13 @@ _TMA_ALIGN = 16  # the NONE-swizzle box-copy rule: 16 B-aligned inner dim and in
 
 # cp.async needs a >= 4 B contiguous chunk, so a 2 B/elem slab's inner dim must be even.
 _CP_ASYNC_MIN_ELEMS = 2
+
+# The cp.async streaming slabs' padded rows, in elements — two slabs at ``2 * _twist._PAD`` each,
+# the bank-conflict break the hardware swizzle replaces on the TMA path.
+_STREAM_PAD_ELEMS = 16
+
+# The staged QUERY slab's row pad, in elements (the ``split`` arm stages Q through smem too).
+_STREAM_Q_PAD_ELEMS = 8
 
 
 def enforce(reason: str | None, *, pinned: bool) -> bool:
@@ -89,6 +96,8 @@ def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
     async load half) on a kernel that is not split across CTAs."""
     if stage is None or stage.transport != "tma":
         return "a producer band drives a resolved TMA stage; this row has none"
+    if stage.split:
+        return "a producer band arms ONE mbarrier ring; the per-edge transport split arms one per edge"
     if reduce.needs_split:
         return "a producer band and a cross-CTA split-K are not co-representable"
     return None
@@ -277,7 +286,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> St
     one enforcement point for the smem budget, and returning the largest legal stage is what keeps
     an over-budget row out of the fork instead of failing at materialization.
     """
-    if stage.split:
+    if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
     a_nbytes = atom.operand_dtype("a").nbytes
@@ -359,12 +368,187 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     return Stage(depth=depth, transport="sync", smem=(operand_name(c.a),), bk_elems=bk_elems)
 
 
+# ---- the twisted streaming pair ---------------------------------------------------------------- #
+
+
+def _reaches(stmt, edge) -> bool:
+    """Whether ``edge`` occurs anywhere under ``stmt``. The walk crosses operand EDGES as well as
+    nested bodies: an edge is not a body dependency (``Fold.nested`` withholds a contraction's
+    edges by design), and where an edge is consumed is exactly the question here."""
+    if stmt is edge:
+        return True
+    if isinstance(stmt, Fold) and any(_reaches(e, edge) for e in stmt.operands):
+        return True
+    return any(_reaches(s, edge) for b in stmt.nested() for s in b)
+
+
+def stage_split_groups(node: Fold) -> str | None:
+    """Whether ``split`` — the transport GROUP GRANULARITY — is structurally available on ``node``.
+    It cuts the fold's staged edges into one transport group EACH, which needs ≥ 2 staged operand
+    edges consumed at DISTINCT positions of the derived evaluation: the streaming pair's score edge
+    reads K at the head of the step, its synthesized PV reads V further down, so each group refills
+    in the phase that no longer reads it. A contraction consumes both edges in ONE multiply, so
+    there is a single group and nothing to cut — which is why the matmul resolvers decline the
+    value, now for a stated reason rather than by name.
+
+    STRUCTURAL, not geometric: the answer is a property of how the term is BUILT, so a refused pin
+    is a user error rather than a budget."""
+    if is_contraction(node):
+        return "STAGE split: a contraction's one multiply consumes both operand edges — one transport group, nothing to cut"
+    steps = list(node.step_stmts())
+    at = {i for e in node.operands if (i := next((n for n, s in enumerate(steps) if _reaches(s, e)), None)) is not None}
+    if len(at) >= 2:
+        return None
+    return (
+        f"STAGE split cuts a fold's staged edges into one transport group each; this fold consumes its "
+        f"{len(node.operands)} operand edge(s) at {len(at)} position(s) of its derived evaluation."
+    )
+
+
+def twisted_warp_columns(work) -> str | None:
+    """Constraint 15 — a TWISTED site is m-ONLY. The materializer has no cross-warp merge of the
+    twisted ``(m, l, O)`` carrier (both flash sites are realized at ``units=(um, 1)``), so a warp
+    inventory spending a second warp COLUMN names a stream that cannot be materialized at all."""
+    if work is None or work.kind != "warp" or work.units[1] == 1:
+        return None
+    return (
+        f"the twisted streaming pair is m-only (WN = 1) — there is no cross-warp merge of the (m, l, O) "
+        f"carrier; WORK {work.spell()} spends {work.units[1]} warp columns."
+    )
+
+
+def twisted_atom(atom, d_v: int) -> str | None:
+    """The mma atom's own demands on a streaming pair: the C→A register repack that feeds the P@V
+    fragments from the score's accumulator (constraint 11), and a value dim the PV fragment tiles
+    exactly (``WN·FN·atom_n = d`` at ``WN = 1`` — constraint 2)."""
+    if not atom.c_to_a_repack:
+        return f"atom {atom.name} has no C→A register repack — the P@V fragment feed has no tier without it"
+    if d_v % atom.atom_n:
+        return f"the value dim {d_v} is not a multiple of the P@V atom's n width {atom.atom_n}"
+    return None
+
+
+def twisted_block(stream: Fold, qk_tile: TilePlan) -> str | None:
+    """The streaming key block and the query-row block must COVER their extents exactly when those
+    are STATIC: a static ragged tail has no fragment mask (the symbolic path masks at the fragment
+    and guards the gmem reads, so a symbolic extent is fine). ``qk_tile`` is the PLACED score
+    slice, so its ``m`` side is the query axis and its ``n`` tile is the streamed key block."""
+    kv, m = stream.axis.extent, qk_tile.m.axis.extent
+    if kv.is_static and kv.as_static() % qk_tile.tile_n:
+        return f"the {qk_tile.tile_n}-key streaming block does not divide the static KV extent {kv.as_static()}"
+    if m.is_static and m.as_static() % qk_tile.tile_m:
+        return f"the {qk_tile.tile_m} query rows per CTA do not divide the static M extent {m.as_static()}"
+    return None
+
+
+def twisted_sites_agree(qk_tile: TilePlan, pv_tile: TilePlan) -> str | None:
+    """The QK / PV SIBLING EQUALITY — constraints 3 and 8. The two sites are enumerated
+    independently (they are two sites, and making them agree is what the recursion is for), so the
+    pair reconciles here: both schedule the mma tier or neither, the PV rows ARE the score's rows
+    (one register query chain each), and the PV K-chunk is the streamed key block the score just
+    produced. The block must also be a whole number of P@V atom-K steps — the C→A repack pairs
+    k-adjacent score fragments, so an odd one leaves a partial expect fold."""
+    if qk_tile.is_warp != pv_tile.is_warp:
+        return "the twisted pair schedules both sites on the mma tier or neither"
+    if not qk_tile.is_warp:
+        return None
+    if pv_tile.reg_m != qk_tile.reg_m:
+        return f"the P@V register query tiles ({pv_tile.reg_m}) must match the score's ({qk_tile.reg_m}) — one chain each"
+    atom_k = pv_tile.atom.atom_k
+    if qk_tile.tile_n % atom_k:
+        return f"the {qk_tile.tile_n}-key streaming block is not a multiple of the P@V atom K-step {atom_k}"
+    if pv_tile.bk != max(1, qk_tile.tile_n // atom_k):
+        return (
+            f"the P@V K-chunk k{pv_tile.bk} does not cover the {qk_tile.tile_n}-key streaming block "
+            f"(k{max(1, qk_tile.tile_n // atom_k)} at atom_k={atom_k})"
+        )
+    return None
+
+
+def splitkv_slice(stream: Fold, qk_tile: TilePlan, plan: ReducePlan) -> str | None:
+    """What a flash split-KV partition (``REDUCE=g<n>k``) demands. The FINALIZE is the first half
+    and it is categorical: the twisted ``(m, l, O)`` state folds across partitions through an
+    exp-family LSE combine, which no atomic spells — ``030_split_reduce``'s deferred-kernel arm is
+    the only realization. The second is geometric: the slices must be BLOCK-WHOLE, since the staged
+    chunking and the fragment column masks assume a whole number of streaming key blocks. A SYMBOLIC
+    kv always splits — ``030_split_reduce`` builds the bn-aligned runtime slice width and the
+    absolute bound the realizer stops and masks against."""
+    if plan.finalize != "kernel":
+        return "the twisted (m, l, O) state cannot finalize atomically — its e^{Δm} rescale is not an atomic; pin REDUCE=g<n>k"
+    ext = stream.axis.extent
+    if not ext.is_static:
+        return None
+    n = ext.as_static()
+    if n % plan.cta:
+        return f"split-KV width {plan.cta} does not divide the KV extent {n}"
+    if (n // plan.cta) % qk_tile.tile_n:
+        return f"the split-KV slice {n // plan.cta} is not a whole number of {qk_tile.tile_n}-key streaming blocks"
+    return None
+
+
+def resolve_twisted_stage(stream: Fold, qk: Fold, qk_tile: TilePlan, pv_tile: TilePlan, stage: Stage, budget: int) -> Stage | None:
+    """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of ONE
+    ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
+    K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). ``None`` when
+    the transport declines or the slabs exceed ``budget``.
+
+    Two transports resolve: **cp.async** (cooperative fills, +16 elem padded rows for the
+    bank-conflict break) and **TMA** (the batched K/V encode as rank-N boxes with leading extent-1
+    dims, so the slabs stay dense and take the hardware swizzle instead of padding; box dims cap at
+    the 256 hardware limit). ``sync`` has nothing to overlap. A SYMBOLIC kv stages under both — TMA
+    zero-fills the box overhang, cp.async clamp-reads the tail's key rows to the last valid key, and
+    the drain's tail masks zero their P columns either way; a STATIC, non-block-divisible kv has no
+    tail mask, so it stays gmem-direct.
+
+    ``split`` is the ALTERNATING single-slab pipeline: one K slab + one V slab, each on its own
+    mbarrier, refilled in the phase that no longer reads it (K under softmax + P·V, V under the next
+    step's Q·K) — the FA-2 choreography that overlaps a WIDE streaming block's copies in HALF the
+    paired ring's smem. It stages the QUERY tile through smem too (a padded row-major slab filled
+    once, its A fragments ldmatrix'd per atom-K chunk), which frees the resident Q registers that
+    made the wide block spill. Its structural eligibility is :func:`stage_split_groups`; the sizing
+    is here.
+
+    A resolver rather than a predicate, for the same reason the matmul ones are: the legal answer is
+    a SIZE (the ring depth the budget affords), and the row carries the RESOLVED spelling."""
+    if stage.transport not in ("cp.async", "tma"):
+        return None  # sync has nothing to overlap on a stream — there is no compute fill here
+    kv, bn = stream.axis.extent, qk_tile.tile_n
+    if kv.is_static and kv.as_static() % bn:
+        return None  # a static ragged tail has no mask on either transport — stay gmem-direct
+    head_dim, d_v = qk.axis.extent.as_static(), pv_tile.tile_n
+    elem_bytes = qk_tile.atom.operand_dtype("b").nbytes
+    if stage.transport == "tma":
+        if max(bn, head_dim, d_v) > _TMA_MAX_BOX:
+            return None
+        if (head_dim * elem_bytes) % _TMA_ALIGN or (d_v * elem_bytes) % _TMA_ALIGN:
+            return None
+        pad = 0  # TMA deposits dense — the hardware swizzle replaces the row pad
+    else:
+        pad = _STREAM_PAD_ELEMS
+    slot_bytes = bn * (head_dim + d_v + pad) * elem_bytes
+    if stage.split:
+        q_bytes = qk_tile.tile_m * (head_dim + _STREAM_Q_PAD_ELEMS) * elem_bytes
+        if q_bytes + slot_bytes > budget:
+            return None
+        # Single-slab by construction (``Stage`` rejects a deeper split) — the overlap comes from
+        # the phase split, and the ldmatrix ping-pong has no slot to alternate over.
+        return replace(stage, reg_depth=1, bk_elems=bn)
+    if slot_bytes > budget:
+        return None
+    # ``reg_depth`` <= 2: the streaming drains support the two-slot ldmatrix ping-pong (the next
+    # atom-K step's B fragments load while the current step's mmas consume, breaking the WAR hazard
+    # on the fragment registers); deeper ping-pongs cost registers the fm chains do not have.
+    return replace(stage, depth=min(stage.depth, budget // slot_bytes), reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
+
+
 def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.split or stage.transport not in ("tma", "cp.async") or not c.axis.extent.is_static:
+    if stage.transport not in ("tma", "cp.async") or not c.axis.extent.is_static:
+        return None
+    if stage.split and stage_split_groups(c) is not None:
         return None
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages
@@ -411,12 +595,19 @@ __all__ = [
     "producer_transport",
     "resolve_scalar_stage",
     "resolve_sync_stage",
+    "resolve_twisted_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
     "splitk_materialized_b",
     "splitk_slice_k_step",
     "splitk_width",
+    "splitkv_slice",
+    "stage_split_groups",
     "strip_width",
+    "twisted_atom",
+    "twisted_block",
+    "twisted_sites_agree",
+    "twisted_warp_columns",
     "warp_k_step",
     "warp_operand_dtype",
 ]

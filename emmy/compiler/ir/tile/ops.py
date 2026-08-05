@@ -101,7 +101,13 @@ class Sched:
 
         The pair is a function of the SITE (:meth:`_mn_for`), which is what makes one rule
         possible where there used to be three hand-written ``.at(...)`` calls."""
-        plan = self.get("TILE", node)
+        return self.placed(node, self.get("TILE", node))
+
+    def placed(self, node, plan):
+        """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
+        the same one rule :meth:`tile_of` reads through, offered to a caller holding a CANDIDATE
+        plan the table does not carry yet (the enumeration, whose legality predicates read the
+        placed geometry). Already-placed and unplaceable plans pass through."""
         if plan is None or self.place is None or plan.axes is not None:
             return plan
         mn = self._mn_for(node)

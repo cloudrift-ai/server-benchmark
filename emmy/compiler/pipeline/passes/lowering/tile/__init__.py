@@ -26,10 +26,12 @@
 the pointwise cell + the register-strip term reading, the reduce partition, and the contraction
 (scalar + warp tiers, staging, split-K, raster) — plus the COMPUTED operand edge (the fused
 norm→linear / gate⊗up cone), which arrives as a ``_site_values`` entry under the term-reading union
-rather than as an emitter of its own. The flash streaming pair still yields NO rows, and ``020``
-then leaves the term unmapped — the guardrail contract, ``[]`` and never a raise. Those tests ride
-``tests/xfail_registry.py``; the knob / path codec, the move catalog and the whole
-``lowering/kernel`` materializer are frozen — they are the contract the enumerator meets.
+rather than as an emitter of its own — the flash streaming pair included, whose two sites
+(the hoisted score edge and the derived P@V) enumerate their own halves of the twisted geometry and
+reconcile at the stream. A term the enumeration cannot schedule yields NO rows and ``020`` leaves it
+unmapped — the guardrail contract, ``[]`` and never a raise. The knob / path codec, the move catalog
+and the whole ``lowering/kernel`` materializer are frozen — they are the contract the enumerator
+meets.
 
 Recognition reads algebraic structure; scheduling is geometry; materialization back to
 loop IR happens in ``lowering/kernel`` — so the tile passes work purely with algebra

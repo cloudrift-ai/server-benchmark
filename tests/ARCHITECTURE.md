@@ -89,9 +89,10 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   lists the exact node ids in one place with one reason, and the root `conftest.py` applies a **strict** `xfail`
   mark at collection. Exact ids, never path globs — each id is an acceptance obligation for the replacement, and
   the file shrinking to empty is the completion gate. Strictness is what makes that a gate rather than a wish: an
-  id that starts passing fails the run until it is deleted from the list. Today it holds the tests the removed
-  tile scheduler took down. Reach for it only for a deliberate removal of that size; an ordinary known failure
-  still gets an inline mark.
+  id that starts passing fails the run until it is deleted from the list. Today it holds what the tile schedule
+  enumeration does not cover yet — the flash streaming pair and the graphs that contain it. Reach for it only for a
+  deliberate removal of that size; an ordinary known failure still gets an inline mark, where the reason can name its
+  own condition (the fused prologue's cold deploy pick is one).
 - **Consequence ids do not run.** `CONSEQUENCE_MODULES` in the registry names the modules whose ids fail only
   because their graph contains a gap the primary ids already track — whole-model and serving end-to-end, the
   golden drift gate. Those get `run=False`: the expectation is recorded, the minutes are not spent (the drift

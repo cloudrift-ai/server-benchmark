@@ -116,11 +116,6 @@ def _axis_span(axis) -> str:
     return f"{axis.name} in 0..{axis.extent}{parent}"
 
 
-def _kind(edge) -> str:
-    """An operand edge's inhabitant — the two things an input can be."""
-    return "materialized" if isinstance(edge, Load) else "computed"
-
-
 def _head(node, ctx: _Ctx) -> str:
     """One node's header line — its kind and the stored params that fit on a line. A λ-valued
     field is NOT one of them: its signature belongs on its own branch, next to the body it binds
@@ -239,7 +234,7 @@ def _pretty_place(tile) -> list[str]:
     if tile.work is not None:
         out.append(f"work   {tile.work.spell()}")
     if tile.workers is not None:
-        out.append(f"wspec  {tile.workers.spell()}")
+        out.append(f"band   {tile.workers.spell()}")
     return out
 
 

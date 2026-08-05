@@ -75,14 +75,43 @@ raise-vs-drop from whether the family is PINNED (an unpinned warp move with an i
 the same defect in a pin raises). That is the bug class — "the pin says yes and the enumeration says no" — the
 single-home rule exists to prevent.
 
-**Coverage, as it stands.** The recursion carries the SINGLE-SITE terms — the pointwise cell plus the
-register-strip term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over
-the scalar and warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce`
-consumes. The two MULTI-SITE families still enumerate nothing: a **COMPUTED operand edge** (the fused norm→linear /
-gate⊗up cone) and the **flash streaming pair**. They are the reason the enumerator recurses, and each arrives as a
-`_site_values` entry plus its legality predicates — not as a new emitter. A term the enumeration cannot schedule
-yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels still compile on the
-materializer's per-cell path, so what is missing is schedule coverage, never a compile.
+**Term READINGS — the one mechanism ABOVE the product.** Four moves rewrite the term rather than decorating it, and
+the criterion that separates a reading from a value is whether the rewrite changes the SITE SET, because that is what
+a product cannot absorb. The register strip and split-K do not (`r` and `cta` are spelled TILE / REDUCE values,
+applied at materialization); three do, and they are mutually exclusive by shape, so a term has at most TWO readings
+(`_schedule._readings`):
+
+- the MONOID-producer composition (`_atomize.bind_prologue_contraction`) — the fused norm→linear / gate⊗up edge, whose
+  contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
+  the map form's single reduce site, and its tree is the union's REFERENCE namespace: bare `REDUCE` must mean the
+  contraction's K fold, so the map reading spells its statistic at `REDUCE@<axis>` too;
+- the COLLAPSE (`Fold.demoted`) — a computed `a` edge spliced back INLINE, REMOVING its site. With no edges the
+  bilinear reading declines, so the fold derives `PLANAR` and takes the reduce tiers; this is what carries a stat-free
+  cone (`f(x) @ w`) and what a computed-A term with no legal warp row falls back to;
+- the mixed-A PROMOTION — a materialized **f32** `a` re-expressed as a one-`Load` cone, so it rides the converting
+  compute fill (a copy transport moves raw bytes; only the fill converts, on the slab store). It ADDS one site.
+
+The union carries three obligations: uniform key sets with `""` as a decided empty; NO cross-reading suppression (each
+gate is a local predicate on its own term — a 16-bit atom, a resolvable fill, an inventory a value can spell against);
+and reading identity surviving into the prior's key space, which `_enumerate` enforces by keying the row → reading map
+on `canonical_row_key` and RAISING on a collision (the fix would be an `S_*` stamp, never a new knob key).
+
+**Coverage, as it stands.** The recursion carries the single-site terms — the pointwise cell plus the register-strip
+term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and
+warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce` consumes — and
+the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `sync`
+compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
+k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
+statistic site is a nested site under the same inventory. The **flash streaming pair** still enumerates nothing; it is
+the reason the enumerator recurses, and it arrives as a `_site_values` entry plus its legality predicates — not as a
+new emitter. A term the enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a
+failure, since kernels still compile on the materializer's per-cell path, so what is missing is schedule coverage,
+never a compile.
+
+One nested site answers with the decided empty and nothing else: a cone's statistic under a computed `a` edge, because
+the parent FORM realizes its partition itself — `_stage.sync_stat_fill` stripes the statistic one row per warp with
+the warp's lanes striding the fold, a single hardwired partition (`_schedule._fill_realized`). A value there would
+stamp a knob no kernel realizes.
 
 A row BUDGET (`_schedule.MAX_ROWS`) bounds one kernel's enumeration and fails LOUDLY when exceeded — never
 truncates. The product across sites is generated rather than hand-written, so a widened catalog multiplies where a

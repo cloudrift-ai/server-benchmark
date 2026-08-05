@@ -155,10 +155,3 @@ def evaluate_golden(
     # golden) and optimistic (strictly-greater only), whose gap is the plateau width.
     rank, rank_opt = dual_rank(scores, gidx) if gidx is not None else (None, None)
     return rows[best], rank, len(rows), rank_opt
-
-
-def pick_matmul(M: int, N: int, K: int, dtype: str, ctx: Context) -> dict:
-    """Best knob row for an ``(M, K) @ (K, N)`` matmul under the offline prior —
-    no online data, no measurements. Thin wrapper over :func:`evaluate_golden`
-    (no golden to match). Returns ``{}`` if nothing enumerates."""
-    return evaluate_golden(M, N, K, dtype, {}, ctx)[0]

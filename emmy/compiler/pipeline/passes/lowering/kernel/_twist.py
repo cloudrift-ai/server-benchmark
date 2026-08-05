@@ -34,7 +34,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   the step's B fragments drain them via the staged ldmatrix variants (plain ``x2`` for the
   N-major K slab, ``x2.trans`` for the K-major V slab). cp.async fills pad the rows +16 B; TMA
   box-copies the batched operands via rank-N descriptors into dense hardware-swizzled slabs, and
-  a stamped ``WSPEC`` split rides ``_wspec_kloop`` with the wrapped elected fill tid.
+  a stamped producer band rides ``_producer_band_kloop`` with the wrapped elected fill tid.
 
 Nothing here keys on a kernel *identity* — the walk reads node structure, channel algebra, and the
 stamped schedule; an unrealizable tree is rejected at schedule time (the twisted warp
@@ -804,7 +804,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             box=(1,) * len(v_batch) + (bn, d_v) if is_tma else None,
         )
         transport_cls = TmaTransport if is_tma else CpAsyncTransport
-        # Under a WSPEC band split the fill's elected thread must be the PRODUCER band's first —
+        # Under a producer-band split the fill's elected thread must be the PRODUCER band's first —
         # the wrapped linear tid (``threadIdx.x % block_threads``) maps aux thread ``block_threads``
         # to 0, so the transport's ``linear_tid == 0`` election lands there verbatim (the raw tid
         # would elect a compute thread and the producer branch would never fill).

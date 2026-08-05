@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.ir.tile.ir import Fold, is_contraction
 
-#: The knob families whose keys address a tree site (``WSPEC`` / ``RASTER`` / ``LOOPIFY`` stay
+#: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
 #: NON-ROOT node — each in-tree child names its parent↔child seam — and its values are
 #: ``cut | fuse``, resolved from ROUTING golden entries / pins, never a schedule slice.

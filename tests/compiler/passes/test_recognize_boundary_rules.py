@@ -255,26 +255,33 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
     as fork siblings), with the K partition either decided-empty or a redundant-statistic
     split — deferred ``g<w>k`` or, this fixture's plain-store tail being distributive, the
-    single-kernel atomic ``g<w>a`` (the single-channel computed-A split-K family)."""
+    single-kernel atomic ``g<w>a`` (the single-channel computed-A split-K family).
+
+    Both readings spell the SAME key set — the contraction tree's, since that is the union's one
+    namespace: bare ``TILE`` / ``STAGE`` / ``REDUCE`` for the product fold and ``@<stat axis>`` for
+    the cone's statistic, each stamped as a DECIDED EMPTY where its reading has no such site."""
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
     assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
     # F1: a coop partition spells the site value ``coop`` with its width in the WORK entry.
     assert any(isinstance(v, str) and v.startswith("coop") for v in rows[0].values()), "option-0 must cooperate on the stat reduce"
     assert str(rows[0].get("WORK", "")).startswith("t"), "the coop width rides the WORK inventory"
+    assert rows[0]["TILE"] == "" and rows[0]["STAGE"] == "" and rows[0]["REDUCE"] == "", (
+        f"the Map reading must stamp the contraction's families as decided empties: {rows[0]}"
+    )
     warp = [r for r in rows if _is_warp_row(r)]
     assert warp, "the bilinear fold form contributed no warp rows"
     stages_seen = set()
     reds_seen = set()
     for r in warp:
-        stage = [v for k, v in r.items() if k.startswith("STAGE")]
-        red = [v for k, v in r.items() if k == "REDUCE"]
-        assert stage and all(v in ("d1/sync", "d2/sync") for v in stage), f"warp rows must ride the resolved sync compute-fill: {r}"
-        assert all(v == "" or (v.startswith("g") and v.endswith(("k", "a"))) for v in red), (
+        stat = [(k, v) for k, v in r.items() if "@" in k]
+        assert stat and all(v == "" for _, v in stat), f"the compute fill realizes the statistic itself — its site stays empty: {r}"
+        assert r["STAGE"] in ("d1/sync", "d2/sync"), f"warp rows must ride the resolved sync compute-fill: {r}"
+        assert r["REDUCE"] == "" or (r["REDUCE"].startswith("g") and r["REDUCE"].endswith(("k", "a"))), (
             f"the computed-A form allows only the empty or split (g<w>k / g<w>a) K partition: {r}"
         )
-        stages_seen.update(stage)
-        reds_seen.update(red)
+        stages_seen.add(r["STAGE"])
+        reds_seen.add(r["REDUCE"])
     # This fixture's weight is a graph INPUT, so the linear's B is transposed and the d2
     # B-only ring clamps back to d1 (nothing async to overlap) — d1 alone is correct here.
     # The canonical-B (constant-weight) shape class exercises d2 in

@@ -38,7 +38,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `TWISTED` off the combine's twist family, `CONTRACTION` off the bilinear reading alone (split-K's outer reduce
   tiles nothing and has no operand pair, so it derives `PLANAR` like any other additive fold; `Fold.composed` stays a
   structural probe, not a role), `PLANAR` otherwise — so the PLANAR demotion is a formation fact with no role
-  rewrite (moving the edges inline is enough; the same derivation then answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
+  rewrite (moving the edges inline — `Fold.demoted()`, the schedule's COLLAPSE reading — is enough; the same
+  derivation then answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
   segments off those readings — `PLACE@a`'s golden rows depend on it.
   The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
   family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
@@ -116,13 +117,22 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   node (`axis is None` / `is_contraction`), NOT the `AxisRole` — which stays a loop annotation and a materializer
   read. The domain is `search/space.py`'s move catalog. A MATERIALIZED operand is not a site (its transport is the parent's
   `STAGE`); a COMPUTED one IS (it enumerates its own families). **No role builds `TileOp`s directly and no term
-  shape gets its own path.** It covers the SINGLE-SITE terms today (the strip, the reduce partition, the
-  contraction product with split-K); the two MULTI-SITE families — a COMPUTED operand edge (the fused cone) and the
-  flash streaming pair — still emit nothing and each arrives as a `_site_values` entry, never a new emitter. A term
-  it cannot schedule stays unmapped — the guardrail contract, so kernels still compile on the materializer's
-  per-cell path at un-scheduled performance, and the coverage gap rides `tests/xfail_registry.py` (strict; empty is
-  the completion gate) plus `scripts/digest_kernels.py`'s per-case pin liveness. A stated row budget
-  (`MAX_ROWS`) bounds one kernel's enumeration and fails loudly rather than truncating →
+  shape gets its own path.** ONE mechanism sits ABOVE the product — the term READINGS (`_schedule._readings`), the
+  rewrites that change the SITE SET (the strip's `r` and split-K's `cta` do not, so they stay spelled VALUES): the
+  MONOID-producer composition (`_atomize.bind_prologue_contraction` — the fused norm→linear / gate⊗up cone, whose tree
+  is the union's REFERENCE key namespace, so bare `REDUCE` stays the contraction's K fold and the map reading spells
+  its statistic at `REDUCE@<axis>`), the COLLAPSE (`Fold.demoted` — a computed edge spliced inline, REMOVING its site;
+  the reduce-tier sibling of a cone), and the mixed-A PROMOTION (a materialized f32 `a` turned into a cone so the
+  converting fill can carry it). At most two readings per term, unioned into one fork with uniform key sets, no
+  cross-reading suppression (each gate is a local predicate on its own term) and reading identity keyed on
+  `canonical_row_key` — a collision RAISES. Covered today: the strip, the reduce partition, the contraction product
+  with split-K, and the COMPUTED `a` edge (warp-only over the MANDATORY resolved `sync` compute fill at `d1`/`d2`, the
+  redundant-statistic split-K, the cone's statistic a nested site whose only spellable value is the decided empty —
+  the fill realizes that partition itself). The flash streaming pair still emits nothing and arrives as a
+  `_site_values` entry, never a new emitter. A term it cannot schedule stays unmapped — the guardrail contract, so
+  kernels still compile on the materializer's per-cell path at un-scheduled performance, and the coverage gap rides
+  `tests/xfail_registry.py` (strict; empty is the completion gate) plus `scripts/digest_kernels.py`'s per-case pin
+  liveness. A stated row budget (`MAX_ROWS`) bounds one kernel's enumeration and fails loudly rather than truncating →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 - **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
   [`GLOSSARY.md`](GLOSSARY.md)

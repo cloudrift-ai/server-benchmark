@@ -30,7 +30,17 @@ from tests.compiler.conftest import requires_cuda, requires_sm90
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
 
-_WARP_TILE = "a:mma_m16n8k16_f16_f32/w1x1/f2x2/k2"  # tile 32x16, bk 32 — exact cover of the 32x64x32 shape
+# The site-local TILE value + the ONE worker inventory its unit widths read off (the step-7
+# split — a TILE value never spells a worker token): one warp, tile 32x16, bk 32 — an exact
+# cover of the 32x64x32 shape.
+_WARP_TILE = "mma_m16n8k16_f16_f32/f2x2/k2"
+_WARP_WORK = "w1x1"
+
+
+def _pin_warp(monkeypatch) -> None:
+    """Pin the one-warp mma tier — the TILE value at its site, the warps in WORK."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    monkeypatch.setenv("EMMY_WORK", _WARP_WORK)
 
 
 def _sigmoid(x):
@@ -90,7 +100,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     the ``warp`` cells additionally demand the ``mma.sync`` tier (the compute-filled A slab;
     the broadcast cell is xfailed — its producer recognizes as a flat un-annotated ``Map``)."""
     if tier == "warp":
-        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        _pin_warp(monkeypatch)
     g, extra = _producer_graph(producer)
     g.add_node(InputOp(), [], Tensor("w", (_K, _N), F16), node_id="w")
     g.add_node(MatmulOp(), ["xn", "w"], Tensor("o", (_M, _N), F16), node_id="o")
@@ -126,7 +136,7 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     matmul — the recognize-nodified computed-A bilinear ``Fold`` (the statistic prologue rides the
     A cone, run once per tile row by the sync stat fill)."""
     if tier == "warp":
-        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        _pin_warp(monkeypatch)
     # Pin the serial fold in BOTH cells: the computed-A form offers redundant-statistic split-K
     # siblings on this decode-M shape, and this test pins the ONE-kernel fused form. The scalar
     # cell is an unpinned greedy compile, so without the pin the device's evidence may steer it
@@ -191,13 +201,13 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
 
 @requires_cuda
 @pytest.mark.parametrize(
-    "tile",
+    ("tile", "work"),
     [
-        "a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4",  # bk 64 elems + tile_n 128 → both slabs B128
-        "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2",  # bk 32 elems + tile_n 32 → both slabs B64
+        ("mma_m16n8k16_f16_f32/f2x4/k4", "w2x4"),  # bk 64 elems + tile_n 128 → both slabs B128
+        ("mma_m16n8k16_f16_f32/f2x2/k2", "w2x2"),  # bk 32 elems + tile_n 32 → both slabs B64
     ],
 )
-def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
+def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     """The sync compute-fill's slab swizzle round-trips — fill-side ``Write`` XOR = drain-side
     ``ldmatrix`` XOR, at both derived modes (B64 / B128). Regression for the silent fill-side
     drop (a pass reconstructing ``Write`` without ``swizzle`` left the fill row-major under a
@@ -208,6 +218,7 @@ def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
     the same static 2-D block-tile grid, and the grouped launch order is its B-re-streaming
     fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
     monkeypatch.setenv("EMMY_TILE", tile)
+    monkeypatch.setenv("EMMY_WORK", work)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
@@ -378,7 +389,7 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     bytes and cannot. The scalar cell pins nothing and just checks the mixed kernel still
     compiles and matches; both compare against the f16-rounded-A reference."""
     if tier == "warp":
-        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        _pin_warp(monkeypatch)
     F32 = _dt.get("f32")
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (_M, _K), F32), node_id="x")
@@ -408,7 +419,7 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     the warp atom gate refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
     own measured mma rows on the gemma-4-12B layer. ``Candidate.try_rewrite``'s apply-time
     ``populate_io`` refresh restores the graph-true dtypes; this pins it."""
-    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    _pin_warp(monkeypatch)
     B, H, S, D = 1, 4, 64, 64
     NO = 96  # projection out-features
     Sd = Dim("seq_len", hint=S)

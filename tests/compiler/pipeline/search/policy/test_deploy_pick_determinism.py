@@ -47,13 +47,15 @@ class _ConstPrior(Prior):
 
 def _rows() -> list[dict]:
     base = {"H_opt": 3.0, "S_ext_k": "512"}
+    # SITE-LOCAL ``TILE`` values (the worker widths ride the row's one ``WORK`` entry) — the same
+    # spelling a stamped row carries, so the tiebreak is exercised over live content.
     tiles = [
-        "a:mma_m16n8k16_f16_f32/w1x1/f2x4",
-        "a:mma_m16n8k16_f16_f32/w1x1/f4x2",
-        "a:mma_m16n8k16_f16_f32/w1x1/f2x4/k2",
-        "a:mma_m16n8k16_f16_f32/w1x1/f4x2/k2",
+        "mma_m16n8k16_f16_f32/f2x4",
+        "mma_m16n8k16_f16_f32/f4x2",
+        "mma_m16n8k16_f16_f32/f2x4/k2",
+        "mma_m16n8k16_f16_f32/f4x2/k2",
     ]
-    return [{**base, "TILE@k": t, "REDUCE@k": r, "STAGE@k": "", "RASTER": "", "WSPEC": ""} for t in tiles for r in ("", "g2k")]
+    return [{**base, "TILE@k": t, "REDUCE@k": r, "STAGE@k": "", "RASTER": "", "WORK": "w1x1"} for t in tiles for r in ("", "g2k")]
 
 
 def _selected(pick: tuple[int, float] | None, rows: list[dict]):

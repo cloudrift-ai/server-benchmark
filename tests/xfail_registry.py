@@ -1,4 +1,4 @@
-"""Registry of tests expected to fail while the tile scheduler is INCOMPLETE.
+"""Registry of tests expected to fail while the tile schedule enumeration is INCOMPLETE.
 
 The row enumerator was deleted and rebuilt RECURSIVELY over the site tree. Its first rebuild had
 been single-site — ``_site_keys`` returned three keys for ``ops.head`` alone and ``_assemble`` took
@@ -7,16 +7,17 @@ node's families. The two families that never landed — a COMPUTED operand edge 
 norm→linear / gate⊗up cone) and the flash streaming pair — are both cases where two SITES must
 agree, which that shape cannot express.
 
-The recursion now carries every SINGLE-SITE term, so that band of ids is gone. What remains is the
-two MULTI-SITE families and their consequences: those terms enumerate no rows and stay unmapped.
-That is the guardrail contract, not a crash: kernels still compile on the materializer's per-cell
-path, so what fails below is coverage — a pinned tier, a stamped knob, an enumerated fork — never a
-compile. The ids fall in two bands:
+The recursion carries every SINGLE-SITE term, and the COMPUTED operand edge with it (the fused
+cone's contraction + statistic pair, its rows unioned with the map reading's). What remains is the
+FLASH streaming pair and its consequences: those terms enumerate no rows and stay unmapped. That is
+the guardrail contract, not a crash: kernels still compile on the materializer's per-cell path, so
+what fails below is coverage — a pinned tier, a stamped knob, an enumerated fork — never a compile.
+The ids fall in two bands:
 
-- **COMPUTED operand edges and the flash streaming pair** — never scheduled by either builder,
-  and the reason the rebuild is recursive. The cooperative-KV cases additionally pin the RETIRED
-  ``REDUCE=b<N>`` spelling, which the site-local codec no longer decodes; they need re-spelling
-  against the restored flash rows, not before them.
+- **The flash streaming pair** — never scheduled by either builder, and the reason the rebuild is
+  recursive. The cooperative-KV cases additionally pin the RETIRED ``REDUCE=b<N>`` spelling, which
+  the site-local codec no longer decodes; they need re-spelling against the restored flash rows, not
+  before them.
 - **Whole-model and serving end-to-end** — every graph that CONTAINS one of the above (the qwen
   / tinyllama block and dynamic-shape chains, the generation runner and its batched twins). These
   fail as CONSEQUENCES, so they clear on their own once the enumerator returns; none of them is an
@@ -30,7 +31,7 @@ card-conditional expectations do not belong here — they stay inline ``@pytest.
 at their own test, where the reason can name the condition.
 
 The :data:`CONSEQUENCE_MODULES` ids additionally do not RUN (``run=False``). They fail only because
-their graph CONTAINS one of the two gaps above, so executing them re-measures a known-missing
+their graph CONTAINS the gap above, so executing them re-measures a known-missing
 enumerator at a cost of minutes per suite (the drift gate alone spends ~190 s reaching its xfail).
 The trade is deliberate: a consequence id can no longer report XPASS, so recovery is signalled by
 the PRIMARY ids — which is where it should be signalled anyway.
@@ -52,7 +53,7 @@ Applied by the root ``conftest.py``'s ``pytest_collection_modifyitems``.
 
 from __future__ import annotations
 
-REASON = "tile scheduler removed - awaiting the generic demand-driven enumerator"
+REASON = "tile schedule incomplete - awaiting the flash streaming pair's rows"
 
 # Node ids that fail because scheduling is missing. Sorted by module, then case.
 NODEIDS: frozenset[str] = frozenset(
@@ -161,27 +162,6 @@ NODEIDS: frozenset[str] = frozenset(
         # tests/compiler/e2e/test_block.py
         "tests/compiler/e2e/test_block.py::test_qwen_block_accuracy",
         "tests/compiler/e2e/test_block.py::test_tinyllama_block_accuracy[cuda]",
-        # tests/compiler/e2e/test_fused_edge.py
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_cone_splitk_matches_reference[d1/sync]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_cone_splitk_matches_reference[d2/sync]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_splitk_matches_reference",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[130]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[31]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-broadcast]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-multiply]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-relu]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-sigmoid]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-broadcast]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-multiply]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-relu]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-sigmoid]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear[warp]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[130]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[31]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_sync_fill_slab_swizzle[a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2]",
-        "tests/compiler/e2e/test_fused_edge.py::test_fused_sync_fill_slab_swizzle[a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4]",
-        "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[warp]",
-        "tests/compiler/e2e/test_fused_edge.py::test_sdpa_consumer_projection_reaches_mma",
         # tests/compiler/e2e/test_knob_pinning.py
         # tests/compiler/e2e/test_matmul_coverage.py
         "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
@@ -193,11 +173,6 @@ NODEIDS: frozenset[str] = frozenset(
         "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_whole_model_dynamic_compiles_and_matches_eager",
         # tests/compiler/passes/test_delegate_zero_init.py
         # tests/compiler/passes/test_move_catalog.py
-        # tests/compiler/passes/test_recognize_boundary_rules.py
-        "tests/compiler/passes/test_recognize_boundary_rules.py::test_mlp_gate_up_nodifies_as_two_channel_product_contraction",
-        "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_cone_is_an_inline_node_tree",
-        "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_offers_map_rows_then_warp_contraction_rows",
-        "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_symbolic_m_offers_warp_rows",
         # tests/compiler/passes/test_warp_eligible_stamp.py
         # tests/compiler/pipeline/search/policy/test_dit_golden_deploy.py
         "tests/compiler/pipeline/search/policy/test_dit_golden_deploy.py::test_the_shipped_dit_flash_golden_decides_the_live_deploy",
@@ -206,8 +181,6 @@ NODEIDS: frozenset[str] = frozenset(
         "tests/compiler/pipeline/search/policy/test_golden_evidence.py::test_attention_golden_decides_the_live_flash_fork[static]",
         # tests/compiler/pipeline/search/prior/test_offline_prior.py
         # tests/compiler/pipeline/search/test_bench_record.py
-        # tests/compiler/pipeline/search/test_golden_spelling_canonical.py
-        "tests/compiler/pipeline/search/test_golden_spelling_canonical.py::test_every_stored_golden_spelling_is_canonical",
         # tests/compiler/pipeline/search/test_keys.py
         # tests/compiler/pipeline/search/test_two_level.py
         # tests/compiler/pipeline/test_flash_form_narrowing.py

@@ -275,26 +275,6 @@ class CompilerDump:
                 stack.extend(node.inputs)
         return closure
 
-    def _collect_subgraph(self, graph: Graph, root_id: str) -> set[str]:
-        """Transitive-input closure for a compute node: itself + every
-        ``ConstantOp`` / ``InputOp`` reachable via ``node.inputs``."""
-        from emmy.compiler.ir.base import ConstantOp, InputOp
-
-        keep: set[str] = set()
-        stack = [root_id]
-        while stack:
-            cur = stack.pop()
-            node = graph.producer(cur)
-            cur = node.id if node is not None else cur
-            if cur in keep:
-                continue
-            keep.add(cur)
-            if node is None:
-                continue
-            if cur == root_id or isinstance(node.op, (ConstantOp, InputOp)):
-                stack.extend(node.inputs)
-        return keep
-
     @staticmethod
     def _safe_filename(name: str) -> str:
         return "".join(c if c.isalnum() or c in "._-" else "_" for c in name)

@@ -77,10 +77,6 @@ def _walk(value, *, on_expr, on_axis):
     return value
 
 
-def _stage_kwargs(stage, *, on_expr, on_axis):
-    return {f.name: _walk(getattr(stage, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(stage)}
-
-
 # ---------------------------------------------------------------------------
 # rewrite — sigma + axis_fn + SSA renaming
 # ---------------------------------------------------------------------------

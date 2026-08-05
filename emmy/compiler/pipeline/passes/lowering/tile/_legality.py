@@ -27,6 +27,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.tile import Fold
+from emmy.compiler.ir.tile.ir import operand_name
+from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -259,6 +261,64 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> St
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
 
 
+def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
+    """A MATERIALIZED ``a`` edge must already carry the atom's own operand dtype: the transports that
+    fill its fragment — gmem-direct ``ldmatrix``, cp.async, TMA — move raw BYTES and cannot convert.
+    Only the sync compute-fill converts (on the slab store), which is why a mixed pair reaches the
+    warp tier through the mixed-A promotion's cone instead. A COMPUTED edge is exempt for exactly
+    that reason."""
+    if not isinstance(c.a, Load) or a_dtype == tile.atom.operand_dtype("a"):
+        return None
+    return (
+        f"warp TILE: atom {tile.atom.name} takes a {tile.atom.operand_dtype('a')} A operand but this "
+        f"contraction's A is {a_dtype} — a copy transport cannot convert it. The mma tier is reachable "
+        f"through the converting sync compute-fill (the mixed-A cone), or drop the atom for the scalar tier."
+    )
+
+
+def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
+    """The geometry a COMPUTED ``a`` edge's compute fill demands: a STATIC contraction K (the
+    ``_staged`` driver reads one) and an N width that EXACTLY covers the output columns (the sync B
+    fill has no N clamp). A masked / symbolic M is fine — the fill σ clamps the overhanging rows and
+    the ``RegStore`` guard discards their store."""
+    if not c.axis.extent.is_static:
+        return "a computed A edge needs a static contraction K — the sync compute-fill has no K mask"
+    if tile.n.mask:
+        return (
+            f"a computed A edge needs a TILE whose N width exactly covers the static output columns "
+            f"(N={tile.n.axis.extent}, no N mask in the sync compute-fill); pick a dividing tile."
+        )
+    return None
+
+
+def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
+    """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction under ``tile``
+    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
+    copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
+    and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
+    slab, one B slab per channel, and one fp32 row per bridged statistic (``ops.cone_seam``'s
+    ``stats`` — the same node boundary the materializer fills through).
+
+    ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the B cp.async slabs ring
+    (their copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill and drain), while the
+    compute-filled A slab and the stat rows stay single-buffer — ringing a compute fill buys no
+    overlap, it runs on the drain's own threads. Measured on the gemma gate_up edge at M=512 (5090)
+    the ring LOSES (897 vs 665 µs) — the extra B slot alone crosses the smem occupancy quantization
+    — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
+    so both depths are enumerated as fork siblings and measured per shape."""
+    atom = tile.atom
+    bk_elems = tile.bk * atom.atom_k
+    a_nbytes = atom.operand_dtype("a").nbytes
+    _, _, stats = cone_seam(c.a)
+    a_bytes = tile.m.tile * bk_elems * a_nbytes
+    b_bytes = len(c.channels) * tile.n.tile * bk_elems * a_nbytes
+    stat_bytes = len(stats) * tile.m.tile * 4
+    if a_bytes + b_bytes + stat_bytes > budget:
+        return None
+    depth = want_depth if want_depth >= 2 and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
+    return Stage(depth=depth, transport="sync", smem=(operand_name(c.a),), bk_elems=bk_elems)
+
+
 def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
@@ -303,12 +363,14 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
 
 
 __all__ = [
+    "computed_a_cover",
     "enforce",
     "fragment_epilogue",
     "coop_band_layout",
     "producer_band",
     "producer_transport",
     "resolve_scalar_stage",
+    "resolve_sync_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
     "splitk_materialized_b",
@@ -316,4 +378,5 @@ __all__ = [
     "splitk_width",
     "strip_width",
     "warp_k_step",
+    "warp_operand_dtype",
 ]

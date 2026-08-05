@@ -954,10 +954,12 @@ on a matmul / pointwise / attention archetype. The full design lives in
 [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 
 The step BETWEEN those two — schedule enumeration: mapping the free axes onto the grid and forking the per-node
-`TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` families — has been REMOVED pending the generic recursive
-enumerator. Recognition, the codec, the move catalog and the materializer are untouched; nothing currently maps a
-`TileOp`, so every compile that reaches scheduling fails and rides `tests/xfail_registry.py`. See the leading
-section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the contract the replacement must meet.
+`TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` families — is ONE recursive row enumerator over the term's own site
+tree (the `020_schedule` rule). It covers every single-site term plus the COMPUTED `a` edge (the fused norm→linear /
+gate⊗up cone); the flash streaming pair is the remaining gap, and a term it cannot schedule enumerates NO rows and
+stays unmapped rather than being guessed at — the guardrail contract, with the coverage gap riding
+`tests/xfail_registry.py`. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the
+design.
 
 ## Tunable knobs
 
@@ -965,7 +967,7 @@ A **`Knob`** (`knob.py`) is the canonical schema for one tuning dimension: name,
 `STR`), candidate `hints` (advisory — the rule still validates structural fit), and a help string. Rules stamp values
 into `TileOp.knobs` dicts; the autotuner reads those back as the per-hop knob delta in the `lowering` table. Every
 knob is declared **in `search/space.py`** — the single home for the whole tunable surface — and imported by the rule
-that resolves it (for the schedule codecs, the absent tile scheduler). Declaring a `Knob` IS
+that resolves it (for the schedule codecs, the tile scheduler's row enumerator). Declaring a `Knob` IS
 registering it (`Knob.__post_init__`); `knob.registry()` imports `space.py` before answering, so the set is complete
 in any process — no module scanning, no manual registration. `knob.py`
 also owns the `EMMY_<KNOB>` env namespace (decode per `Knob` type; `config.py` remains the sole owner of

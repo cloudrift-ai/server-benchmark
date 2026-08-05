@@ -566,6 +566,27 @@ class Fold(Stmt):
 
         return tuple(dict.fromkeys(nm for e in self.operands for nm in loads(operand_body(e))))
 
+    def demoted(self) -> Fold:
+        """The operand hoist UNDONE — every edge moves INLINE into the lift body as a stmt (a
+        materialized ``Load`` verbatim, a computed node as the structural NODE — a term is a value,
+        legal in a pure ``Lambda``), each placed before the first read of its bound name (ties in
+        operand order — the splice rule). With no operand edges the bilinear reading declines, so
+        the fold DERIVES ``PLANAR`` and takes the reduce tiers at dispatch; :func:`_flatten_nodes`
+        flattens the inline node at lowering, so the derived loop is byte-identical to the hoisted
+        spelling's (the demotion is a spelling change, never a semantics change).
+
+        This is the COLLAPSE term reading: it REMOVES the edge's schedule site, which is why it is
+        a reading rather than a value (``passes/lowering/tile/_schedule._readings``)."""
+        assert self.axis is not None, "demoted: an iterating fold only — the lift's leading param is the iteration var"
+        lam = self.lift
+        body = list(lam.body)
+        for edge in reversed(self.operands):
+            name = operand_name(edge)
+            idx = next((i for i, st in enumerate(body) if name in deep_reads([st])), len(body))
+            body.insert(idx, edge)
+        lift = Lambda(params=lam.params[:1], body=Body(tuple(body)), results=lam.results)
+        return Fold(axis=self.axis, unroll=self.unroll, lift=lift, init=self.init, combine=self.combine)
+
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:
         """The MEMOIZED derived blocked evaluation of a λ-spelled twisted fold — cached so the

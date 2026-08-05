@@ -241,9 +241,11 @@ slice runs zero steps). The close swaps the projection for RAW state stores when
 state component: O rides the normal fragment store into the f32 `__partial` workspace; the d-invariant row stats
 (m, l) are written once per query row (the `_t == 0` lanes) at their template's pinned last slot.
 
-**The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
-under a warp `TILE` pin: the demoted warp option nodifies the PLANAR ⊗-fold to a computed-A contraction fold
-(the same computed-A `a = Body` form flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
+**The fused edge — the mma tier's `sync` transport.** A cone-fed matmul (`f(x, …) @ w`) reaches the warp tier through
+its COMPUTED `a` edge: recognition stores the producer cone inline on that edge (`_atomize.make_cone`), the schedule's
+contraction site then offers the warp tier over a MANDATORY resolved `sync` `Stage` (there is no gmem-direct sibling —
+a copy transport cannot evaluate a cone), and the reduce tiers stay reachable through the COLLAPSE reading, which
+splices the edge back inline. `_staged` builds a `SyncTransport`
 whose A fill is the producer CONE evaluated per slab cell (compute-fill) — the same `fill`/`commit`/`wait` seam,
 feeding the unchanged `ldmatrix` drain. The compute fill assigns each thread a 16-byte run of CONTIGUOUS slab
 cells (the row/col derivation hoists out of the per-cell code; per-thread gmem reads and smem stores merge into
@@ -254,8 +256,9 @@ N-major `(tile_n × bk)` slab in its own gmem orientation (`Operand.trans`; K st
 from `bk_elems`, drained by the plain no-`.trans` ldmatrix — the per-thread per-cell copy fill it replaced was the
 served fused edges' weight-stream deficit); when a two-slot ring also fits the smem budget the
 stage resolves at `depth=2` and the prefetched chunk's B copies stay in flight across the current chunk's drain. A
-**reduce-bearing (MONOID) cone** — the fused norm→linear edge — is nodified at RECOGNIZE time
-(`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone is an inline node tree whose
+**reduce-bearing (MONOID) cone** — the fused norm→linear edge — is the schedule's fused term READING
+(`_atomize.bind_prologue_contraction`; real fork rows unioned with the map form's, not a pin rescue): the A cone is an
+inline node tree whose
 SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam
 IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
 transport prologue

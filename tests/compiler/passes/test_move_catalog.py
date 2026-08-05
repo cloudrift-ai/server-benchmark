@@ -323,8 +323,9 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, keys = sch._enumerate(term)
+    rows, keys, owner = sch._enumerate([term])
     assert rows, "the two-site term enumerated nothing"
+    assert set(owner.values()) == {term}, "a single-reading term has one owner"
 
     # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
     # the stored corpus uses.
@@ -342,13 +343,21 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
             assert work is not None and work.kind == "thread" and work.count == edge.coop, r
             assert r["TILE"] == "", r  # a tiled parent claims the same threads — never both
 
-    # The row count is the product ACROSS sites, per inventory — the equation a flat builder over
-    # one node's families cannot state.
+    # The row count is the product ACROSS sites, per inventory — the equation a flat builder over one
+    # node's families cannot state — pruned by the ONE inventory validation, which is a JOINT fact
+    # over the pair (a coop edge and a tiled parent claim the same threads) and so cannot factor per
+    # site.
+    def claim(*values):
+        tiles = tuple(v["TILE"] for v in values if v.get("TILE") is not None)
+        return sch._Row(knobs={}, tiles=tiles, coop=max([1, *(v["REDUCE"].coop for v in values if v.get("REDUCE") is not None)]))
+
     by_work: dict[str, int] = {}
     for r in rows:
         by_work[r["WORK"]] = by_work.get(r["WORK"], 0) + 1
     for work_spell, n in by_work.items():
         work = Workers.parse(work_spell or None)
-        parent = len(sch._contraction_values(term, term.tree[0].site.node, work))
-        edge = len(sch._site_values(term, term.tree[0].children[0].site, work))
-        assert n == parent * edge * len(sch._raster_values(term)), f"{work_spell!r}: {n} != {parent} x {edge}"
+        parent = sch._contraction_values(term, term.tree[0].site.node, work)
+        edge = sch._site_values(term, term.tree[0].children[0].site, work, term.tree[0])
+        pairs = [(p, e) for p in parent for e in edge if sch._work_holds(claim(p, e), work)]
+        assert pairs and len(pairs) <= len(parent) * len(edge), f"{work_spell!r}: {len(pairs)} pairs"
+        assert n == len(pairs) * len(sch._raster_values(term)), f"{work_spell!r}: {n} != {len(pairs)} pairs x rasters"

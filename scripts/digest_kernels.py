@@ -180,18 +180,13 @@ CASES = [
 ]
 
 
-# The cases whose pins reach NO kernel today, each a consequence of one of the two enumerator gaps:
-# a COMPUTED operand edge (the fused norm→linear / gate⊗up cone) and the flash streaming pair emit no
-# schedule rows, so ``020_schedule`` leaves those terms unmapped and the case digests the un-scheduled
-# lowering path instead. Recorded, not tolerated — like the xfail registry this set is STRICT: a case
-# that starts landing its pins FAILS here until it is deleted, so phases 4 and 5 report themselves.
+# The cases whose pins reach NO kernel today, each a consequence of the ONE enumerator gap left: the
+# flash streaming pair emits no schedule rows, so ``020_schedule`` leaves those terms unmapped and the
+# case digests the un-scheduled lowering path instead. Recorded, not tolerated — like the xfail
+# registry this set is STRICT: a case that starts landing its pins FAILS here until it is deleted, so
+# the remaining phase reports itself.
 UNSCHEDULED = frozenset(
     {
-        "norm_linear",
-        "norm_linear_lin",
-        "norm_linear_splitk",
-        "norm_linear_dynm",
-        "mlp_geglu",
         "flash_hd128",
         "flash_hd128_cp",
         "flash_hd256_alt",
@@ -208,8 +203,20 @@ def _liveness(name, pins, realized):
     without this the baseline would pin recognition, term storage and the un-scheduled lowering path
     while leaving the tiered/placed contraction path — the one the pins name — entirely uncovered.
     The pins must land TOGETHER on one kernel; under split-K that kernel is the ``__partial``.
+
+    A pin here is spelled BARE, and a bare pin fans out to every eligible site — so it lands when
+    SOME same-family realized key carries its value (``knob.pin_key_matches`` / ``values_equal``,
+    the same reading the golden matcher and the replay gate use). A fused kernel spells its
+    contraction's K fold bare and the cone's statistic at ``REDUCE@<axis>``; requiring the bare key
+    to carry the value would call that miss a drop.
     """
-    landed = [kname for kname, knobs in realized if all(knobs.get(f) == v for f, v in pins.items())]
+    from emmy.compiler.pipeline.knob import family_of, pin_key_matches, values_equal
+
+    def lands(knobs, pin, want):
+        hits = [(k, v) for k, v in knobs.items() if family_of(k) == family_of(pin) and pin_key_matches(pin, k)]
+        return any(values_equal(k, want, v) for k, v in hits)
+
+    landed = [kname for kname, knobs in realized if all(lands(knobs, f, v) for f, v in pins.items())]
     if name in UNSCHEDULED:
         return None if not landed else f"{name}: pins now land on {landed[0]} — delete it from UNSCHEDULED"
     if landed:

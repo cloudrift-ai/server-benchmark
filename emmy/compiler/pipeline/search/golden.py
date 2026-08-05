@@ -129,8 +129,8 @@ def _knobs_env(knobs: dict) -> str:
 
     Structural-feature knobs (``STRUCT_PREFIX``) are dropped — a repro command
     pins tuning decisions, not the kernel's structural identity. ``WARPSPEC`` (the pre-rebuild
-    boolean spelling still on old golden rows; the live codec is ``WSPEC``) rides through like
-    any other knob."""
+    boolean spelling still on old golden rows; the live spelling is ``WORK``'s ``+p<n>`` band) rides
+    through like any other knob."""
     return ",".join(f"{k}={v}" for k, v in knobs.items() if not k.startswith(STRUCT_PREFIX))
 
 

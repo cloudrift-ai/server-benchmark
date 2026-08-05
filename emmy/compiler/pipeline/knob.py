@@ -246,10 +246,10 @@ class Knob:
 # existing pin / recipe / golden — keeps working unchanged (the suffix disambiguates only a kernel with
 # two eligible nodes). ``TILE`` / ``STAGE`` / ``REDUCE`` all carry the suffix: the schedule reduce
 # partition IS the axis-named reduce decision (there is no separate native ``REDUCE@`` family — the
-# reduce/split-K partition is the one reduce family). ``WSPEC`` stays root-global (always
+# reduce/split-K partition is the one reduce family). ``WORK`` / ``RASTER`` stay root-global (always
 # bare). Readers use :func:`family_value` so a bare and a suffixed key featurize / match identically.
 
-# The per-node schedule codec families that carry an ``@<axis>`` element (``WSPEC`` is
+# The per-node schedule codec families that carry an ``@<axis>`` element (``WORK`` / ``RASTER`` are
 # root-global, always bare).
 _AXIS_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -566,8 +566,8 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`
     family the realized dict never stamped. The pass-boundary OFF fill covers a pass that ran
-    and declined, but a family whose pass never loads for the target (e.g. ``WSPEC`` off
-    Hopper/Blackwell) can be absent from ``op.knobs`` entirely — a recording must still pin it
+    and declined, but a family whose pass never loads for the target (e.g. ``STAGE`` when no
+    transport resolves) can be absent from ``op.knobs`` entirely — a recording must still pin it
     as declined, or the entry drifts when a later planner starts filling it. A family with no
     registered OFF is skipped rather than invented."""
     out = dict(tuning_knob_items(knobs))

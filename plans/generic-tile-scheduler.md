@@ -69,10 +69,10 @@ keeps its loads inline in the lift, so there are no edges to parse and the row f
 collapse reading below is exactly "move the edges inline", which flips a contraction to a plain fold by the same
 table. The reading mechanism and the role derivation are not two mechanisms.
 
-**`Fold.demoted()` does not exist** — it was dead once the scheduler was deleted (zero callers) and went in the
-minimization pass. It is ~15 lines and fully specified here: move each operand edge into the lift body before the
-first read of its bound name, ties in operand order. The collapse reading re-adds it (phase 2). Two durable docs
-still cite it as if it existed — repair them when it returns.
+**`Fold.demoted()` is back** (phase 2, ~15 lines): move each operand edge into the lift body before the first read of
+its bound name, ties in operand order — a materialized `Load` verbatim, a computed edge as the structural NODE, which
+`_flatten_nodes` flattens at lowering so the derived loop is byte-identical to the hoisted spelling's. Its one caller
+is the COLLAPSE term reading (`_schedule._readings`), and `ir/ARCHITECTURE.md` names it again.
 
 ### What it means for this plan
 
@@ -108,8 +108,9 @@ It must stay derived because kernel identity is the α-invariant `repr()` of the
 `ir/tile/_key.py`): a stored partition
 means two recognitions that split the same algebra differently key apart, splitting cache and evidence for identical
 kernels. Derived, it costs nothing and unlocks the fused per-operand prologue `Fold.contraction`'s docstring already
-anticipates (qk-norm / RoPE folded into a score, on-the-fly dequant) — which is a STAGE-family concern, so phase 2
-should expose `operand_lift(i)` even though no emitter reads it yet.
+anticipates (qk-norm / RoPE folded into a score, on-the-fly dequant) — which is a STAGE-family concern. Phase 2 did
+NOT expose `operand_lift(i)`: nothing reads it, and the computed-`a` fill it would serve reads the cone off the edge
+(`ops.cone_seam`) instead. Add it when a per-operand prologue emitter actually exists.
 
 **The collapse did not re-spell terms.** Hoisting a load to an operand edge stays recognition's decision — a bare
 sum keeps its load INLINE in the lift, a contraction hoists both operands because the schedule needs their
@@ -193,10 +194,12 @@ The wire format does not move: rows stay flat dicts of canonical codec keys, so 
 A flat product over ONE node's families covers exactly the terms with one site. Every role scheduled today is such a
 term — which is why a single-site builder could serve them, and why that is not evidence the shape generalizes.
 
-The two families that remain are precisely the ones where **two sites must agree**: the fused cone carries a
-statistic fold inside its A edge, and flash carries a hoisted QK operand edge plus a derived PV contraction. Neither
-is a product over one node's families. Under a flat builder each needs its own bespoke emitter, and the "one generic
-enumerator" claim becomes four hand-written products — the exact defect the rebuild exists to remove.
+The two families beyond it are precisely the ones where **two sites must agree**: the fused cone carries a
+statistic fold inside its A edge (LANDED, phase 2), and flash carries a hoisted QK operand edge plus a derived PV
+contraction. Neither is a product over one node's families. Under a flat builder each needs its own bespoke emitter,
+and the "one generic enumerator" claim becomes four hand-written products — the exact defect the rebuild exists to
+remove. The cone half is the evidence that it does not: its rows are a `_site_values` entry, three legality predicates
+and a reading, with no emitter of its own.
 
 ### The pieces
 
@@ -253,19 +256,27 @@ escape, not a strip site. Phase 1 asserts it directly.
 ("Reading", not "variant": `variant` is the recipe vocabulary — one concrete combination of recipe settings, the noun
 behind `emmy eval variants` — and reusing it for a term rewrite collides with a live CLI concept.)
 
-Four moves rewrite the term rather than decorating it. **The criterion that separates them is whether the rewrite
+Five moves rewrite the term rather than decorating it. **The criterion that separates them is whether the rewrite
 changes the SITE SET**, because that is what the product cannot absorb:
 
 | move | changes the site set? | so it is |
 | --- | --- | --- |
 | strip — unroll the zero-axis fold's `lift` x r, α-rename SSA, fan out `TileOp.stores`, divide the inner extent | no — the root stays one site | a `TILE` VALUE (`r` IS the spelled `f<r>`) |
 | split-K — wrap the sliced fold in an identity-lift `Fold(axis=ksplit)`, σ-reindex operands | no, ONCE the wrapper stops being a site (below) | a `REDUCE` VALUE (`cta` IS the spelled `g<cta>`) |
+| the MONOID-producer composition — bind the map form's statistic + column loop as a contraction over a computed cone | yes, it ADDS two | a READING |
 | collapse — splice a computed edge inline, REMOVING its schedule site | yes | a READING |
 | mixed-A promotion — turn a MATERIALIZED f32 A edge into a computed cone so the sync compute-fill can convert it | yes, it ADDS one | a READING |
 
-So `readings()` has exactly TWO members, and the two moves that stay values are values because their rewrite happens
-at materialization from the slice the row already carries. Treating `r` and `cta` as readings would make `readings()`
-a product and reintroduce the combinatorics this design removes.
+So the three READINGS are the site-set rewrites, and the two moves that stay values are values because their rewrite
+happens at materialization from the slice the row already carries. Treating `r` and `cta` as readings would make
+`_readings` a product and reintroduce the combinatorics this design removes.
+
+The three are MUTUALLY EXCLUSIVE by shape — the composition applies to a map form whose head is a PLANAR statistic
+fold, the collapse to a contraction whose `a` edge is already computed, the promotion to one whose `a` is a
+materialized f32 `Load` — so a term has the base reading plus AT MOST ONE sibling, and `_readings` returns a list of
+one or two. The union's key namespace is the REFERENCE reading's tree (the composition's, when it applies), consulted
+before a reading's own; a rewrite keeps the site's tree POSITION, so for the other two the two spellings coincide and
+the fallback is exact.
 
 **Split-K is on the values side only after one IR repair.** `Fold.role` returns `CONTRACTION` when `composed is not
 None` — an arm whose sole purpose is to classify the split-K wrapper — and `family_sites` admits any `CONTRACTION`
@@ -492,13 +503,33 @@ Phase 1's acceptance set — every SINGLE-SITE term, all restored:
 | `PLANAR` / `TWISTED` | the reduce partition (heuristic option-0 + coop / ILP catalog + the matvec layout gate) |
 | `CONTRACTION`, materialized edges | tile × stage × reduce × raster, scalar + warp tiers, the producer band as inventory, split-K through the `Fold ⊃ Fold` composition |
 
-The two that remain — a COMPUTED operand edge (the fused cone) and the flash streaming pair — are the multi-site
-ones, and are why the enumeration is recursive. Both are `_site_values` entries plus legality, not new emitters.
+**Phase 2 has LANDED too: the COMPUTED operand edge, and with it the term-reading union.** `_readings(tile, ctx)` is
+the one mechanism above the product — at most two readings per term, the second whichever rewrite applies (the
+MONOID-producer composition, the COLLAPSE, the mixed-A PROMOTION; mutually exclusive by shape). The union's key
+namespace is the REFERENCE reading's tree (`_Term.key` — the reference first, the reading's own as the fallback, which
+is exact because a rewrite keeps the site's tree POSITION), its keys are the union of both readings' with `""` as the
+decided empty (`_union_keys`), and reading identity is keyed on `canonical_row_key` with a collision RAISING. The
+computed-A site itself is `_contraction_values`' second inhabitant: warp tiles only (the scalar tier has no compute
+fill; the reduce tiers ride the COLLAPSE reading instead), the mandatory `sync` fill resolved at `d1`/`d2`
+(`_legality.resolve_sync_stage`), `computed_a_cover` for the exact-N/static-K geometry, and the redundant-statistic
+split-K (`_sliced_a` σ-reindexes the cone's per-cell BODY, never its row-invariant prologue).
+
+The one that remains — the flash streaming pair — is why the enumeration is recursive: a `_site_values` entry plus
+legality, not a new emitter.
 
 **Measured at the phase-1 commit**: `digest_kernels.py --check` green — all 24 cases byte-identical to the baseline
 and all 14 schedulable cases landing their pins (from 0), the 10 `UNSCHEDULED` still dark; `make test` green with 50
 registry ids deleted; the enumerated row SET identical to the pre-demolition builder's on every corpus term, option-0
 included, with ONE accepted change (below). The widest term measures 132 246 rows against a 400 000 budget.
+
+**Measured at the phase-2 commit**: `digest_kernels.py --check` green with 5 cases moved OUT of `UNSCHEDULED`
+(`norm_linear`, `.lin`, `.splitk`, `.dynm`, `mlp_geglu` — all landing their pins, `.splitk` on its `__partial`) and the
+other 19 cases byte-identical, including `norm_linear_coop`, whose kernel is unchanged even though its row re-keys to
+`REDUCE@<stat>`; `make test` + `make lint` green with 25 registry ids deleted (20 `test_fused_edge`, 4
+recognize-boundary, the golden-spelling canonical gate). Three predicates were added
+(`resolve_sync_stage`, `computed_a_cover`, `warp_operand_dtype`) and one per-value inventory filter became a per-ROW
+one (`_work_holds`) — a nested serial fold claims no workers, so it composes with any parent inventory, which is what
+lets the cone's statistic sit under a warp parent at all.
 
 **Of the three predicted row-key changes only the first fired.** (1) The deploy override is gone: `matvec_coopt`'s
 wide-K coalesced matvec enumerated ONE row under `ctx.validate_pins` and now enumerates the full 12-row catalog with
@@ -514,13 +545,13 @@ equation.
 
 | gate | what it pins | where |
 | --- | --- | --- |
-| kernel-source digests | every case's rendered kernel, byte for byte, against a committed baseline | `scripts/kernel_digests.txt` (23 cases); `digest_kernels.py --check` reports drifted / missing / unexpected separately |
+| kernel-source digests | every case's rendered kernel, byte for byte, against a committed baseline | `scripts/kernel_digests.txt` (27 rendered kernels over 24 cases); `digest_kernels.py --check` reports drifted / missing / unexpected separately |
 | pin LIVENESS | that a case's pins actually REACHED a kernel — all of them, on one emitted op (the `__partial` under split-K) | same harness; a digest alone cannot tell a covered path from an unmapped one, since both render and both hash stably |
 | the xfail registry | every scheduler casualty as an exact node id, `strict=True` — an id that starts passing FAILS until deleted | `tests/xfail_registry.py`; the file shrinking to empty IS the completion gate |
 
 The liveness half is what makes the digest baseline mean something during a rebuild: at the demolition it reports
-**0 of 23** cases landing their pins, and each role that returns moves that number. The 10 cases that stayed dark
-under the previous builder are recorded in a STRICT `UNSCHEDULED` set, so phases 2 and 3 report their own completion.
+**0 of 23** cases landing their pins, and each role that returns moves that number. The cases that stay dark
+are recorded in a STRICT `UNSCHEDULED` set, so each phase reports its own completion.
 
 **A Hopper run is owed** before the merge: verification so far is sm_89, where every `d*/tma*` row declines, leaving
 the staged-TMA tiers unexercised.
@@ -554,7 +585,7 @@ the staged-TMA tiers unexercised.
 | `test_golden_knobs_are_members_of_the_move_catalog` (live today) | a golden becoming unreachable | non-golden losses |
 | per-key value-domain snapshot (new, ~80 lines) | which family lost which value, localized | ranking quality |
 | `xfail_registry` shrink (107 ids) | a restored behavior regressing | the 605 CPU skips; GPU-only; silent XPASS under `strict=False` |
-| `digest_kernels.py` vs a committed baseline (+ its per-case pin liveness) | a pinned/golden row materializing differently; a case whose pins stop reaching a kernel, or an `UNSCHEDULED` one that starts | the 10 `UNSCHEDULED` cases' materialization, until phases 2–3 land and they leave the set |
+| `digest_kernels.py` vs a committed baseline (+ its per-case pin liveness) | a pinned/golden row materializing differently; a case whose pins stop reaching a kernel, or an `UNSCHEDULED` one that starts | the 5 remaining `UNSCHEDULED` (flash) cases' materialization, until phase 3 lands and they leave the set |
 | eval-golden MATCH sweep (GPU) | the deployed pick drifting | non-golden shapes |
 | option-0 assertion (`stamp_schedule_families(rows[0])` all-`off`, per-family) | the safety-net pick becoming non-degenerate | — |
 
@@ -594,16 +625,16 @@ Rows 9–10 must NOT be asserted in tier 0 — row 9 is enforced by the resolver
 
 ## Migration — the clean reimplementation
 
-`_schedule.py` was DELETED and rebuilt recursively; phase 1 has landed. A term the enumeration cannot schedule still
-yields no rows and stays unmapped — the guardrail contract, so kernels compile on the materializer's per-cell path and
-what fails is coverage, never a compile. The progress meter: `digest_kernels.py`'s **live-pin count** (0 of 24 at the
-demolition, 14 of 24 now — the remaining 10 are the `UNSCHEDULED` multi-site cases phases 2 and 3 own) and the
-**registry size** (241 registered xfails at the demolition, 50 deleted by phase 1).
+`_schedule.py` was DELETED and rebuilt recursively; phases 1 and 2 have landed. A term the enumeration cannot schedule
+still yields no rows and stays unmapped — the guardrail contract, so kernels compile on the materializer's per-cell path
+and what fails is coverage, never a compile. The progress meter: `digest_kernels.py`'s **live-pin count** (0 of 24 at
+the demolition, 14 after phase 1, 19 of 24 now — the remaining 5 are the flash cases phase 3 owns) and the **registry
+size** (241 registered xfails at the demolition, 198 after phase 1, 173 now — 25 deleted by phase 2).
 
 | phase | scope | gate |
 | --- | --- | --- |
 | ~~**1**~~ | **LANDED — the enumerator, the target design, built once.** `_inventories(term)` at the root, then `_rows_at(site, work)` as a product over the site tree; `_merge` spelling every slice through `ops.Sched.key`; `_site_values(site, work)` returning TYPED slices from the `search/space.py` catalogs; `_legality.py`'s predicates as the `(term, candidate)` filter. Dispatch is the two node predicates. The four IR repairs landed with it: one contraction predicate shared by `path._walk` and `family_sites`; the `composed` arm out of `Fold.role`; the raw-loop escape separated structurally in `family_sites`; `stage_moves` returning `Stage`. `resolve_row` / `RowSlices` deleted and the `WSPEC` pin alias retired | **MET**: byte-identical kernels on all 24 digest cases, 14 of 14 schedulable cases live, `make test` + `make lint` green, 50 registry ids deleted, the row set identical but for the one accepted change above |
-| 2 | CONTRACTION with computed edges — the fused norm→linear / gate⊗up cone, whose A edge is an inline node rather than a gmem `Load`. Under the recursion this is a `values` entry for the cone's sites plus legality (warp-only, sync fill mandatory, multi-channel ⇒ no cp.async/TMA) — NOT a new emitter | 4 `norm_linear` + `mlp_geglu` digest cases leave `UNSCHEDULED` + 6 recognize-boundary ids |
+| ~~**2**~~ | **LANDED — the COMPUTED operand edge, plus the term-reading union it needed.** `_readings` above the product (the monoid composition / the collapse / the mixed-A promotion, ≤ 2 per term, one reference key namespace, identity keyed on `canonical_row_key`); `_contraction_values`' computed-`a` inhabitant (warp-only, the mandatory `resolve_sync_stage` at `d1`/`d2`, `computed_a_cover`, the redundant-statistic split through `_sliced_a`); `_fill_realized` for the one nested site the parent form already partitions; the per-value inventory filter became the per-ROW `_work_holds`. `Fold.demoted()` returned; `warp_operand_dtype` made the copy transports' dtype rule a checked predicate | **MET**: 5 digest cases (`norm_linear` ×4 + `mlp_geglu`) left `UNSCHEDULED` landing their pins, the other 19 byte-identical, `make test` + `make lint` green, 25 registry ids deleted (20 fused-edge + 4 recognize-boundary + the golden-spelling gate) |
 | 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
 | 4 | `schedule()`'s own dispatch and flash-form selection once 2–3 exist; `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have — unreachable until the flash warp realizer runs, so it has no obtainable baseline until then) | registry EMPTY + `make test` + `make lint` |
 
@@ -627,15 +658,28 @@ is a bug, not a bonus; any row it drops is a regression the row-count equation c
 `values` entries and legality predicates to a structure that is already proven, instead of adding a third and fourth
 hand-written product.
 
+**#2 and #3 both fired in phase 2, on the fused shapes, and #2 cost a deploy.** The fused term is where the nested-fold
+walk is real: every reading of a norm→linear / geglu term spells `REDUCE@<stat>` + `STAGE@<stat>` beside the bare
+contraction keys, so the map reading's coop row moved off the bare `REDUCE` it used to carry (kernels unchanged —
+`norm_linear_coop`'s digest is byte-identical). The promoted `STAGE@<stat>` then changed what the cold pick ranks: on
+`test_fused_prologue_compiles_in_budget[rmsnorm_linear_n4096]` the shared-row lift is enumerated and materializes (pin
+the row and it passes) but no longer DEPLOYS, because the cold prior ties and a tie breaks on `canonical_row_key`,
+where the serial row's empty values sort ahead of `coop`. That case is xfailed strict with the cause named; the fix is
+evidence — the owed `emmy fit --artifact` refit — not an enumeration change.
+
 **Phase 1 also ships a two-site FIXTURE.** The single-site corpus cannot exercise the product, so the structure would
 otherwise land untested and only be discovered wrong in phase 2. A synthetic two-site term with asserted rows is the
 cheapest way to prove the merge, the key spelling at a non-primary site, and the shared-inventory resolution before
-a production term depends on them.
+a production term depends on them. It paid: phase 2's production two-site term needed no structural change to the
+walk, and the fixture's own row-count equation is what named the one thing that did move — the per-value inventory
+filter became a per-ROW one, so the equation is now the pairs that PASS `_work_holds`, times the rasters.
 
-Phases 2 and 3 both need the term-reading union this plan specifies (`readings()` — collapse and mixed-A
-promotion) and its three obligations: uniform key sets with `""` as a DECIDED empty, no cross-reading suppression,
-and reading identity surviving into the prior's key space (check `canonical_row_key(a) != canonical_row_key(b)`
-across pairs; if they collide the fix is an `S_*` stamp, never a new knob key).
+The term-reading union this plan specifies landed with phase 2 (`_readings` — the monoid composition, the collapse and
+the mixed-A promotion), and all three obligations are mechanized rather than checked by hand: `_union_keys` stamps the
+union of both readings' keys with `""` as the DECIDED empty; no gate reads a sibling reading (the dtype rule that used
+to suppress the base's warp rows is now `_legality.warp_operand_dtype`, a local predicate on the term's own `a` edge);
+and reading identity is the `canonical_row_key` the row → reading map is keyed on, so a collision RAISES instead of
+averaging two kernels under one feature row. Phase 3 inherits it.
 
 **Watch the row count — with a number, not a hope.** The product across sites is now GENERATED where the flat
 builder structurally avoided it. The live catalogs are already large on ONE site (163 scalar tiles, 1140 warp tiles
@@ -706,8 +750,8 @@ Previously unstated and each otherwise discovered mid-phase:
 - **Empty enumeration returns `[]`, never raises** — "the guardrail contract". Tier 0 asserts every corpus term
   yields ≥ 1 row except the documented computed-A-no-legal-warp case.
 - **Split-K re-entry**: `030_split_reduce` produces a `__partial` kernel that re-enters as its own `TileOp` and must
-  itself be enumerable, without further splitting. Its `__partial` kernels are absent from `digest_kernels` output
-  today; the baseline must include them.
+  itself be enumerable, without further splitting. Its `__partial` kernels ARE in the digest baseline (the matmul
+  and norm_linear split cases each render one).
 
 ## Worked examples
 
@@ -1303,10 +1347,11 @@ and recognition, not from this enumeration.
   all operandless zero-axis folds; only `ops.axis_role`'s `Loop.role` fallback and `family_sites`' root-only rule
   separate them. Pre-collapse the type distinguished nothing either, but the failure was loud; now it is a wrong
   recursion. Phase 1 asserts it directly.
-- **The remaining reconstruction is the risk**, and it is concentrated: phases 2-3 are the paths for which
-  NOTHING in the registry re-asserts the deleted predicates (`_demote_mixed_a` above all). `_legality.py` and the
-  committed digest baseline are the mitigations — but see the baseline's blind spot in Status: it does not reach the
-  tiered/placed contraction path, so the flash phase leans on the liveness assertion for its gate.
+- **The remaining reconstruction is the risk**, and it is now only phase 3's: the flash paths, for which NOTHING in
+  the registry re-asserts the deleted predicates. `_legality.py` and the committed digest baseline are the mitigations.
+  Phase 2's own version of this risk was real and caught by the gates: `_demote_mixed_a` came back as `_promoted` +
+  `warp_operand_dtype`, and the missing dtype predicate surfaced as a `cuTensorMapEncodeTiled` failure on an f32-A
+  matmul under a warp pin — a row the pre-demolition builder also emitted, refused now.
 - **`validate` enforces smem only.** Row 1 is enforced by the emitters and by nothing else until P1 restores the
   thread/CTA checks; registers are unenforced at every tier below 3.
 - **Variant identity may collide in the prior's key space** (see Design). Cheap to check, expensive if real.

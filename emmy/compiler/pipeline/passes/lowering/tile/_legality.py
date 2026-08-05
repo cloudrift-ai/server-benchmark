@@ -91,6 +91,24 @@ def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
     return None
 
 
+def coop_band_layout(plan: ReducePlan, k_contiguous: bool | None) -> str | None:
+    """Whether a cooperative band's lane mapping is COALESCED on B's layout. The plain band
+    interleaves lanes along K, so it needs K contiguous in B (the serving ``F.linear`` N×K layout);
+    the transposed band sweeps lanes along the output axis, so it needs the canonical k-major
+    ``B[k, n]``. ``k_contiguous is None`` (no B to classify) gates neither.
+
+    Measurement cannot decide this: ``ShapeKey`` is layout-blind, so cross-orientation golden /
+    evidence rows tie, and a cold or tied pick landed the band on the wrong operand three times in
+    one day — 10-100x regressions (the WS5 cold-poison hardening). An env pin bypasses the gate."""
+    if k_contiguous is None or plan.coop <= 1:
+        return None
+    if plan.coop_transposed and k_contiguous:
+        return "the transposed coop band lane-sweeps the output axis — uncoalesced on a K-contiguous B"
+    if not plan.coop_transposed and not k_contiguous:
+        return "the plain coop band interleaves lanes along K — uncoalesced on a k-major B[k, n]"
+    return None
+
+
 # ---- the warp tier's K step -------------------------------------------------------------------- #
 
 
@@ -287,6 +305,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
 __all__ = [
     "enforce",
     "fragment_epilogue",
+    "coop_band_layout",
     "producer_band",
     "producer_transport",
     "resolve_scalar_stage",

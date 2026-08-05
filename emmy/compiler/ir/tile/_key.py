@@ -19,7 +19,6 @@ def _term_names(root) -> tuple[list[str], list[str]]:
     results, then the combine results; a zero-axis ``Fold``'s fn params / body / results, then sources).
     The order is a function of the stored params only, so the renumber map — and with it
     :func:`term_key` — is α-invariant."""
-    from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415
 
     names: list[str] = []
     bufs: list[str] = []
@@ -124,7 +123,6 @@ def _canon_tree(node):
 
     from emmy.compiler.ir.stmt import Lambda  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body as _B  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415
 
     def canon_stmt(s):
         return _canon_tree(s) if isinstance(s, Fold) else s

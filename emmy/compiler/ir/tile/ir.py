@@ -517,27 +517,22 @@ class Fold(Stmt):
         return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
 
     @classmethod
-    def projection(cls, fn: Lambda | None = None, operands: tuple = (), *, body=None, results: tuple[str, ...] | None = None) -> Fold:
+    def projection(cls, operands: tuple = (), *, body=None) -> Fold:
         """A ZERO-AXIS fold — the pointwise / projection cell (what the zero-axis fold kind was).
-        No axis and no monoid: ``fn`` becomes the ``lift``, and it IS the per-cell compute, so
-        softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over the
-        reducing fold rather than a wrapper kind around it.
+        No axis and no monoid: the synthesized binder IS the ``lift`` and IS the per-cell compute,
+        so softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over
+        the reducing fold rather than a wrapper kind around it.
 
         ``operands`` bind POSITIONALLY, one lift param per RESULT COMPONENT — a product operand
         binds every channel accumulator, so the geglu combine's second read is a bound param and
-        never a free name. The ``body=`` form synthesizes the binder (params from the operands'
-        components, ``results`` from the last def) and is the arm the raw-loop-IR kernels take,
-        where :func:`_loop_ir_fn` tolerates an impure body."""
+        never a free name. ``body`` is the raw-loop-IR arm, where :func:`_loop_ir_fn` tolerates an
+        impure body; its params come from the operands' components and its results from the last
+        def. A caller holding a ready ``Lambda`` constructs ``Fold(axis=None, ...)`` directly —
+        this builder exists for the body form, which is the only one anything spells."""
         operands = tuple(operands)
-        if fn is None:
-            b = Body.coerce(body) if body is not None else Body()
-            params = tuple(n for s in operands for n in _operand_result_names(s))
-            if results is None:
-                results = _map_results(b) or params[:1]
-            fn = _loop_ir_fn(params, b, results)
-        elif body is not None or results is not None:
-            raise TypeError("Fold.projection: pass fn= xor (body= / results=), not both")
-        return cls(axis=None, operands=operands, lift=fn)
+        b = Body.coerce(body) if body is not None else Body()
+        params = tuple(n for s in operands for n in _operand_result_names(s))
+        return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, _map_results(b) or params[:1]))
 
     def with_axis(self, axis: Axis) -> Fold:
         """This fold over a different iteration ``axis`` — a pure ALGEBRA edit. The lift's

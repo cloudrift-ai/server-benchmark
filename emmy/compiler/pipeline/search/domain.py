@@ -44,7 +44,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from math import prod
 
 # The comparisons a bound may state against its product.
 _OPS = ("<=", "==", "divides")
@@ -163,20 +162,6 @@ class Space:
                     yield from walk(i + 1, {**point, dim.name: v}, tuple(running))
 
         yield from walk(0, {}, tuple(b.coeff for b in self.bounds))
-
-    def points(self) -> list[dict[str, int]]:
-        """Every legal point, enumerated."""
-        return list(self)
-
-    def contains(self, point: dict[str, int]) -> bool:
-        """Whether ``point`` is a member: it binds exactly the declared dimensions, each to one of
-        that dimension's values, and satisfies every bound. This is the check a recorded golden is
-        tested against — "the search can still reach it" — without enumerating the space."""
-        if set(point) != {d.name for d in self.dims}:
-            return False
-        if any(point[d.name] not in d.values for d in self.dims):
-            return False
-        return all(b.holds(b.coeff * prod(point[n] for n in b.dims), complete=True) for b in self.bounds)
 
 
 __all__ = ["Bound", "Dimension", "Space"]

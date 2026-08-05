@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.schedule import TilePlan, Workers, has_scalar_atom_alias
+from emmy.compiler.ir.schedule import TilePlan, Workers
 
 _THREADS = Workers.parse("t8x16")
 
@@ -38,12 +38,10 @@ def test_alias_never_survives_to_spell(alias: str, canonical: str) -> None:
     # The alias is pin-only: it must normalize to the canonical scalar spelling so it never rides a
     # stored knob dict / prior key / golden YAML.
     assert TilePlan.parse(alias, None).spell() == canonical
-    assert not has_scalar_atom_alias(canonical)
+    assert "a:" not in TilePlan.parse(alias, None).spell()
 
 
-def test_alias_detection() -> None:
-    assert has_scalar_atom_alias("a:scalar")
-    assert has_scalar_atom_alias("a:none/f2x2")
-    assert not has_scalar_atom_alias("f8x16")
-    assert not has_scalar_atom_alias("mma_m16n8k16_f16_f32/f2x2/k4")
-    assert not has_scalar_atom_alias("")
+@pytest.mark.parametrize("spec", ["f8x16", "mma_m16n8k16_f16_f32/f2x2/k4", ""])
+def test_a_spec_without_the_alias_is_untouched(spec: str) -> None:
+    """The alias is stripped, never invented: a spelling that never carried one round-trips."""
+    assert TilePlan.parse(spec, Workers.parse("w2x1" if "mma" in spec else "")).spell() == spec

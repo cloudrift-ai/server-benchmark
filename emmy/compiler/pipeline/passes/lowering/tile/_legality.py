@@ -73,16 +73,14 @@ def scalar_block_threads(plan: TilePlan) -> str | None:
     )
 
 
-def producer_band(spec: WarpSpec, block_threads: int | None) -> str | None:
-    """A dedicated producer band adds ``32·aux`` threads ON TOP of the compute warps. Two budgets:
+def producer_band(spec: WarpSpec, block_threads: int) -> str | None:
+    """A dedicated producer band adds ``32·p`` threads ON TOP of the compute warps. Two budgets:
     the total fits the CTA limit, and the band does not outnumber the compute half.
 
     The only rule in this module that is NOT a bound — it mixes a sum with a product, which no
     coordinate change linearizes — so it stays an ordinary arithmetic predicate.
     """
     aux = WARP_LANES * spec.producer_warps
-    if block_threads is None:
-        return "a producer band needs a launch-thread count; this tile has none (register-only)"
     if aux > block_threads:
         return f"producer band {aux} threads outnumbers the {block_threads} compute threads"
     if block_threads + aux > MAX_BLOCK_THREADS:

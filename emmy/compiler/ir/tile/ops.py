@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail
+from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, stmt_axis_names
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -182,7 +182,6 @@ def axis_names(root) -> set[str]:
     (bound by the nest, free by construction) and a captured VALUE. The cut's closure predicate
     (``_cut._captured_values``) subtracts this set, and the structural dump shows what remains as
     the λ's capture set."""
-    from emmy.compiler.ir.tile.ir import stmt_axis_names  # noqa: PLC0415
     from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
 
     out: set[str] = set()
@@ -222,7 +221,7 @@ def seal_workers(tile) -> None:
     from emmy.compiler.ir.schedule import derive_inventory  # noqa: PLC0415
 
     coop = max(
-        (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE" and hasattr(v, "coop")),
+        (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE"),
         default=1,
     )
     work = derive_inventory(
@@ -289,14 +288,17 @@ def axis_role(op) -> AxisRole:
     """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction: a
     ``CONTRACTION`` contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain
     ``sum`` / ``max`` / ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback
-    zero-axis ``Fold``. This is what the schedule / materialize passes dispatch on.
+    zero-axis ``Fold``.
 
-    Read off the NODE (:func:`head`) — the role is that node's own derived property
-    (``Fold.role``), so the dispatch costs a field access. The
-    annotated-``Loop`` scan survives only for the raw-loop-IR escape (an un-recognized cell,
-    ``030``'s finalize, the coop fused-tail sibling): no node to ask, the stamped ``Loop.role``
-    IS the fact. Never synthesize a nest to answer this — :attr:`Fold.loop` splices every operand
-    edge and flattens nested nodes, and hands back the same property it was given."""
+    NOT the scheduler's dispatch — that reads ``Fold.role`` off the node directly, through
+    :func:`head`, and this accessor has no caller in the passes. What it is FOR is the one reading
+    the node cannot give: the RAW-LOOP-IR escape (an un-recognized cell, ``030``'s finalize, the
+    coop fused-tail sibling) has no node to ask, so the recognition-stamped ``Loop.role`` is the
+    only statement of the fact. That makes this the one place the lifted term and the bare-loop
+    form it was lifted from can be compared, which is what the recognition-boundary tests assert.
+
+    Never synthesize a nest to answer this — :attr:`Fold.loop` splices every operand edge and
+    flattens nested nodes, and hands back the same property it was given."""
     node = head(op)
     if node is not None:
         return node.role

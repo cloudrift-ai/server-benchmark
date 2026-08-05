@@ -438,7 +438,7 @@ pair, never fused into one object. The **geometry is the slice's own**: a `TileP
 `(m, n)` output axes it tiles (`axes`, bound by `.at(m, n)`) and derives the `Side` pair from them, so the tiled
 CELL's reading is a function of the schedule slice alone. `axes` is `compare=False` — placement is not a search
 dimension, so it never reaches `spell()`, a stamped knob row, a golden or a prior key. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
-structurally off the node (`ops.axis_role` — every role DERIVES from arity: no axis is `FREE`, a twisted combine
+structurally off the node (`Fold.role` — every role DERIVES from arity: no axis is `FREE`, a twisted combine
 `TWISTED`, the bilinear shape `CONTRACTION`, else `PLANAR`), not a bespoke Python type per schedule. The PLANAR
 demotion is therefore a formation fact with no role rewrite: moving the edges inline is enough, and the same
 derivation answers `PLANAR` by itself. That rewrite is `Fold.demoted()` — each edge placed before the first read of its

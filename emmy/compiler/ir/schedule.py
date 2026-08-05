@@ -20,8 +20,8 @@ A reduction's only freedom is **how the reduce axis is partitioned across hardwa
 same op + the same materializer extend across kernel kinds — only the carrier and the partition
 change.
 
-The schedule is **flat and kind-free**: a kernel's structure is read from its annotated reduce loop's
-:class:`~emmy.compiler.ir.axis.AxisRole` (``ops.axis_role``), not a Python type, so a pointwise
+The schedule is **flat and kind-free**: a kernel's structure is read from its node's derived
+:class:`~emmy.compiler.ir.axis.AxisRole` (``Fold.role``), not a Python type, so a pointwise
 cell, a ``PLANAR`` / ``TWISTED`` reduce, and a ``CONTRACTION`` contraction all schedule through the
 same value types and use the subset their axes admit. Warp specialization is **orthogonal** — an
 optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a producer band split
@@ -288,11 +288,6 @@ class ReducePlan:
 #: stored knob dict. Lets a pin force the scalar tier explicitly instead of the invisible empty
 #: string.
 _SCALAR_ATOM_ALIASES = frozenset({"a:scalar", "a:none"})
-
-
-def has_scalar_atom_alias(spec: str | None) -> bool:
-    """True iff any ``/``-token of ``spec`` is an explicit scalar-atom alias (``a:scalar`` / ``a:none``)."""
-    return bool(spec) and any(t.strip() in _SCALAR_ATOM_ALIASES for t in spec.split("/"))
 
 
 def _strip_scalar_atom(spec: str | None) -> str:
@@ -921,5 +916,4 @@ __all__ = [
     "_codec_width",
     "atom_for",
     "derive_workers",
-    "has_scalar_atom_alias",
 ]

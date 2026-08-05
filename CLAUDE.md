@@ -104,7 +104,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `TilePlan`/`ReducePlan` slices and spells each row ONCE; the retired embedded-worker spellings RAISE, and the
   golden corpus was re-spelled mechanically). Dispatch reads the
   role/algebra off the node — `ops.head` reaches it through the projection `Map` and every scheduling FACT
-  (`ops.axis_role`, the reduce `Axis`, the operand edges read off the node) is a stored param on it, so no
+  (`Fold.role`, the reduce `Axis`, the operand edges read off the node) is a stored param on it, so no
   scheduling decision synthesizes a nest; `reduce_loop`/`Fold.lower` are for callers that consume a body, and flatten
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's

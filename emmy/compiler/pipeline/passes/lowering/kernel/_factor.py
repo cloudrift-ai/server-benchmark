@@ -136,15 +136,12 @@ def _emit(op, ctx: Ctx) -> Frag:
         prefix = list(src.body) if src is not None else []
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op))
     if isinstance(op, Fold):
-        stmts = _emit_body(Body(op.spliced_step()), ctx)  # operand edges splice ahead of first use
+        # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
+        # included, since a contraction is this same node under the bilinear reading. Operand
+        # edges splice ahead of first use.
+        stmts = _emit_body(Body(op.spliced_step()), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[loop], out=Handle(op.out))
-    if is_contraction(op):
-        # The per-cell scalar contraction (no TILE slice): the node's synthesized mul-add loop —
-        # operand edges already flattened in place, so the walk below only passes stmts through.
-        loop = op.loop
-        stmts = _emit_body(loop.body, ctx)
-        return Frag(body=[Loop(axis=loop.axis, body=Body(tuple(stmts)), unroll=loop.unroll, role=loop.role)], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
 
 

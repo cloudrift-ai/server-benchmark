@@ -12,7 +12,7 @@ from emmy.compiler.pipeline.search.domain import Bound, Dimension, Space
 def test_unconstrained_space_is_the_cartesian_product_in_declaration_order():
     """No bounds ⇒ every combination, first dimension slowest, last fastest."""
     space = Space(dims=(Dimension("a", (1, 2)), Dimension("b", (1, 2, 4))))
-    assert space.points() == [
+    assert list(space) == [
         {"a": 1, "b": 1},
         {"a": 1, "b": 2},
         {"a": 1, "b": 4},
@@ -60,8 +60,9 @@ def test_non_power_of_two_values_are_ordinary_members():
         dims=(Dimension("reg_n", (1, 2, 4)), Dimension("reg_m", (1, 2, 4, 6, 8, 9, 10, 12, 14, 26))),
         bounds=(Bound(("reg_n", "reg_m"), limit=128),),
     )
-    assert space.contains({"reg_n": 4, "reg_m": 26})
-    assert space.contains({"reg_n": 2, "reg_m": 9})
+    pts = list(space)
+    assert {"reg_n": 4, "reg_m": 26} in pts
+    assert {"reg_n": 2, "reg_m": 9} in pts
 
 
 def test_pruning_makes_a_tightly_bounded_large_space_enumerable():
@@ -70,7 +71,7 @@ def test_pruning_makes_a_tightly_bounded_large_space_enumerable():
     test does not finish."""
     dims = tuple(Dimension(f"x{i}", tuple(range(1, 65))) for i in range(5))
     space = Space(dims=dims, bounds=(Bound(tuple(d.name for d in dims), limit=64),))
-    pts = space.points()
+    pts = list(space)
     assert all(prod(p.values()) <= 64 for p in pts)
     assert len(pts) < 10_000
     assert {"x0": 64, "x1": 1, "x2": 1, "x3": 1, "x4": 1} in pts
@@ -86,26 +87,27 @@ def test_multiple_bounds_all_apply():
     }
 
 
-def test_contains_rejects_a_non_member():
+def test_a_bound_violating_point_is_not_enumerated():
+    """Membership has ONE definition — the walk. A point over the bound, or off a dimension's
+    declared values, simply never appears in it."""
     space = Space(dims=(Dimension("a", (1, 2, 4)), Dimension("b", (1, 2, 4))), bounds=(Bound(("a", "b"), limit=4),))
-    assert space.contains({"a": 2, "b": 2})
-    assert not space.contains({"a": 4, "b": 4})  # violates the bound
-    assert not space.contains({"a": 3, "b": 1})  # 3 is not a declared value
-    assert not space.contains({"a": 2})  # under-specified
-    assert not space.contains({"a": 2, "b": 2, "c": 1})  # names an undeclared dimension
+    pts = list(space)
+    assert {"a": 2, "b": 2} in pts
+    assert {"a": 4, "b": 4} not in pts  # violates the bound
+    assert {"a": 3, "b": 1} not in pts  # 3 is not a declared value
+    assert all(set(p) == {"a", "b"} for p in pts)  # every point binds exactly the declared dims
 
 
-def test_contains_agrees_with_enumeration():
+def test_prefix_pruning_drops_no_legal_point():
+    """The walk prunes a prefix the moment a running product overruns, which is only sound because
+    every value is ``≥ 1``. Checked against the unpruned truth: the full cartesian product filtered
+    by the bounds, computed here independently of the walk that produced them."""
     space = Space(
         dims=(Dimension("a", (1, 2, 3, 4)), Dimension("b", (1, 2, 3, 4)), Dimension("c", (1, 2, 3, 4))),
         bounds=(Bound(("a", "b"), limit=8), Bound(("b", "c"), limit=12, op="divides")),
     )
-    enumerated = {tuple(sorted(p.items())) for p in space}
-    for a in (1, 2, 3, 4):
-        for b in (1, 2, 3, 4):
-            for c in (1, 2, 3, 4):
-                point = {"a": a, "b": b, "c": c}
-                assert space.contains(point) == (tuple(sorted(point.items())) in enumerated)
+    brute = {(a, b, c) for a in (1, 2, 3, 4) for b in (1, 2, 3, 4) for c in (1, 2, 3, 4) if a * b <= 8 and 12 % (b * c) == 0}
+    assert {(p["a"], p["b"], p["c"]) for p in space} == brute
 
 
 @pytest.mark.parametrize(
@@ -147,7 +149,7 @@ def test_space_rejects_duplicate_and_undeclared_dimensions():
 def test_an_over_tight_bound_yields_the_empty_set():
     """An empty enumeration is a legal answer, not an error — the caller decides what to do."""
     space = Space(dims=(Dimension("a", (4, 8)),), bounds=(Bound(("a",), limit=3),))
-    assert space.points() == []
+    assert list(space) == []
 
 
 def test_bound_spelling_reads_back():

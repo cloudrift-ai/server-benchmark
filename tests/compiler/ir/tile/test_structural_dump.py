@@ -93,7 +93,7 @@ def test_map_dump_shows_the_binder_and_its_sources() -> None:
     """A ``Map``'s storage is ``fn`` + ``sources``. The binder rides its OWN branch, next to the
     body it binds — not the header, which on a big fold sat a screenful above its stmts. Every
     λ-valued field reads the same way: ``lift:`` / ``combine:`` / ``fn:``, signature then body."""
-    m = Fold.projection(fn=None, operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
+    m = Fold.projection(operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
     text = "\n".join(pretty(m))
     assert text.splitlines()[0] == "Fold  free"
     assert "├─ operand[0]: Fold[k in 0..512] planar" in text
@@ -104,7 +104,7 @@ def test_map_dump_shows_the_binder_and_its_sources() -> None:
 def test_the_fn_branch_survives_an_empty_body() -> None:
     """The branch carries the SIGNATURE, so it is emitted even with nothing to compute — an
     identity projection still binds, and dropping the branch would lose the binder entirely."""
-    text = "\n".join(pretty(Fold.projection(fn=None, operands=(_stat_fold(),), body=Body(()))))
+    text = "\n".join(pretty(Fold.projection(operands=(_stat_fold(),), body=Body(()))))
     assert "└─ lift: λ(acc0) -> (acc0)" in text
 
 
@@ -222,7 +222,7 @@ def test_iteration_vars_are_not_captures() -> None:
     m, n = Axis("m", 128), Axis("n", 64)
     body = Body((Load(name="w_e", input="w", index=(Var("m"), Var("n"))), Assign(name="o", op="multiply", args=("acc0", "w_e"))))
     tile = TileOp(
-        op=Fold.projection(fn=None, operands=(_stat_fold(),), body=body),
+        op=Fold.projection(operands=(_stat_fold(),), body=body),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
@@ -259,7 +259,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
 def test_pretty_body_separates_placement_and_boundary_stores_from_the_term() -> None:
     m, n = Axis("m", 128), Axis("n", 64)
     tile = TileOp(
-        op=Fold.projection(fn=None, operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),))),
+        op=Fold.projection(operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),))),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),

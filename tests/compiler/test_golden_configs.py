@@ -263,6 +263,43 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         assert red is None or red in splitk_moves() + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
 
 
+def test_attention_golden_geometry_is_a_member_of_the_twisted_grid():
+    """The flash half of the permanence gate. Attention goldens were checked against NO domain at
+    all — the matmul test above skips every non-``MatmulGoldenConfig`` — so nothing said whether a
+    recorded flash row was reachable, and the plan carried
+    ``dit_xl_2.attn.s256``'s ``k5`` as an open "may be a hand pin" question.
+
+    It is reachable, and the question rested on reading ``k5`` as a key-atom count. It is not:
+    ``/k<bk>`` is the K-chunk, which ``twisted_warp_moves`` derives from the head dim rather than
+    drawing from ``_FLASH_KEY_ATOMS``. What the grid generates is the free geometry
+    ``(warps_m, key_atoms, q_tiles)`` = ``(WORK.units[0], reg_n, reg_m)`` of the SCORE site, and
+    every recorded golden's is a member.
+
+    The PV site (``TILE@pj``) is deliberately not checked here: its ``wn·fn·atom_n == d_v``
+    factorization is derived from the head dim, so it has no ladder to belong to — which is also
+    why ``f2x9`` is legal there and would be nonsense on the score site."""
+    from emmy.compiler.ir.schedule import TilePlan, Workers
+    from emmy.compiler.pipeline.search.golden import AttentionGoldenConfig
+    from emmy.compiler.pipeline.search.space import twisted_warp_moves
+
+    grid = set(twisted_warp_moves())
+    checked = 0
+    for g in GOLDEN_CONFIGS:
+        if not isinstance(g, AttentionGoldenConfig):
+            continue
+        work = Workers.parse(g.knobs.get("WORK") or "")
+        # A static row keys the score site ``TILE@dd``; a dynamic one records a single bare ``TILE``
+        # naming the same plan (the schema requires it — see the dynamic-attention any-of contract).
+        spec = g.knobs.get("TILE@dd") or g.knobs.get("TILE") or ""
+        if not spec or work is None:
+            continue
+        plan = TilePlan.parse(spec, work)
+        triple = (work.units[0], plan.reg_n, plan.reg_m)
+        assert triple in grid, f"{g.name} ({g.gpu_name}): flash geometry {triple} not in twisted_warp_moves()"
+        checked += 1
+    assert checked >= 40, f"only {checked} attention goldens carried a score-site TILE — the gate stopped covering them"
+
+
 # --- dynamic (symbolic-axis) goldens -----------------------------------------
 
 

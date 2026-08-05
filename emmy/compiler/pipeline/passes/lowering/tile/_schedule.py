@@ -1011,16 +1011,32 @@ def _inventories(terms: list[_Term]) -> list[Workers | None]:
                 out.append(replace(w, producer=band))
     # The live ``WORK`` pin is AUTHORITATIVE, so the pinned inventory is offered whether or not a
     # catalog implies it — the unit widths a ``TILE`` pin reads off it are exactly what no catalog
-    # can predict. A pin no candidate matches keeps the catalog's own inventories as siblings, with
-    # a warning: the term the pin was written for may not be the one being scheduled (a recognition
-    # fork's reduce sibling sees a matmul's warp pin), and emptying its fork would leave it unmapped.
+    # can predict.
     raw = WORK.raw()
     if raw is None:
         return out
     kept = [w for w in out if values_equal(WORK.name, raw, w.spell() if w is not None else "")]
     if kept:
         return kept
-    logger.warning("WORK pin %r matches no candidate's worker inventory; offering it beside the full fork", raw)
+    # THE ONE PLACE A PIN DOES NOT NARROW, and it is a phase-3 crutch rather than a contract: the
+    # catalog's inventories stay as siblings so the term still maps. Two situations reach here and
+    # they want opposite answers, which is why the widening is not simply removed —
+    #
+    #   - PIN BLEED, where widening is right: one env pin, several kernels, and this is not the one
+    #     it was written for (a recognition fork's reduce sibling sees a matmul's warp pin).
+    #     Emptying the fork would leave a term unmapped over a pin that was never about it.
+    #   - A COVERAGE GAP, where narrowing is right: the pin names a real inventory this term's sites
+    #     cannot offer YET. Live today on flash — the twisted streaming site enumerates reduce bands
+    #     only, so a ``w<M>x<N>`` pin matches nothing until phase 3 adds ``twisted_warp_moves``.
+    #
+    # Nothing here can tell them apart, so the gap is TRACKED instead of guessed at:
+    # ``test_work_pin_widens_only_where_the_site_offers_no_warp_inventory`` pins which terms reach
+    # this branch, and phase 3 is what lets the widening become a plain narrowing.
+    logger.warning(
+        "WORK pin %r matches no candidate's worker inventory (%s offered); offering it beside the full fork",
+        raw,
+        ", ".join(repr(w.spell() if w is not None else "") for w in out) or "none",
+    )
     return [Workers.parse(raw), *out]
 
 

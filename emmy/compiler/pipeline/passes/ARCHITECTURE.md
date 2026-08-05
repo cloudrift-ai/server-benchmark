@@ -133,6 +133,17 @@ empty is the completion gate. `scripts/digest_kernels.py` is the other half: it 
 byte-for-byte AND asserts the case's pins actually reached a kernel, so a role that is merely rendering rather than
 scheduling cannot pass unnoticed.
 
+Three structural properties the enumeration rests on are asserted rather than trusted, all in
+`tests/compiler/passes/test_move_catalog.py`. **Option-0 is conservative PER FAMILY** — position still deploys a
+kernel on three prior-free paths, so the leading row must stamp each family's declared OFF, with the reduce tier the
+one encoded exception (it leads with its cooperative heuristic pick, and since step 7 that exception has two
+spellings, because the band's width moved into `WORK` — so the pair is checked together). **A row is its spelled
+knob dict**, so two candidate combinations spelling identically are one row, not two. And **the `WORK` pin's one
+non-narrowing branch is tracked**: a pin no candidate matches is offered beside the catalog's own inventories rather
+than replacing them, which is right for pin bleed across kernels and wrong for a coverage gap, and nothing at that
+point can tell them apart — so the terms that reach it are pinned by test until phase 3 gives the twisted site a
+warp geometry and the widening can become a plain narrowing.
+
 ## No shape-specific pattern matching
 
 A pass must not dispatch on enumerated shapes ("if this is the gated-MLP body do X, if it is the QK^T body do Y").

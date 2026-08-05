@@ -688,22 +688,33 @@ the staged-TMA tiers unexercised.
 | gate | catches | does not catch |
 | --- | --- | --- |
 | `test_schedule_leaf_set_equals_catalog` + its 3 siblings (restore from xfail) | a family's value domain or row count changing | cross-family composition on non-matmul shapes |
-| `test_golden_knobs_are_members_of_the_move_catalog` (live today) | a golden becoming unreachable | non-golden losses |
-| per-key value-domain snapshot (new, ~80 lines) | which family lost which value, localized | ranking quality |
+| `test_golden_knobs_are_members_of_the_move_catalog` (live today) | a matmul / reduce golden becoming unreachable | non-golden losses |
+| `test_attention_golden_geometry_is_a_member_of_the_twisted_grid` (LANDED) | a flash golden's score-site geometry becoming unreachable | the PV site, which has no ladder (its factorization is derived from `d_v`) |
+| per-key value-domain snapshot (new, ~80 lines) — DEFERRED to phase 3 | which family lost which value, localized | ranking quality |
 | `xfail_registry` shrink (107 ids) | a restored behavior regressing | the 605 CPU skips; GPU-only; silent XPASS under `strict=False` |
 | `digest_kernels.py` vs a committed baseline (+ its per-case pin liveness) | a pinned/golden row materializing differently; a case whose pins stop reaching a kernel, or an `UNSCHEDULED` one that starts | the 5 remaining `UNSCHEDULED` (flash) cases' materialization, until phase 3 lands and they leave the set |
 | eval-golden MATCH sweep (GPU) | the deployed pick drifting | non-golden shapes |
-| option-0 assertion (`stamp_schedule_families(rows[0])` all-`off`, per-family) | the safety-net pick becoming non-degenerate | — |
+| option-0 assertion (LANDED — `test_option_zero_is_conservative_per_family`) | the safety-net pick becoming non-degenerate | — |
+| `test_work_pin_widens_only_where_the_site_offers_no_warp_inventory` (LANDED) | the one non-narrowing pin branch becoming permanent | — |
 
 **The gate is set equality plus a conservative option-0**, not ordered-row equality — ranking is the prior's job and
 no ordered baseline survives. Row order is re-derived per family and documented, not preserved.
 
-**Snapshot instead of a system dump.** For each corpus shape check in `{codec key → sorted set of spelled values}`
-plus the row count per key. It is in the STORED spelling (so it joins goldens and DB rows directly), it is what
-`test_move_catalog` already asserts by hand, and it doubles as the row-count oracle. Copy `search/data/freeze.py`'s
-checked-in-YAML + manifest + drift-detection pattern; there is no other snapshot infrastructure in `tests/`.
-Completeness then upgrades from "the golden row appears somewhere" to **"for each golden key, its value is a member
-of that key's domain"** — ~3000 per-key assertions instead of 747 set-membership ones, each localizing the loss.
+**Snapshot instead of a system dump — DEFERRED to phase 3, deliberately.** For each corpus shape check in
+`{codec key → sorted set of spelled values}` plus the row count per key. It is in the STORED spelling (so it joins
+goldens and DB rows directly), it is what `test_move_catalog` already asserts by hand, and it doubles as the
+row-count oracle. Copy `search/data/freeze.py`'s checked-in-YAML + manifest + drift-detection pattern; there is no
+other snapshot infrastructure in `tests/`. Completeness then upgrades from "the golden row appears somewhere" to
+**"for each golden key, its value is a member of that key's domain"** — ~3000 per-key assertions instead of 747
+set-membership ones, each localizing the loss.
+
+It waits for phase 3 because the next thing that MOVES a domain is phase 3 itself, registering the twisted geometry
+as a `values` entry: a baseline checked in before that lands is regenerated as its first act, which is how a
+snapshot gate learns to be re-blessed instead of read. Until then the loss it would localize is still CAUGHT — by
+the leaf-set equality + row-count equation and by the two membership gates above — just not localized to the key.
+The A/B harness used through this window (enumerate every digest case pinned AND unpinned, compare sorted
+`canonical_row_key` sets; 903 705 rows) is the same oracle run by hand, and is what every change here was measured
+against.
 
 ## Soundness tests
 

@@ -402,3 +402,114 @@ def test_two_site_rows_are_distinct_and_materialize_both_sites():
         op = sch._materialize(owner[canonical_row_key(row)], row, "k", {})
         assert "REDUCE@j" in op.schedule, f"row spells REDUCE@j={row['REDUCE@j']!r} but the op carries {sorted(op.schedule)}"
         assert op.schedule["REDUCE@j"].spell() == row["REDUCE@j"], (op.schedule["REDUCE@j"].spell(), row["REDUCE@j"])
+
+
+# --- the WORK pin's one non-narrowing branch ----------------------------------------------------- #
+
+
+def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatch):
+    """A pin NARROWS — except in ``_inventories``' one fallback, where a ``WORK`` pin that matches
+    no candidate is offered BESIDE the catalog's own inventories instead of replacing them.
+
+    That branch is a phase-3 crutch, not a contract, so this pins both halves of it. A pin the
+    site DOES offer narrows to exactly that inventory. A pin it cannot offer widens — live today on
+    the twisted streaming fold, whose site enumerates cooperative bands only until
+    ``twisted_warp_moves`` gives it a warp geometry, which is why a ``w<M>x<N>`` pin matches nothing
+    there. The widening is measured, not assumed: narrowing it today drifts 4 of the 5 flash kernels
+    in the digest baseline.
+
+    When phase 3 lands, the widening half starts failing. That is the point — the fix then is to
+    delete the fallback, not to update this test."""
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    ctx = Context.from_target((12, 0))
+    fold = fold_from_loop(
+        Loop(
+            axis=Axis("kv", 256),
+            body=Body((Load(name="v_e", input="v", index=(Var("m"), Var("kv"))), Accum(name="acc", value="v_e", op="add", axes=("kv",)))),
+            role=AxisRole.PLANAR,
+        )
+    )
+    tile = TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
+
+    def inventories() -> list[str]:
+        term = sch._Term(tile, tile.place.on_grid(), ctx)
+        return [w.spell() if w is not None else "" for w in sch._inventories([term])]
+
+    monkeypatch.delenv("EMMY_WORK", raising=False)
+    offered = inventories()
+    assert offered and not any(w.startswith("w") for w in offered), offered  # reduce bands only
+
+    # A pin the site DOES offer narrows to it alone.
+    monkeypatch.setenv("EMMY_WORK", offered[-1])
+    assert inventories() == [offered[-1]]
+
+    # A pin it cannot offer LEADS, and the catalog's own stay as siblings rather than being emptied.
+    monkeypatch.setenv("EMMY_WORK", "w4x1")
+    widened = inventories()
+    assert widened == ["w4x1", *offered], widened
+
+
+# --- the ordering obligation: each family's FIRST value is its conservative default -------------- #
+
+
+def _first_row(tile) -> dict:
+    """The row a prior-free path deploys: the enumeration's leading row for ``tile``."""
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
+    rows, _keys, _owner = sch._enumerate([term])
+    assert rows, "the term enumerated nothing"
+    return rows[0]
+
+
+def test_option_zero_is_conservative_per_family(monkeypatch):
+    """Enumeration produces a SET, so ranking is the prior's job — but POSITION still deploys a
+    kernel on three prior-free paths (no prior and no golden, every leaf blocklisted, and the
+    validate-retry budget exhausted). The obligation those paths rest on is that each family's
+    FIRST value is its conservative default, and it is PER-FAMILY rather than global: the reduce
+    tier deliberately leads with its cooperative heuristic pick, not a serial one, because that is
+    the historical cold deploy.
+
+    Mechanized here rather than trusted: every family of the leading row stamps its declared OFF
+    value, with ``REDUCE`` the one encoded exception — and since step 7 that exception has TWO
+    spellings, because the band's WIDTH moved into ``WORK``. So the pair is checked together: an
+    option-0 that leads with a cooperative band must spell exactly that band's inventory, never a
+    wider one and never a tile."""
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.pipeline.knob import is_off_value, stamp_schedule_families
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    monkeypatch.delenv("EMMY_WORK", raising=False)
+    reduce_fold = fold_from_loop(
+        Loop(
+            axis=Axis("k", 4096),
+            body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), Accum(name="acc", value="x_e", op="add", axes=("k",)))),
+            role=AxisRole.PLANAR,
+        )
+    )
+    terms = {
+        "bare reduce": TileOp(op=reduce_fold, place=Placement(free=(Axis("m", 64),))),
+        "two-site contraction": _two_site_term(),
+    }
+    for label, tile in terms.items():
+        row = _first_row(tile)
+        stamped = stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")})
+        work = Workers.parse(stamped.get("WORK") or None)
+        coop = max((ReducePlan.parse(v, work).coop for k, v in stamped.items() if family_of(k) == "REDUCE" and v), default=1)
+        for fam, value in stamped.items():
+            if family_of(fam) == "REDUCE":
+                continue  # the encoded exception — the reduce tier leads with its cooperative pick
+            if family_of(fam) == "WORK" and coop > 1:
+                # …and the inventory that carries its width is the SAME exception, not a second one.
+                assert value == f"t{coop}", f"{label}: option-0 leads with coop={coop} but spells WORK={value!r}"
+                continue
+            assert is_off_value(family_of(fam), value), f"{label}: option-0 stamps {fam}={value!r}, not the family's OFF"

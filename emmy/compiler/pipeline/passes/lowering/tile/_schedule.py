@@ -1293,6 +1293,13 @@ class _Row:
     knobs: dict
     plans: dict = field(default_factory=dict)
     coop: int = 1
+    #: ``{codec key -> resolved slice}`` for every family the row's sites DECIDED — the typed
+    #: ``TilePlan`` / ``ReducePlan`` / ``Stage`` the enumeration already built. Materialization
+    #: reads these instead of re-parsing the strings it just spelled from them. A family a site
+    #: left at its decided empty is ABSENT, not ``None``: the empty spelling still has to be
+    #: RESOLVED against the inventory (an empty ``TILE`` beside a thread inventory is a real
+    #: unit-register tile), and that is the resolver doing its job rather than a re-parse.
+    slices: dict = field(default_factory=dict)
 
     @property
     def tiles(self) -> tuple:
@@ -1317,15 +1324,17 @@ class _Row:
         this existed, and the looser of the two was the one that ran on multi-root terms."""
         knobs: dict = {}
         plans: dict = {}
+        slices: dict = {}
         coop = 1
         for part in parts:
             knobs.update(part.knobs)
             plans.update(part.plans)
+            slices.update(part.slices)
             if part.coop > 1:
                 if coop > 1 and part.coop != coop:
                     return None  # two sites, two widths, one WORK entry to spell them in
                 coop = part.coop
-        return cls(knobs=knobs, plans=plans, coop=coop)
+        return cls(knobs=knobs, plans=plans, coop=coop, slices=slices)
 
 
 def _merge(node: _Node, value: dict, combo: tuple[_Row, ...]) -> _Row | None:
@@ -1339,6 +1348,7 @@ def _merge(node: _Node, value: dict, combo: tuple[_Row, ...]) -> _Row | None:
         knobs={key: _spell(value.get(family)) for family, key in node.keys.items()},
         plans={node.keys["TILE"]: tile} if tile is not None and "TILE" in node.keys else {},
         coop=red.coop if red is not None else 1,
+        slices={node.keys[f]: v for f, v in value.items() if f in node.keys and v is not None},
     )
     return _Row.union((own, *combo))
 
@@ -1488,12 +1498,12 @@ def _term_rows(term: _Term, work: Workers | None, rasters: list[str], spelled: s
     by the row-level inventory validation, closed by the kernel-global ``RASTER``. The roots
     reconcile through the same :meth:`_Row.union` a site uses for its children: one rule, whichever
     level of the tree assembles the row."""
-    out: list[dict] = []
+    out: list[tuple[dict, _Row]] = []
     for combo in product(*(_rows_at(term, node, work) for node in term.tree)):
         row = _Row.union(combo)
         if row is None or not _work_holds(row, work):
             continue
-        out.extend({**row.knobs, WORK.name: spelled, RASTER.name: raster} for raster in rasters)
+        out.extend(({**row.knobs, WORK.name: spelled, RASTER.name: raster}, row) for raster in rasters)
     return out
 
 
@@ -1510,13 +1520,13 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], dict]:
     #: Every key the union spells, decided-empty — a reading lacking a site stamps the empty there.
     empty = {k: "" for k in keys}
     rows: list[dict] = []
-    origin: list[_Term] = []
+    origin: list[tuple[_Term, _Row]] = []
     for work in _inventories(terms):
         spelled = work.spell() if work is not None else ""
         for term in terms:
-            for row in _term_rows(term, work, _raster_values(term), spelled):
+            for row, resolved in _term_rows(term, work, _raster_values(term), spelled):
                 rows.append({**empty, **row})
-                origin.append(term)
+                origin.append((term, resolved))
         if len(rows) > MAX_ROWS:
             raise ValueError(
                 f"schedule enumeration for {terms[0].tile.name!r} exceeds the {MAX_ROWS}-row budget "
@@ -1524,10 +1534,10 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], dict]:
                 f"narrow a catalog or add the legality predicate that bounds it, never truncate."
             )
     keys, rows = _decided(keys, rows)
-    owner: dict[tuple, _Term] = {}
-    for row, term in zip(rows, origin, strict=True):
+    owner: dict[tuple, tuple[_Term, _Row]] = {}
+    for row, (term, resolved) in zip(rows, origin, strict=True):
         ident = canonical_row_key(row)
-        if owner.setdefault(ident, term) is not term:
+        if owner.setdefault(ident, (term, resolved))[0] is not term:
             raise ValueError(
                 f"two readings of {term.tile.name!r} spell the SAME row {dict(ident)} — reading identity must "
                 f"survive into the prior's key space; distinguish them with an S_* stamp, never a new knob key."
@@ -1789,10 +1799,16 @@ def _splitk_option(
     return _stamp(term, op, name, knobs, [*own, *nested])
 
 
-def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
-    """One row → its ``TileOp``. Each family resolves ONCE against the row's ``WORK`` inventory,
-    per key, through the same :class:`Sched` spelling the enumeration used — and the FORM is the
-    two node predicates again, never a role."""
+def _materialize(term: _Term, resolved: _Row, row: dict, name: str, knobs: dict) -> TileOp:
+    """One row → its ``TileOp``, built from the slices the ENUMERATION resolved (``resolved``) —
+    the row is the tuning currency and must stay strings, but the materializer is not a tuning
+    consumer and has no business inverting a serialization it just produced. The FORM is the two
+    node predicates again, never a role.
+
+    A family a site left at its DECIDED EMPTY carries no slice, and there the string is still
+    resolved against the inventory: an empty ``TILE`` beside a thread inventory is a real
+    unit-register tile and only ``resolve_site_tile`` knows it. That is the one resolution here
+    that computes something rather than reproducing it."""
     work = Workers.parse(row.get(WORK.name) or None)
     # Structural stamps (``S_warp_eligible``) ride onto the op: fork rows carry them for branch
     # identity, but the MATERIALIZED op is what ``realized_knobs`` reads, and dropping them here
@@ -1821,22 +1837,32 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
     def value(family: str) -> str:
         return row.get(keys.get(family, family), "") or ""
 
+    def decided(family: str):
+        """The slice this site DECIDED, or ``None`` for its decided empty."""
+        return resolved.slices.get(keys.get(family, family))
+
     site = root.site if root is not None else None
-    nested = _nested_slices(term, root, row, work) if root is not None else []
+    nested = _nested_slices(term, resolved, root, row, work) if root is not None else []
     if site is None or site.node.axis is None:
-        return _free_option(term, resolve_site_tile(value("TILE"), work), name, op_knobs, nested)
+        strip = decided("TILE")
+        return _free_option(term, strip if strip is not None else resolve_site_tile(value("TILE"), work), name, op_knobs, nested)
     node = site.node
-    rplan = ReducePlan.parse(value("REDUCE"), work)
+    rplan = decided("REDUCE") or ReducePlan.parse(value("REDUCE"), work)
+    plan = decided("TILE")
+    if plan is None:
+        plan = resolve_site_tile(value("TILE"), work, rplan.spell())
     if is_contraction(node) and rplan.needs_split:
-        split_plan = resolve_site_tile(value("TILE"), work, rplan.spell())
-        return _splitk_option(term, split_plan, node, rplan, name, op_knobs, value("STAGE"), nested)
+        # The stage is re-resolved INSIDE against the sliced node, so it stays a spelling here.
+        return _splitk_option(term, plan, node, rplan, name, op_knobs, value("STAGE"), nested)
     if _streams(node) and any(t is not None for t in _row_stream_tiles(root, row, work)):
         return _stream_option(term, node, root, row, rplan, work, name, op_knobs, nested)
-    plan = resolve_site_tile(value("TILE"), work, rplan.spell())
-    return _node_option(term, node, plan, rplan, _stage_of(term, node, plan, value("STAGE")), work, name, op_knobs, nested)
+    stage = decided("STAGE")
+    if stage is None and value("STAGE"):
+        stage = _stage_of(term, node, plan, value("STAGE"))
+    return _node_option(term, node, plan, rplan, stage, work, name, op_knobs, nested)
 
 
-def _nested_slices(term: _Term, node: _Node, row: dict, work: Workers | None) -> list[tuple]:
+def _nested_slices(term: _Term, resolved: _Row, node: _Node, row: dict, work: Workers | None) -> list[tuple]:
     """Every NESTED site's resolved slices, as the ``(family, node, value)`` triples ``scheduled``
     keys — materialization's half of the recursion :func:`_rows_at` already does.
 
@@ -1853,18 +1879,23 @@ def _nested_slices(term: _Term, node: _Node, row: dict, work: Workers | None) ->
         def spec(family: str, keys: dict = keys) -> str:
             return row.get(keys.get(family), "") or ""
 
-        rplan = ReducePlan.parse(spec("REDUCE"), work)
+        rplan = resolved.slices.get(keys.get("REDUCE")) or ReducePlan.parse(spec("REDUCE"), work)
         tile_spec = spec("TILE")
-        plan = resolve_site_tile(tile_spec, work, rplan.spell())
+        plan = resolved.slices.get(keys.get("TILE"))
+        if plan is None:
+            plan = resolve_site_tile(tile_spec, work, rplan.spell())
+        stage = resolved.slices.get(keys.get("STAGE"))
+        if stage is None and spec("STAGE"):
+            stage = _stage_of(term, cnode, plan, spec("STAGE"))
         out.append(("REDUCE", cnode, rplan if rplan.stages else None))
-        out.append(("STAGE", cnode, _stage_of(term, cnode, plan, spec("STAGE"))))
+        out.append(("STAGE", cnode, stage))
         if "TILE" in keys and tile_spec:
             # Stored UNPLACED: which ``(m, n)`` pair a nested site tiles is a function of its
             # POSITION (``Sched._mn_for`` — the parent fold's axis for a hoisted edge, the trailing
             # free pair for a derived one), so binding it here with the ROOT's rule would name the
             # wrong axes. ``Sched.tile_of`` binds at read, through the one home.
             out.append(("TILE", cnode, plan))
-        out.extend(_nested_slices(term, child, row, work))
+        out.extend(_nested_slices(term, resolved, child, row, work))
     return out
 
 
@@ -1897,7 +1928,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
         return []
 
     def materialize(row: dict) -> TileOp:
-        return _materialize(owner[canonical_row_key(row)], row, name, knobs)
+        term, resolved = owner[canonical_row_key(row)]
+        return _materialize(term, resolved, row, name, knobs)
 
     if len(rows) == 1:
         return materialize(rows[0])

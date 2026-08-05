@@ -328,7 +328,7 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
     rows, keys, owner = sch._enumerate([term])
     assert rows, "the two-site term enumerated nothing"
-    assert set(owner.values()) == {term}, "a single-reading term has one owner"
+    assert {t for t, _ in owner.values()} == {term}, "a single-reading term has one owner"
 
     # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
     # the stored corpus uses.
@@ -408,7 +408,7 @@ def test_two_site_rows_are_distinct_and_materialize_both_sites():
     decided = [r for r in rows if r.get("REDUCE@j")]
     assert decided, "the fixture must decide its nested site on some row"
     for row in decided:
-        op = sch._materialize(owner[canonical_row_key(row)], row, "k", {})
+        op = sch._materialize(*owner[canonical_row_key(row)], row, "k", {})
         assert "REDUCE@j" in op.schedule, f"row spells REDUCE@j={row['REDUCE@j']!r} but the op carries {sorted(op.schedule)}"
         assert op.schedule["REDUCE@j"].spell() == row["REDUCE@j"], (op.schedule["REDUCE@j"].spell(), row["REDUCE@j"])
 

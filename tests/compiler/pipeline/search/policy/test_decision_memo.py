@@ -78,6 +78,50 @@ def test_second_same_shape_kernel_replays_the_first_decision() -> None:
     assert [r for r in replays if r is not None], "the replay must go through the tree descent"
 
 
+def test_golden_probe_decides_without_flattening(monkeypatch) -> None:
+    """A golden MATCH on a schedule fork deploys through the pool-row probe: the recorded row is
+    matched against the raw pool rows off the tree's root branch, the pick descends to its one
+    leaf, and the flatten-and-score never runs. DRIFT / GAP keep the old fall-through (pass 1)."""
+    from dataclasses import replace
+
+    # Pass 1 — an index that matches nothing: the probe consults (recording the fork's ShapeKey),
+    # records GAP, and falls through to the scored path.
+    seen_keys: list = []
+
+    class _Spy(dict):
+        def get(self, key, default=None):
+            seen_keys.append(key)
+            return default
+
+    monkeypatch.setattr(greedy, "_golden_evidence_index", lambda ctx: _Spy(nonempty=1))
+    flattens: list[int] = []
+    real_flatten = greedy.flatten_leaves
+    monkeypatch.setattr(greedy, "flatten_leaves", lambda opts: (flattens.append(1), real_flatten(opts))[1])
+
+    ctx1 = replace(Context.from_target((12, 0)), compile_flags="")  # the -O3 regime the golden tier requires
+    prior1 = _CountingPrior()
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx1).resolve(_matmul_graph(), greedy_decide(prior=prior1))
+    assert seen_keys, "the probe must consult the golden index off the raw pool rows"
+    assert prior1.schedule_scores == 1, "a GAP falls through to the scored path"
+    pass1_flattens = len(flattens)
+
+    # Pass 2 — a golden recording one of the pool's own rows: MATCH, no flatten, no scoring.
+    (pool,) = ctx1.session_cache._store.values()
+    row = next(r for r in pool.rows if r.get("TILE"))
+    gold = SimpleNamespace(knobs={k: v for k, v in row.items() if not str(k).startswith("S_")}, emmy_us=7.5, name="stub.golden")
+    monkeypatch.setattr(greedy, "_golden_evidence_index", lambda ctx: {seen_keys[0]: [gold]})
+    flattens.clear()
+    ctx2 = replace(Context.from_target((12, 0)), compile_flags="")
+    prior2 = _CountingPrior()
+    records: list[dict] = []
+    with greedy.golden_audit(records):
+        g2, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx2).resolve(_matmul_graph(), greedy_decide(prior=prior2))
+    assert prior2.schedule_scores == 0, "a golden MATCH must never reach the scoring pass"
+    assert len(flattens) == pass1_flattens - 1, "the covered schedule fork must not flatten"
+    assert [r["verdict"] for r in records] == ["MATCH"] and records[0]["n_rows"] == len(pool.rows)
+    assert _scheduled_rows(g2) == [tuple(tuning_knob_items(gold.knobs))], "the deployed row must realize the golden"
+
+
 def test_decision_key_separates_blocklist_states_and_skips_foreign_roots() -> None:
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 

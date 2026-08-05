@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 from emmy.compiler.pipeline.knob import (
     _AXIS_FAMILIES,
@@ -98,9 +99,19 @@ def _tile_plan(knobs: dict):
     row that does not resolve — a geometry featurizer degrades to "no tile geometry" rather than
     failing a whole fit on one unreadable row. Resolving through ``resolve_site_tile`` is what
     disambiguates the empty-``TILE``-beside-thread-``WORK`` unit-register tile from the coop tier."""
+    work, tile, _stage, reduce = _row_values(knobs)
+    return _resolved_tile(work, tile, reduce)
+
+
+@lru_cache(maxsize=4096)
+def _resolved_tile(work: str, tile: str, reduce: str):
+    """:func:`_tile_plan`'s parse, memoized on the SPELLING TUPLE — the value vocabulary is tiny
+    (dozens of distinct spellings) beside the row count (~100k per pool), and one row's
+    featurization reaches this parse through several independent features, so the memo removes
+    the dominant per-row cost of a scoring or fit pass. Safe to share the returned plan: every
+    schedule value type is frozen and placement binds by COPY (``TilePlan.at`` is a replace)."""
     from emmy.compiler.ir.schedule import ReducePlan, Workers, resolve_site_tile  # noqa: PLC0415
 
-    work, tile, _stage, reduce = _row_values(knobs)
     try:
         inv = Workers.parse(work)
         plan = resolve_site_tile(tile, inv, ReducePlan.parse(reduce, inv).coop)
@@ -139,11 +150,8 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     spec = family_value(knobs, "STAGE")
     if not spec:
         return {}
-    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
-
-    try:
-        st = Stage.parse(spec)
-    except ValueError:
+    st = _parsed_stage(str(spec))
+    if st is None:
         return {}
     return {
         "D_stage_depth": float(st.depth),
@@ -155,6 +163,30 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         # this flag ``d1/tma/split`` featurizes byte-identically to plain ``d1/tma``.
         "D_stage_split": 1.0 if st.split else 0.0,
     }
+
+
+@lru_cache(maxsize=1024)
+def _parsed_stage(spec: str):
+    """``Stage.parse`` memoized on the spelling (``None`` on an unparseable one) — same rationale
+    as :func:`_resolved_tile`."""
+    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
+
+    try:
+        return Stage.parse(spec)
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=1024)
+def _parsed_reduce(reduce: str, work: str):
+    """``ReducePlan.parse`` against the row's inventory, memoized on the spelling pair —
+    ``ValueError`` maps to ``None`` (the caller owns the coop-without-inventory degrade)."""
+    from emmy.compiler.ir.schedule import ReducePlan, Workers  # noqa: PLC0415
+
+    try:
+        return ReducePlan.parse(reduce, Workers.parse(work))
+    except ValueError:
+        return None
 
 
 # Per-node structural features the featurizer reads per axis-group (``S_ext_reduce_prod@<axis>`` etc):
@@ -392,15 +424,15 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
 
     spec = family_value(knobs, "REDUCE")
     work, _tile, _stage, reduce = _row_values(knobs)
-    try:
-        plan = ReducePlan.parse(reduce, Workers.parse(work))
-    except ValueError:
+    plan = _parsed_reduce(reduce, work)
+    if plan is None:
         if spec and "coop" in str(spec):
             # A site ``coop`` value with no WORK inventory in the dict (a fork PREFIX row cut
             # above the WORK level, or a stripped evidence dict): the width is genuinely
             # unknown — degrade to the serial decomposition rather than raise mid-featurize.
             return _Decomp()
-        raise
+        ReducePlan.parse(reduce, Workers.parse(work))  # re-raise the original error, uncached
+        raise AssertionError("unreachable — the uncached parse must raise what the memo mapped to None")
     # ``finalize`` must be forwarded here AND by every ``_geom_feats`` caller: dropping it leaves
     # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
     # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
@@ -439,13 +471,8 @@ def _stage_sig(knobs: dict) -> tuple | None:
     spec = family_value(knobs, "STAGE")
     if not spec:
         return None
-    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
-
-    try:
-        st = Stage.parse(spec)
-    except ValueError:
-        return None
-    return (st.depth, st.transport, st.split)
+    st = _parsed_stage(str(spec))
+    return (st.depth, st.transport, st.split) if st is not None else None
 
 
 def _geom_feats(

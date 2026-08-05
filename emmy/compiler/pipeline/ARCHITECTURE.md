@@ -373,7 +373,10 @@ factory call — one compile attempt; never the shared `SessionCache`, which wou
 keys on the schedule `pool_key` (the dtype / hint / pin discriminators op identity excludes) plus the node's
 blocklist content, so N same-shape kernels flatten-and-score once and the rest replay by descending the lazy tree's
 level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
-while a validate-retry with a blocked tile is a different key and re-decides.
+while a validate-retry with a blocked tile is a different key and re-decides. A GOLDEN-covered schedule fork never
+flattens at all: the pool's rows already sit on the tree's root branch, so the golden tier probes them raw
+(`_pool_group` → `_golden_pick`) and a MATCH descends straight to its leaf — DRIFT and GAP record their verdicts
+there once and fall through to the scored path unchanged.
 
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
 same-featurized siblings identically (the offline `D_*` geometry doesn't separate an `f2x4` from an `f4x2` fragment or

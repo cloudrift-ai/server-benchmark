@@ -737,8 +737,8 @@ def _spying(monkeypatch, rows_sink: list, picks_sink: list):
 
     orig = greedy_mod._golden_pick
 
-    def spy(index, rows, node_id):
-        got = orig(index, rows, node_id)
+    def spy(index, rows, node_id, **kw):
+        got = orig(index, rows, node_id, **kw)
         rows_sink.append(rows)
         picks_sink.append((node_id, got))
         return got

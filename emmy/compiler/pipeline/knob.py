@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 
 from emmy import config
@@ -347,13 +348,20 @@ def canon_family_value(name: str, value) -> str:
     alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
     but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/cp`` instead of
     failing verification against its own value on the deploy path. Any other family — and any
-    unparseable value — passes through untouched (the caller's own equality applies)."""
-    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers  # noqa: PLC0415
+    unparseable value — passes through untouched (the caller's own equality applies).
 
+    Memoized on ``(family, value)``: the value vocabulary is tiny beside the comparison count (a
+    golden consult runs :func:`values_equal` per candidate row per recorded knob), so the parse
+    runs once per distinct spelling per process."""
     fam = family_of(name)
     v = str(value).strip()
-    if not v:
-        return v
+    return _canon_family_cached(fam, v) if v else v
+
+
+@lru_cache(maxsize=8192)
+def _canon_family_cached(fam: str, v: str) -> str:
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers  # noqa: PLC0415
+
     try:
         if fam == "TILE":
             return TilePlan.parse(v, Workers(kind="warp", units=(1, 1))).spell()
@@ -495,16 +503,24 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
 
 
+#: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare
+#: and ``@``-keyed) plus the precision gates ``_schedule._f16acc_allowed`` reads (the precise
+#: ``F16_MMA_F32_ACC`` pin and its ``FAST_MATH`` umbrella — they decide whether the f16-accumulate
+#: atom rows are OFFERED, so they change the pool exactly like a family pin). The pool cache's pin
+#: fingerprint must cover exactly this set; a knob outside it cannot change which rows enumerate.
+_ENUMERATION_PIN_KNOBS = (*SCHEDULE_FAMILIES, "F16_MMA_F32_ACC", "FAST_MATH")
+
+
 def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
-    """Every live env pin the schedule enumeration can read — the :data:`SCHEDULE_FAMILIES`
-    knobs, bare and ``@``-keyed — as sorted ``(env var, raw value)`` pairs. The schedule pool
-    cache folds this into its key: a pin changes which rows enumerate, so two pin states must
-    never share a pool. The environ scan is this module's to make — the ``EMMY_<KNOB>``
-    namespace is knob.py-owned (the one exception to ``config.py``'s env ownership), and the
-    ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
+    """Every live env pin the schedule enumeration can read (:data:`_ENUMERATION_PIN_KNOBS`) as
+    sorted ``(env var, raw value)`` pairs. The schedule pool cache folds this into its key: a pin
+    changes which rows enumerate, so two pin states must never share a pool. The environ scan is
+    this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one exception to
+    ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS``
+    splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
 
-    prefixes = tuple(config.knob_var(fam) for fam in SCHEDULE_FAMILIES)
+    prefixes = tuple(config.knob_var(name) for name in _ENUMERATION_PIN_KNOBS)
     return tuple(sorted((var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)))
 
 

@@ -63,8 +63,8 @@ def _resolve_picks(snippet: str, monkeypatch) -> list[dict]:
     picks: list[dict] = []
     orig = greedy_mod._golden_pick
 
-    def spy(index, rows, node_id):
-        got = orig(index, rows, node_id)
+    def spy(index, rows, node_id, **kw):
+        got = orig(index, rows, node_id, **kw)
         if got is not None:
             picks.append(rows[got[0]])  # (candidate_index, recorded_us)
         return got

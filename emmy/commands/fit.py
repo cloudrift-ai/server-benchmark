@@ -143,8 +143,17 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
     cases: list[Group] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
+    # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
+    # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
+    # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
+    # dataset build pays each pool once. The fm-pinned enumeration keys apart on its own: the
+    # precision gate rides the pool key's pin fingerprint.
+    ctxs: dict[tuple, Context] = {}
     for g in GOLDEN_CONFIGS:
-        ctx = Context.from_target(tuple(g.compute_cap), gpu_name=g.gpu_name)
+        card = (tuple(g.compute_cap), g.gpu_name)
+        ctx = ctxs.get(card)
+        if ctx is None:
+            ctx = ctxs[card] = Context.from_target(tuple(g.compute_cap), gpu_name=g.gpu_name)
         if isinstance(g, ReduceGoldenConfig):
             # The reduce's free axis (the ``M`` rows) maps to the planner's N axis
             # (the tuned ``FN`` register tile sweeps it): trace E_M=1, E_N=M, E_K=K.

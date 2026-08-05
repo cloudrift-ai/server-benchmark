@@ -97,6 +97,20 @@ def test_a_dtype_change_keys_a_different_pool() -> None:
     assert set(f16) != set(f32), "the f16 pool must differ (the warp tier is dtype-gated)"
 
 
+def test_a_precision_gate_pin_keys_a_different_pool() -> None:
+    """The ``F16_MMA_F32_ACC`` gate is not a schedule family but it changes which rows are
+    OFFERED (the f16-accumulate atom siblings), so it must ride the pin fingerprint — the fit's
+    fm-pinned reconstruction shares one Context per card and would otherwise collide with the
+    unpinned pools."""
+    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC
+
+    clean = schedule_pin_fingerprint()
+    with F16_MMA_F32_ACC.pinned("1"):
+        assert schedule_pin_fingerprint() != clean, "the precision gate must change the pool key"
+    assert schedule_pin_fingerprint() == clean
+
+
 def test_a_live_pin_keys_a_different_pool() -> None:
     ctx = Context.from_target((12, 0))
     unpinned = _resolve(ctx, _matmul_graph())

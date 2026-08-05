@@ -297,7 +297,7 @@ def _stmt_eval_scope() -> dict:
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis, AxisRole, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -349,6 +349,9 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
+        # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
+        # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
+        "Window": Window,
         "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,
@@ -375,12 +378,13 @@ def _stmt_eval_scope() -> dict:
     # back. Auto-populate every public class from these modules (``setdefault`` so the
     # explicit stmt/expr entries above win on any name clash) — a new node/knob field
     # needs no edit here.
+    import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_axis_mod, _sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):

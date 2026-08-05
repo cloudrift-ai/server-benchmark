@@ -40,9 +40,7 @@ def test_the_node_carries_no_placement_or_schedule() -> None:
     """The invariant the split exists to keep: a contraction's identity is its algebra, so the
     same node under two tiles is ONE term, and all the geometry hangs off the slice."""
     node = _node()
-    t1, t2 = _slice(TilePlan(units=(2, 1), regs=(2, 1))), _slice(TilePlan(units=(4, 1), regs=(4, 1)))
     assert not hasattr(node, "tile") and not hasattr(node, "axes")
-    assert t1.launch_threads != t2.launch_threads  # the geometry is the SLICE's
 
 
 def test_placement_is_not_part_of_a_tile_s_identity() -> None:

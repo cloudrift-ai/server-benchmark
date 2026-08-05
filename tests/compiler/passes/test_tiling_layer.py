@@ -119,12 +119,23 @@ def test_shrink_axis_keeps_a_symbolic_extent_symbolic() -> None:
 def test_the_layer_needs_no_node_ctx_or_algebra() -> None:
     """The extraction's point, held as a test: every case above built a real `Tile` from a `Side`
     pair, integer counts and three callables. Guard the module namespace so an algebra / emission
-    dependency cannot creep back in — that is what makes the layer separately testable at all."""
-    from emmy.compiler.pipeline.passes.lowering.kernel import _tiling
+    dependency cannot creep back in — that is what makes the layer separately testable at all.
+
+    Every banned name must NAME SOMETHING, checked here against the modules it would leak from. A
+    guard listing a symbol that no longer exists cannot fire and reads as coverage it does not
+    provide: three of this list's entries had rotted that way — `Map` and `Placed` named classes
+    the one-kind collapse deleted, and a glossary rename left the literal `"bilinear fold"`, which
+    has a space in it and so can never be an identifier at all."""
+    from emmy.compiler.ir.tile import ir as tile_ir
+    from emmy.compiler.pipeline.passes.lowering.kernel import _atom, _factor, _tiling
+
+    banned = ("Fold", "Channel", "TileOp", "Ctx", "reduce_codegen", "store_sink", "copy_cell")
+    live = {n for mod in (tile_ir, _factor, _atom) for n in dir(mod)}
+    assert set(banned) <= live, f"the guard names nothing: {sorted(set(banned) - live)}"
 
     names = {n for n in dir(_tiling) if not n.startswith("__")}
-    for banned in ("bilinear fold", "Fold", "Map", "Placed", "Ctx", "reduce_codegen", "store_sink", "copy_cell"):
-        assert banned not in names, f"{banned} leaked into the tiling layer"
+    for name in banned:
+        assert name not in names, f"{name} leaked into the tiling layer"
 
 
 def test_the_tile_body_is_state_then_reduce_then_stores() -> None:

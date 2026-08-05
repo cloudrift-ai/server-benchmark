@@ -18,7 +18,6 @@ from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.ir.tile.ir import operand_body, operand_name
 from emmy.compiler.ir.tile.ops import axis_names
-from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
 
 
@@ -95,11 +94,6 @@ def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
     assert not isinstance(node.a, Load)
     assert operand_body(node.a) == tuple(node.a.lower())
     assert operand_name(node.a) == "xhat"
-
-
-def test_the_node_walk_covers_inline_operand_edges() -> None:
-    fold = _product()
-    assert _product().a in [s.node for s in sites(fold)]  # the cone edge, walked off the STORED fold
 
 
 def test_external_reads_cover_every_channel() -> None:

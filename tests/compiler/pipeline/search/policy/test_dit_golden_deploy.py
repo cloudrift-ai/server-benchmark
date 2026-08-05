@@ -82,7 +82,9 @@ def _resolve_picks(snippet: str, monkeypatch) -> list[dict]:
 def test_the_shipped_dit_golden_is_a_transposed_fp16_matmul(name, M, N, K) -> None:
     g = _shipped(name)
     assert isinstance(g, MatmulGoldenConfig)
-    assert (g.M, g.N, g.K) == (M, N, K)
+    # NOT the shape: ``_DIT_MATMULS`` was transcribed from the YAML, so asserting it back is a
+    # mapping compared to itself. The deploy test below drives the real pipeline at that shape and
+    # fails if either moved.
     assert g.dtype == "fp16" and g.trans_b, "the DiT projections are F.linear — B is (N, K)"
 
 

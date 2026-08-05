@@ -352,18 +352,21 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
     # site.
     def claim(*values):
         """The pair's joint inventory claim, or ``None`` when the two sites want different
-        cooperative widths — ``_merge``'s rule, since a ``REDUCE`` value spells no width and the
-        kernel has exactly one ``WORK`` entry to carry it."""
-        plans = {i: v["TILE"] for i, v in enumerate(values) if v.get("TILE") is not None}
-        coop = 1
-        for v in values:
-            red = v.get("REDUCE")
-            if red is None or red.coop <= 1:
-                continue
-            if coop > 1 and red.coop != coop:
-                return None
-            coop = red.coop
-        return sch._Row(knobs={}, plans=plans, coop=coop)
+        cooperative widths — since a ``REDUCE`` value spells no width and the kernel has exactly
+        one ``WORK`` entry to carry it.
+
+        Asked through the PRODUCTION rule (``_Row.union``) rather than restated here. A local copy
+        of it would drift with the enumerator it is checking, and this equation is only worth
+        stating if the two sides can disagree."""
+        parts = [
+            sch._Row(
+                knobs={},
+                plans={i: v["TILE"]} if v.get("TILE") is not None else {},
+                coop=v["REDUCE"].coop if v.get("REDUCE") is not None else 1,
+            )
+            for i, v in enumerate(values)
+        ]
+        return sch._Row.union(parts)
 
     by_work: dict[str, int] = {}
     for r in rows:
@@ -373,7 +376,10 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
         parent = sch._contraction_values(term, term.tree[0].site.node, work)
         edge = sch._site_values(term, term.tree[0].children[0].site, work, term.tree[0])
         pairs = [(p, e) for p in parent for e in edge if (c := claim(p, e)) is not None and sch._work_holds(c, work)]
-        assert pairs and len(pairs) <= len(parent) * len(edge), f"{work_spell!r}: {len(pairs)} pairs"
+        # NOT `len(pairs) <= len(parent) * len(edge)` — `pairs` is a filtered comprehension over
+        # exactly that product, so the bound cannot fail. What the equation below tests is the
+        # RECURSION: that the enumerator's row count for this inventory is the site product.
+        assert pairs, f"{work_spell!r}: no legal pair"
         assert n == len(pairs) * len(sch._raster_values(term)), f"{work_spell!r}: {n} != {len(pairs)} pairs x rasters"
 
 

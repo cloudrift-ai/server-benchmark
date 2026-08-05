@@ -13,7 +13,7 @@ extent in a ``LoopOp`` body and rewrites it to the fused streaming loop. The car
 ``(m, d)`` states fold through ``base``-``Accum``\\ s, so when the cell is lifted (the reduce
 ``Loop`` annotated ``TWISTED``) the seed is derived from ``op.identity`` by
 ``Loop.render``; explicit
-``Init`` stmts are emitted before the loop as well, load-bearing only on the flat-``Map``
+``Init`` stmts are emitted before the loop as well, load-bearing only on the flat-zero-axis ``Fold``
 fallback (a cell kept as loop-IR verbatim). Recognition is called from
 ``lowering/tile/010_recognize``
 (after flash, before the plain-reduce normalize — each later step consumes the

@@ -3,7 +3,7 @@
 The two-level tuner isolates each post-fusion kernel into its own graph and
 tunes it standalone. For inner-tuned ``perf`` / ``lowering`` rows to transfer
 back to the assembled graph, the slice must round-trip to the *same*
-``op_cache_key`` — for the finalized ``LoopOp`` and for every ``CudaOp`` it
+``Op.cache_key`` — for the finalized ``LoopOp`` and for every ``CudaOp`` it
 lowers to — as the full graph. These tests pin that invariant.
 
 Target is forced to sm_80 so the lowering is deterministic and GPU-independent
@@ -21,7 +21,6 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.keys import op_cache_key
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES
 
@@ -64,7 +63,7 @@ def test_slice_is_standalone_and_preserves_loop_key() -> None:
         non_root = [n for k, n in sub.nodes.items() if k != nid]
         assert all(isinstance(n.op, InputOp) for n in non_root), "slice ancestors must be InputOp stubs/leaves"
         # Op shared by reference → identical body → identical key.
-        assert op_cache_key(sub.nodes[nid].op) == op_cache_key(op)
+        assert sub.nodes[nid].op.cache_key() == op.cache_key()
 
 
 def test_sliced_kernel_lowers_to_same_cuda_keys() -> None:
@@ -72,7 +71,7 @@ def test_sliced_kernel_lowers_to_same_cuda_keys() -> None:
     CudaOp keys the full-graph compile produces — the DB-handoff invariant."""
     graph = _two_matmul_graph()
     full = Pipeline.build(CUDA_PASSES).run(graph, db=SearchDB())
-    full_keys = sorted(op_cache_key(n.op) for n in full.nodes.values() if isinstance(n.op, CudaOp))
+    full_keys = sorted(n.op.cache_key() for n in full.nodes.values() if isinstance(n.op, CudaOp))
 
     fused = Pipeline.build(LOOP_PASSES).run(graph, db=SearchDB())
     slice_keys: list[str] = []
@@ -81,7 +80,7 @@ def test_sliced_kernel_lowers_to_same_cuda_keys() -> None:
             continue
         sub = single_node_graph(fused, nid)
         lowered = Pipeline.build(LOWERING_PASSES).run(sub, db=SearchDB())
-        slice_keys += [op_cache_key(x.op) for x in lowered.nodes.values() if isinstance(x.op, CudaOp)]
+        slice_keys += [x.op.cache_key() for x in lowered.nodes.values() if isinstance(x.op, CudaOp)]
 
     assert sorted(slice_keys) == full_keys
 

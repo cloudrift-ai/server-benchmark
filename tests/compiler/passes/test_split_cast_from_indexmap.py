@@ -1,5 +1,4 @@
-"""Tests for ``frontend/optimization/005_split_cast_from_indexmap`` and the TMA
-operand-rank rule it unlocks staging through.
+"""Tests for ``frontend/optimization/005_split_cast_from_indexmap``.
 
 A traced view that also narrows dtype (gemma's f32 ``mul`` → f16 ``transpose`` feeding
 SDPA) must split into a source-shaped elementwise ``copy`` (the cast — real compute, so
@@ -14,10 +13,9 @@ import numpy as np
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var, placeholder
+from emmy.compiler.ir.expr import placeholder
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._schedule import _tma_operand_rank_ok
 
 rng = np.random.default_rng(7)
 _backend = NumpyBackend()
@@ -65,36 +63,3 @@ def test_split_preserves_values():
     before = _backend.run(_backend.compile(_transpose_graph("f16")), input_data={"x": x})[0].outputs
     after = _backend.run(_backend.compile(_optimize(_transpose_graph("f16"))), input_data={"x": x})[0].outputs
     np.testing.assert_allclose(list(after.values())[0], list(before.values())[0], rtol=0, atol=0)
-
-
-# ===================================================================
-# _tma_operand_rank_ok — the matmul-tier TMA box rank rule
-# ===================================================================
-
-_M, _K = Var("m"), Var("k")
-
-
-def test_tma_rank_plain_2d_ok():
-    assert _tma_operand_rank_ok((_M, _K), "m", "k")
-
-
-def test_tma_rank_leading_literal_ok():
-    assert _tma_operand_rank_ok((Literal(0, "int"), _M, _K), "m", "k")
-
-
-def test_tma_rank_leading_batch_var_ok():
-    assert _tma_operand_rank_ok((Var("b"), _M, _K), "m", "k")
-
-
-def test_tma_rank_leading_dim_moving_with_k_declines():
-    lead = BinaryExpr("+", Var("b"), Var("k"))
-    assert not _tma_operand_rank_ok((lead, _M, _K), "m", "k")
-
-
-def test_tma_rank_leading_dim_moving_with_tile_declines():
-    assert not _tma_operand_rank_ok((Var("m"), _M, _K), "m", "k")
-
-
-def test_tma_rank_1d_and_5d_decline():
-    assert not _tma_operand_rank_ok((_K,), "m", "k")
-    assert not _tma_operand_rank_ok((Var("a"), Var("b"), Var("c"), _M, _K), "m", "k")

@@ -1,6 +1,6 @@
 r"""The per-atom codegen strategies — the one seam every tiled contraction dispatches through.
 
-``_factor._bind`` (the output-tiled contraction arm) reads the tiling geometry off the :class:`Contraction`
+``_factor._bind`` (the output-tiled contraction arm) reads the tiling geometry off the contraction
 node and asks this module for the two codegen halves: :func:`reduce_codegen` (the sink-agnostic
 ``(state_decls, reduce_region)`` — the accumulator/operand decls + the shared :func:`_contract_kloop`
 K-loop) and :func:`store_sink` (the per-cell matmul sink). Both resolve through :func:`_atom_ops` to
@@ -8,7 +8,7 @@ one of the two concrete strategies — :class:`_MmaOps` (tensor-core ``ldmatrix`
 ``RegStore`` sink) or :class:`_ScalarOps` (plain ``Load``\ s + an ``fma`` cell, the replicated-
 ``epilogue`` sink). The K-loop itself is ONE driver on the base strategy (:meth:`_AtomOps.reduce`),
 deciding nothing: the **scheduler-resolved** ``stage`` (eligibility + sizing ran once in
-``_schedule`` (inside ``010_recognize``) — ``_resolve_warp_stage`` / ``_resolve_scalar_stage``; ``None`` = gmem-direct)
+the scheduler; ``None`` = gmem-direct)
 picks its form — gmem-direct through the shared :func:`_contract_kloop` spine, or staged through
 the shared :func:`_staged` fill→drain skeleton (over the one ``_stage.staged_kloop``) — and the
 atom supplies only descriptor reads: the four gmem leaf constructors (:meth:`gmem_leaves`), the
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import AtomKind
-from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
@@ -36,10 +36,10 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
 )
-from emmy.compiler.ir.schedule import Stage
+from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Side
+from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -75,17 +75,7 @@ def unroll_ok_n(trips: int, cap: int | None = None) -> bool:
     return trips <= UNROLL.read_int(trips if cap is None else cap)
 
 
-# Shared axis-geometry helpers, used across this module (the atom-generic mma/scalar codegen) AND
-# ``_factor.py`` (the tiling layer + the cooperative / ILP reduce tier).
-def shrink_axis(axis: Axis, reg: int) -> Axis:
-    """The grid (cell) axis for a register-tiled free axis: ``ceil(E / reg)`` cells, each a
-    per-thread ``reg``-wide register sub-tile. ``Dim.ceil_div`` keeps a symbolic extent
-    symbolic (``(seq_len+reg-1)//reg``) so the launch grid sizes from the runtime extent."""
-    if reg <= 1:
-        return axis
-    return Axis(name=axis.name, extent=axis.extent.ceil_div(reg), window=Window(parent=axis.source_axis or axis))
-
-
+# Shared per-cell helpers, used across this module (the atom-generic mma/scalar codegen).
 def copy_cell(body, sigma, suffix: str, protected) -> list:
     """One copy of a tiled reduce ``body``: σ-substitute its indices (``sigma``) and suffix every
     per-copy SSA name (the shared grid / reduce / lane coordinates in ``protected`` pass through
@@ -133,7 +123,7 @@ def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
 def _warp_epilogue(
     tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[tuple[str, str], ...] = ()
 ) -> RegEpilogue | None:
-    """Fold the projection ``Map`` into a :class:`RegEpilogue` for cell ``sigma``. ``None`` when
+    """Fold the projection (zero-axis) fold into a :class:`RegEpilogue` for cell ``sigma``. ``None`` when
     there is no projection (a bare ``Write`` of the accumulator). ``extra_accs`` binds a multi-fold
     node's additional ``(acc, C-fragment)`` pairs so the chain combines the channels per element.
 
@@ -189,7 +179,7 @@ def _warp_epilogue(
 # transform**: an ineligible kernel silently falls back to gmem-direct, and a staged kernel is
 # bit-identical to its gmem-direct baseline. The transport primitives (the fill loops + the
 # commit/wait / mbarrier handshakes) live in ``_stage.py``; these functions schedule them onto the
-# K-loop off the :class:`Contraction` geometry.
+# K-loop off the contraction geometry.
 def _fold_frag(base: str, fold: int) -> str:
     """The per-fold-channel fragment name — the primary channel keeps the historic bare spelling
     (``_b0`` / ``_c0_0``), extra channels suffix ``_x<f>`` (the multi-B gate/up node)."""
@@ -455,7 +445,7 @@ def _stat_slab(name: str) -> str:
 
 
 def _sync_operands(
-    c: Contraction,
+    c: Fold,
     bk_elems: int,
     mn: tuple[Side, Side],
     cta: CtaTile,
@@ -481,7 +471,7 @@ def _sync_operands(
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
     of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
     contract the copy transports follow)."""
-    m_name, k_name = c.m_axis.name, c.k_axis.name
+    m_name, k_name = mn[0].axis.name, c.axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = seam
 
@@ -493,7 +483,7 @@ def _sync_operands(
         sigma = Sigma({m_name: m_coord(row), k_name: BinaryExpr("+", k0, col)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
         stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
-        return stmts, c.a_name
+        return stmts, operand_name(c.a)
 
     prologue: list[Stmt] = []
     if stats:
@@ -526,8 +516,8 @@ def _sync_operands(
             tag=tag,
             buf=bl.input,
             shape=shape,
-            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis),
-            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis, tile_is_row=c.b_trans),
+            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis),
+            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans),
             swizzle=swizzles[1],
             trans=c.b_trans,
         )
@@ -541,18 +531,18 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
     :func:`staged_kloop`; the atom supplies only the slab drain leaf (:meth:`_AtomOps.staged_drain`
     — ``ldmatrix`` + ``mma.sync`` vs plain-``Load`` fma) and the slab element dtype. ``ops.stage``
-    is the **scheduler-RESOLVED** stage (``_schedule._resolve_warp_stage`` / ``_resolve_scalar_stage``
+    is the **scheduler-RESOLVED** stage (the scheduler
     ran eligibility + sizing once) — its ``transport`` / ``bk_elems`` / ``depth`` / ``reg_depth``
     are applied verbatim, no decision here. A pure perf transform, numerically identical to
     gmem-direct (mma: bit-identical). ``depth == 1`` is the single-buffer degenerate; ``depth >= 2``
     the gmem→smem ring; ``reg_depth`` composes the mma inner smem→register double-buffer. A masked
     M / N overhang is fill-side clamped (cp.async) or box zero-filled (TMA); the discard stays with
     the store guard."""
-    c, stage = ops.c, ops.stage
-    k_axis = c.k_axis
+    c, stage, tile = ops.c, ops.stage, ops.tile
+    k_axis = c.axis
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
-    cta = _cta(mn, c.atom.lanes, c.block_threads)
+    cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     if stage.transport == "sync":
         # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone);
         # every B (canonical K-major, or transposed staged N-major) rides a vectorized cp.async
@@ -603,7 +593,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         n_chunks=K // stage.bk_elems,
         k_extent=K,
         workers=ops.workers,
-        block_threads=c.block_threads,
+        block_threads=tile.launch_threads,
     )
 
 
@@ -684,22 +674,24 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Contraction) -> frozenset[str]:
+def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = ()) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
-    per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names)."""
-    m, n, k_axis = c.m, c.n, c.k_axis
+    per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
+    ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
+    block, so renaming one would emit a reference no enclosing loop defines."""
+    m, n, k_axis = tile.m, tile.n, c.axis
     prot = {k_axis.name}
     for s in (m, n):
         prot |= {s.block, s.unit}
-    for a in c.lead_axes:
+    for a in lead:
         prot.add(a.name)
-    for a in (m.axis, n.axis, k_axis, *c.lead_axes):
+    for a in (m.axis, n.axis, k_axis, *lead):
         prot |= set(a.extent_expr().free_vars())
     return frozenset(prot)
 
 
 def _scalar_drain(
-    c: Contraction, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
+    c: Fold, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
 ) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
@@ -714,7 +706,7 @@ def _scalar_drain(
     seam the mma drain rides."""
     (a_slab, b_slab), (row_base, col_base) = slabs, base
     off_a, off_b = offs
-    b_name, a_name = c.b_name, c.a_name
+    b_name, a_name = operand_name(c.b), operand_name(c.a)
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
@@ -737,7 +729,7 @@ def _scalar_drain(
 class _AtomOps:
     """The per-atom codegen **strategy** — the one seam every tiled contraction dispatches through.
     Bound to the contraction ``c`` + its **scheduler-resolved** operand ``stage`` (``None`` =
-    gmem-direct; eligibility + sizing already ran in ``_schedule`` (inside ``010_recognize``)) and ``inputs``, it supplies
+    gmem-direct; eligibility + sizing already ran schedule-side) and ``inputs``, it supplies
     the three ``grid_tile`` callables — ``state(cells)`` (accumulator decls), :meth:`reduce` (the
     K-loop — **shared on this base**, one loop over atoms), ``store(i, j, offset, mn)`` (the
     per-cell sink; ``mn`` is the contraction's ``(m, n)`` :class:`Side` pair). The two concrete
@@ -746,13 +738,19 @@ class _AtomOps:
     slab-reading leaf) and :meth:`slab_elem` (the slab element dtype). This IS the "atom as
     descriptor" seam: one factory (:func:`_atom_ops`), no scattered ``isinstance``."""
 
-    c: Contraction
+    c: Fold  # the ALGEBRA — operand edges, K axis, channels
+    tile: TilePlan  # the SCHEDULE slice, PLACED (``TilePlan.at``): the atom + the ``(m, n)`` geometry
     stage: Stage | None = None
     inputs: object = None
     workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
-    # The projection this node's store folds in — the wrapping ``Map``'s body plus the grid-``Write``
+    # The kernel's LEADING (batch / ksplit) grid axes — the coordinates shared by every register
+    # cell, so the per-cell rename must pass them through (:func:`_scalar_protected`). They come
+    # from the caller that owns the grid (``_factor._bind``), not off the ``tile`` slice: the slice
+    # reads the tiled ``(m, n)`` cell, and what sits outside it is the grid's fact.
+    lead: tuple = ()
+    # The projection this node's store folds in — the wrapping zero-axis fold's lift body plus the grid-``Write``
     # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
-    # the ``Map`` wrapper, and the store sink is where it lands.
+    # the zero-axis ``Fold`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
     # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY
     # (``ops.cone_seam``). ``None`` for a
@@ -769,7 +767,7 @@ class _AtomOps:
     def cone(self) -> tuple:
         """The A cone's ``(row-invariant prologue, per-cell body, bridged stats)`` — the node
         boundary, or the whole operand body when there is no cone to split."""
-        return self.seam if self.seam is not None else ((), tuple(self.c.a_body), ())
+        return self.seam if self.seam is not None else ((), operand_body(self.c.a), ())
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -802,7 +800,7 @@ class _MmaOps(_AtomOps):
 
     def slab_elem(self):
         """The slab element dtype — the mma A/B operand dtype (f16/bf16 fragments)."""
-        return self.c.atom.operand_dtype("a")
+        return self.tile.atom.operand_dtype("a")
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The mma slab drain — the ``ldmatrix`` + ``mma.sync`` leaf reading ring ``slot``
@@ -815,14 +813,14 @@ class _MmaOps(_AtomOps):
             slabs=tuple(op.slab for op in operands),
             offs=tuple(op.slot_row(slot) for op in operands),
             mn=mn,
-            atom=self.c.atom,
+            atom=self.tile.atom,
             bk_elems=self.stage.bk_elems,
             ki="_ki",
             reg_depth=self.stage.reg_depth,
             swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
             trans=tuple(getattr(op, "trans", False) for op in operands),
         )
-        if _f16acc(self.c.atom):
+        if _f16acc(self.tile.atom):
             stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels))]
         return stmts
 
@@ -850,8 +848,7 @@ class _MmaOps(_AtomOps):
         """The mma operand/accumulator register fragments — one ``_a``/``_b`` per register row/col and
         one ``_c`` accumulator per cell (held across the K-loop). A staged ``reg_depth >= 2`` slots the
         operand fragments (``_a{i}_s{slot}``) for the smem→register double-buffer's ping-pong."""
-        c = self.c
-        atom, m, n = c.atom, c.m, c.n
+        atom, m, n = self.tile.atom, self.tile.m, self.tile.n
         reg_depth = self.stage.reg_depth if self.stage is not None else 1
 
         def frags(base_of, reg):  # reg-tile operand fragment names (slotted ``_s{s}`` when double-buffered)
@@ -892,9 +889,9 @@ class _MmaOps(_AtomOps):
         non-divisible K zero-fills the masked-K tail via the ``k_zero`` helper variants — canonical
         and transposed-B both have gmem-direct K zero-fill helpers)."""
         c = self.c
-        atom, (m, n) = c.atom, mn
-        k_axis = c.k_axis
-        assert not c.a_computed, (
+        atom, (m, n) = self.tile.atom, mn
+        k_axis = c.axis
+        assert isinstance(c.a, Load), (
             "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
         )
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
@@ -963,7 +960,7 @@ class _MmaOps(_AtomOps):
         :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         c = self.c
-        atom = c.atom
+        atom = self.tile.atom
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(self.epilogue)
@@ -1048,18 +1045,18 @@ class _ScalarOps(_AtomOps):
         its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
         c = self.c
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
-        k_axis = c.k_axis
+        k_axis = c.axis
         m, n = mn
-        prot = _scalar_protected(c)
-        b_name, a_name = c.b_name, c.a_name
+        prot = _scalar_protected(c, self.tile, self.lead)
+        b_name, a_name = operand_name(c.b), operand_name(c.a)
 
         def read_row(i):
             if m is None:
-                return copy_cell(c.a_body, Sigma({}), f"__ar{i}", prot)
-            return copy_cell(c.a_body, Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
+                return copy_cell(operand_body(c.a), Sigma({}), f"__ar{i}", prot)
+            return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell(c.b_body, Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
 
         def contract(i, j):
             v = f"{c.acc}__v__c{i}_{j}"
@@ -1078,32 +1075,42 @@ class _ScalarOps(_AtomOps):
         the (overhanging) write, dedup shared operand loads."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
-        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c))
+        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, seam=None) -> _AtomOps:
-    """The **one** atom dispatch — select the codegen strategy off the atom kind."""
-    cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
-    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, seam)
+def _atom_ops(
+    c: Fold,
+    tile: TilePlan,
+    stage: Stage | None = None,
+    inputs=None,
+    workers=None,
+    epilogue: Body | None = None,
+    seam=None,
+    lead: tuple = (),
+) -> _AtomOps:
+    """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
+    stored algebra, ``tile`` the PLACED schedule slice (``TilePlan.at``) the geometry derives from."""
+    cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
+    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam)
 
 
-def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, seam=None):
+def reduce_codegen(c: Fold, tile: TilePlan, stage: Stage | None = None, inputs=None, workers=None, seam=None, lead: tuple = ()):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, stage, inputs, workers, seam=seam)
+    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead)
     return ops.state, ops.reduce
 
 
-def store_sink(c: Contraction, epilogue: Body | None = None):
+def store_sink(c: Fold, tile: TilePlan, epilogue: Body | None = None, lead: tuple = ()):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
-    projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
+    projection off the node's zero-axis ``Fold`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
     sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
     shared ``reduce`` emission."""
-    return _atom_ops(c, epilogue=epilogue).store
+    return _atom_ops(c, tile, epilogue=epilogue, lead=lead).store

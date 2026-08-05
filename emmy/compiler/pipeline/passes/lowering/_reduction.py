@@ -42,14 +42,6 @@ class Reduction:
 
     fold: object  # the Fold node (typed loosely — ir.tile imports nothing from here)
 
-    def __post_init__(self) -> None:
-        from emmy.compiler.ir.tile.ir import Contraction  # noqa: PLC0415 — ir.tile imports nothing from here
-
-        # A Contraction node answers through its λ-fold reading (``as_fold`` — the one
-        # place the algebra machinery still derives the flat combine for a stored contraction).
-        if isinstance(self.fold, Contraction):
-            object.__setattr__(self, "fold", self.fold.as_fold())
-
     @property
     def names(self) -> tuple[str, ...]:
         """The carried state's SSA names — the stored combine's results."""
@@ -77,21 +69,13 @@ class Reduction:
     def twisted(self) -> bool:
         return self.ops is None
 
-    @property
-    def component_dtypes(self) -> tuple:
-        """The per-component accumulator dtype, ``None``-filled when unset."""
-        return self.fold.dtypes or (None,) * len(self.fold.combine.results)
-
     @cached_property
     def combine_states(self) -> tuple[Assign, ...]:
-        """The cross-partition state⊕state fold program — the stored combine's body (re-emitted
-        with the accumulator dtypes for a degenerate ⊕, whose stored program is dtype-free)."""
+        """The cross-partition state⊕state fold program — the stored combine's body, re-emitted
+        for a degenerate ⊕ (whose stored program is dtype-free, like the fold itself)."""
         if self.ops is None:
             return tuple(self.fold.combine.body)
-        return tuple(
-            Assign(name=n, op=op, args=(n, o), dtype=dt)
-            for n, op, o, dt in zip(self.names, self.ops, self.state_b, self.component_dtypes, strict=True)
-        )
+        return tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(self.names, self.ops, self.state_b, strict=True))
 
     def state_merge(self, other: tuple[str, ...]) -> StateMerge:
         """A one-shot :class:`StateMerge` stmt folding this state with a second fully-reduced
@@ -112,13 +96,13 @@ class Reduction:
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:
         """The :class:`Reduction` of a computed-A cone's per-row statistic — the fold at the head
-        of the cone's prologue node (``Map(body=cell, sources=(prologue,))``; the prologue itself
-        a ``Map`` over the stat ``Fold``, or the bare fold). ``None`` when the cone carries no
+        of the cone's prologue node (``Fold.projection(body=cell, operands=(prologue,))``; the prologue itself
+        a zero-axis ``Fold`` over the stat ``Fold``, or the bare fold). ``None`` when the cone carries no
         prologue (a gmem-``Load`` A) — the caller's serial fallback."""
-        from emmy.compiler.ir.tile.ir import Fold, Map  # noqa: PLC0415 — typing-only dependency
+        from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415 — avoid an import cycle
 
-        pro = cone.sources[0] if isinstance(cone, Map) and cone.sources else None
-        head = pro.sources[0] if isinstance(pro, Map) and pro.sources else pro
+        pro = cone.operands[0] if (isinstance(cone, Fold) and cone.axis is None) and cone.operands else None
+        head = pro.operands[0] if (isinstance(pro, Fold) and pro.axis is None) and pro.operands else pro
         return cls(head) if isinstance(head, Fold) else None
 
     def identities(self) -> dict[str, float]:

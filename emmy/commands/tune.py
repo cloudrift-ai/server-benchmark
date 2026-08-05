@@ -489,7 +489,7 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
 
     # Re-bench at -O3 (deployable) unless the user explicitly pinned --nvcc-flags;
     # tune searched at -O1, which is a ranking signal only. The lowering-fork
-    # selection that tuning recorded is keyed by op_cache_key (opt-level independent),
+    # selection that tuning recorded is keyed by Op.cache_key (opt-level independent),
     # so the -O1-tuned winners are still picked when re-benching here at -O3.
     bench_flags = args.nvcc_flags if args.nvcc_flags is not None else ""
     os.environ[config.NVCC_FLAGS] = bench_flags

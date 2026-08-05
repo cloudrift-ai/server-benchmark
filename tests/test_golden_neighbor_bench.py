@@ -22,25 +22,25 @@ import golden_neighbor_bench as gnb  # noqa: E402
 
 class TestKnobDistance:
     def test_identical_rows_are_distance_zero(self):
-        row = {"TILE@d": "a:mma/w2x2/f4x4/k2", "REDUCE@a1": "g2k"}
+        row = {"TILE@d": "mma/f4x4/k2", "WORK": "w2x2", "REDUCE@a1": "g2k"}
         assert gnb.knob_distance(row, dict(row)) == 0
 
     def test_plain_value_diff_counts_one(self):
         assert gnb.knob_distance({"REDUCE@a1": "g2k"}, {"REDUCE@a1": "g8k"}) == 1
 
     def test_codec_counts_differing_segments_not_whole_knob(self):
-        a = {"TILE@d": "a:mma/w2x2/f4x4/k2"}
-        assert gnb.knob_distance(a, {"TILE@d": "a:mma/w2x2/f2x4/k2"}) == 1
-        assert gnb.knob_distance(a, {"TILE@d": "a:mma/w2x4/f2x4/k2"}) == 2
+        a = {"TILE@d": "mma/f4x4/k2", "WORK": "w2x2"}
+        assert gnb.knob_distance(a, {"TILE@d": "mma/f2x4/k2", "WORK": "w2x2"}) == 1
+        assert gnb.knob_distance(a, {"TILE@d": "mma/f2x4/k2", "WORK": "w2x4"}) == 2
 
     def test_missing_key_compares_as_empty(self):
         assert gnb.knob_distance({}, {"STAGE@a1": "d2"}) == 1
         # A codec against an absent key counts each present segment.
-        assert gnb.knob_distance({}, {"TILE@d": "a:mma/w2x2/f4x4"}) == 3
+        assert gnb.knob_distance({}, {"TILE@d": "mma/f4x4", "WORK": "w2x2"}) == 3
 
     def test_distance_sums_across_knobs(self):
-        a = {"TILE@d": "a:mma/w2x2/f4x4/k2", "REDUCE@a1": "g2k"}
-        b = {"TILE@d": "a:mma/w2x2/f2x4/k2", "REDUCE@a1": "g8k"}
+        a = {"TILE@d": "mma/f4x4/k2", "WORK": "w2x2", "REDUCE@a1": "g2k"}
+        b = {"TILE@d": "mma/f2x4/k2", "WORK": "w2x2", "REDUCE@a1": "g8k"}
         assert gnb.knob_distance(a, b) == 2
 
 

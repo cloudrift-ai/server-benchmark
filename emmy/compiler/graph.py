@@ -221,7 +221,7 @@ def _deserialize_field(k, v):
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
-        # (``"Map(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
+        # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
     # (``Placement(...)`` / ``TilePlan(...)`` / ``ReducePlan(...)`` / ``Stage(...)`` /
@@ -360,13 +360,13 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
-        # A dumped ``Map.fn`` lambda is strict for every recognized term (the root stores left
+        # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
         # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
-        # rebuild through the same ``_loop_ir_fn`` arm ``Map`` construction uses.
+        # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
         "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Map`` / ``Fold`` / ``Contraction``) and the
+    # The tile-IR structural nodes (``Fold`` node) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
@@ -979,13 +979,12 @@ class Graph:
                 op_payload: tuple = ("body", body.structural_key())
             else:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-                from emmy.compiler.ir.tile.ops import term_key  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (step 7 — the canonically
-                    # renumbered term, ``ops.term_key``); every other field keeps its repr.
+                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
+                    # the bottom-up term key); every other field keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return term_key(o.op)
+                        return o.structural_key()
                     return repr(_unwrap_dims(getattr(o, name)))
 
                 attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)

@@ -363,10 +363,10 @@ the role annotation is the fold's own derived read, so an unbindable matvec capt
 derives `PLANAR` (the 1l
 demotion, now a formation fact; `_extract_lift` accepts any PURE prefix). The inverse — un-hoisting a computed
 edge back into the lift body — has no implementation at present: its only caller was the scheduler's collapse arm,
-and it returns with the enumerator. Kernel identity is the α-INVARIANT TERM HASH (`ops.term_key`: canonical
+and it returns with the enumerator. Kernel identity is the α-INVARIANT TERM HASH (`Fold.structural_key`: canonical
 renumbering in first-appearance walk order plus hash-time ANF body-order canonicalization — the stored term is never
 reordered, the lowered nest keeps storage order, identity does not; the lowered-nest identity is retired), consumed
-by `op_cache_key`'s TileOp arm and `Graph.structural_key`'s op field. The ZERO-AXIS fold is what `Map` was — no
+by `Op.cache_key`'s TileOp arm and `Graph.structural_key`'s op field. The ZERO-AXIS fold is what `Map` was — no
 `fn` / `sources` fields survive it (`lift` / `operands`, built by `Fold.projection`): operands bind positionally to
 `lift.params` (one param per operand RESULT COMPONENT — a product operand binds every channel accumulator — so
 lowering splices verbatim), and `lift.results` replace the retired `out` last-def convention.

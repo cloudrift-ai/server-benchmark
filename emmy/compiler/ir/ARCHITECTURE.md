@@ -71,7 +71,7 @@ lowered `CudaOp` carries the full chain back to its originating
 pass it explicitly. The base-class field is keyword-only and
 `compare=False`, so subclass positional construction and equality
 keep working unchanged. `source` is excluded from
-`Graph.structural_key` and from `op_cache_key` — kernels rendered
+`Graph.structural_key` and from `Op.cache_key` — kernels rendered
 along different lowering paths still dedup in the tuning cache.
 
 **Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
@@ -201,7 +201,7 @@ type to dispatch on and no second place for a fact to live.
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
 algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
-what makes kernel identity the α-invariant TERM HASH (`ops.term_key`) rather than the lowered nest.
+what makes kernel identity the α-invariant TERM HASH (`Fold.structural_key`) rather than the lowered nest.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -232,7 +232,7 @@ emitter's use of it: a degenerate fold dissolves into its `Accum`s and takes eac
 its `op.identity`, and a twisted fold's streaming merge regenerates its own (`_reduction` reads the
 generated merge's `Accum`s, never the stored `init`'s `−inf`). So `init` is algebra the term owes
 its own definition, not a value the lowering path consults — which is why removing it would change
-every `term_key`, and with it every `op_cache_key` the tune DB's measurement replay and the cubin
+every `structural_key`, and with it every `Op.cache_key` the tune DB's measurement replay and the cubin
 cache are keyed on, in exchange for a field nothing reads.
 
 **The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
@@ -425,7 +425,7 @@ module map and the parts that touch the rest of `ir/`.
 
 Tile IR keeps the stored term pure algebra and the schedule beside it. The layer is **one concern per module**:
 `tile/ir.py` the term vocabulary (`Fold`, `Channel`, `Store`, `TileOp`), `tile/ops.py` the geometry-free compute reads
-and the `Sched` accessor, `tile/path.py` the tree-path codec, `tile/_key.py` kernel identity (`term_key`),
+and the `Sched` accessor, `tile/path.py` the tree-path codec, `tile/_key.py` kernel identity (`structural_key`),
 `tile/_dump.py` the structural dump. Loop IR → term is NOT here: `fold_from_loop` / `nodify_reduce` are a parser and
 live with the passes that consume them (`passes/lowering/tile/_fromloop.py`). A `TileOp` holds the structural-IR root
 `op` directly — a `Fold`, the ONE stored node kind (defined in `tile/ir.py`) — plus the root-global free→grid
@@ -442,7 +442,7 @@ rides the stored operand ORDER `(b₀, a, b₁…)`, because node-locally the tw
 `B[k,n]` each carry K plus one free axis — and telling M from N needs the placement, which lives on the `TileOp`.
 
 **No node carries a schedule field at all**: a contraction reading is its axis + edges + generated algebra and
-nothing more, so a node's `==` / `hash` / `ops.term_key` is its algebra — two kernels
+nothing more, so a node's `==` / `hash` / `Fold.structural_key` is its algebra — two kernels
 differing only in tile key identically, and no emission path can leak a schedule into a stored term. The placement +
 schedule a tier needs travels beside the node as its SCHEDULE SLICE — algebra and geometry as a `(node, tile)`
 pair, never fused into one object. The **geometry is the slice's own**: a `TilePlan` carries the

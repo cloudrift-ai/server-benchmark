@@ -174,14 +174,13 @@ def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, f
     hierarchy as a top-level knob pick (reservoir -O3 rows, then the tune DB's
     -O1 ranking rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
-    per ``op_cache_key`` so 28 identical per-layer kernels price once.
+    per ``Op.cache_key`` so 28 identical per-layer kernels price once.
     Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
     the op-variant path)."""
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
 
-    key = op_cache_key(graph.nodes[nid].op)
+    key = graph.nodes[nid].op.cache_key()
     if key in memo:
         return memo[key]
     us: float | None = None
@@ -199,9 +198,7 @@ def _price_graph(graph: Graph, ctx: Context, prior, memo: dict[str, float | None
     """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
     e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve)."""
-    from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
-
-    prices = [_price_kernel(graph, nid, ctx, prior, memo, db) for nid, n in graph.nodes.items() if op_cache_key(n.op) is not None]
+    prices = [_price_kernel(graph, nid, ctx, prior, memo, db) for nid, n in graph.nodes.items() if n.op.cache_key() is not None]
     if not prices or any(p is None for p in prices):
         return None
     return sum(prices)
@@ -703,10 +700,10 @@ def greedy_decide(
     ``Pipeline.run``'s retry after a structural pick failed to lower, and by
     the nested pricing probes themselves (no recursive splitting inside a
     price probe). The price memo is per-factory-call (one compile attempt),
-    keyed by ``op_cache_key``."""
+    keyed by ``Op.cache_key``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    memo: dict[str, float | None] = {}  # op_cache_key → predicted µs (None = unpriceable)
+    memo: dict[str, float | None] = {}  # Op.cache_key → predicted µs (None = unpriceable)
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     # Lazily-built per-compile DB evidence index (needs a fork point's ctx for the

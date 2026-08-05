@@ -977,12 +977,10 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     unconditionally on rebinds, stamped across loop-dialect splices,
     preserved by ``_rename_buf_in_op``). So: find any op carrying every
     decision knob whose source chain contains an op structurally identical
-    to this offer (same ``op_cache_key``), and replay the option whose delta
+    to this offer (same ``Op.cache_key``), and replay the option whose delta
     matches its stamped values. Matching by decision-knob agreement (not a
     stored option index) survives rules reordering their emissions."""
-    from emmy.compiler.pipeline.search.keys import op_cache_key, source_chain  # noqa: PLC0415
-
-    key = op_cache_key(root_op)
+    key = root_op.cache_key()
     if key is None:
         return None
     deltas = [(opt, _option_decision(opt, root_op.knobs)) for opt in options]
@@ -993,9 +991,9 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
         knobs = getattr(node.op, "knobs", None)
         if not knobs or not decision_keys <= set(knobs):
             continue  # undecided or unrelated op — the cheap pre-filter
-        chain = source_chain(node.op)
+        chain = node.op.source_chain()
         next(chain)  # the op itself — its key differs from the pre-decision key by the stamp
-        if not any(op_cache_key(anc) == key for anc in chain):
+        if not any(anc.cache_key() == key for anc in chain):
             continue
         found = {k: knobs[k] for k in decision_keys}
         for opt, delta in deltas:
@@ -1193,9 +1191,8 @@ class _TerminalBench:
         from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
         from emmy.compiler.ir.kernel.ir import KernelOp  # noqa: PLC0415
         from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
 
-        key = op_cache_key(op)
+        key = op.cache_key()
         if key is None:
             return
         if isinstance(op, CudaOp):
@@ -1214,22 +1211,15 @@ class _TerminalBench:
             self.db.record_loop_op(key, self._body_json(op, "loop"), op.pretty_body())
 
     def _persist(self, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None) -> None:
-        from emmy.compiler.pipeline.search.keys import (  # noqa: PLC0415
-            _is_kernel_bearing,
-            dialect_of,
-            op_cache_key,
-            source_chain,
-        )
-
-        cuda_key = op_cache_key(cuda_op)
+        cuda_key = cuda_op.cache_key()
         if cuda_key is None:
             return
-        chain = [op for op in source_chain(cuda_op) if _is_kernel_bearing(op)]
+        chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
         for op in chain:
             self._record_op_inventory(op)
         for parent_op, child_op in zip(chain[1:], chain[:-1], strict=False):
-            p_dialect = dialect_of(parent_op)
-            c_dialect = dialect_of(child_op)
+            p_dialect = parent_op.dialect
+            c_dialect = child_op.dialect
             if p_dialect is None or c_dialect is None:
                 continue
             if p_dialect == c_dialect == "loop":
@@ -1244,8 +1234,8 @@ class _TerminalBench:
                 # masquerading as the whole op. The decomposition's cost
                 # is a Σ, owned by the two-level tuner, never this table.
                 continue
-            p_key = op_cache_key(parent_op)
-            c_key = op_cache_key(child_op)
+            p_key = parent_op.cache_key()
+            c_key = child_op.cache_key()
             if p_key is None or c_key is None:
                 continue
             p_knobs = getattr(parent_op, "knobs", None) or {}
@@ -1284,8 +1274,6 @@ class _TerminalBench:
         status))`` when no measurement is needed (no CudaOps / full cache hit /
         stub backend), else ``("bench", None)`` — the caller obtains a
         ``BenchmarkResult`` and calls :meth:`finalize_result` / :meth:`finalize_exc`."""
-        from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
-
         # An un-lowered kernel-bearing node is a bench_fail terminal, decided here — never a
         # backend call (it would raise the opaque ``non-CudaOp`` TypeError) and never the
         # cache-hit / no-CudaOp paths below (they see only the RESIDUAL kernels and would report
@@ -1309,7 +1297,7 @@ class _TerminalBench:
         # useful here because ``backend.benchmark`` runs the whole graph.
         cached_rows = []
         for node in self.cuda_nodes:
-            key = op_cache_key(node.op)
+            key = node.op.cache_key()
             row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
             if row is None:
                 cached_rows = None

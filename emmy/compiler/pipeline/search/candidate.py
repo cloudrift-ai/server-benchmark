@@ -200,12 +200,10 @@ class Candidate:
             pass_ = match.rule.pass_
             mint_pieces = pass_ is not None and pass_.name.startswith("frontend/decomposition")
             if pass_ is not None and pass_.name.startswith("lowering/"):
-                from emmy.compiler.pipeline.search.keys import dialect_of  # noqa: PLC0415
-
                 root_op = self.graph.nodes[match.root_node_id].op
-                if dialect_of(root_op) == "loop":
+                if root_op.dialect == "loop":
                     for frag_node in option.nodes.values():
-                        if frag_node.op.source is None and dialect_of(frag_node.op) == "loop":
+                        if frag_node.op.source is None and frag_node.op.dialect == "loop":
                             frag_node.op.source = root_op
             self.graph.splice(
                 option,

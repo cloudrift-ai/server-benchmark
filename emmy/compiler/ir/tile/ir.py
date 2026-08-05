@@ -65,7 +65,7 @@ per-node slices live in ``TileOp.schedule`` keyed by the tree-path codec, and th
 geometry a placed reading needs is bound onto the SLICE at the point of use
 (``ops.Sched.tile_of`` / ``TilePlan.at``) — never stamped back onto the term. That is what keeps
 a term IMMUTABLE across the whole schedule search, and what makes its identity
-(``==`` / ``hash`` / ``term_key``) its algebra alone. The kernel materializer reads the schedule
+(``==`` / ``hash`` / ``structural_key``) its algebra alone. The kernel materializer reads the schedule
 off the slice beside the node — it never re-recognizes structure the tile IR already holds.
 """
 
@@ -93,13 +93,14 @@ from emmy.compiler.ir.stmt import (
     rename_combine,
 )
 from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.structural import digest
 
 
 def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
     """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
     that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
     TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
-    into the flat loop body — deterministic, so the derived loop (and with it ``op_cache_key``)
+    into the flat loop body — deterministic, so the derived loop (and with it ``Op.cache_key``)
     depends only on the stored params."""
     if not operands:
         return stmts
@@ -237,7 +238,7 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     same deterministic emitter that produced the stored combine), landing after the lift body —
     exactly where recognition's dissolved merge sat; a twisted fold with operand edges derives
     the full blocked evaluation (:func:`_twisted_derived_step` — flash). Deterministic from the
-    stored params only — kernel identity (``op_cache_key``) depends on nothing else."""
+    stored params only — kernel identity (``Op.cache_key``) depends on nothing else."""
     lam = fold.lift
     names = fold.combine.results
     ops = component_ops(fold.combine)
@@ -296,12 +297,12 @@ class Fold(Stmt):
     is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
     :class:`Fold` whose body IS that projection. Like every structural node it IS a ``Stmt`` — that is
     what lets a composed step occupy a statement position in another node's body;
-    :meth:`lower` flattens it to the synthesized loop (``[loop]``), so ``op_cache_key`` and the
+    :meth:`lower` flattens it to the synthesized loop (``[loop]``), so ``Op.cache_key`` and the
     ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
 
     The reduce PARTITION (:class:`ReducePlan` — GRID split / BLOCK coop / REG ILP) is the schedule's,
     not the node's: it is keyed into ``TileOp.schedule`` and read through ``ops.Sched``, which is why
-    ``lower`` cannot see it and ``op_cache_key`` stays byte-identical whichever partition the fork
+    ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical whichever partition the fork
     picked. See the NO-schedule-fields note on ``operands`` below."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
@@ -681,6 +682,15 @@ class Fold(Stmt):
         (partial,) = bodies
         return replace(self, lift=_loop_ir_fn(self.lift.params, Body.coerce(partial), self.lift.results))
 
+    def structural_key(self) -> str:
+        """The α-invariant identity digest of this term — the
+        :class:`~emmy.compiler.structural.Structural` implementation, computed BOTTOM-UP from
+        the children's cached keys (``tile/_key.py``). The term is immutable across the whole
+        schedule search, so the per-node memo is sound and a shared subtree keys once."""
+        from emmy.compiler.ir.tile._key import structural_key  # noqa: PLC0415
+
+        return structural_key(self)
+
     def render(self, ctx: RenderCtx) -> list[str]:
         raise AssertionError("Fold must be lowered (Fold.lower) before render")
 
@@ -933,7 +943,7 @@ class TileOp(Op):
     kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
     across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
     write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``op_cache_key``) is
+    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is
     untouched. The contraction operand→role binding is not a
     ``TileOp`` field either — a tiled contraction carries its A operand / channels on
     its stored fold (``op``), the single source of truth, resolved recognize-side
@@ -963,6 +973,16 @@ class TileOp(Op):
         from emmy.compiler.ir.tile._dump import tile_body  # noqa: PLC0415 — presentation, loaded on demand
 
         return tile_body(self)
+
+    def structural_key(self) -> str:
+        """Kernel identity — the stored term's α-invariant digest (``""`` for a placeholder).
+        Placement, schedule slices, workers and stores are deliberately EXCLUDED: identity is
+        the algebra alone (the NO-schedule-fields rule above), so every fork sibling of one term
+        shares the key and no emission path can leak a schedule into it."""
+        return self.op.structural_key() if self.op is not None else ""
+
+    def cache_key(self) -> str | None:
+        return digest(type(self).__name__, self.structural_key(), self._knob_key())
 
 
 __all__ = [

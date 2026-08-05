@@ -548,8 +548,8 @@ def _stream_of(term: _Term, node) -> _Stream | None:
 
 def _reading(tile: TileOp, op, ctx, *, free=None, stores=None, ref: Sched | None = None) -> _Term:
     """One reading as a ``_Term`` — the rewritten ``op`` over its own placement / boundary stores,
-    on the grid. A reading is never a mutation: each is its own term, with its own ``term_key`` and
-    ``op_cache_key``."""
+    on the grid. A reading is never a mutation: each is its own term, with its own ``structural_key`` and
+    ``Op.cache_key``."""
     place = Placement(free=tuple(tile.place.free if free is None else free))
     alt = TileOp(op=op, name=tile.name, place=place, inputs=dict(tile.inputs), stores=tile.stores if stores is None else stores)
     return _Term(alt, place.on_grid(), ctx, ref=ref)
@@ -1609,7 +1609,7 @@ def _strip_variant(term: _Term, plan: TilePlan, name: str, knobs: dict) -> TileO
     unrolled ``r`` times — copy ``i`` reads/writes ``inner·r + i`` with its SSA names suffixed —
     then regrouped as ``r`` loads · ``r`` computes · ``r`` writes so the unit-stride runs feed
     ``050_vectorize_loads`` / ``080_vectorize_stores``. A different term, hence a different
-    ``term_key`` and ``op_cache_key`` — which is why it is applied HERE and not at recognition."""
+    ``structural_key`` and ``Op.cache_key`` — which is why it is applied HERE and not at recognition."""
     inner = term.place.free[-1]
     r = plan.reg_n
     op = term.tile.op

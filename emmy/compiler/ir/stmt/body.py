@@ -613,7 +613,7 @@ class Body(tuple[Stmt, ...]):
         # different Body instances with identical stmts now share the
         # one ``normalize_body`` call — matters in tune mode where
         # ``_record_op_inventory`` walks the source chain of every
-        # CudaOp in every terminal and hammers ``op_cache_key`` ->
+        # CudaOp in every terminal and hammers ``Op.cache_key`` ->
         # ``Body.structural_key()`` on bodies that frequently recur
         # structurally across variants. The cache is safe because
         # ``structural_key`` always normalizes with the same fixed flag
@@ -727,7 +727,7 @@ def _shared_structural_key(body: Body) -> str:
     dataclass and ``Body`` a ``tuple[Stmt, ...]`` subclass, equal-content
     bodies hash equal — so two structurally identical Body instances
     share one normalize+pretty walk through this cache. Tune mode hits
-    this hard from ``_record_op_inventory`` (one ``op_cache_key`` call
+    this hard from ``_record_op_inventory`` (one ``Op.cache_key`` call
     per ancestor in every CudaOp's source chain, per terminal candidate).
 
     The cache is sound because the flag combination is hard-coded here.

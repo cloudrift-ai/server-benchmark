@@ -23,9 +23,22 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from emmy.compiler.graph import Graph, Node
     from emmy.compiler.ir.expr import Expr
     from emmy.compiler.tensor import Tensor
+
+
+class _ClassProperty:
+    """A read-only property answered by the CLASS (``@classmethod @property`` chaining is gone
+    since Python 3.13) — reachable from both ``LoopOp.dialect`` and ``op.dialect``."""
+
+    def __init__(self, fget) -> None:
+        self.fget = fget
+
+    def __get__(self, obj, owner):
+        return self.fget(owner)
 
 
 @dataclass
@@ -93,6 +106,39 @@ class Op:
         post-register-tile thread count fits the hardware launch budget.
         """
         return True
+
+    def cache_key(self) -> str | None:
+        """Tuning / cubin-cache identity for a kernel-bearing op, or ``None`` when this op
+        kind is not cacheable (boundary sentinels, pre-lowering ops). Each kernel-bearing
+        dialect overrides it as a digest of its content identity (``structural_key``) folded
+        with :meth:`_knob_key` — knobs are part of the key because same-body /
+        different-knobs variants must not collide with their parent in the search tree
+        (``SearchTree.expand`` self-parents the node otherwise). The same kernel reached via
+        different rewrite paths produces the same key — ``source`` is never part of it."""
+        return None
+
+    def _knob_key(self) -> tuple:
+        """The knob half of :meth:`cache_key` — the dict as a sorted item tuple."""
+        return tuple(sorted(self.knobs.items())) if self.knobs else ()
+
+    @_ClassProperty
+    def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner
+        """The lowering-stage tag for a kernel-bearing op (``"loop"`` / ``"tile"`` /
+        ``"kernel"`` / ``"cuda"``); ``None`` for everything that is not one kernel of work
+        (boundary sentinels, pre-fusion ops). DERIVED, never declared: kernel-bearing is
+        exactly "overrides :meth:`cache_key`", and the tag is the class name minus its ``Op``
+        suffix, lowercased. A future subclass of a dialect op that wants its PARENT's tag must
+        override this — the name rule tags it by its own name."""
+        if cls.cache_key is Op.cache_key:
+            return None
+        return cls.__name__.removesuffix("Op").lower()
+
+    def source_chain(self) -> Iterator[Op]:
+        """Yield this op and every predecessor along the rewrite chain (:attr:`source`)."""
+        cur: Op | None = self
+        while cur is not None:
+            yield cur
+            cur = cur.source
 
 
 @dataclass

@@ -3,7 +3,7 @@
 Pure persistence layer — no MCTS state, no propagation walks. Tables:
 
 - ``loop_op`` / ``tile_op`` / ``kernel_op`` / ``cuda_op`` — one row per
-  op encountered along a lowering chain. Keyed by ``op_cache_key``.
+  op encountered along a lowering chain. Keyed by ``Op.cache_key``.
   Each row stores the JSON form (for programmatic inspection) and the
   pretty-printed form (for human inspection).
 - ``lowering`` — best-known child for each parent op, one row per
@@ -333,10 +333,10 @@ class SearchDB:
     #       topology shifted vs. the legacy downstream forks.
     #   2: explicit-knob OFF sentinels — every variant now stamps every planner
     #       knob (tier-foreign ones get an OFF value: WM/WN/MMA on scalar,
-    #       BM/BN/BR/FK on warp), so ``op_cache_key`` (which folds the knob dict)
+    #       BM/BN/BR/FK on warp), so ``Op.cache_key`` (which folds the knob dict)
     #       shifts for every TileOp/KernelOp. Stale ``lowering`` rows won't match.
     #   3: the RASTER launch-order codec — every contraction row now spells a fifth
-    #       schedule family (``RASTER: ''``/``gm8``), so ``op_cache_key`` shifts for every
+    #       schedule family (``RASTER: ''``/``gm8``), so ``Op.cache_key`` shifts for every
     #       matmul TileOp/KernelOp; cached pre-RASTER chains would silently replay
     #       old-key kernels and starve the new rows of evidence.
     _SCHEMA_VERSION = 3

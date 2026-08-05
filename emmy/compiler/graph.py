@@ -979,13 +979,12 @@ class Graph:
                 op_payload: tuple = ("body", body.structural_key())
             else:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-                from emmy.compiler.ir.tile.ops import term_key  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (step 7 — the canonically
-                    # renumbered term, ``ops.term_key``); every other field keeps its repr.
+                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
+                    # the bottom-up term key); every other field keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return term_key(o.op)
+                        return o.structural_key()
                     return repr(_unwrap_dims(getattr(o, name)))
 
                 attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)

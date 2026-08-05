@@ -36,7 +36,7 @@ Terms used throughout:
 | **prior** | The ranking model — a fit-offline model when cold (the **offline prior**), a CatBoost model trained online from local measurements (the **online prior**) once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden config** | A hand-recorded known-good config for a benchmark shape, used as ground truth and for A/B checks. |
-| **`op_cache_key`** | A name-invariant digest of an op's body + knobs — the identity measurements are stored under. A `TileOp`'s structure digests as the α-invariant term hash (`ops.term_key`), never the lowered nest. |
+| **`Op.cache_key`** | A name-invariant digest of an op's body + knobs — the identity measurements are stored under. A `TileOp`'s structure digests as the α-invariant term hash (`Fold.structural_key`), never the lowered nest. |
 
 ## Module map
 
@@ -56,7 +56,6 @@ Terms used throughout:
 | `search/data/` | The harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). |
 | `search/golden.py` | `GoldenConfig` and its subclasses (see Part 7, "Golden configs and the A/B integrity gates"). |
 | `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and the CI gate (see Part 7). |
-| `keys.py` | `op_cache_key` / `dialect_of` / `source_chain`. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -381,7 +380,7 @@ cross-subprocess selected-kernel-set pin, the resolution counterpart of `test_so
 
 **Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
 `_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only
-pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `op_cache_key`.
+pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `Op.cache_key`.
 The cheaper kernel set wins, so an unpinned compile deploys the splits `tune` measured best. The nested resolve carries
 the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick (reservoir -O3, then the
 tune DB's -O1 ranking rows, model prediction only where unmeasured) — a pure sum-of-predictions comparison would be
@@ -457,19 +456,19 @@ per-kernel bests), so a warm re-tune descends the predicted-cheaper kernel set f
 (`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes only (`tile → kernel → cuda`):
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
-  The root op is shared **by reference**, so its body — and thus `op_cache_key` — is byte-for-byte the full-graph op's.
+  The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
 - One fold-aware exception: a flash fold offer site's slice CARRIES the score producer its fusion consumes
   (`_flash.fused_producer_ids` → `single_node_graph(absorb=…)`), and the absorbed producer loses its own slice. A
   synthetic-input boundary would make `try_flash` unfusable in-slice, silently degrading every tune trajectory to the
   cut (benching fragment kernels greedy deploy never picks) and leaving the fused flash fork unreachable under tune.
 - Because the inner tree holds one op, MCTS explores only that op's forks with `patience` as the op's own budget —
   `Σ_k n_k` benches total, never the product.
-- **Leaves are deduped by `op_cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
+- **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
   outer `total_us` accumulates `best * multiplicity` so the reward stays multiplicity-weighted. The progress
   denominator is the deduped count, so Qwen3-Embedding-0.6B's ~14 unique kernels show as 14/14, not 14/337.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
-rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`op_cache_key` =
+rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =
 name-invariant body+knobs digest), so a kernel tuned in its slice transfers to the assembled graph unchanged **and**
 is shared across outer terminals — two fusion candidates sharing an identical op reuse its tuning (a DB hit). After
 the best fusion is picked, the assembled `Graph[CudaOp]` is benched **once** for the real in-context whole-graph
@@ -594,7 +593,7 @@ don't invent a third:
   identity, so a prior is a pure function of it. The online prior is exactly `score(features(ctx, knobs))`: the
   structural facts are already in the knob dict, so `features.knob_features` turns it straight into the model feature
   vector (the `S_*` knobs pass through; tuning knobs encode by type, `MMA` expands to atom props).
-- **Measurement identity = `(ctx.structural_key, op_cache_key)`** — ground truth about *materialized leaves*: `perf`
+- **Measurement identity = `(ctx.structural_key, Op.cache_key)`** — ground truth about *materialized leaves*: `perf`
   rows (the per-variant replay cache), op inventory (`loop_op` / `tile_op` / `kernel_op` / `cuda_op`), and two-level
   dedup. The structural `child_key` on `lowering` rows is measurement linkage (it joins the inventory), NOT a replay
   key.
@@ -603,7 +602,7 @@ don't invent a third:
 
 **`SearchDB`** (`db.py`) is a SQLite store partitioned into:
 
-- **Four op-inventory tables** — one row per op encountered along any lowering chain, keyed by `op_cache_key`.
+- **Four op-inventory tables** — one row per op encountered along any lowering chain, keyed by `Op.cache_key`.
 - **A `lowering` edge table** — one row per rewrite hop carrying the knob delta plus a best-median upsert
   (`best_per_op_time` walks the chain to resolve a pre-final op's measured cost; loop→loop source hops are skipped as
   structural/decision hops).

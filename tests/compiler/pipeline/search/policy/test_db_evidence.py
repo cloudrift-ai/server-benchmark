@@ -154,7 +154,7 @@ def test_structural_price_probe_threads_db_evidence(monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(greedy, "greedy_decide", spy)
-    graph = SimpleNamespace(nodes={"n0": SimpleNamespace(op=SimpleNamespace())})
+    graph = SimpleNamespace(nodes={"n0": SimpleNamespace(op=SimpleNamespace(cache_key=lambda: None))})
     sentinel = object()
     ctx = Context.from_target((12, 0))
     # The dummy graph is unpriceable (no real op) — the probe must still have been

@@ -21,6 +21,7 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.base import pretty_body as _pretty_body_stmts
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Load, Write
+from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
 
@@ -139,6 +140,12 @@ class BodyOp(Op):
         ``Candidate._format_nodes``) emit the surrounding name / I/O
         label themselves; duplicating it here would just rot."""
         return "\n".join(_pretty_body_stmts(self.body, "    "))
+
+    def cache_key(self) -> str | None:
+        """Override :meth:`Op.cache_key`: digest of the dialect tag plus the canonical body
+        (:meth:`Body.structural_key` — SSA / axis / commutative-arg / external-buffer names
+        normalized away) plus the knob dict."""
+        return digest(type(self).__name__, self.body.structural_key(), self._knob_key())
 
 
 def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.

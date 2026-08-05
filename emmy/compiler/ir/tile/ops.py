@@ -10,7 +10,7 @@ prevent: :func:`reduce_loop` and :meth:`Fold.lower` are for callers that consume
 
 This module holds the structural reads over a node tree — the cone seam (:func:`cone_seam`), the
 iteration-space names (:func:`axis_names`) — plus the tree-path schedule accessor (:class:`Sched`),
-kernel identity (:func:`term_key`) and the worker sealing (:func:`seal_workers`). Lowering itself
+kernel identity (:func:`structural_key`) and the worker sealing (:func:`seal_workers`). Lowering itself
 has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
 :attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
 resolved — a computed operand is an inline node on its edge, so there is no name-resolution step
@@ -328,11 +328,10 @@ def axis_role(op) -> AxisRole:
     return AxisRole.FREE
 
 
-# ``term_key`` (kernel identity) lives in its own module — it is not a compute read. Re-exported
-# here because ``ops.term_key`` is the layer's ONE public identity name (``op_cache_key`` /
-# ``Graph.structural_key`` reach it through this module). The structural dump is NOT re-exported:
+# Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
+# ONE public name is the ``Structural`` method, ``Fold.structural_key()`` / ``TileOp.structural_key()``
+# (``Op.cache_key`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
 # it has no consumer outside ``_dump`` itself, so a shim here would serve nothing.
-from emmy.compiler.ir.tile._key import term_key  # noqa: E402
 
 __all__ = [
     "Sched",
@@ -346,5 +345,4 @@ __all__ = [
     "reduce_plan",
     "sched_of",
     "seal_workers",
-    "term_key",
 ]

@@ -67,7 +67,7 @@ def test_projected_reduce_is_a_map_over_the_reduction() -> None:
 
 def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
     """``Fold.projection(source=Fold).lower()`` equals the bare-loop ``Fold.projection(body=(loop, *proj))`` — the parity
-    guarantee that keeps ``op_cache_key`` stable across the lift."""
+    guarantee that keeps ``Op.cache_key`` stable across the lift."""
     loop = _sum_loop()
     proj = (Write(output="out", index=(Var("m"),), value="acc"),)
     node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))

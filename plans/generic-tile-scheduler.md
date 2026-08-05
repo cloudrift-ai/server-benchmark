@@ -35,8 +35,8 @@ An operand edge stays the union it always was — MATERIALIZED (a gmem `Load`, w
 source/access pair) or COMPUTED (the node itself, stored inline, its one consumer its parent). Two reasons to keep
 it that way if the question is reopened: every structural node is a `Stmt`, which is what lets an inline node occupy
 a statement position (`_splice_operands` splices an edge's producing stmts straight into a `Body`, `_flatten_nodes`
-lowers it in place), and `term_key` is `repr()`, so a wrapper is a new level in every stored term's key for no
-consumer. Reopen only if a pass appears that genuinely needs a computed edge's index space; today none does.
+lowers it in place), and kernel identity serializes the stored tree (`Fold.structural_key`, the bottom-up per-node digest), so a wrapper
+is a new level in every stored term's key for no consumer. Reopen only if a pass appears that genuinely needs a computed edge's index space; today none does.
 
 **The projection is not a field.** `Map(fn, sources=(Fold,))` is a zero-axis `Fold` whose one operand is the
 reducing fold; the projection IS the outer node's `lift`. Composition supplies what the `fn` field did, so RMSNorm's
@@ -104,8 +104,8 @@ nine golden rows are its test.
 **Per-operand lifts are a DERIVED view, never storage.** "Different lift per operand, one combine" is the right
 reading of a contraction — but the per-operand part is a canonical partition of the existing `lift.body` (a stmt
 reading one operand's bound name belongs to that operand; a stmt reading several is the joint step), not new fields.
-It must stay derived because kernel identity is the α-invariant `repr()` of the stored term (`ops.term_key`, now in
-`ir/tile/_key.py`): a stored partition
+It must stay derived because kernel identity is the α-invariant digest of the stored term (`Fold.structural_key`,
+computed bottom-up in `ir/tile/_key.py`): a stored partition
 means two recognitions that split the same algebra differently key apart, splitting cache and evidence for identical
 kernels. Derived, it costs nothing and unlocks the fused per-operand prologue `Fold.contraction`'s docstring already
 anticipates (qk-norm / RoPE folded into a score, on-the-fly dequant) — which is a STAGE-family concern. There is no
@@ -118,10 +118,10 @@ addresses. The collapse renamed the node kind and moved the projection down one 
 what bounded its blast radius, and it is why examples 1–3 and 7 below are byte-identical to their pre-collapse dumps
 but for the header word.
 
-**The evidence orphaning is already paid.** `ops.term_key` is the `repr()` of the canonically-renumbered term, so the
-changed class name and the projection's changed nesting changed the key for every term — and with it `op_cache_key`
+**The evidence orphaning is already paid.** `Fold.structural_key` digests the canonically-renumbered term, so the
+changed class name and the projection's changed nesting changed the key for every term — and with it `Op.cache_key`
 and `Graph.structural_key`'s op field. **The cubin cache and every recorded DB / reservoir measurement keyed on
-`(ctx.structural_key, op_cache_key)` are orphaned**; the golden corpus survives untouched because it keys on knob
+`(ctx.structural_key, Op.cache_key)` are orphaned**; the golden corpus survives untouched because it keys on knob
 spellings. Measurement therefore starts from an empty reservoir — a cost already sunk, not a risk
 still to manage.
 
@@ -304,7 +304,7 @@ Three obligations the union carries, none of which is free:
   term (*no warp tile when A's dtype ≠ the atom's a-dtype and the transport cannot convert*), evaluable without
   sibling knowledge.
 - **Reading identity must survive into the prior's key space.** `build_fork_tree` keys leaves on the knob dict
-  ALONE; measurement identity is `(ctx.structural_key, op_cache_key)` and distinguishes readings, but row identity is
+  ALONE; measurement identity is `(ctx.structural_key, Op.cache_key)` and distinguishes readings, but row identity is
   `(context, knobs)` and may not. Two structurally different kernels averaging under one feature row is a real
   hazard. **Check it as each reading lands** (`canonical_row_key(a) != canonical_row_key(b)` across pairs on each
   corpus shape); if they collide, the fix is an `S_*` stamp — like the existing `S_warp_eligible`, whose absence on
@@ -566,8 +566,8 @@ Rows 9–10 must NOT be asserted in tier 0 — row 9 is enforced by the resolver
   granularity, register depth. Rotation and refill discipline DERIVE at materialization; the sync/async operand
   split is a term reading; `smem` / `bk_elems` are resolver outputs. A new FIELD on `Stage` is a design regression,
   the same way a new stored field on `Fold` is.
-- **Terms are never mutated in place** — readings are explicit, each with its own `term_key`, site set and
-  `op_cache_key`, and their identity must survive into the prior's key space.
+- **Terms are never mutated in place** — readings are explicit, each with its own `structural_key`, site set and
+  `Op.cache_key`, and their identity must survive into the prior's key space.
 - **`WORK` is derived from the slices**, and leads the fork levels; `RASTER` closes and stays CONTRACTION-SCOPED
   (`test_raster_fork_offers_both_orders` and `test_raster_symbolic_grid_stays_flat` already pin this).
 - **The bare-`TILE` dynamic-attention pin any-of** stays until symbolic keyed resolution exists. Note the 20 dynamic

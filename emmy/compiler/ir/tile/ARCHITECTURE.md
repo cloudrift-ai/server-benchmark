@@ -66,8 +66,11 @@ non-λ-representable loop, and callers keep the raw-loop-IR escape.
 
 `Fold.loop` splices each operand's body before the first read of its bound param and flattens nested nodes in place,
 so the derived loop depends only on the stored params. That is what makes kernel identity the α-INVARIANT **term hash**
-(`ops.term_key`: canonical renumbering plus hash-time ANF body-order canonicalization), consumed by `op_cache_key`'s
-TileOp arm and `Graph.structural_key`'s op field — never the lowered nest.
+(`Fold.structural_key()`, the `Structural` protocol: per-node canonical renumbering plus hash-time ANF body-order
+canonicalization, digested BOTTOM-UP — each node folds its own canonical content with its children's cached keys, so a
+subtree keys once and a reading that rewrites one level re-keys that level only; buffer identity canonicalizes
+positionally per scope with the cross-scope aliasing pattern kept). Consumed by `TileOp.cache_key` and
+`Graph.structural_key`'s op field — never the lowered nest.
 
 ## An operand edge has two inhabitants
 
@@ -85,7 +88,7 @@ streamed — is a SCHEDULE fact read off the node (`isinstance(c.b, Load)` eligi
 
 ## The node carries no placement and no schedule
 
-The node is pure algebra, so its identity (`==` / `hash` / `term_key`) is its algebra alone and the term is IMMUTABLE
+The node is pure algebra, so its identity (`==` / `hash` / `structural_key`) is its algebra alone and the term is IMMUTABLE
 across the whole schedule search. The placed reading the tensor-core and staged tiers need — the `(m, n)` `Side`
 geometry — belongs to the SCHEDULE SLICE: `TilePlan.at(m, n)` binds the caller's placement axes onto it, and the slice
 then derives `mn` / `m` / `n` / `launch_threads`. `axes` is `compare=False`, so placement never reaches `spell()`, a

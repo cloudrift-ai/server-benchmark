@@ -26,7 +26,6 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.keys import op_cache_key
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.two_level import (
     LOWERING_PASSES,
@@ -72,7 +71,7 @@ class _CountingBackend:
             # crc32, not hash(): str hashes are salted per process (PYTHONHASHSEED),
             # which made the MCTS path — and the bench counts the separability test
             # bounds — vary run to run.
-            us = 1.0 + (zlib.crc32(op_cache_key(n.op).encode()) % 100)
+            us = 1.0 + (zlib.crc32(n.op.cache_key().encode()) % 100)
             per.append(LaunchTime(idx=i, kernel_name=getattr(n.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,)))
         return BenchmarkResult(time_ms=sum(p.time_ms for p in per), num_launches=len(per), per_launch=per)
 
@@ -161,7 +160,7 @@ def test_inner_reward_is_separable_not_a_product() -> None:
     # Per-op sharing through the DB perf cache is allowed — an already-measured
     # variant replays without a bench. The exact share count is sensitive to
     # MCTS exploration order: the
-    # ``_CountingBackend`` fakes latency from ``crc32(op_cache_key)``, so any
+    # ``_CountingBackend`` fakes latency from ``crc32(Op.cache_key)``, so any
     # structural-digest perturbation (e.g. a Source-field rename) shifts the
     # path and the count by a few benches. The hard guarantee is the
     # cross-product upper bound; tighter ``n1+n2`` / ``max(n1,n2)`` bounds
@@ -321,7 +320,7 @@ def test_inner_reward_deeper_patience_benches_new_variants() -> None:
 
 def test_inner_reward_shares_identical_kernel() -> None:
     """Two identical kernels in one terminal collapse to a single ``per_op``
-    entry under one ``op_cache_key`` with ``multiplicity=2``. The inner
+    entry under one ``Op.cache_key`` with ``multiplicity=2``. The inner
     search runs once; the outer total still costs 2× the shared best so the
     outer MCTS reward stays bit-for-bit identical to the per-node-iterated
     formulation."""
@@ -329,7 +328,7 @@ def test_inner_reward_shares_identical_kernel() -> None:
     loops = _loop_ids(fused)
     assert len(loops) == 2
     # Same body ⇒ same structural key.
-    keys = {op_cache_key(fused.nodes[nid].op) for nid in loops}
+    keys = {fused.nodes[nid].op.cache_key() for nid in loops}
     assert len(keys) == 1, "the two matmuls must share one structural key"
 
     single = _tune_one_slice(fused, loops[0], _PATIENCE)
@@ -348,7 +347,7 @@ def test_inner_reward_parallel_matches_serial(monkeypatch) -> None:
     a pool of N device-pinned backends yields the SAME per-op bests and summed
     reward as the one-slot serial path. Each op's search is seeded by ``op_idx``
     (execution-order-independent) and the fake backend's latency keys off
-    ``op_cache_key`` (slot-independent), so completion order can't change the
+    ``Op.cache_key`` (slot-independent), so completion order can't change the
     result. ``prior=None`` keeps this off the online-prior (catboost) path.
 
     The tile is pinned to per-cell (``EMMY_TILE=""``) so the matmul enumerates a

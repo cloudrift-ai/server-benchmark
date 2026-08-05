@@ -381,12 +381,88 @@ unnoticed. Generation removes the failure mode; the value ladders keep the measu
 `emmy eval offline` rank/pool columns incomparable. An `emmy fit --artifact` refit plus golden
 rank / top-1/10/25/50 re-verification is owed before any GPU sweep is trusted.
 
+### The `STAGE` codec — delete the dead field, name the live one
+
+Two fields in `d<depth>/<transport>[/ring][/alt][/p<reg_depth>]` are wrong, in opposite ways, and the rest is right.
+
+**`ring` is dead.** No emitter reads it: the staged K-loop derives rotation from depth alone (`kernel/_stage.py`
+computes `ring = depth if symbolic else min(depth, n_chunks)` per operand group), so `d3/cp` and `d3/cp/ring`
+compile byte-identically. Its only readers are its own validation and spelling, the two resolvers rewriting it into
+`stage.ring and depth >= 2` after the depth clamp, and two featurizer entries. It should be DELETED — one dead field
+that 480 golden rows carry, and two catalog entries that mean the same thing.
+
+**`alt` names a term shape where it should name a decision.** What it selects is real and structural: the flash
+realizer builds ONE transport over both staged operands under a single-segment body, or one transport PER operand
+under a segmented body (`_twist.py`'s two arms feeding `staged_kloop` vs `pipelined_kloop`). That is a choice about
+GROUP GRANULARITY — how many transport groups this fold's staged edges are cut into. Spelled as `alt` it is a flag
+whose eligibility rule is "this term is flash", which the generic enumerator cannot offer; spelled as what it is, it
+is a value with a structural predicate. Rename it **`split`**, and give it the predicate: the fold has ≥ 2 staged
+operand edges consumed at DISTINCT positions of its derived evaluation — true of the streaming pair (the score edge
+reads K, the synthesized PV reads V), false of a contraction (one multiply consumes both), which is exactly why the
+matmul resolvers decline it today, now for a stated reason rather than by name.
+
+So the grammar is today's, one token deleted and one renamed:
+
+```
+STAGE := "d" <depth> "/" ("sync" | "cp" | "tma") [ "/split" ] [ "/p" <reg_depth> ]
+```
+
+| today | new | rows |
+| --- | --- | --- |
+| `''`, `d1/sync`, `d2/sync`, `d1/cp`, `d1/tma` | unchanged | 129 + 51 + 13 + 1 + 6 |
+| `d2/cp/ring`, `d4/cp/ring`, `d2/tma/ring`, `d3/tma/ring`, `d4/tma/ring` | `/ring` dropped | 184 + 1 + 286 + 5 + 7 |
+| `d2/cp/ring/p2` | `d2/cp/p2` | 14 |
+| `d1/cp/alt`, `d1/tma/alt` | `d1/cp/split`, `d1/tma/split` | 28 + 5 |
+
+**This parses on today's engine.** `ring` and `alt` are both `FieldKind.FLAG`; deleting one `Field` and changing the
+other's token is a two-line schema edit, and `decode` / `encode` / `desugar` are untouched. The corpus migration is a
+`sed`: `s|/ring||; s|/alt|/split|`, string-only, no term needed.
+
+**Why not per-operand keys.** Keying one `STAGE` row per staged operand edge (`STAGE@a`, `STAGE@b`) was the
+attractive answer and it does not survive the code. `path._walk` recurses only into `Fold` edges, so a materialized
+operand is never a `Site` and `_seg` / `Site.axis` would fault on one; flash's K and V land on the SAME segment path
+and are separable only by the traversal-order ordinal the codec documents as never-needed; `family_sites` hands
+`PLACE` every non-root site, so admitting `Load`s would silently offer a cut on a materialized operand. Worse, it
+would spell a TERM property as a choice: the sync compute-fill's operand/`async_operands` split is decided in
+`_atom._sync_operands` purely by edge inhabitant — a computed cone is compute-filled, a materialized channel is
+cp.async'd, and nothing chooses it. And the enumeration would pay for it: the stage catalog offered per edge is a
+PRODUCT (≈ 9² on a two-edge fold, most of it unbuildable) where the fold-keyed value is a sum. The one thing per-edge
+keys buy — a mixed-depth split, K at depth 3 beside V at depth 1 — is unbuildable today anyway (`_atom._staged`
+constructs one transport for both operands) and, if wanted later, is an additive second depth on one key.
+
+**What stays derived, and where.** Rotation, refill discipline (`ring` / `current` / `kill`), prologue prime counts
+and wait-group counts derive in the MATERIALIZER from depth and the body's segment structure — none exists at
+enumeration time. `bk_elems`, the depth clamp, the `reg_depth ≤ bk` clamp and transport eligibility derive in the
+RESOLVER, which is why the stored spelling is the realized one. `smem` stays an unspelled resolver output with two
+producers — the shared-row buffer `_row_stage` detects, and the computed-`a` operand `resolve_sync_stage` names for
+the cone's mandatory compute fill (phase 2). Spelling it would put a derived quantity in a golden key, and the
+second producer is the proof: which buffer is staged is a reading of the term, not a choice the row makes. The
+sync/async operand split stays a term reading for the same reason. `D_stage_ring` is deleted (it is collinear with
+`depth ≥ 2 ∧ async` across the whole corpus) and `D_stage_alt` becomes `D_stage_split`.
+
+**Landing order.** Deleting `ring` is independently landable and codegen-neutral: the gate is `digest_kernels.py` at
+zero diff plus `test_golden_configs.py`, which parses every golden's `STAGE` and asserts matmul goldens are members
+of `stage_moves` — so the catalog strings migrate with the corpus in one commit. The `split` rename lands WITH the
+flash cut that first enumerates it (phase 3): until then `split` is reachable only by pin and the rename is churn.
+Both steps owe an `emmy fit --artifact` refit — the featurizer keys move — which the domain-generation section
+already books; and `prior/offline.py` RAISES on a `feat_ver` mismatch rather than degrading, so the refit lands in
+the same commit as the bump, not after it.
+
+**Three codec-engine defects, none caused by this and one worth bundling.** Bundle the second: `STAGE` pins compare
+as raw strings because `knob.canon_family_value` canonicalizes `TILE` / `REDUCE` only, so `cp/d2` — which parses and
+re-spells canonically — fails pin verification against its own realized value, on the DEPLOY path
+(`policy/greedy`'s golden-row match runs through `values_equal`). `STAGE` needs no inventory to canonicalize, so it
+is a two-line arm. The other two are orthogonal and should not ride along: `decode` never rejects a duplicate or
+conflicting token, so `d2/cp/d3` silently becomes `d3/cp` and `sync/tma` becomes `d1/tma`; and each schema's
+`expect` string is a hand-maintained copy of its own field list that this change falsifies — as is the module header
+naming the engine's users, which this branch's own `WSPEC` deletion already falsified.
+
 ### The constraint table — documentation and assertions, not a space
 
 Legality is still worth writing down in one place: it is the checklist each emitter implements, the tier-0 assertion
 list, and the review artifact that makes a dropped predicate visible. It is NOT the definition of the candidate
 space (see above), and nothing solves or projects it. Instantiated for flash's two contraction sites with the
-`m16n8k16` family (`atom_n = 8`, `atom_m = atom_k = 16`) and `d = 64`, f16, `depth = 2`:
+`m16n8k16` family (`atom_n = 8`, `atom_m = atom_k = 16`) and `d = 64`, f16, two slots (`s2`):
 
 | # | constraint | form | where it is checked |
 | --- | --- | --- | --- |
@@ -425,6 +501,16 @@ enumeration drops the candidate. The duplicated raise/drop pairs the old schedul
 (`_check_warp_static_k` vs `_warp_move_ok`; `_fragment_epilogue_ok` checked once as a silent `()`
 and once as a raise) are gone, and with them the "the pin says yes and the enumeration says no" bug
 class.
+
+**Two kinds of rule live here, and they fail differently.** A GEOMETRIC predicate asks how big the term is —
+extents, dtypes, tile widths, smem, divisibility — so its answer is a property of this shape and flips with the
+input. A STRUCTURAL one asks how the term is BUILT — the staged-edge decomposition `split` needs, the bilinear
+reading, a
+COMPUTED versus MATERIALIZED edge — so its answer is a property of the term forever, and a refusal means the value
+is not a candidate at all rather than merely unaffordable here. Both are ordinary functions returning a reason, both
+take `enforce(…, pinned=…)`; the distinction is documentation, not machinery. It earns its place because a pin
+refused on structural grounds is a user error worth a different message than a pin refused on a budget, and because
+a structural rule is the one kind that can be asserted on a term without knowing its shape.
 
 Two corrections the rebuild forced:
 
@@ -534,7 +620,7 @@ lets the cone's statistic sit under a warp parent at all.
 **Of the three predicted row-key changes only the first fired.** (1) The deploy override is gone: `matvec_coopt`'s
 wide-K coalesced matvec enumerated ONE row under `ctx.validate_pins` and now enumerates the full 12-row catalog with
 the same `coop=32` pick leading, so the row set is a function of the term alone and the prior-free deploy is
-unchanged. (2) `_row_stage` is now a `STAGE` value (`d1/sync`, a resolver — offered exactly when the shape carries a
+unchanged. (2) `_row_stage` is now a `STAGE` value (`sync`, a resolver — offered exactly when the shape carries a
 shared row), but no corpus shape fires it, so no stored key moved. (3) `family_sites` vs `head(op)` cannot differ
 yet: every corpus term is single-site, which is also why phase 1 ships the two-site FIXTURE
 (`test_two_site_term_merges_both_sites_under_one_inventory`) — a contraction over a computed B edge, asserting the
@@ -635,7 +721,7 @@ size** (241 registered xfails at the demolition, 198 after phase 1, 173 now — 
 | --- | --- | --- |
 | ~~**1**~~ | **LANDED — the enumerator, the target design, built once.** `_inventories(term)` at the root, then `_rows_at(site, work)` as a product over the site tree; `_merge` spelling every slice through `ops.Sched.key`; `_site_values(site, work)` returning TYPED slices from the `search/space.py` catalogs; `_legality.py`'s predicates as the `(term, candidate)` filter. Dispatch is the two node predicates. The four IR repairs landed with it: one contraction predicate shared by `path._walk` and `family_sites`; the `composed` arm out of `Fold.role`; the raw-loop escape separated structurally in `family_sites`; `stage_moves` returning `Stage`. `resolve_row` / `RowSlices` deleted and the `WSPEC` pin alias retired | **MET**: byte-identical kernels on all 24 digest cases, 14 of 14 schedulable cases live, `make test` + `make lint` green, 50 registry ids deleted, the row set identical but for the one accepted change above |
 | ~~**2**~~ | **LANDED — the COMPUTED operand edge, plus the term-reading union it needed.** `_readings` above the product (the monoid composition / the collapse / the mixed-A promotion, ≤ 2 per term, one reference key namespace, identity keyed on `canonical_row_key`); `_contraction_values`' computed-`a` inhabitant (warp-only, the mandatory `resolve_sync_stage` at `d1`/`d2`, `computed_a_cover`, the redundant-statistic split through `_sliced_a`); `_fill_realized` for the one nested site the parent form already partitions; the per-value inventory filter became the per-ROW `_work_holds`. `Fold.demoted()` returned; `warp_operand_dtype` made the copy transports' dtype rule a checked predicate | **MET**: 5 digest cases (`norm_linear` ×4 + `mlp_geglu`) left `UNSCHEDULED` landing their pins, the other 19 byte-identical, `make test` + `make lint` green, 25 registry ids deleted (20 fused-edge + 4 recognize-boundary + the golden-spelling gate) |
-| 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
+| 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry, and `split` as a `stage_moves` member with its structural predicate (the `alt` rename lands HERE, not before) | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
 | 4 | `schedule()`'s own dispatch and flash-form selection once 2–3 exist; `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have — unreachable until the flash warp realizer runs, so it has no obtainable baseline until then) | registry EMPTY + `make test` + `make lint` |
 
 **Phase 1 must land with no new BEHAVIOUR — but its row KEYS provably change in three places, and pretending
@@ -666,6 +752,43 @@ contraction keys, so the map reading's coop row moved off the bare `REDUCE` it u
 the row and it passes) but no longer DEPLOYS, because the cold prior ties and a tie breaks on `canonical_row_key`,
 where the serial row's empty values sort ahead of `coop`. That case is xfailed strict with the cause named; the fix is
 evidence — the owed `emmy fit --artifact` refit — not an enumeration change.
+
+**The `STAGE` cleanup lands in two steps, and only the second waits on phase 3** (the codec section has the
+design). Step A deletes `ring`: a two-line schema edit, `s|/ring||` over the golden YAMLs and the tune DB's knob
+column, the `stage_moves` catalog strings, and the `ring=` term in the two resolvers. Step B renames `alt` →
+`split`, adds its structural predicate and puts it in the catalog — it lands WITH the flash cut that first
+enumerates it, because until then `split` is reachable only by pin. There is no compatibility obligation either
+time: the old spelling is DELETED and `Stage.parse` raises on it, exactly as it already raises on the retired
+`b<n>` reduce grammar and the retired embedded-worker `TILE` values. No codec-engine change and no emitter change
+in either step.
+
+**The digest baseline is necessary and NOT sufficient as its gate**, and saying otherwise is how this ships broken.
+The re-spelling decides nothing, so all 24 cases must stay byte-identical and the per-kernel row count must be
+unchanged — a re-spelling that changes the row set is a widening in disguise. But three things the digest cannot
+see move with it (all of them apply to step A; step B adds only the `D_stage_split` rename):
+
+- **`op_cache_key` includes the knob dict verbatim** (`search/keys.py` — `tuple(sorted(op.knobs.items()))`), so
+  every staged kernel's key changes even though its source does not, and every measurement recorded against the old
+  key is orphaned. Accepted, and it belongs beside the collapse's existing orphaning in Risks — not discovered later
+  as a regression.
+- **The golden YAMLs carry no featurizer version**, so nothing about the corpus is covered by the bump. What
+  covers it is `test_golden_configs.py`, which calls `Stage.parse` on EVERY golden's `STAGE` — under the retired
+  grammar that raises, so a missed re-spell fails loudly there and nowhere else. That test is the corpus gate and
+  the re-spelling must run it, not just the digest. (A golden that slipped past it would degrade the DEPLOY, not
+  the rank reporting: the golden row match runs through `values_equal`'s string compare in `policy/greedy`.)
+- **A stale recorded row featurizes as gmem-direct rather than being dropped** — `_stage_features` and `_stage_sig`
+  catch `ValueError` and return `{}` / `None`, which is the correct degrade for a malformed pin and the wrong one
+  for a retired grammar. The `FEATURIZER_VERSION` bump is what keeps those rows from being read at all, so it is
+  load-bearing rather than hygienic.
+- **The bump HARD-ERRORS the shipped offline prior**, so the refit is not a follow-up. `prior/offline.py` raises on
+  a `feat_ver` mismatch with no fallback, and this change moves the weight KEYS (`D_stage_ring` deleted,
+  `D_stage_alt` → `D_stage_split` in step B) — so `emmy fit --artifact` must land in the SAME commit or
+  every prior-free compile dies at load. This is stricter than the refit obligation the domain-generation section
+  already owes, which is about rank comparability; this one is about the artifact loading at all.
+
+Two-to-one collapses exist outside the catalog: `d2/cp`, `d3/cp` and `d2/tma` appear in tests and in any user's
+pin-driven tune DB, and each merges with its `/ring` twin. Harmless for kernels, since the pair already compiles
+identically; it is evidence identity that merges, which the version bump already invalidates.
 
 **Phase 1 also ships a two-site FIXTURE.** The single-site corpus cannot exercise the product, so the structure would
 otherwise land untested and only be discovered wrong in phase 2. A synthetic two-site term with asserted rows is the
@@ -723,13 +846,18 @@ byte-identity gate, and a coordinate-ordering change without one is how a silent
 - **Every role emits rows; no role builds `TileOp`s directly.** This is the success criterion.
 - **ONE stored node kind.** Role, the A/B edge labels and the per-operand lifts are all DERIVED; nothing that a
   reading can produce gets a field. A new stored field on `Fold` is a design regression, not an optimization.
-- **Knob KEYS and VALUE spellings are frozen** — which means `path._walk` must keep emitting the `a` / `b` edge
-  labels. Term keys are NOT frozen; the collapse already changed them once, by design.
+- **Knob KEYS are frozen; two `STAGE` VALUE tokens are not** (see the codec section: `ring` deleted, `alt` →
+  `split`) — which means `path._walk` must keep emitting the `a` / `b` edge labels. Term keys are NOT frozen; the
+  collapse already changed them once, by design.
 - **Uniform key sets per fork**, `""` as a decided empty — prefix-consistency for the evidence pick.
 - **Bare `REDUCE` is the contraction's K fold, never the cone's stat** — both readings of a fused term spell against
   the contraction tree. (The earlier proposal to let each reading spell its own keys is dropped: it would change
   what stored bare keys mean.)
 - **Ranking is the prior's; enumeration produces a SET** plus a per-family conservative first value.
+- **A `STAGE` value is keyed at the FOLD and names only what the schedule chooses** — transport, depth, group
+  granularity, register depth. Rotation and refill discipline DERIVE at materialization; the sync/async operand
+  split is a term reading; `smem` / `bk_elems` are resolver outputs. A new FIELD on `Stage` is a design regression,
+  the same way a new stored field on `Fold` is.
 - **Terms are never mutated in place** — readings are explicit, each with its own `term_key`, site set and
   `op_cache_key`, and their identity must survive into the prior's key space.
 - **`WORK` is derived from the slices**, and leads the fork levels; `RASTER` closes and stays CONTRACTION-SCOPED
@@ -786,7 +914,7 @@ The variables are named as they are registered, so a table row reads directly ag
 | `par_n`, `par_m`, `reg_n`, `reg_m` | the scalar output tile | `_SCALAR_TILE_SPACE` — a `Space` in `search/space.py`, generated from `Bound(("par_n","par_m"), 1024)` |
 | `wm`, `wn`, `fm`, `fn`, `bk` | the warp output tile | `_WARP_TILE_SPACE` — generated from `Bound(("wm","wn"), 1024, coeff=32)` and `Bound(("fm","fn"), 32)` |
 | `atom` | the mma atom kind | CATEGORICAL — `ATOM_REGISTRY`, filtered by operand dtype. Not a `Space` dimension: `domain.py` knows integers and products only |
-| `depth`, `transport`, `ring`, `reg_depth`, `alt` | the operand pipeline | the `Stage` fields, spelled `d<depth>/<transport>[/ring][/alt][/p<reg_depth>]`; LISTED (`stage_moves`) — nothing multiplicative couples them |
+| `depth`, `transport`, `split`, `reg_depth` | the operand pipeline | the `Stage` fields, spelled `d<depth>/<transport>[/split][/p<reg_depth>]`; LISTED (`stage_moves`) — nothing multiplicative couples them. `ring` is deleted (derived from depth) and `smem` / `bk_elems` are resolver outputs, never spelled |
 | `cta`, `coop`, `reg`, `finalize`, `coop_transposed` | the reduce partition | the `ReducePlan.of` fields, spelled `g<cta>[a\|k]` / `coop[-t]` / `r<reg>` — the WIDTH lives in `WORK`, and `ReducePlan.parse` RAISES on the retired `b<n>` grammar; LISTED (`splitk_moves`, `coop_reduce_moves`) |
 | `group`, `orient` | the launch order | the `Raster` fields, spelled `g<orient><group>`; LISTED (`raster_moves`) |
 | the flash geometry | — | NOT its own vocabulary: `twisted_warp_moves`' `(warps_m, key_atoms, q_tiles)` ARE `(wm, fn, fm)`. Phase 3 declares a second `Space` over the same dimension names with the twisted bounds |
@@ -798,8 +926,8 @@ values are a hand-kept ladder stays a list until a real multiplicative bound app
 The rule the tables make concrete, and the one reason the walk must recurse:
 
 - **A MATERIALIZED operand is not a site.** It is a gmem `Load`, so there is nothing below to schedule and its
-  transport is enumerated AT THE PARENT — the parent's `STAGE` family (`d<depth>` / `sync` | `cp` | `tma` / `ring`)
-  covers every operand it stages.
+  transport is enumerated AT THE PARENT — the parent's `STAGE` family (`d<depth>` / `sync` | `cp` | `tma`) covers
+  every operand it stages. The path codec cannot address one either: `_walk` recurses only into `Fold` edges.
 - **A COMPUTED operand IS a site.** It is a node, so it enumerates its OWN families (its reduce partition, its
   register geometry), and the parent's `STAGE` collapses to the compute-fill it can actually use. Transport for
   whatever *that* subtree reads is then enumerated one level further down, at ITS sites.
@@ -1023,7 +1151,7 @@ Depth-0 is the tile × stage × reduce × raster product. The warp sibling famil
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold[a2] contraction` — bare `TILE` | SCALAR `par_n ∈ {16,32,64}`, `par_m ∈ {8,16}`, `reg_n ∈ {1,2,4}`, `reg_m ∈ {1,2,4,6,8,10,12,14,26}` — OR WARP `atom`, `wm`, `wn ∈ {1,2,4,8,16}`, `fm`, `fn ∈ {1,2,4,8}`, `bk ∈ {1,2,4,8}` | `par_n·par_m ≤ 1024`; `32·wm·wn ≤ 1024`; `fm·fn ≤ 32`; `atom`'s operand dtype must match A/B; `bk·atom.atom_k` divides a static K. `↑` `(par_n, par_m)` / `(wm, wn)` ARE the `WORK` inventory |
-| same node — bare `STAGE` | `depth ∈ {1,2,3,4}`, `transport ∈ {sync, cp, tma}`, `ring ∈ {F,T}`, `reg_depth ∈ {1,2}` — **the transport for BOTH materialized operands**, since neither is a site | the resolver returns the largest slab fitting `ctx.max_dynamic_smem`, or declines to gmem-direct; `transport=tma` needs `ctx.has_tma`; `reg_depth=2` is `↓` warp-only |
+| same node — bare `STAGE` | `depth ∈ {1,2,3,4}`, `transport ∈ {cp, tma}`, `reg_depth ∈ {1,2}` — **the transport for BOTH materialized operands**, since neither is a site. No `split`: one multiply consumes both edges, so there are not two groups to cut | the resolver returns the largest slab fitting `ctx.max_dynamic_smem`, or declines to gmem-direct; `transport=tma` needs `ctx.has_tma`; `reg_depth=2` is `↓` warp-only |
 | same node — bare `REDUCE` | `cta ∈ {2,4,8}`, `finalize ∈ {kernel, atomic}` (serial = option-0) | `cta` divides K; `finalize=atomic` only when the projection distributes; `↑` no `coop` beside a warp inventory |
 | kernel-global `WORK` | `units`, `producer` — DERIVED, never chosen | `↑` folded from the slices; the combination drops if they disagree |
 | root-global `RASTER` | `group ∈ {8}`, `orient = m` (flat = option-0; `orient = n` is pin-only until a shape wants it) | 2-D-tiled static grid only |
@@ -1066,7 +1194,7 @@ construction** — and post-collapse that means the same emitter ran, not that t
 | site | enumerate | constraints |
 | --- | --- | --- |
 | root `Fold free` (the epilogue) | — (has an operand) | its lift becomes the per-fragment `RegEpilogue`; a data-dependent gather in it `↓` REFUSES the child's warp tier — the one cross-level constraint this shape adds |
-| child `Fold[a2] contraction` | example 4's variables verbatim — `par_*`/`reg_*` or `atom`,`wm`,`wn`,`fm`,`fn`,`bk`; `depth`,`transport`,`ring`,`reg_depth`; `cta`,`finalize`; `group`,`orient` | example 4's constraints, plus the `↓` epilogue filter above |
+| child `Fold[a2] contraction` | example 4's variables verbatim — `par_*`/`reg_*` or `atom`,`wm`,`wn`,`fm`,`fn`,`bk`; `depth`,`transport`,`reg_depth`; `cta`,`finalize`; `group`,`orient` | example 4's constraints, plus the `↓` epilogue filter above |
 
 
 ### 6. SwiGLU — the fused gate⊗up edge, where sharing IS arity
@@ -1142,7 +1270,7 @@ union the rows". `PLACE@cone` and `PLACE@a` are the segment spellings the collap
 | --- | --- | --- |
 | root `Fold free` (silu ⊗ multiply) | — (has an operand) | the ⊗-combine defers into the finalize under split-K |
 | `Fold[k] contraction` — bare `TILE` | `atom`, `wm`, `wn`, `fm`, `fn`, `bk` — the WARP variables ONLY | `par_*` / `reg_*` are not offered: the fill is a compute fill, which only the warp realizer has. Same bounds as example 4; `↑` `(wm, wn)` is the inventory BOTH channels share |
-| same node — bare `STAGE` | `depth ∈ {1, 2}` only — `transport` is not free, `ring` / `reg_depth` / `alt` unoffered | `↓` a COMPUTED `a` edge PINS `transport = sync` (the compute fill); `depth=2` is the asymmetric B-only prefetch ring; multi-channel (gate⊗up) forbids `cp` / `tma` outright; `producer` unoffered — the band assumes a COPYING producer |
+| same node — bare `STAGE` | `depth ∈ {1, 2}` only — `transport` is not free, `reg_depth` / `split` unoffered | `↓` a COMPUTED `a` edge PINS `transport = sync` (the compute fill); `depth=2` is the asymmetric B-only prefetch, and WHICH operands ride it is a TERM reading (`_atom._sync_operands` keys on the edge inhabitant), never a choice; multi-channel (gate⊗up) forbids `cp` / `tma` outright; `producer` unoffered — the band assumes a COPYING producer |
 | same node — bare `REDUCE` | `cta ∈ {2,4,8}`, `finalize = kernel` — the redundant-statistic split | `finalize=atomic` unoffered; single-channel for the classic arm, multi-channel splits with per-channel raw `C` partials; the k-invariant prologue is RECOMPUTED per partition, so only small-free decode shapes admit it |
 | `operand[a]` — the cone, `PLACE@a` | **IS a site**: the seam is real, so cut legality is spelled here | edge iff closed — structural, by construction |
 | the cone's statistic fold — `REDUCE@<axis>` / `STAGE@<axis>` | its OWN `coop`, `reg`, `cta` — plus the prologue's placement (hoisted above the K loop, published by a CTA barrier) | `↓` `coop` binds to the parent's inventory: `ReducePlan.parse` requires a THREAD kind and `coop == work.count`, so beside a WARP parent the statistic's coop band is unspellable — the codec-imposed limit, unchanged by this plan |
@@ -1318,7 +1446,7 @@ block, no flash-specific pin escape.
 | root `Fold free` (the `divide(O, l)` projection) | — (has an operand) | — |
 | kernel-global `WORK` | `units`, `producer` — CHOSEN first, as everywhere | the form is a READING of what this and the two `TILE` sites resolve to: `""` gives chain / per-cell, thread gives coop, warp gives streaming |
 | `Fold[kv] twisted` — `REDUCE@<kv>` | `cta ∈ {2,4,8}`, `coop`, `finalize = kernel` | `cta` divides kv and slices block-whole; `finalize=atomic` is ILLEGAL — the twisted `e^{Δm}` rescale cannot be an atomic, and the LSE combine split-KV needs is not spellable by `finalize`, so it carries its own `_legality` predicate |
-| same fold — `STAGE` | `depth ∈ {1,2,3,4}`, `transport ∈ {cp, tma}`, `ring`, `alt` for the K/V stream | slab fits smem; a `""` inventory resolves no staged value, which is what makes the chain / per-cell forms unstaged — not a form check |
+| same fold — `STAGE` | `depth ∈ {1,2,3,4}`, `transport ∈ {cp, tma}`, and `split` — the one term whose staged edges are consumed at distinct positions of the derived evaluation, so the one site where the granularity value is eligible | slabs fit smem; `split` additionally stages Q and forces `depth = 1` per group (the emitter's arm, not a codec rule). A `""` inventory resolves no staged value, which is what makes the chain / per-cell forms unstaged — not a form check |
 | `operand` — the hoisted QK score, `TILE@dd` | **IS a site**: `atom`, `wm`, `wn`, `fm`, `fn`, `bk` of the TWISTED `Space` | `wn·fn·atom.atom_n == bn`, the parent's streaming key block — a `Bound(op="==")` in that `Space`, NOT recursion state; `wn = 1`; the fragment budget is the twisted one, not `fm·fn ≤ 32` (the corpus records `f1x64`) |
 | the DERIVED PV contraction, `TILE@pj` | its own `atom` (including the f16-acc sibling), `fm`, `fn`, `bk` | `wm` / `wn` are not free — both sites resolve against the SAME chosen `work`, so there is nothing to propagate; `wn·fn·atom_n == d`; `Site.derived` ⇒ EXCLUDED from `PLACE` (it lies below the seam, so it is not a cut) |
 | `Q`, `K`, `V` loads | **NOT SITES** | transport is the parent fold's `STAGE` |
@@ -1371,7 +1499,8 @@ and recognition, not from this enumeration.
 
 - **Materialization**, except the `qk.acc` repair — a fix, not a change. `030_split_reduce` keeps consuming the
   same slices.
-- **`Stage.alt` → `top`/`late`** — its own plan, when a second inhabitant exists.
+- **A per-group depth under `split`** (K at depth 3 beside V at depth 1) — unbuildable today, since the emitter
+  constructs one transport for both operands; an additive second depth on the same key when a measurement wants it.
 - **Widening any candidate domain.** The catalog is the domain; widening is a separate, benchmarked change that
   moves the deploy pick on the prior-free paths and requires a refit.
 - **A register model.**

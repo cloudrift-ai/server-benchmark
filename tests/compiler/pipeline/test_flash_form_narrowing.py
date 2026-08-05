@@ -31,7 +31,7 @@ def test_stage_pin_does_not_bypass_keyed_tile_pins():
         "TILE@dd": "mma_m16n8k16_f16_f32/f1x8/k4",
         "TILE@pj": "mma_m16n8k16_f16_f32/f1x8/k4",
         "WORK": "w2x1",
-        "STAGE": "d2/cp/ring",
+        "STAGE": "d2/cp",
     }
 
     def decide(fp):

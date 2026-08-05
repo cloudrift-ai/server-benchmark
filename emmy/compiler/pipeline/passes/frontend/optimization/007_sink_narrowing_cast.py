@@ -11,7 +11,7 @@ gate/up projections read ``const float* mul_3``. A mixed-dtype A operand has no 
 copy transports move raw bytes and cannot convert — so the mixed-dtype A demotion routed both projections onto
 the ``sync`` compute-fill, which has no weight-prefetch ring. They streamed their 118 MB weight at
 1.12 TB/s where the neighbouring down_proj, whose A is a clean f16 buffer and which therefore rides
-``d2/tma/ring``, hit 1.61 TB/s on the identical weight footprint.
+``d2/tma``, hit 1.61 TB/s on the identical weight footprint.
 
 The rewrite is a dtype retype, not a numeric change: an ``ElementwiseOp`` computes in its inputs'
 promoted precision and rounds on store, so folding ``copy(x@f32) -> f16`` into ``x`` — retyping only

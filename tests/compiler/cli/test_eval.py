@@ -547,8 +547,8 @@ def test_bare_families_canonicalizes_axis_suffixed_knobs():
     rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
     from emmy.commands.eval import _bare_families
 
-    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/tma/ring", "REDUCE@a2": "g2a", "WSPEC": ""})
-    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/tma/ring", "REDUCE": "g2a", "WSPEC": ""}
+    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/tma", "REDUCE@a2": "g2a"})
+    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/tma", "REDUCE": "g2a"}
     # bare keys pass through; first key wins a family collision (single-node picks in practice)
     assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
 

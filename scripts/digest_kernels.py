@@ -6,7 +6,7 @@ source. Run at the baseline commit and after each migration commit; diff the out
 byte-neutral storage migration must leave every digest unchanged. Covers the scalar/warp/f16acc/
 split-K/raster matmuls and the producer band, the coop-t matvec, dynM forms, the reduce tiers
 (rms/softmax/reduce/pointwise), the computed-A fused kinds (norm_linear canonical + .lin +
-split-K + coop, mlp_geglu) and flash (hd128 tma/cp, hd256 alt, fm sibling, chain, scalar).
+split-K + coop, mlp_geglu) and flash (hd128 tma/cp, hd256 split, fm sibling, chain, scalar).
 
 Every case additionally asserts LIVENESS — that its pins reached a kernel (see :func:`_liveness`).
 A digest alone cannot tell a covered path from an unscheduled one: both render, both hash stably.
@@ -129,23 +129,23 @@ def sdpa(head_dim=128, seq=128, heads=4):
 
 CASES = [
     ("matmul_scalar", lambda: matmul(), {"TILE": "f4x8", "WORK": "t16x8"}),
-    ("matmul_warp_tma", lambda: matmul(), {"TILE": f"{WARP}/f4x1/k4", "WORK": "w1x8", "STAGE": "d3/tma/ring"}),
+    ("matmul_warp_tma", lambda: matmul(), {"TILE": f"{WARP}/f4x1/k4", "WORK": "w1x8", "STAGE": "d3/tma"}),
     (
         "matmul_warp_f16acc",
         lambda: matmul(2048, 2048, 2048),
-        {"TILE": "mma_m16n8k16_f16_f16/f4x8/k4", "WORK": "w4x2", "STAGE": "d2/tma/ring"},
+        {"TILE": "mma_m16n8k16_f16_f16/f4x8/k4", "WORK": "w4x2", "STAGE": "d2/tma"},
     ),
-    ("matmul_splitk", lambda: matmul(), {"TILE": f"{WARP}/f2x4/k2", "WORK": "w2x2", "REDUCE": "g2k", "STAGE": "d2/tma/ring"}),
+    ("matmul_splitk", lambda: matmul(), {"TILE": f"{WARP}/f2x4/k2", "WORK": "w2x2", "REDUCE": "g2k", "STAGE": "d2/tma"}),
     (
         "matmul_raster",
         lambda: matmul(2048, 2048, 2048),
-        {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4", "STAGE": "d2/tma/ring", "RASTER": "gm8"},
+        {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4", "STAGE": "d2/tma", "RASTER": "gm8"},
     ),
     # The producer band is inventory: it rides WORK's ``+p`` suffix, never the retired WSPEC key.
     (
         "matmul_pband",
         lambda: matmul(2048, 2048, 2048),
-        {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4+p1", "STAGE": "d2/tma/ring", "REDUCE": ""},
+        {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4+p1", "STAGE": "d2/tma", "REDUCE": ""},
     ),
     ("matvec_coopt", lambda: matmul(1, 4096, 4096, lin=True), {"REDUCE": "g16k/coop-t", "WORK": "t256"}),
     ("matmul_dynm", lambda: matmul(Dim("seq_len"), 512, 512), {"TILE": f"{WARP}/f4x1/k4", "WORK": "w1x8"}),
@@ -159,21 +159,21 @@ CASES = [
     ("norm_linear_coop", lambda: norm_linear(), {"REDUCE": "coop", "WORK": "t128"}),
     ("norm_linear_dynm", lambda: norm_linear(S=Dim("seq_len")), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": ""}),
     ("mlp_geglu", lambda: mlp_geglu(), {"TILE": f"{WARP}/f4x8", "WORK": "w2x2", "REDUCE": ""}),
-    ("flash_hd128", lambda: sdpa(128), {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/tma/ring"}),
+    ("flash_hd128", lambda: sdpa(128), {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/tma"}),
     (
         "flash_hd128_cp",
         lambda: sdpa(128),
-        {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/cp/ring"},
+        {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/cp"},
     ),
     (
         "flash_hd256_alt",
         lambda: sdpa(256),
-        {"TILE@dd": f"{WARP}/f1x8/k16", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x32/k4", "STAGE": "d1/cp/alt"},
+        {"TILE@dd": f"{WARP}/f1x8/k16", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x32/k4", "STAGE": "d1/cp/split"},
     ),
     (
         "flash_hd256_fm",
         lambda: sdpa(256),
-        {"TILE@dd": f"{WARP}/f1x8/k16", "TILE@pj": "mma_m16n8k16_f16_f16/f1x32/k4", "WORK": "w4x1", "STAGE": "d1/cp/alt"},
+        {"TILE@dd": f"{WARP}/f1x8/k16", "TILE@pj": "mma_m16n8k16_f16_f16/f1x32/k4", "WORK": "w4x1", "STAGE": "d1/cp/split"},
     ),
     ("flash_chain", lambda: sdpa(64), {"TILE": "a:scalar", "TILE@pj": "f64"}),
     ("flash_scalar", lambda: sdpa(64), {"REDUCE": "coop", "WORK": "t128"}),

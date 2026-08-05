@@ -363,7 +363,7 @@ def test_unreproducible_pin_flag(monkeypatch):
     # sibling never pollutes the diagnostic...
     assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
-    assert "realized (off)" in _unreproducible_pin_flag({"STAGE": "d2/tma/ring"}, [{"STAGE": ""}])
+    assert "realized (off)" in _unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
     assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
     assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None

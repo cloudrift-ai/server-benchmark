@@ -381,7 +381,12 @@ unnoticed. Generation removes the failure mode; the value ladders keep the measu
 `emmy eval offline` rank/pool columns incomparable. An `emmy fit --artifact` refit plus golden
 rank / top-1/10/25/50 re-verification is owed before any GPU sweep is trusted.
 
-### The `STAGE` codec — delete the dead field, name the live one
+### The `STAGE` codec — delete the dead field, name the live one — **LANDED**
+
+Both steps landed in one commit, ahead of the staged landing order below: bundling them paid one
+`FEATURIZER_VERSION` bump (3 → 4) + one `emmy fit --artifact` refit + one corpus migration instead of two. The
+`split` rename is the RENAME only — its structural predicate and its `stage_moves` membership stay phase 3, so
+`split` is still reachable by pin alone. All three codec-engine defects landed with it, not just the bundled one.
 
 Two fields in `d<depth>/<transport>[/ring][/alt][/p<reg_depth>]` are wrong, in opposite ways, and the rest is right.
 
@@ -440,22 +445,37 @@ second producer is the proof: which buffer is staged is a reading of the term, n
 sync/async operand split stays a term reading for the same reason. `D_stage_ring` is deleted (it is collinear with
 `depth ≥ 2 ∧ async` across the whole corpus) and `D_stage_alt` becomes `D_stage_split`.
 
-**Landing order.** Deleting `ring` is independently landable and codegen-neutral: the gate is `digest_kernels.py` at
-zero diff plus `test_golden_configs.py`, which parses every golden's `STAGE` and asserts matmul goldens are members
-of `stage_moves` — so the catalog strings migrate with the corpus in one commit. The `split` rename lands WITH the
-flash cut that first enumerates it (phase 3): until then `split` is reachable only by pin and the rename is churn.
-Both steps owe an `emmy fit --artifact` refit — the featurizer keys move — which the domain-generation section
-already books; and `prior/offline.py` RAISES on a `feat_ver` mismatch rather than degrading, so the refit lands in
-the same commit as the bump, not after it.
+**Landing order — superseded; both steps landed together.** Deleting `ring` was the independently landable half
+(codegen-neutral, gated by `digest_kernels.py` at zero diff plus `test_golden_configs.py`, which parses every
+golden's `STAGE` and asserts matmul goldens are members of `stage_moves`), and the `split` rename was to wait for
+the phase-3 flash cut that first enumerates it. They shipped in one commit instead: each step owes an
+`emmy fit --artifact` refit (`prior/offline.py` RAISES on a `feat_ver` mismatch rather than degrading, so the refit
+lands in the same commit as the bump), and two refits over one corpus is the churn the deferral was meant to avoid.
+What phase 3 still owes is `split`'s structural predicate and its `stage_moves` membership — the rename bought
+neither.
 
-**Three codec-engine defects, none caused by this and one worth bundling.** Bundle the second: `STAGE` pins compare
-as raw strings because `knob.canon_family_value` canonicalizes `TILE` / `REDUCE` only, so `cp/d2` — which parses and
-re-spells canonically — fails pin verification against its own realized value, on the DEPLOY path
+**Three codec-engine defects, none caused by this — all three landed.** The bundled one: `STAGE` pins compared
+as raw strings because `knob.canon_family_value` canonicalized `TILE` / `REDUCE` only, so `cp/d2` — which parses and
+re-spells canonically — failed pin verification against its own realized value, on the DEPLOY path
 (`policy/greedy`'s golden-row match runs through `values_equal`). `STAGE` needs no inventory to canonicalize, so it
-is a two-line arm. The other two are orthogonal and should not ride along: `decode` never rejects a duplicate or
-conflicting token, so `d2/cp/d3` silently becomes `d3/cp` and `sync/tma` becomes `d1/tma`; and each schema's
-`expect` string is a hand-maintained copy of its own field list that this change falsifies — as is the module header
-naming the engine's users, which this branch's own `WSPEC` deletion already falsified.
+is a two-line arm. The two the plan called orthogonal went with it, since the same commit was already in the engine:
+`decode` never rejected a duplicate or conflicting token, so `d2/cp/d3` silently became `d3/cp` and `sync/tma`
+became `d1/tma` — it now RAISES, order-free binding giving a silent overwrite no reading the pin could have meant;
+and each schema's `expect` string was a hand-maintained copy of its own field list, now DERIVED from the fields
+(`_field_hint`), as is the module header, which no longer names the retired `WSPEC` knob among the engine's users.
+
+**The retired `WSPEC` shim went too.** No shipped golden carries a `WSPEC` key (all 42 occurrences were prose in
+comments), and `knob.ingest_row` — whose whole body was the WSPEC drop — was redundant with the match loop's own
+"family not decided at this fork ⇒ free" rule, so the function and its five call sites are deleted.
+`scripts/migrate_goldens_to_codec.py`, the pre-rebuild one-shot that constructed `Stage(ring=…)` off
+`ir.tile.schedule`, has imported nothing that exists since the rebuild and is deleted.
+
+**Two engine capabilities with no live user went with them**: `FieldKind.NAME` (self-labelled "an extension point;
+no live codec uses it") and `Field.required` (no schema set it). What was deliberately KEPT is the TUPLE
+arity-≥2 / suffix-enum machinery: it lost its live users when `TILE` / `REDUCE` went hand-written at step 7, but the
+engine exists so that a new codec — or a new `RoleKind`, which `_WSPEC_SCHEMA` builds from the registry without a
+codec edit — needs no engine change, and a warp-count PAIR or a finalize letter is exactly what one would reach for.
+Stripping it is a design decision about the engine's scope, not cleanup.
 
 ### The constraint table — documentation and assertions, not a space
 
@@ -721,7 +741,7 @@ size** (241 registered xfails at the demolition, 198 after phase 1, 173 now — 
 | --- | --- | --- |
 | ~~**1**~~ | **LANDED — the enumerator, the target design, built once.** `_inventories(term)` at the root, then `_rows_at(site, work)` as a product over the site tree; `_merge` spelling every slice through `ops.Sched.key`; `_site_values(site, work)` returning TYPED slices from the `search/space.py` catalogs; `_legality.py`'s predicates as the `(term, candidate)` filter. Dispatch is the two node predicates. The four IR repairs landed with it: one contraction predicate shared by `path._walk` and `family_sites`; the `composed` arm out of `Fold.role`; the raw-loop escape separated structurally in `family_sites`; `stage_moves` returning `Stage`. `resolve_row` / `RowSlices` deleted and the `WSPEC` pin alias retired | **MET**: byte-identical kernels on all 24 digest cases, 14 of 14 schedulable cases live, `make test` + `make lint` green, 50 registry ids deleted, the row set identical but for the one accepted change above |
 | ~~**2**~~ | **LANDED — the COMPUTED operand edge, plus the term-reading union it needed.** `_readings` above the product (the monoid composition / the collapse / the mixed-A promotion, ≤ 2 per term, one reference key namespace, identity keyed on `canonical_row_key`); `_contraction_values`' computed-`a` inhabitant (warp-only, the mandatory `resolve_sync_stage` at `d1`/`d2`, `computed_a_cover`, the redundant-statistic split through `_sliced_a`); `_fill_realized` for the one nested site the parent form already partitions; the per-value inventory filter became the per-ROW `_work_holds`. `Fold.demoted()` returned; `warp_operand_dtype` made the copy transports' dtype rule a checked predicate | **MET**: 5 digest cases (`norm_linear` ×4 + `mlp_geglu`) left `UNSCHEDULED` landing their pins, the other 19 byte-identical, `make test` + `make lint` green, 25 registry ids deleted (20 fused-edge + 4 recognize-boundary + the golden-spelling gate) |
-| 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry, and `split` as a `stage_moves` member with its structural predicate (the `alt` rename lands HERE, not before) | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
+| 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry, and `split` as a `stage_moves` member with its structural predicate (the codec rename already LANDED; what remains is the predicate + the catalog entry) | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
 | 4 | `schedule()`'s own dispatch and flash-form selection once 2–3 exist; `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have — unreachable until the flash warp realizer runs, so it has no obtainable baseline until then) | registry EMPTY + `make test` + `make lint` |
 
 **Phase 1 must land with no new BEHAVIOUR — but its row KEYS provably change in three places, and pretending
@@ -753,19 +773,17 @@ the row and it passes) but no longer DEPLOYS, because the cold prior ties and a 
 where the serial row's empty values sort ahead of `coop`. That case is xfailed strict with the cause named; the fix is
 evidence — the owed `emmy fit --artifact` refit — not an enumeration change.
 
-**The `STAGE` cleanup lands in two steps, and only the second waits on phase 3** (the codec section has the
-design). Step A deletes `ring`: a two-line schema edit, `s|/ring||` over the golden YAMLs and the tune DB's knob
-column, the `stage_moves` catalog strings, and the `ring=` term in the two resolvers. Step B renames `alt` →
-`split`, adds its structural predicate and puts it in the catalog — it lands WITH the flash cut that first
-enumerates it, because until then `split` is reachable only by pin. There is no compatibility obligation either
-time: the old spelling is DELETED and `Stage.parse` raises on it, exactly as it already raises on the retired
-`b<n>` reduce grammar and the retired embedded-worker `TILE` values. No codec-engine change and no emitter change
-in either step.
+**The `STAGE` cleanup LANDED as one commit, not the two steps planned here** (the codec section has the design and
+the reason). It deleted `ring` — a schema-field edit, `s|/ring||` over the golden YAMLs, the `stage_moves` catalog
+strings, and the `ring=` term in the two resolvers — and renamed `alt` → `split` in the same pass, leaving
+`split`'s structural predicate and its catalog membership to phase 3. There is no compatibility obligation either
+way: the old spelling is DELETED and `Stage.parse` raises on it, exactly as it already raises on the retired
+`b<n>` reduce grammar and the retired embedded-worker `TILE` values. No emitter change.
 
 **The digest baseline is necessary and NOT sufficient as its gate**, and saying otherwise is how this ships broken.
 The re-spelling decides nothing, so all 24 cases must stay byte-identical and the per-kernel row count must be
-unchanged — a re-spelling that changes the row set is a widening in disguise. But three things the digest cannot
-see move with it (all of them apply to step A; step B adds only the `D_stage_split` rename):
+unchanged — a re-spelling that changes the row set is a widening in disguise. But four things the digest cannot
+see move with it:
 
 - **`op_cache_key` includes the knob dict verbatim** (`search/keys.py` — `tuple(sorted(op.knobs.items()))`), so
   every staged kernel's key changes even though its source does not, and every measurement recorded against the old
@@ -782,9 +800,11 @@ see move with it (all of them apply to step A; step B adds only the `D_stage_spl
   load-bearing rather than hygienic.
 - **The bump HARD-ERRORS the shipped offline prior**, so the refit is not a follow-up. `prior/offline.py` raises on
   a `feat_ver` mismatch with no fallback, and this change moves the weight KEYS (`D_stage_ring` deleted,
-  `D_stage_alt` → `D_stage_split` in step B) — so `emmy fit --artifact` must land in the SAME commit or
+  `D_stage_alt` → `D_stage_split`) — so `emmy fit --artifact` must land in the SAME commit or
   every prior-free compile dies at load. This is stricter than the refit obligation the domain-generation section
-  already owes, which is about rank comparability; this one is about the artifact loading at all.
+  already owes, which is about rank comparability; this one is about the artifact loading at all. It fired exactly
+  as written: at the bump, `test_fast_math_golden_ranks_in_gated_enumeration` was the first thing to die, on
+  `_load_artifact`'s `feat_ver` check.
 
 Two-to-one collapses exist outside the catalog: `d2/cp`, `d3/cp` and `d2/tma` appear in tests and in any user's
 pin-driven tune DB, and each merges with its `/ring` twin. Harmless for kernels, since the pair already compiles
@@ -846,7 +866,7 @@ byte-identity gate, and a coordinate-ordering change without one is how a silent
 - **Every role emits rows; no role builds `TileOp`s directly.** This is the success criterion.
 - **ONE stored node kind.** Role, the A/B edge labels and the per-operand lifts are all DERIVED; nothing that a
   reading can produce gets a field. A new stored field on `Fold` is a design regression, not an optimization.
-- **Knob KEYS are frozen; two `STAGE` VALUE tokens are not** (see the codec section: `ring` deleted, `alt` →
+- **Knob KEYS are frozen; two `STAGE` VALUE tokens were not** (see the codec section, LANDED: `ring` deleted, `alt` →
   `split`) — which means `path._walk` must keep emitting the `a` / `b` edge labels. Term keys are NOT frozen; the
   collapse already changed them once, by design.
 - **Uniform key sets per fork**, `""` as a decided empty — prefix-consistency for the evidence pick.

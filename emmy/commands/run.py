@@ -644,13 +644,10 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
     conflicting value). An UNREGISTERED family with no realized key is a typo in the
     pin and flags ``(unset)``. Returns a flag naming each dropped pin and what ran
     instead, or ``None`` when clean / ungateable."""
-    from emmy.compiler.pipeline.knob import family_of, get, ingest_row, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
 
     if not any(kernel_knobs):
         return None
-    # The retired WSPEC key drops (realized rows carry the producer band as WORK's ``+p``
-    # suffix); a pin row's worker geometry gates through its own WORK entry.
-    pinned = ingest_row(pinned)
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)

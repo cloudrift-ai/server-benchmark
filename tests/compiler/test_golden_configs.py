@@ -459,7 +459,7 @@ def test_fast_math_regime_derived_from_knobs():
     the entry fast-math; the acc-unspecified atom ALIAS resolves to f32-accumulate → standard."""
     from emmy.compiler.pipeline.search.golden import fast_math_knobs
 
-    std = {"TILE": "mma_m16n8k16_f16_f32/f2x4", "WORK": "w2x4", "STAGE": "d4/tma/ring", "FAST_EXP": False}
+    std = {"TILE": "mma_m16n8k16_f16_f32/f2x4", "WORK": "w2x4", "STAGE": "d4/tma", "FAST_EXP": False}
     alias = {"TILE": "mma_m16n8k16_f16/f2x2/k2", "WORK": "w2x2"}  # historic spelling = f32-acc
     scalar = {"TILE": "f4x4", "WORK": "t32x8", "REDUCE": ""}
     assert not fast_math_knobs(std) and not fast_math_knobs(alias) and not fast_math_knobs(scalar)
@@ -547,12 +547,10 @@ def test_fused_golden_requires_a_cone_anchor():
     NormLinearGoldenConfig(name="ok.routing", knobs={"PLACE@cone": "cut"}, **common)
     NormLinearGoldenConfig(name="ok.keyonly", knobs={}, **common)
     with pytest.raises(ValueError, match="sync STAGE"):
-        NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "f2x2", "STAGE": "d2/tma/ring"}, **common)
+        NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "f2x2", "STAGE": "d2/tma"}, **common)
     with pytest.raises(ValueError, match="sync STAGE"):
         # ``cp.async`` contains "sync" as a substring — the segment match must not accept it.
-        MlpGeGluGoldenConfig(
-            name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async/ring"}, gpu_name="X", compute_cap=(12, 0)
-        )
+        MlpGeGluGoldenConfig(name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async"}, gpu_name="X", compute_cap=(12, 0))
 
 
 def test_neighbor_bench_group_id_covers_every_recorded_kind():

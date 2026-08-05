@@ -43,7 +43,7 @@ mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
 fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
 GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
 warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
-(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
+(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma``, the 2026-07-02 seventh
 sweep). Ranking lives in ``search/prior/OfflinePrior`` (the ``D_*`` geometry
 features over ``features.knob_features``).
 """
@@ -506,7 +506,7 @@ class NormLinearGoldenConfig(GoldenConfig):
     the ``rms_norm`` and the ``mlp_gate_up`` matmul goldens. The reference is torch's UNFUSED
     decomposition (``F.rms_norm`` eager + ``@``), so the ratio compares emmy's one fused mma against
     PyTorch's norm-then-matmul. Its ONLY realizable configs are the sync compute-fill tiles
-    (``d1/d2/sync``, no ``d2/tma/ring``) — record the tuned twin's ``record_knobs`` verbatim.
+    (``d1/d2/sync``, no ``d2/tma``) — record the tuned twin's ``record_knobs`` verbatim.
 
     The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares ``kind="fused"`` but is a distinct
     snippet — see :class:`MlpGeGluGoldenConfig` (both matmuls must share ONE RMSNorm output, which a

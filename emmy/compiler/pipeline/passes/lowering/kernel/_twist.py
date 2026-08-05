@@ -550,12 +550,12 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
 
     # Per-transport staging facts, visible to the stream builder's drains: cp.async slabs take the
     # +16 B row pad (the bank-conflict break), TMA slabs stay dense and take the hardware swizzle
-    # (``pick_swizzle_atom`` per operand) with the drain's address XOR undoing it. The ALTERNATING
-    # pipeline (``stage.alt``) additionally stages Q: a padded row-major smem tile filled once,
-    # its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident registers
-    # are what make the wide (64-key) block fit.
+    # (``pick_swizzle_atom`` per operand) with the drain's address XOR undoing it. The per-edge
+    # transport split (``stage.split``) additionally stages Q: a padded row-major smem tile filled
+    # once, its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident
+    # registers are what make the wide (64-key) block fit.
     stage = ctx.sched.get("STAGE", red)
-    alt = stage is not None and stage.alt
+    split = stage is not None and stage.split
     is_tma = stage is not None and stage.transport == "tma"
     elem_bytes = atom.operand_dtype("b").nbytes
     kv_pad = 0 if is_tma else _PAD
@@ -575,11 +575,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
 
     def _q_frag_stmts(qt, i: int) -> list[Stmt]:
         """The query tile's ``bk`` A-fragment declarations + loads. Resident form (default): gmem
-        loads hoisted ahead of the stream. Alternating form (``stage.alt``): per-block ldmatrix
+        loads hoisted ahead of the stream. Split form (``stage.split``): per-block ldmatrix
         from the staged Q slab (slab-local rows — the tile's offset within the CTA's query block),
         block-scoped so the registers die each step. Same values either way: bit-identical."""
         stmts: list[Stmt] = []
-        if alt:
+        if split:
             rel = Literal(i * shape[0], "int")
             if um > 1:
                 rel = BinaryExpr("+", BinaryExpr("*", Var(FLASH_WARP_AXIS), Literal(fm * shape[0], "int")), rel)
@@ -622,18 +622,18 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             state.append(Init(name=f"{qt.denom}{c}", identity=0.0, dtype=F32))
         for f in qt.ofrags:
             state.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
-        if not alt:
+        if not split:
             state.extend(_q_frag_stmts(qt, i))
 
     # ---- the streaming step (a builder — the staged path re-parents it under the ring drain; the
-    # alternating path hands the tagged segments to the liveness scheduler, which places the K/V
+    # split path hands the tagged segments to the liveness scheduler, which places the K/V
     # refills at their kill points) -------------------------------------------------------------- #
     def _stream_segments(
         k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False
     ) -> list[tuple[list[Stmt], frozenset[str]]]:
         stream: list[Stmt] = []
         for i, qt in enumerate(qtiles):
-            if alt:
+            if split:
                 stream.extend(_q_frag_stmts(qt, i))  # per-block A fragments off the staged Q slab
             for f in qt.sfrags:
                 stream.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
@@ -739,10 +739,10 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             stream += _rebind(qt.pivot, f"_mn{qt.sfx}")  # advance the running pivot: m = mn
         # Segments tagged by the slabs they READ — the liveness key ``pipelined_kloop`` derives
         # each staged operand's live range from. The QK contraction drains the K slab (and, under
-        # ``alt``, the staged-Q slab — a loop-invariant prologue-only fill, never scheduled); the
+        # ``split``, the staged-Q slab — a loop-invariant prologue-only fill, never scheduled); the
         # softmax merge reads none; the P·V contraction drains the V slab. The boundaries ARE the
         # partial's node boundaries; gmem-direct segments read no slabs.
-        qk_reads = frozenset(("_k_smem", *(("_q_smem",) if alt else ()))) if staged else frozenset()
+        qk_reads = frozenset(("_k_smem", *(("_q_smem",) if split else ()))) if staged else frozenset()
         pv_reads = frozenset(("_v_smem",)) if staged else frozenset()
         return [(qk_seg, qk_reads), (mid_seg, frozenset()), (stream, pv_reads)]
 
@@ -813,8 +813,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             BinaryExpr("%", Builtin("thread_idx.x"), Literal(block_threads, "int")) if ctx.workers is not None else Builtin("thread_idx.x")
         )
         cta = CtaTile(linear_tid=ltid, n_threads=block_threads)
-        if alt:
-            # The ALTERNATING single-slab pipeline (``d1/tma/alt``): one slab + one mbarrier per
+        if split:
+            # The per-edge transport split (``d1/tma/split``): one slab + one mbarrier per
             # operand, each a depth-1 group whose refill ``pipelined_kloop`` places at its KILL
             # POINT — K's live range ends at the QK segment so its refill lands under softmax +
             # P·V, V's at the P·V segment so its refill lands under the next step's Q·K (the FA-2

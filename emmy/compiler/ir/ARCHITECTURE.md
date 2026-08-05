@@ -467,7 +467,12 @@ schema-driven ser/de engine (the codec half of `schedule.py`): a `Schema` of typ
 conversion to the engine. The grammar collapses int and pair widths into one tuple kind and supports per-field
 params (the recursive
 `WSPEC` role case); the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept inside the value
-so the round-trip stays byte-identical. Since step 7 the WIRE forms are site-local: `Workers` is the kernel-global
+so the round-trip stays byte-identical. Binding is order-free but each field binds at most ONCE — a repeated token
+(`d2/cp/d3`, `sync/tma`) raises rather than letting the last one win, since an order-free grammar gives a silent
+overwrite no reading the pin could have meant. The `expect <grammar>` hint every parse error carries is DERIVED from
+the schema's own fields, so it cannot fall out of step with them, and no field is mandatory — an absent node takes
+its kind's default, which is what lets a codec add a field without invalidating values spelled before it. Since step
+7 the WIRE forms are site-local: `Workers` is the kernel-global
 inventory (`WORK` — `Workers.spell`/`parse`, the `+p<n>` producer band absorbing the retired per-row `WSPEC` key), and
 `TilePlan.spell`/`parse` + `ReducePlan.spell`/`parse` are the worker-token-free site values the stamped rows and the
 golden corpus carry — they parse **against** a `Workers`, and are hand-written rather than schema-driven for exactly

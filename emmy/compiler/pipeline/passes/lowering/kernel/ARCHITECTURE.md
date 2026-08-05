@@ -175,7 +175,7 @@ authoritative.
 **The warp-flash stream stages too** (`STAGE@<kv>`, resolved schedule-side): the K and V
 operands of the TWISTED streaming pair fill per-block smem slabs through the same `CpAsyncTransport` seam, the whole
 streaming step (both mmas + the fragment softmax merge) riding `staged_kloop` as its drain — `d1` the single-buffer
-fill, `d2+/ring` the prefetch ring overlapping the next KV block's copies with this block's mma work. Each slab keeps
+fill, `d2+` the prefetch ring overlapping the next KV block's copies with this block's mma work. Each slab keeps
 its operand's own layout (K stays N-major, V K-major; verbatim row copies), so the transposed-B K slab drains via the
 **plain `x2` (no `.trans`) staged ldmatrix** — its 8×8 rows ARE the mma's col-major B columns (the `LdmatrixLoad`
 render's third variant) — and the V slab via the canonical `x2.trans`. The K/V slab rows are **padded +16 B**
@@ -210,7 +210,7 @@ slice-local on a split-KV partial (a slice wholly below the band runs zero steps
 exact) under WSPEC. At seq ≫ W this turns the sliding layers' O(seq²) stream into O(seq·W) — 40 of gemma-4's 48
 layers at real context lengths.
 
-**The alternating single-slab pipeline** (`STAGE=d1/tma/alt`) is the wide-block form of the same stream — not its own
+**The per-edge transport split** (`STAGE=d1/tma/split`) is the wide-block form of the same stream — not its own
 skeleton but `pipelined_kloop` run over the stream's three tagged segments (`_twist._stream_segments`: Q·K reads the
 K slab, the softmax merge reads none, P·V reads the V slab) with K and V as separate depth-1 groups: each live range
 is a proper sub-interval, so the scheduler places each refill at its kill point (`wait K | Q·K | sync | fill K_{i+1} |
@@ -220,17 +220,18 @@ copies within HALF the paired ring's smem. Q stages through smem too: a padded r
 rows) cp.async-filled once before the stream — the δ=0 loop-invariant degenerate, a prologue-only fill with no wait
 or refill to schedule — its A fragments ldmatrix'd per atom-K chunk INSIDE the step; the freed
 resident Q registers are what make the wide block's register file fit (the hd256 nt8 form went from 255 regs + 848 B
-spill loads to 240 regs / zero spills, 55.5 → 31.7 µs — past the nt4-d2 frontier, and the fm sibling on `d1/cp/alt`
+spill loads to 240 regs / zero spills, 55.5 → 31.7 µs — past the nt4-d2 frontier, and the fm sibling on `d1/cp/split`
 is the first emmy-past-torch-SDPA hd256 entry on the 5090 at 29.7). Both async transports ride the skeleton: TMA arms
-per-operand mbarriers (`d1/tma/alt`); cp.async commits each fill into its own group — the K,V,K,V commits queue per
+per-operand mbarriers (`d1/tma/split`); cp.async commits each fill into its own group — the K,V,K,V commits queue per
 thread, and the counting pass derives the uniform `wait_group(1)` that completes exactly the older sibling
-(`d1/cp/alt`, the sm_89 form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). A symbolic
+(`d1/cp/split`, the sm_89 form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). A symbolic
 kv rides the same runtime clamps as the ring: the kill-point refill clamps onto the runtime last chunk exactly as
 the ring prefetch does, and the staged-Q fill clamp-reads a tail CTA's overhanging query rows (their outputs are
-store-guarded) — the 5090 `attention.hd256.dynM` frontier moved 34.4 → 32.0 on `d1/cp/alt` and `hd128.dynM`
-13.5 on the fm `d1/tma/alt`, closing the symbolic-vs-static gap. A static non-block-divisible kv stays gmem-direct;
-composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only (the matmul resolvers
-decline `alt`).
+store-guarded) — the 5090 `attention.hd256.dynM` frontier moved 34.4 → 32.0 on `d1/cp/split` and `hd128.dynM`
+13.5 on the fm `d1/tma/split`, closing the symbolic-vs-static gap. A static non-block-divisible kv stays gmem-direct;
+composes with the causal tile-skip (`k_end`) and the split-KV window. Eligibility is structural — a fold with ≥ 2
+staged operand edges consumed at DISTINCT positions of its derived evaluation — which is why the matmul resolvers
+decline `split`: one multiply consumes both their edges, so there is a single transport group and nothing to cut.
 
 **A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
 `Fold` arrives with its axis shrunk to the slice length and the slice's absolute base/bound on that axis's

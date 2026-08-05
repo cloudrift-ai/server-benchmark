@@ -96,9 +96,9 @@ def test_db_index_reads_the_o3_twin_as_deployable(tmp_path):
 def test_db_pick_prefix_consistency_frees_undecided_knobs():
     # The measured row carries a STAGE the candidate hasn't decided — still a match
     # (value-of-position semantics); a *conflicting* decided knob is not.
-    index = _index_of(({"TILE": "f4x8", "WORK": "t16x8", "STAGE": "d2/tma/ring"}, 20.0))
+    index = _index_of(({"TILE": "f4x8", "WORK": "t16x8", "STAGE": "d2/tma"}, 20.0))
     undecided = {**_SIG, "TILE": "f4x8", "WORK": "t16x8"}
-    conflicting = {**_SIG, "TILE": "f4x8", "WORK": "t16x8", "STAGE": "d4/tma/ring"}
+    conflicting = {**_SIG, "TILE": "f4x8", "WORK": "t16x8", "STAGE": "d4/tma"}
     assert _db_measured_pick(index, [undecided]) == (0, 20.0)
     assert _db_measured_pick(index, [conflicting]) is None
 

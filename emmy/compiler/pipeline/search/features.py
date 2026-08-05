@@ -33,10 +33,20 @@ from emmy.compiler.pipeline.knob import (
 # artifacts carry no stamp and default to it). Version 2 is the retired blind encoding of the
 # codec vocabulary: the warp ``TilePlan.bk`` never reached the features, ``_free_slots`` sorted
 # the warp grid wide-is-n (transposed siblings collapsed; ``tile_m``/``tile_n`` mislabelled),
-# warp rows dropped the split-K finalize letter, and the ``STAGE`` ``alt`` / ``REDUCE`` ``coop-t``
-# letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit on v2
-# are semantically stale.
+# warp rows dropped the split-K finalize letter, and the ``STAGE`` group-granularity / ``REDUCE``
+# ``coop-t`` letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit
+# on v2 are semantically stale.
 # Bump on any incompatible knob-spelling or feature-encoding change.
+#
+# A BUMP IS OWED and deliberately deferred to the end of the tile-scheduler refactor. The ``STAGE``
+# re-spelling already moved the weight KEYS (``D_stage_ring`` deleted, ``D_stage_alt`` →
+# ``D_stage_split``), so a v3 row recorded under the retired grammar now featurizes as gmem-direct
+# rather than being dropped — ``Stage.parse`` raises on ``/ring`` and ``/alt`` and the featurizers
+# degrade a ``ValueError`` to ``{}`` / ``None``. Bumping is what would keep those rows out, but it
+# HARD-ERRORS the shipped ``offline_weights.json`` (``prior/offline.py`` raises on a ``feat_ver``
+# mismatch with no fallback), so it cannot land without ``emmy fit --artifact`` in the same commit.
+# Until then: the prior loses the ``ring`` signal (collinear with ``depth >= 2 AND async``, so no
+# real loss) and cannot price ``split`` (weightless, scores 0 — and nothing enumerates it yet).
 FEATURIZER_VERSION = 3
 
 
@@ -118,7 +128,7 @@ def is_warp(knobs: dict) -> bool:
 
 def _stage_features(knobs: dict) -> dict[str, float]:
     """Engineered ``D_*`` features for the operand-staging decision (the ``STAGE`` codec
-    ``d<depth>/sync|cp|tma[/ring]``). The prior prices the smem pipeline: a deeper / async
+    ``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``). The prior prices the smem pipeline: a deeper / async
     transport trades smem footprint + a fill prologue for K-loop overlap. Absent / empty
     ``STAGE`` (the gmem-direct baseline) contributes nothing (``{}``); a present codec emits
     the pipeline depth and a small transport one-hot so the model separates the synchronous
@@ -138,12 +148,11 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         "D_stage_depth": float(st.depth),
         "D_stage_async": 1.0 if st.is_async else 0.0,
         "D_stage_tma": 1.0 if st.transport == "tma" else 0.0,
-        "D_stage_ring": 1.0 if st.ring else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)
-        # The alternating single-slab pipeline (``/alt`` — the flash stream's FA-2 choreography,
-        # which also stages Q): enumerated as a sibling of the paired ring on flash rows, so
-        # without this flag ``d1/tma/alt`` featurized byte-identically to plain ``d1/tma``.
-        "D_stage_alt": 1.0 if st.alt else 0.0,
+        # The per-edge transport split (``/split`` — the flash stream's FA-2 choreography, which
+        # also stages Q): enumerated as a sibling of the paired ring on flash rows, so without
+        # this flag ``d1/tma/split`` featurizes byte-identically to plain ``d1/tma``.
+        "D_stage_split": 1.0 if st.split else 0.0,
     }
 
 
@@ -422,10 +431,10 @@ def _tile_bk(knobs: dict) -> int:
 
 
 def _stage_sig(knobs: dict) -> tuple | None:
-    """The structural staging identity ``(depth, transport, ring, alt)`` for ``tile_signature``,
-    or ``None`` when ``STAGE`` is absent / empty (the gmem-direct baseline). ``alt`` (the flash
-    stream's alternating single-slab pipeline) is a different variant from the paired ring, so it
-    is part of the identity."""
+    """The structural staging identity ``(depth, transport, split)`` for ``tile_signature``,
+    or ``None`` when ``STAGE`` is absent / empty (the gmem-direct baseline). ``split`` (one
+    transport per staged edge — the flash stream's form) is a different pipeline from the single
+    grouped transport, so it is part of the identity."""
     spec = family_value(knobs, "STAGE")
     if not spec:
         return None
@@ -435,7 +444,7 @@ def _stage_sig(knobs: dict) -> tuple | None:
         st = Stage.parse(spec)
     except ValueError:
         return None
-    return (st.depth, st.transport, st.ring, st.alt)
+    return (st.depth, st.transport, st.split)
 
 
 def _geom_feats(

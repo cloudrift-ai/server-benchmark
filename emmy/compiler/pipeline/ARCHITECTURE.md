@@ -1064,20 +1064,26 @@ contractions and the LayerNorm statistic reduce now deploy off the prior; adding
 let them be recorded.
 
 **`STAGE`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the operand-staging codec
-`d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
+`d<depth>/sync|cp|tma[/split][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
 of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
-smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. Also rides the warp-flash TWISTED
-stream (`STAGE@<kv>` — the K/V slabs of one streaming block; `reg_depth` clamps to 1), where `d1/tma/alt` /
-`d1/cp/alt` is the **alternating single-slab pipeline**: one slab per operand (TMA: its own mbarrier; cp.async: its
-own commit group, a uniform `wait_group(1)` completing the older sibling), each refill placed at its operand's kill
-point by the liveness-scheduled skeleton (derived from the segment live ranges, not hand-assembled), Q staged through
-smem — the wide (64-key) streaming block's staging (flash stream only; the matmul resolvers decline it). See
-`lowering/kernel/ARCHITECTURE.md`.
+smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what the
+schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
+retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
+never spelled. `split` is the transport GROUP GRANULARITY: off = ONE transport over all the fold's staged edges
+(a contraction's single multiply consumes both, so there is one group to cut), on = one transport PER edge. It
+therefore rides the warp-flash TWISTED stream (`STAGE@<kv>` — the K/V slabs of one streaming block; `reg_depth`
+clamps to 1), where `d1/tma/split` / `d1/cp/split` gives each operand its own slab (TMA: its own mbarrier;
+cp.async: its own commit group, a uniform `wait_group(1)` completing the older sibling) and each refill lands at
+its operand's kill point by the liveness-scheduled skeleton (derived from the segment live ranges, not
+hand-assembled), Q staged through smem — the wide (64-key) streaming block's staging. Eligibility is structural:
+≥ 2 staged operand edges consumed at DISTINCT positions of the derived evaluation, which is why the matmul
+resolvers decline it. See `lowering/kernel/ARCHITECTURE.md`.
 
 **`WSPEC`** (STR codec, RETIRED) — the warp-specialization producer band `p<np>` is INVENTORY: realized rows spell
-it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, `ingest_row` strips a stray `WSPEC` key off a
-stored / pinned row before matching (the shipped goldens still carry such keys), and the enumeration neither reads
-the `EMMY_WSPEC` pin nor offers a `WSPEC` level — pin `EMMY_WORK=w4x2+p2` instead. The `Knob` declaration is gone;
+it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, no shipped golden carries the key, and the
+enumeration neither reads the `EMMY_WSPEC` pin nor offers a `WSPEC` level — pin `EMMY_WORK=w4x2+p2` instead. A stray
+`WSPEC` key on a stored row is no longer stripped before matching; it simply names a family no row decides, which
+the "family not decided at this fork" rule already reads as free. The `Knob` declaration is gone;
 what survives is the `WarpSpec` codec the materializer reads off `TileOp.workers`. A band is
 legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget (`block_threads + 32·aux ≤ 1024`,
 `32·aux ≤ block_threads`) with no cross-CTA split; an inventory whose band nothing can drive enumerates no row at

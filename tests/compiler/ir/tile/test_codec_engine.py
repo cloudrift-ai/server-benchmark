@@ -32,12 +32,12 @@ _R = Field("ring", FieldKind.FLAG, emit=Emit.TRUE)
 _Q = Field("q", FieldKind.TUPLE)
 _P = Field("p", FieldKind.GROUP, params=(_Q,))
 
-SCH = Schema("TEST", (_G, _N, _W, _T, _R, _P), expect="g/n/w/t/ring/p")
+SCH = Schema("TEST", (_G, _N, _W, _T, _R, _P))
 
 # A second schema for the ALWAYS-emit fields (mirrors STAGE's d<depth>/transport, always spelled).
 _D = Field("d", FieldKind.TUPLE, emit=Emit.ALWAYS)
 _TA = Field("t", FieldKind.CHOICE, choices=(("sync", "sync"), ("cp", "cp.async")), default="sync", emit=Emit.ALWAYS)
-ALWAYS_SCH = Schema("ALW", (_D, _TA), expect="d<n>/sync|cp")
+ALWAYS_SCH = Schema("ALW", (_D, _TA))
 
 
 @pytest.mark.parametrize(
@@ -105,7 +105,23 @@ def test_malformed_raises_value_error(spec: str) -> None:
         decode(SCH, spec)
 
 
-def test_required_field() -> None:
-    sch = Schema("REQ", (Field("a", FieldKind.NAME, required=True, emit=Emit.ALWAYS),), expect="a:<atom>")
-    with pytest.raises(ValueError, match="REQ"):
-        decode(sch, "")
+@pytest.mark.parametrize("spec", ["g2/g4", "sync/cp", "w2x2/cp/w4x4", "ring/ring"])
+def test_repeated_field_raises(spec: str) -> None:
+    """Binding is order-free, so a repeated token has no last-one-wins reading a caller could
+    have meant: ``sync/cp`` would silently deploy the cp.async pipeline a ``sync`` pin named."""
+    with pytest.raises(ValueError, match="spelled twice"):
+        decode(SCH, spec)
+
+
+def test_absent_fields_take_their_declared_defaults() -> None:
+    """No field is mandatory: an absent node decodes to the kind's default, which is what lets a
+    codec add a field without invalidating every stored value spelled before it."""
+    v = decode(SCH, "")
+    assert v == {"g": (1, "kernel"), "n": (1, 1), "w": (1, 1), "t": "sync", "ring": False, "p": None}
+
+
+def test_expect_hint_is_derived_from_the_fields() -> None:
+    """The parse-error hint is DERIVED — a hand-written copy falsifies itself the first time a
+    field moves. Every field contributes exactly one fragment, in schema order."""
+    assert SCH.expect == "expect g<n>[a|k] / n<n>[x<m>] / w<n>x<m> / sync|cp / ring / p<n>[:<param>,...]"
+    assert ALWAYS_SCH.expect == "expect d<n> / sync|cp"

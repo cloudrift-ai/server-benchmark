@@ -333,7 +333,7 @@ def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_TILE", "f2x2")  # tile_n=32 overhangs N=48 ⇒ masked-N
     monkeypatch.setenv("EMMY_WORK", "t16x16")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: isolate the stage resolution
-    for stage in ("d1/cp", "d2/cp/ring", "d2/tma"):
+    for stage in ("d1/cp", "d2/cp", "d2/tma"):
         monkeypatch.setenv("EMMY_STAGE", stage)
         out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
         tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
@@ -358,8 +358,8 @@ def test_tma_stage_declines_below_sm90(monkeypatch) -> None:
     assert family_value(tile_op.knobs, "STAGE") == "", tile_op.knobs  # tma declined below sm_90
     assert _node_stage(tile_op) is None, _node_stage(tile_op)
 
-    # Control: cp.async is unaffected by the gate — a d2/cp/ring pin still rings at sm_89.
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    # Control: cp.async is unaffected by the gate — a d2/cp pin still rings at sm_89.
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     stage = _node_stage(tile_op)
@@ -367,7 +367,7 @@ def test_tma_stage_declines_below_sm90(monkeypatch) -> None:
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d2/cp/ring", "d3/cp/ring"])
+@pytest.mark.parametrize("stage", ["d2/cp", "d3/cp"])
 def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     """The SCALAR gmem→smem prefetch ring (``STAGE=d<depth>/cp``, depth ≥ 2) runs the same
     ``staged_kloop`` phases as the warp ring — the atom contributes only the slab drain — and is a
@@ -411,7 +411,7 @@ def test_warp_matmul_stamps_the_producer_band(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")  # warp (mma) tier
     monkeypatch.setenv("EMMY_WORK", "w2x2+p1")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the band, not the split fork
-    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(dtype=F16), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert "WSPEC" not in tile_op.knobs, tile_op.knobs  # the band spells on WORK, never a row key
@@ -440,10 +440,10 @@ def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch)
 @pytest.mark.parametrize(
     ("band", "stage", "M"),
     [
-        ("p1", "d2/tma/ring", 128),  # the ring split (the golden-config shape family)
-        ("p2", "d2/tma/ring", 128),  # two producer warps
+        ("p1", "d2/tma", 128),  # the ring split (the golden-config shape family)
+        ("p2", "d2/tma", 128),  # two producer warps
         ("p1", "d1/tma", 128),  # single-buffer split (no prefetch, handshake only)
-        ("p1", "d2/tma/ring", 100),  # masked M — the producer's box zero-fills, the store guards
+        ("p1", "d2/tma", 100),  # masked M — the producer's box zero-fills, the store guards
     ],
 )
 def test_warp_specialized_matmul_matches_reference(monkeypatch, band: str, stage: str, M: int) -> None:
@@ -480,7 +480,7 @@ def test_warp_specialized_matmul_matches_reference(monkeypatch, band: str, stage
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["", "d1/cp", "d2/cp/ring"])
+@pytest.mark.parametrize("stage", ["", "d1/cp", "d2/cp"])
 @pytest.mark.parametrize("shape", [(64, 64, 64), (64, 47, 64), (128, 128, 128)])
 def test_staged_scalar_matmul_matches_reference(monkeypatch, stage, shape) -> None:
     """Every scalar-tier staging depth lowers to a kernel that matches a numpy matmul, including a
@@ -773,7 +773,7 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
 # staged transposed-B (the serving F.linear layout) — the N-major B slab.
 # =========================================================================== #
 
-_TRANS_STAGES = {"cp": "d2/cp/ring", "tma": "d2/tma/ring"}
+_TRANS_STAGES = {"cp": "d2/cp", "tma": "d2/tma"}
 
 
 @pytest.mark.parametrize("transport", ["cp", "tma"])
@@ -851,7 +851,7 @@ def test_trans_b_offers_staged_rows(monkeypatch):
 # eager tolerance can't see.
 _F16ACC_PIN = ("mma_m16n8k16_f16_f16/f4x8/k2", "w2x2")
 _F16ACC_SIBLING_PIN = _WARP_PIN  # the same w2x2 / f4x8 / k2 schedule on the f32-accumulate atom
-_F16ACC_STAGES = {"gmem": "", "cp": "d2/cp/ring", "tma": "d4/tma/ring"}
+_F16ACC_STAGES = {"gmem": "", "cp": "d2/cp", "tma": "d4/tma"}
 
 
 @pytest.mark.parametrize("stage", list(_F16ACC_STAGES))
@@ -1890,7 +1890,7 @@ _RASTER_TILE = ("mma_m16n8k16_f16_f32/f2x4/k2", "w2x2")  # M-tile 64, N-tile 64 
 
 def _raster_kop(monkeypatch, M: int, raster: str | None = None):
     _pin_tile(monkeypatch, _RASTER_TILE)
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     if raster is not None:
         monkeypatch.setenv("EMMY_RASTER", raster)
     g = _mma_matmul_graph("static", M, 2048, 1024, "f16", False)
@@ -1947,7 +1947,7 @@ def test_raster_ragged_group_matches_torch(monkeypatch):
     """Accuracy through a ragged tail group (``Em = 20``, groups of 8 → 8/8/4): every output
     tile must be produced exactly once under the remapped CTA order."""
     _pin_tile(monkeypatch, _RASTER_TILE)
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     monkeypatch.setenv("EMMY_RASTER", "gm8")
     rng = np.random.default_rng(7)
     a = rng.standard_normal((1280, 256), dtype=np.float32).astype(np.float16)
@@ -1964,7 +1964,7 @@ def test_raster_ragged_group_matches_torch(monkeypatch):
 def test_raster_gn_matches_torch(monkeypatch):
     """The transposed grouping (``gn4``) — same exactly-once contract."""
     _pin_tile(monkeypatch, _RASTER_TILE)
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     monkeypatch.setenv("EMMY_RASTER", "gn4")
     rng = np.random.default_rng(11)
     a = rng.standard_normal((1280, 256), dtype=np.float32).astype(np.float16)
@@ -2007,7 +2007,7 @@ def test_regstore_rewrite_preserves_atomic():
 @requires_cuda
 def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
     """The f16acc atom's array-fragment (rolled-store) form threads ``RegStore.atomic`` through the
-    stmt rewrite: the staged ``d2/tma/ring`` + ``g2a`` pin on a deep-K matmul must emit ``atomicAdd``
+    stmt rewrite: the staged ``d2/tma`` + ``g2a`` pin on a deep-K matmul must emit ``atomicAdd``
     (the pre-fix render emitted racing plain stores here — the accuracy assert below fails ~4x-low
     values loudly if the flag is ever dropped again)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
@@ -2015,7 +2015,7 @@ def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f2x2/k4")
     monkeypatch.setenv("EMMY_WORK", "w1x8")
     monkeypatch.setenv("EMMY_REDUCE", "g2a")
-    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
     m, k, n = 32, 1024, 256
     be = CudaBackend()
     rng = np.random.default_rng(7)

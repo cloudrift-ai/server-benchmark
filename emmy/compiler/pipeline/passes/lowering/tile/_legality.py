@@ -229,16 +229,15 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, elem_bytes
 def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> Stage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
     gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
-    slots fit ``budget`` (dropping ``ring`` when the clamp leaves nothing to cycle) and ``reg_depth``
-    clamped to ``bk``. A tile whose single depth-1 slot already exceeds ``budget`` DECLINES — unlike
-    the scalar resolver it cannot shrink the slab.
+    slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose single depth-1 slot
+    already exceeds ``budget`` DECLINES — unlike the scalar resolver it cannot shrink the slab.
 
     A resolver rather than a predicate because the legal answer is a SIZE, not a yes/no: this is the
     one enforcement point for the smem budget, and returning the largest legal stage is what keeps
     an over-budget row out of the fork instead of failing at materialization.
     """
-    if stage.alt:
-        return None  # the alternating single-slab pipeline is the warp-flash stream's
+    if stage.split:
+        return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
     a_nbytes = atom.operand_dtype("a").nbytes
     bk_elems = tile.bk * atom.atom_k
@@ -258,7 +257,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> St
     if slot_bytes > budget:
         return None
     depth = min(stage.depth, budget // slot_bytes)
-    return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+    return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
 
 
 def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
@@ -324,7 +323,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.alt or stage.transport not in ("tma", "cp.async") or not c.axis.extent.is_static:
+    if stage.split or stage.transport not in ("tma", "cp.async") or not c.axis.extent.is_static:
         return None
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages
@@ -359,7 +358,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
         depth -= 1
     if bk_elems < 4:
         return None
-    return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=1, bk_elems=bk_elems)
+    return replace(stage, depth=depth, reg_depth=1, bk_elems=bk_elems)
 
 
 __all__ = [

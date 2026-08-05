@@ -36,12 +36,14 @@ spelling has (an empty ``TILE`` beside a thread inventory). There is no second, 
 reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
 
 **The codec engine** (:func:`decode` / :func:`encode` / :class:`Schema` / :class:`Field`) is the
-ser/de source of truth for the inventory-free codecs (``STAGE`` / ``WSPEC``): one ``/``-separated
-string of ``TOKEN`` nodes (grammar at :func:`desugar` / :func:`decode`), declared as a
-:class:`Schema` of typed :class:`Field`\\s so the value type keeps only its own semantics
-(``is_async`` / validation). The tunable knob *declarations* that spell these codecs (``REDUCE`` /
-``TILE`` / ``STAGE`` / ``WSPEC``) live one layer up in
-:mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search concern.
+ser/de source of truth for the inventory-free codecs (``STAGE`` and the ``WSPEC`` grammar
+:class:`WarpSpec` still parses): one ``/``-separated string of ``TOKEN`` nodes (grammar at
+:func:`desugar` / :func:`decode`), declared as a :class:`Schema` of typed :class:`Field`\\s so the
+value type keeps only its own semantics (``is_async`` / validation), and its ``expect`` hint is
+derived from the fields rather than restated. The tunable knob *declarations* that spell the live
+codecs (``WORK`` / ``TILE`` / ``STAGE`` / ``REDUCE``) live one layer up in
+:mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search concern; the
+retired ``WSPEC`` knob is gone from that list, its producer band absorbed into ``WORK``'s ``+p<n>``.
 
 **Warp-spec roles** (:class:`RoleKind` / :data:`ROLE_REGISTRY`) are the worker bands a CTA's warps
 split into; the ``WSPEC`` schema is built from the registry so a new role needs no codec edit. The
@@ -81,12 +83,11 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
 
 
 class FieldKind(enum.Enum):
-    """The five leaf shapes a codec field can take."""
+    """The four leaf shapes a codec field can take."""
 
     TUPLE = "tuple"  # int(xint)* — arity-1 scalar or arity-n pair (the STAGE d/p, the WSPEC role warp counts)
-    NAME = "name"  # a registry name resolved to an object (an extension point; no live codec uses it)
     CHOICE = "choice"  # a bare token that IS the value (the STAGE transport sync|cp|tma)
-    FLAG = "flag"  # a valueless bare token → bool (STAGE ring)
+    FLAG = "flag"  # a valueless bare token → bool (the STAGE split)
     GROUP = "group"  # a value plus named sub-fields (the WSPEC roles, p<np>[:<param>,...])
 
 
@@ -95,7 +96,7 @@ class Emit(enum.Enum):
 
     ALWAYS = "always"  # render unconditionally (the STAGE depth / transport)
     NONDEFAULT = "nondefault"  # render iff the value differs from the field default (the STAGE p, the WSPEC roles)
-    TRUE = "true"  # render iff truthy (the ring flag)
+    TRUE = "true"  # render iff truthy (the split flag)
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,6 @@ class Field:
     arity: int = 1  # TUPLE: number of int elements (1 = scalar int value, ≥2 = tuple value)
     emit: Emit = Emit.NONDEFAULT
     suppress_trailing: bool = True  # TUPLE arity≥2: drop trailing ``x<m>`` when it equals 1
-    required: bool = False  # decode raises if the node is absent
     suffix: tuple[tuple[str, str], ...] = ()  # TUPLE arity-1 enum letter: ((codec, canonical), ...)
     suffix_default: str = ""  # the canonical suffix when the letter is omitted
     choices: tuple[tuple[str, str], ...] = ()  # CHOICE: ((codec-token, canonical), ...)
@@ -120,13 +120,35 @@ class Field:
         return self.kind in (FieldKind.CHOICE, FieldKind.FLAG)
 
 
+def _field_hint(field: Field) -> str:
+    """The grammar fragment for one field — what a bad token's message offers as the expected
+    spelling. DERIVED from the field itself: a hand-written copy of the field list falsifies
+    itself the first time a field is added, renamed or deleted."""
+    if field.kind is FieldKind.CHOICE:
+        return "|".join(codec for codec, _ in field.choices)
+    if field.kind is FieldKind.FLAG:
+        return field.token
+    if field.kind is FieldKind.GROUP:
+        return f"{field.token}<n>[:<param>,...]"
+    if field.suffix:
+        return f"{field.token}<n>[{'|'.join(codec for codec, _ in field.suffix)}]"
+    tail = "".join(f"x<{name}>" for name in ("m", "p")[: field.arity - 1])
+    if tail and field.suppress_trailing:
+        tail = f"[{tail}]"
+    return f"{field.token}<n>{tail}"
+
+
 @dataclass(frozen=True)
 class Schema:
-    """A codec's field list + its name (rides parse errors) + the ``expect`` hint."""
+    """A codec's field list + its name (rides parse errors)."""
 
     name: str
     fields: tuple[Field, ...]
-    expect: str = ""
+
+    @property
+    def expect(self) -> str:
+        """The ``expect <grammar>`` hint rendered into every parse error, derived from the fields."""
+        return "expect " + " / ".join(_field_hint(f) for f in self.fields)
 
     def by_token(self) -> dict[str, Field]:
         return {f.token: f for f in self.fields}
@@ -142,8 +164,6 @@ def _default(field: Field) -> Any:
         return False
     if field.kind is FieldKind.CHOICE:
         return field.default
-    if field.kind is FieldKind.NAME:
-        return None
     return None  # GROUP absent → None
 
 
@@ -151,7 +171,7 @@ def desugar(node: str) -> str:
     """Rewrite a glued node into canonical ``TOKEN:value[,params]`` form.
 
     ``w2x2`` → ``w:2x2``; ``g2a`` → ``g:2a``; ``p2:q8`` → ``p:2,q8``. A node with no glued value
-    (``cp`` / ``ring`` / ``a:mma...`` — already colon-form) is returned unchanged."""
+    (``cp`` / ``split`` / ``a:mma...`` — already colon-form) is returned unchanged."""
     m = _TOKEN_RE.match(node)
     if not m:
         return node
@@ -186,8 +206,6 @@ def _decode_tuple(field: Field, body: str, *, tok: str, codec: str) -> Any:
 def _decode_value(field: Field, body: str, *, tok: str, schema: Schema) -> Any:
     if field.kind is FieldKind.TUPLE:
         return _decode_tuple(field, body, tok=tok, codec=schema.name)
-    if field.kind is FieldKind.NAME:
-        return atom_for(body)  # raises ValueError on an unknown name
     if field.kind is FieldKind.GROUP:
         return _decode_group(field, body, tok=tok, schema=schema)
     raise ValueError(f"bad {schema.name} token {tok!r} ({schema.expect})")
@@ -228,6 +246,11 @@ def _match_bare(schema: Schema, node: str) -> Field | None:
 def decode(schema: Schema, spec: str | None) -> dict[str, Any]:
     """Decode a codec string into ``{token: value}`` (defaults filled for absent fields).
 
+    Every field appears at most ONCE: a repeated token is a malformed spec, not a last-one-wins
+    override. Binding is order-free, so a silent overwrite has no reading a caller could have
+    meant — ``d2/cp/d3`` would land ``d3/cp`` and ``sync/tma`` would land ``d1/tma``, each
+    quietly deploying a kernel the pin did not name.
+
     Raises ``ValueError`` — and only ``ValueError`` — on any malformed input (the featurizer
     degrades on ``ValueError``); the message names ``schema.name`` so a bad pin names its knob."""
     result: dict[str, Any] = {f.token: _default(f) for f in schema.fields}
@@ -236,18 +259,17 @@ def decode(schema: Schema, spec: str | None) -> dict[str, Any]:
     for node in _split_top((spec or "").strip()):
         bare = _match_bare(schema, node)
         if bare is not None:
-            result[bare.token] = True if bare.kind is FieldKind.FLAG else dict(bare.choices)[node]
-            present.add(bare.token)
-            continue
-        token, _, body = desugar(node).partition(":")
-        field = by_token.get(token)
-        if field is None or field.is_bare:
-            raise ValueError(f"bad {schema.name} token {node!r} ({schema.expect})")
-        result[field.token] = _decode_value(field, body, tok=node, schema=schema)
+            field, value = bare, True if bare.kind is FieldKind.FLAG else dict(bare.choices)[node]
+        else:
+            token, _, body = desugar(node).partition(":")
+            field = by_token.get(token)
+            if field is None or field.is_bare:
+                raise ValueError(f"bad {schema.name} token {node!r} ({schema.expect})")
+            value = _decode_value(field, body, tok=node, schema=schema)
+        if field.token in present:
+            raise ValueError(f"bad {schema.name} codec {spec!r}: {field.token!r} is spelled twice (at {node!r})")
+        result[field.token] = value
         present.add(field.token)
-    for f in schema.fields:
-        if f.required and f.token not in present:
-            raise ValueError(f"{schema.name} codec {spec!r} names no {f.token} ({schema.expect})")
     return result
 
 
@@ -287,8 +309,6 @@ def _encode_field(field: Field, value: Any) -> str | None:
         return field.token if value else None
     if field.kind is FieldKind.CHOICE:
         return dict((t, c) for c, t in field.choices)[value]
-    if field.kind is FieldKind.NAME:
-        return f"{field.token}:{value.name}"
     if field.kind is FieldKind.GROUP:
         return _encode_group(field, value)
     return f"{field.token}{_render_tuple(field, value)}"
@@ -968,18 +988,16 @@ class Placement:
 _TRANSPORT_CODEC = {"sync": "sync", "cp": "cp.async", "tma": "tma"}
 _TRANSPORT_SPELL = {v: k for k, v in _TRANSPORT_CODEC.items()}
 
-#: The ``STAGE`` codec schema: ``d<depth>`` and the transport always spell; ``ring`` only when set;
+#: The ``STAGE`` codec schema: ``d<depth>`` and the transport always spell; ``split`` only when set;
 #: ``p<reg_depth>`` only at ≥ 2. The transport choices derive from ``_TRANSPORT_CODEC`` (one source).
 _STAGE_SCHEMA = Schema(
     "STAGE",
     (
         Field("d", FieldKind.TUPLE, emit=Emit.ALWAYS),
         Field("transport", FieldKind.CHOICE, choices=tuple(_TRANSPORT_CODEC.items()), default="sync", emit=Emit.ALWAYS),
-        Field("ring", FieldKind.FLAG, emit=Emit.TRUE),
-        Field("alt", FieldKind.FLAG, emit=Emit.TRUE),
+        Field("split", FieldKind.FLAG, emit=Emit.TRUE),
         Field("p", FieldKind.TUPLE),
     ),
-    expect="expect d<depth> / sync|cp|tma / ring / alt / p<reg_depth>",
 )
 
 
@@ -992,7 +1010,7 @@ class Stage:
 
     A constructed ``Stage`` means staging is **on** (the reused gmem operands ride a shared-
     memory slab); ``schedule.stage is None`` is the register / gmem-direct baseline (no
-    slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]``
+    slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``
     (decided by the tile schedule). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
     pin: the scheduler runs eligibility + sizing against the node ONCE
     (resolved schedule-side for a contraction's operand
@@ -1011,46 +1029,50 @@ class Stage:
     orthogonal — ``d3/cp/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
     The slab K-*granularity* (how much K is resident) is ``TilePlan.bk``, NOT a third depth
-    here — granularity and buffer depth are kept distinct."""
+    here — granularity and buffer depth are kept distinct.
+
+    Rotation and refill discipline are NOT fields: the staged K-loop derives the slot count from
+    ``depth`` alone (``lowering/kernel/_stage``), which is why the retired ``ring`` flag compiled
+    byte-identically with and without it."""
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
     transport: str = "sync"  # sync | cp.async | tma (the gmem→smem producer)
     smem: tuple[str, ...] = ()  # operands staged through smem (derived at resolution; not in the codec)
-    ring: bool = False  # ring buffer vs static double-buffer
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
     bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
-    # The ALTERNATING single-slab pipeline (the warp-flash stream's FA-2 choreography): each operand
-    # keeps ONE slab and its own mbarrier, and the refills interleave with the phases that no longer
-    # read them — K refills under softmax + P·V, V under the next step's Q·K — so a wide (64-key)
-    # streaming block overlaps its copies within HALF the paired ring's smem. Implies the A (query)
-    # operand stages through smem too (the freed resident fragments are what make the wide block's
-    # registers fit). ``d1/tma/alt`` / ``d1/cp/alt``; flash stream only — the matmul resolvers
-    # decline it.
-    alt: bool = False
+    # The transport GROUP GRANULARITY: how many transport groups this fold's staged edges are cut
+    # into. Off = ONE transport over all of them (a contraction's single multiply consumes both
+    # edges, so there is one group to cut). On = one transport PER edge, each with its own slab and
+    # mbarrier, so the refills interleave with the phases that no longer read them — the warp-flash
+    # stream's FA-2 choreography, where K refills under softmax + P·V and V under the next step's
+    # Q·K, so a wide (64-key) streaming block overlaps its copies within HALF the paired ring's
+    # smem. Implies the A (query) operand stages through smem too (the freed resident fragments are
+    # what make the wide block's registers fit). Eligible only where the fold has ≥ 2 staged operand
+    # edges consumed at DISTINCT positions of its derived evaluation, which is why the matmul
+    # resolvers decline it.
+    split: bool = False
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORT_SPELL:
             raise ValueError(f"bad Stage transport {self.transport!r} (expect sync | cp.async | tma)")
         if self.depth < 1:
             raise ValueError(f"Stage depth must be ≥ 1, got {self.depth}")
-        if self.ring and self.depth < 2:
-            raise ValueError("a ring buffer needs depth ≥ 2 (nothing to cycle at depth 1)")
         if self.reg_depth < 1:
             raise ValueError(f"Stage reg_depth must be ≥ 1, got {self.reg_depth}")
-        if self.alt and (self.depth != 1 or self.ring):
-            raise ValueError("the alternating pipeline is single-slab (d1, no ring) — its overlap comes from the phase split")
+        if self.split and self.depth != 1:
+            raise ValueError("the per-edge transport split is single-slab (d1) — its overlap comes from the phase split")
 
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
         """Decode the ``STAGE`` knob codec into a stage: ``/``-separated tokens —
         ``d<depth>`` (gmem→smem ring depth), ``sync`` | ``cp`` | ``tma`` (the transport), an
-        optional ``ring`` flag, and an optional ``p<reg_depth>`` (smem→register double-buffer
-        depth). Empty / ``None`` = the depth-1 ``sync`` default (the caller maps an empty
-        ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is only reached on a
-        non-empty spec). ``smem`` is filled in later by the scheduler. Ser/de routes through
-        :func:`decode`; ``cls(...)`` then runs :meth:`__post_init__` (the depth / ring semantics)."""
+        optional ``split`` flag (one transport per staged edge), and an optional ``p<reg_depth>``
+        (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``sync`` default (the
+        caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
+        only reached on a non-empty spec). ``smem`` is filled in later by the scheduler. Ser/de
+        routes through :func:`decode`; ``cls(...)`` then runs :meth:`__post_init__`."""
         v = decode(_STAGE_SCHEMA, spec)
-        return cls(depth=v["d"], transport=v["transport"], ring=v["ring"], alt=v["alt"], reg_depth=v["p"])
+        return cls(depth=v["d"], transport=v["transport"], split=v["split"], reg_depth=v["p"])
 
     def spell(self) -> str:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
@@ -1058,7 +1080,7 @@ class Stage:
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
         return encode(
             _STAGE_SCHEMA,
-            {"d": self.depth, "transport": self.transport, "ring": self.ring, "alt": self.alt, "p": self.reg_depth},
+            {"d": self.depth, "transport": self.transport, "split": self.split, "p": self.reg_depth},
         )
 
     @property
@@ -1071,11 +1093,7 @@ class Stage:
 #: The ``WSPEC`` codec schema — one GROUP field per registered :class:`RoleKind` (token =
 #: warp-count value, params = the role's per-role param schema). Built from ``ROLE_REGISTRY`` so a
 #: new role needs no edit here. The COMPUTE role is implicit (``TilePlan.units``), never a field.
-_WSPEC_SCHEMA = Schema(
-    "WSPEC",
-    tuple(Field(r.token, FieldKind.GROUP, params=r.params) for r in ROLE_REGISTRY.values()),
-    expect="expect <role><warps>[:<param>,...]",
-)
+_WSPEC_SCHEMA = Schema("WSPEC", tuple(Field(r.token, FieldKind.GROUP, params=r.params) for r in ROLE_REGISTRY.values()))
 
 
 @dataclass(frozen=True)

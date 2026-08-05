@@ -596,7 +596,7 @@ def test_anchor_prefix_matching_is_registry_canonical():
     golden TILE matches its canonically-stamped axis-keyed realization; a different
     geometry does not; a family the golden doesn't record is no constraint."""
     gold = {"TILE": "mma_m16n8k16_f16/f4x4/k2"}
-    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "mma_m16n8k16_f16_f32/f4x4/k2", "STAGE@a2": "d2/cp/ring"}
+    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "mma_m16n8k16_f16_f32/f4x4/k2", "STAGE@a2": "d2/cp"}
     assert diagnostics._golden_prefix_consistent(stamped, gold)
     assert not diagnostics._golden_prefix_consistent({**stamped, "TILE@a2": "mma_m16n8k16_f16_f32/f1x1"}, gold)
 

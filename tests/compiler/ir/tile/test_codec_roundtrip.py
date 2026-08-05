@@ -53,6 +53,6 @@ def test_warp_alias_canonicalizes(alias: str, canonical: str) -> None:
     assert TilePlan.parse(alias, Workers.parse("w2x1")).spell() == canonical
 
 
-@pytest.mark.parametrize("spec", ["d1/sync", "d1/cp", "d2/cp/ring", "d3/tma/ring", "d4/cp/ring/p2"])
+@pytest.mark.parametrize("spec", ["d1/sync", "d1/cp", "d2/cp", "d3/tma", "d4/cp/p2"])
 def test_stage_round_trip(spec: str) -> None:
     assert Stage.parse(spec).spell() == spec

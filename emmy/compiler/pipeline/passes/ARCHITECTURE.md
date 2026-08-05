@@ -483,7 +483,7 @@ masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the
 full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
 legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
 chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. Staging additionally requires the K/V (and,
-for `alt`'s staged Q, the A) BUFFER dtypes to match the atom's operand dtypes — the slab fills byte-copy and cannot
+for `split`'s staged Q, the A) BUFFER dtypes to match the atom's operand dtypes — the slab fills byte-copy and cannot
 convert, so a wide traced intermediate feeding the stream would deposit garbage; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,
 traced dtype CASTS are first-class: a dtype-changing view splits into a source-shaped elementwise `copy` + a pure
@@ -498,7 +498,7 @@ dropping the copy whenever the producer's SOLE consumer is the cast. It is a ret
 elementwise op computes in its inputs' promoted precision and rounds on store), and it is what keeps a norm→matmul
 edge on the plain mma tier: a mixed-dtype A has no copy transport, so without it the mixed-dtype A demotion diverts the
 projection onto the `sync` compute-fill, which has no weight-prefetch ring — measured on gemma-4's gate/up as
-1.12 TB/s against the 1.61 TB/s a clean-f16-A `d2/tma/ring` sibling reached on the same 118 MB
+1.12 TB/s against the 1.61 TB/s a clean-f16-A `d2/tma` sibling reached on the same 118 MB
 weight. **A causal stream tile-skips**: when the score
 prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
 the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted

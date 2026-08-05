@@ -328,19 +328,19 @@ def test_knob_features_typed_knobs(monkeypatch):
 
 
 def test_knob_features_stage_codec():
-    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/ring]``) featurizes to the ``D_stage_*``
-    family; an absent / gmem-direct stage contributes nothing."""
-    feats = knob_features({"STAGE": "d3/tma/ring"})
+    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``) featurizes to the
+    ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""
+    feats = knob_features({"STAGE": "d3/tma"})
     assert feats["D_stage_depth"] == 3.0
     assert feats["D_stage_async"] == 1.0
     assert feats["D_stage_tma"] == 1.0
-    assert feats["D_stage_ring"] == 1.0
+    assert feats["D_stage_split"] == 0.0
     assert feats["D_stage_reg_depth"] == 1.0  # no /p<n> ⇒ register pipeline OFF
     sync = knob_features({"STAGE": "d2/cp"})
     assert sync["D_stage_depth"] == 2.0 and sync["D_stage_async"] == 1.0 and sync["D_stage_tma"] == 0.0
     # The smem→register double-buffer (``p<n>``) featurizes orthogonally to the gmem→smem ring.
-    pp = knob_features({"STAGE": "d3/cp/ring/p2"})
-    assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0 and pp["D_stage_ring"] == 1.0
+    pp = knob_features({"STAGE": "d3/cp/p2"})
+    assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0
     assert not any(k.startswith("D_stage_") for k in knob_features({"STAGE": ""}))
 
 
@@ -349,7 +349,7 @@ def test_stage_codec_reg_depth_roundtrip():
     omitted so an unstaged-register config spells byte-identical to before the field existed."""
     from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
 
-    assert Stage.parse("d3/cp/ring/p2") == Stage(depth=3, transport="cp.async", ring=True, reg_depth=2)
+    assert Stage.parse("d3/cp/p2") == Stage(depth=3, transport="cp.async", reg_depth=2)
     assert Stage.parse("d2/cp/p4").reg_depth == 4
     assert Stage.parse("d2/cp").reg_depth == 1  # absent ⇒ OFF
     assert Stage(depth=2, transport="cp.async", reg_depth=2).spell() == "d2/cp/p2"
@@ -578,6 +578,18 @@ def test_values_equal_canonicalizes_tile_atom_alias():
     assert values_equal("TILE@d", "mma_m16n8k16_bf16/f1x2/k8", "mma_m16n8k16_bf16_f32/f1x2/k8")
     assert not values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f16/f2x2/k2")
     assert not values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k4")
+
+
+def test_values_equal_canonicalizes_stage_token_order():
+    """A ``STAGE`` pin binds order-free but spells in schema order, so a hand pin ``cp/d2`` must
+    verify against the realized ``d2/cp`` — this runs on the DEPLOY path (the golden-row match),
+    where a false mismatch drops the recorded row. A genuinely different pipeline still misses."""
+    from emmy.compiler.pipeline.knob import values_equal
+
+    assert values_equal("STAGE", "cp/d2", "d2/cp")
+    assert values_equal("STAGE@a1", "split/tma/d1", "d1/tma/split")
+    assert not values_equal("STAGE", "d2/cp", "d3/cp")
+    assert not values_equal("STAGE", "d1/tma", "d1/tma/split")
 
 
 def test_knob_pinned_scopes_and_restores(monkeypatch):

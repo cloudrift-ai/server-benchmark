@@ -6,7 +6,7 @@ configs:
     M: 512
     N: 512
     K: 512
-    knobs: {WORK: 't32x8', TILE: 'f2x8', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't32x8', TILE: 'f2x8', RASTER: '', STAGE: 'd2/cp'}
     emmy_us: 15.0
     cublas_us: 18.0
   - kernel: matmul
@@ -14,7 +14,7 @@ configs:
     M: 1024
     N: 1024
     K: 1024
-    knobs: {WORK: 't32x16', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't32x16', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp'}
     emmy_us: 85.2
     cublas_us: 77.0
   - kernel: matmul
@@ -22,7 +22,7 @@ configs:
     M: 2048
     N: 2048
     K: 2048
-    knobs: {WORK: 't32x8', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't32x8', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp'}
     emmy_us: 587.8
     cublas_us: 499.0
   - kernel: matmul
@@ -30,7 +30,7 @@ configs:
     M: 4096
     N: 4096
     K: 4096
-    knobs: {WORK: 't32x16', TILE: 'f4x10', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't32x16', TILE: 'f4x10', RASTER: '', STAGE: 'd2/cp'}
     emmy_us: 4636.7
     cublas_us: 3922.0
   - kernel: matmul
@@ -39,7 +39,7 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {WORK: 'w2x1', TILE: 'mma_m16n8k16_f16_f32/f1x4/k2', RASTER: '', STAGE: 'd4/cp/ring'}
+    knobs: {WORK: 'w2x1', TILE: 'mma_m16n8k16_f16_f32/f1x4/k2', RASTER: '', STAGE: 'd4/cp'}
     emmy_us: 8.3
     cublas_us: 6.0
   - kernel: matmul
@@ -57,7 +57,7 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', RASTER: '', STAGE: 'd2/cp/p2'}
     emmy_us: 32.8
     cublas_us: 27.0
   - kernel: matmul
@@ -66,7 +66,7 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', RASTER: '', STAGE: 'd2/cp'}
     emmy_us: 188.4
     cublas_us: 197.0
   - kernel: matmul
@@ -75,7 +75,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', RASTER: '', STAGE: 'd2/cp'}
     emmy_us: 1399.8
     cublas_us: 1350.0
   - kernel: attention
@@ -86,7 +86,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x2/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x2/k16', STAGE: 'd2/cp'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 68.4
     cublas_us: 49.0
   # --- DiT-XL-2-256 transformer block (s256, hidden 1152) — the measured #431 deploy winners.
@@ -104,7 +104,7 @@ configs:
     K: 1152
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/p2'}
     emmy_us: 0.0
     cublas_us: 0.0
   # Four K slices restore enough CTA parallelism for this small-M, long-K shape.
@@ -116,7 +116,7 @@ configs:
     K: 4608
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/p2'}
     emmy_us: 0.0
     cublas_us: 0.0
   # The block's SDPA (16 heads x s256 x hd72, non-causal) — the flash winner #431 measured, moved

@@ -334,12 +334,14 @@ def pin_key_matches(pinned: str, realized: str) -> bool:
 
 
 def canon_family_value(name: str, value) -> str:
-    """The canonical spelling of a ``TILE`` / ``REDUCE`` value — the site codec's own normal form,
-    reached by decoding under a DUMMY inventory (the worker widths never reach a site spelling, so
-    the dummy cannot leak) and re-spelling: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar`` alias ≡
-    ``""``. Any other family — and any unparseable value — passes through untouched (the caller's
-    own equality applies)."""
-    from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers  # noqa: PLC0415
+    """The canonical spelling of a ``TILE`` / ``REDUCE`` / ``STAGE`` value — the codec's own normal
+    form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
+    spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
+    alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
+    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/cp`` instead of
+    failing verification against its own value on the deploy path. Any other family — and any
+    unparseable value — passes through untouched (the caller's own equality applies)."""
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers  # noqa: PLC0415
 
     fam = family_of(name)
     v = str(value).strip()
@@ -350,6 +352,8 @@ def canon_family_value(name: str, value) -> str:
             return TilePlan.parse(v, Workers(kind="warp", units=(1, 1))).spell()
         if fam == "REDUCE":
             return ReducePlan.parse(v, Workers(kind="thread", units=(2, 1))).spell()
+        if fam == "STAGE":
+            return Stage.parse(v).spell()
     except ValueError:
         return v
     return v
@@ -361,15 +365,16 @@ def values_equal(name: str, want, got) -> bool:
     knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
     realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
     string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
-    storage convention). ``TILE`` / ``REDUCE`` values canonicalize through the site
-    codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
-    (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom and the
-    pin-only ``a:scalar`` alias matches the per-cell row. ``WORK``
+    storage convention). ``TILE`` / ``REDUCE`` / ``STAGE`` values canonicalize through
+    their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
+    (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
+    pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
+    ``cp/d2`` matches the realized ``d2/cp``. ``WORK``
     compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
-    if family_of(name) in ("TILE", "REDUCE"):
+    if family_of(name) in ("TILE", "REDUCE", "STAGE"):
         return canon_family_value(name, w) == canon_family_value(name, g)
     if family_of(name) == "WORK":
         from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
@@ -390,15 +395,6 @@ def values_equal(name: str, want, got) -> bool:
         return kn.parse(w, width=width) == kn.parse(g, width=width)
     except ValueError:
         return False
-
-
-def ingest_row(knobs: dict) -> dict:
-    """A stored knob row (a golden YAML entry, an ``--ab`` pin dict) prepared for MATCHING against
-    realized rows: the retired ``WSPEC`` key dissolves (realized rows spell the producer band as
-    the ``WORK`` inventory's ``+p`` suffix, so a stray ``WSPEC`` key would constrain a family no
-    row carries). Everything else passes through — a row's worker geometry is its own ``WORK``
-    entry, the one place it has ever been spelled since the value grammar went site-local."""
-    return {k: v for k, v in knobs.items() if family_of(str(k)) != "WSPEC"}
 
 
 def is_off_value(family: str, value) -> bool:

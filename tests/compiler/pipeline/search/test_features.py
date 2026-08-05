@@ -157,16 +157,16 @@ def test_warp_grid_orientation_is_physical():
     assert a["D_w_grid_m"] != b["D_w_grid_m"]
 
 
-def test_stage_alt_flag_featurizes():
-    """The flash stream enumerates the alternating single-slab pipeline (``d1/tma/alt``) as a
-    sibling of the plain stage — the ``alt`` flag must reach the features and the signature."""
+def test_stage_split_flag_featurizes():
+    """The flash stream enumerates the per-edge transport split (``d1/tma/split``) as a sibling of
+    the plain stage — the ``split`` flag must reach the features and the signature."""
     from emmy.compiler.pipeline.search.features import tile_signature
 
     plain = {**_CTX, "TILE@a1": "mma_m16n8k16_f16/f2x2", "WORK": "w4x2", "REDUCE@a1": "", "STAGE@a1": "d1/tma"}
-    alt = {**plain, "STAGE@a1": "d1/tma/alt"}
-    assert knob_features(plain)["D_stage_alt"] == 0.0
-    assert knob_features(alt)["D_stage_alt"] == 1.0
-    assert tile_signature(plain) != tile_signature(alt)
+    split = {**plain, "STAGE@a1": "d1/tma/split"}
+    assert knob_features(plain)["D_stage_split"] == 0.0
+    assert knob_features(split)["D_stage_split"] == 1.0
+    assert tile_signature(plain) != tile_signature(split)
 
 
 def test_enumerated_warp_pool_featurizes_injectively():
@@ -200,7 +200,7 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
             **ctx,
             "TILE@a1": "mma_m16n8k16_f16_f16/f2x2/k2",
             "REDUCE@a1": "g2k",
-            "STAGE@a1": "d3/tma/ring/p2",
+            "STAGE@a1": "d3/tma/p2",
             "WORK": "w4x2+p2",
             "RASTER": "gm8",
         }
@@ -227,8 +227,8 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
         "D_ctas_ge_sm": 1.0, "D_splitk_excess": 0.0, "D_splitk_deficit": math.log2(needed / 2.0),
         "D_splitk_roundtrip": 21.0, "D_l2_cells_occ": 2.0,
         "D_w_grid_m": 2.0, "D_w_grid_n": 1.0, "D_w_grid_aspect": 1.0,
-        "D_stage_depth": 3.0, "D_stage_async": 1.0, "D_stage_tma": 1.0, "D_stage_ring": 1.0,
-        "D_stage_reg_depth": 2.0, "D_stage_alt": 0.0,
+        "D_stage_depth": 3.0, "D_stage_async": 1.0, "D_stage_tma": 1.0,
+        "D_stage_reg_depth": 2.0, "D_stage_split": 0.0,
         "D_tma_aspect": 2.0, "D_tma_log2_area": 12.0, "D_tma_grid_m": 2.0, "D_tma_grid_n": 1.0,
         "D_tma_l2_splitk": 1.0,
         "D_wspec_warps": 2.0, "D_raster_group": 8.0, "D_raster_gn": 0.0,
@@ -242,8 +242,8 @@ def test_tma_interactions_fire_only_on_tma_stage():
     """The TMA-conditioned geometry terms are the one-weight-set stand-in for a per-arch split:
     they must mirror the geometry on a TMA-staged row and stay absent under cp.async, so
     pre-Hopper pools rank exactly as before."""
-    tma = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/tma/ring"})
-    cp = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/cp/ring"})
+    tma = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/tma"})
+    cp = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/cp"})
     assert tma["D_tma_grid_m"] == tma["D_w_grid_m"]
     assert tma["D_tma_grid_n"] == tma["D_w_grid_n"]
     assert tma["D_tma_aspect"] == tma["D_aspect"]

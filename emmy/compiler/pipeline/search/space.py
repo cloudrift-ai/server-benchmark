@@ -80,7 +80,7 @@ TILE = Knob(
 STAGE = Knob(
     "STAGE",
     KnobType.STR,
-    help="Operand-staging codec (d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]; empty=gmem-direct). "
+    help="Operand-staging codec (d<depth>/sync|cp|tma[/split][/p<reg_depth>]; empty=gmem-direct). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
@@ -414,10 +414,8 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the enumeration
     leads with it as the conservative option-0. Emission is resolver-gated: a candidate is offered
     only when it RESOLVES against the built node, and the row carries the RESOLVED spelling."""
-    ring = [
-        Stage.parse(s) for s in ("d1/cp", "d2/cp/ring", "d3/cp/ring", "d4/cp/ring", "d1/tma", "d2/tma/ring", "d3/tma/ring", "d4/tma/ring")
-    ]
-    return [*ring, Stage.parse("d2/cp/ring/p2")] if warp else ring
+    depths = [Stage.parse(s) for s in ("d1/cp", "d2/cp", "d3/cp", "d4/cp", "d1/tma", "d2/tma", "d3/tma", "d4/tma")]
+    return [*depths, Stage.parse("d2/cp/p2")] if warp else depths
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is

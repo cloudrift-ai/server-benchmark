@@ -237,7 +237,7 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
 # warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
 # has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
 # correct output rather than raise at descriptor-encode time.
-_OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/tma/ring"}
+_OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/tma"}
 
 
 @requires_cuda
@@ -479,7 +479,7 @@ def test_masked_tile_accuracy_configs(label: str, dims: dict, knobs: dict, env: 
 # watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
 # TMA-only) now covers cp.async too: the pinned stage resolver-declines and the kernel lowers
 # gmem-direct with correct output.
-_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/cp/ring"}
+_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/cp"}
 
 
 @requires_cuda

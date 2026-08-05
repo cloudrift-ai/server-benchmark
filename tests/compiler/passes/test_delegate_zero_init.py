@@ -27,7 +27,6 @@ def _compile_chain(n: int):
     mp.setenv("EMMY_WORK", "w1x8")
     mp.setenv("EMMY_REDUCE", "g4a")
     mp.setenv("EMMY_RASTER", "")
-    mp.setenv("EMMY_WSPEC", "")
     try:
         from emmy.commands.trace import graph_from_code
 

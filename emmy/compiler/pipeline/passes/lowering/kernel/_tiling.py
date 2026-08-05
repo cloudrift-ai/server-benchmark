@@ -148,7 +148,7 @@ def grid_tile(
     stores = [s for (i, j) in cells for s in store(i, j, offset, mn)]
     aux_threads = 0
     if workers is not None:
-        aux_threads = 32 * workers.aux_warps
+        aux_threads = 32 * workers.producer_warps
         stores = [Cond(cond=BinaryExpr("<", Builtin("thread_idx.x"), Literal(block_threads, "int")), body=tuple(stores))]
     # A 2-D-tiled output (both mn Sides bound) marks its (m, n) block axes as
     # rasterization-eligible — the structural fact only this seal knows; whether (and how) the

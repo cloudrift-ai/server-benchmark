@@ -1388,7 +1388,7 @@ def _inventories(terms: list[_Term]) -> list[Workers | None]:
         if w is None or w.kind != "warp":
             continue
         for band in (1, 2):
-            spec = WarpSpec.parse(f"p{band}")
+            spec = WarpSpec(band)
             if legal.enforce(legal.producer_band(spec, w.count * 32), pinned=False):
                 out.append(replace(w, producer=band))
     # The live ``WORK`` pin is AUTHORITATIVE, so the pinned inventory is offered whether or not a
@@ -1616,7 +1616,7 @@ def _node_option(
     legal.enforce(legal.warp_k_step(node, plan) if plan.is_warp else legal.scalar_block_threads(plan), pinned=True)
     # The producer band is INVENTORY, and the enumeration only offered this inventory to rows whose
     # stage can drive it (``_legality.producer_transport``) — so there is nothing left to re-check.
-    workers = WarpSpec.parse(f"p{work.producer}") if work is not None and work.producer else None
+    workers = WarpSpec(work.producer) if work is not None and work.producer else None
     own = [("TILE", node, plan.placed_on(term.place)), ("STAGE", node, stage)]
     return _stamp(term, term.tile.op, name, knobs, [*own, *nested], workers=workers)
 
@@ -1667,7 +1667,7 @@ def _stream_option(
         # The chain: one thread per query row, the value axis off the grid and into the register
         # vector the P@V slice names.
         place = Placement(free=term.place.free, grid=tuple(term.place.grid[:-1]))
-    workers = WarpSpec.parse(f"p{work.producer}") if work is not None and work.producer else None
+    workers = WarpSpec(work.producer) if work is not None and work.producer else None
     own = [("REDUCE", node, rplan if rplan.stages else None), ("STAGE", node, stage)]
     return _stamp(term, term.tile.op, name, knobs, [*own, *nested], workers=workers, place=place)
 

@@ -416,7 +416,7 @@ def test_warp_matmul_stamps_the_producer_band(monkeypatch) -> None:
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert "WSPEC" not in tile_op.knobs, tile_op.knobs  # the band spells on WORK, never a row key
     assert tile_op.knobs.get("WORK") == "w2x2+p1", tile_op.knobs  # stamped: the split materializes
-    assert tile_op.workers is not None and tile_op.workers.aux_warps == 1, tile_op.workers
+    assert tile_op.workers is not None and tile_op.workers.producer_warps == 1, tile_op.workers
 
 
 def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch) -> None:

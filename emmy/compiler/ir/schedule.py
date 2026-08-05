@@ -1,5 +1,5 @@
 """Tile schedule type system — how a kernel's axes bind to the hardware — plus the codec engine that
-ser/des the schedule knobs and the warp-spec role registry they build on.
+ser/des the schedule knobs.
 
 This root ``ir`` module is the merge of the former ``ir/tile/{codec,role,schedule}.py``. The schedule
 value types are used by both the tile IR and the kernel materializer, so they live at the ir root
@@ -24,7 +24,7 @@ The schedule is **flat and kind-free**: a kernel's structure is read from its an
 :class:`~emmy.compiler.ir.axis.AxisRole` (``ops.axis_role``), not a Python type, so a pointwise
 cell, a ``PLANAR`` / ``TWISTED`` reduce, and a ``CONTRACTION`` contraction all schedule through the
 same value types and use the subset their axes admit. Warp specialization is **orthogonal** — an
-optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a role→warp-count split
+optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a producer band split
 *over* the fixed pipeline.
 
 **The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
@@ -36,25 +36,20 @@ spelling has (an empty ``TILE`` beside a thread inventory). There is no second, 
 reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
 
 **The codec engine** (:func:`decode` / :func:`encode` / :class:`Schema` / :class:`Field`) is the
-ser/de source of truth for the inventory-free codecs (``STAGE`` and the ``WSPEC`` grammar
-:class:`WarpSpec` still parses): one ``/``-separated string of ``TOKEN`` nodes (grammar at
-:func:`desugar` / :func:`decode`), declared as a :class:`Schema` of typed :class:`Field`\\s so the
-value type keeps only its own semantics (``is_async`` / validation), and its ``expect`` hint is
-derived from the fields rather than restated. The tunable knob *declarations* that spell the live
-codecs (``WORK`` / ``TILE`` / ``STAGE`` / ``REDUCE``) live one layer up in
-:mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search concern; the
-retired ``WSPEC`` knob is gone from that list, its producer band absorbed into ``WORK``'s ``+p<n>``.
-
-**Warp-spec roles** (:class:`RoleKind` / :data:`ROLE_REGISTRY`) are the worker bands a CTA's warps
-split into; the ``WSPEC`` schema is built from the registry so a new role needs no codec edit. The
-COMPUTE / mma-consumer role is implicit (sized by ``TilePlan.units``), never registered.
+ser/de source of truth for the one inventory-free codec, ``STAGE``: one ``/``-separated string of
+``TOKEN`` nodes (grammar at :func:`desugar` / :func:`decode`), declared as a :class:`Schema` of
+typed :class:`Field`\\s so the value type keeps only its own semantics (``is_async`` / validation),
+and its ``expect`` hint is derived from the fields rather than restated. The tunable knob
+*declarations* that spell the live codecs (``WORK`` / ``TILE`` / ``STAGE`` / ``REDUCE``) live one
+layer up in :mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search
+concern; the retired ``WSPEC`` knob is gone from that list, its producer band absorbed into
+``WORK``'s ``+p<n>`` and its one surviving field into :class:`WarpSpec`.
 """
 
 from __future__ import annotations
 
 import enum
 import re
-from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from dataclasses import replace as dc_replace
@@ -336,68 +331,6 @@ def field_default(field: Field) -> Any:
     """The value of an absent ``field`` — the public handle on the engine's default (used to drop
     default-valued params when building a structured codec object, so they don't spell back)."""
     return _default(field)
-
-
-# ===========================================================================================
-# Warp-specialization roles — the worker bands the WSPEC codec / WarpSpec build on.
-# ===========================================================================================
-
-
-def _always(_sched: object) -> bool:
-    return True
-
-
-def _never(_sched: object) -> bool:
-    return False
-
-
-def _drives_tma_stage(sched: object) -> bool:
-    """The producer band is only meaningful when the pipeline stages operands over a transport a
-    dedicated warp can drive for other warps — TMA this cut: the box copy is issued by one elected
-    thread and lands on the slot mbarrier any thread can parity-wait, so the fill moves warps
-    freely. ``cp.async``'s wait-group is issuing-thread-scoped (a consumer cannot observe a
-    producer's commit groups without the ``cp.async.mbarrier.arrive`` bridge, which the kernel IR
-    does not carry) and a ``sync`` compute-fill has no async load half — both stay uniform."""
-    stage = getattr(sched, "stage", None)
-    return stage is not None and getattr(stage, "transport", None) == "tma"
-
-
-@dataclass(frozen=True)
-class RoleKind:
-    """One warp-specialized worker role.
-
-    ``token`` is the ``WSPEC`` codec letter (``p`` producer, ``s`` sfu, ...); ``params`` is the
-    per-role param schema (extra :class:`~emmy.compiler.ir.schedule.Field`\\s after the
-    warp-count value — e.g. the producer's in-flight op window ``q``); ``legal`` decides whether
-    the role is meaningful for a given uniform schedule (the producer needs a ``stage`` to drive).
-    Frozen + hashable so it rides on a frozen ``WarpSpec``."""
-
-    token: str
-    help: str = ""
-    params: tuple[Field, ...] = ()
-    legal: Callable[[object], bool] = dc_field(default=_always)
-
-
-#: The registered warp-spec roles, keyed by the ``WSPEC`` codec token. COMPUTE (the mma consumer)
-#: is implicit — sized by ``TilePlan.units``, never registered. PRODUCER drives the ``Stage`` load
-#: half; SFU is a stub example of the role-extension path (a transcendental epilogue band).
-ROLE_REGISTRY: dict[str, RoleKind] = {
-    "p": RoleKind(
-        "p",
-        help="producer warps — drive the Stage gmem→smem load half (TMA transport)",
-        params=(Field("q", FieldKind.TUPLE),),  # in-flight op window (producer-local; RESERVED — a q pin degrades to uniform)
-        legal=_drives_tma_stage,
-    ),
-    "s": RoleKind("s", help="sfu / transcendental combine warps — reserved example role (does not materialize)", legal=_never),
-}
-
-
-def role_for(token: str) -> RoleKind:
-    """The registered :class:`RoleKind` for ``token`` (a ``WSPEC`` codec role token)."""
-    try:
-        return ROLE_REGISTRY[token]
-    except KeyError:
-        raise ValueError(f"unknown warp-spec role {token!r} (have {sorted(ROLE_REGISTRY)})") from None
 
 
 # ===========================================================================================
@@ -1097,32 +1030,23 @@ class Stage:
         return self.transport in ("cp.async", "tma")
 
 
-#: The ``WSPEC`` codec schema — one GROUP field per registered :class:`RoleKind` (token =
-#: warp-count value, params = the role's per-role param schema). Built from ``ROLE_REGISTRY`` so a
-#: new role needs no edit here. The COMPUTE role is implicit (``TilePlan.units``), never a field.
-_WSPEC_SCHEMA = Schema("WSPEC", tuple(Field(r.token, FieldKind.GROUP, params=r.params) for r in ROLE_REGISTRY.values()))
-
-
-@dataclass(frozen=True)
-class RoleAlloc:
-    """One warp-specialized band: a registered :class:`RoleKind`, its dedicated warp count, and its
-    per-role param values (canonical-sorted, default-valued params dropped so they don't re-spell)."""
-
-    role: RoleKind
-    warps: int = 1
-    params: tuple[tuple[str, int], ...] = ()
-
-
 @dataclass(frozen=True)
 class WarpSpec:
-    """The worker-mapping pin — a role→warp-count allocation over the fixed pipeline, ORTHOGONAL to
-    it (``reduce`` / ``tile`` / ``stage``): it adds no pipeline parameter, only the warp split. The
-    COMPUTE (mma-consumer) role is implicit (sized by ``TilePlan.units``, never listed); each
-    :class:`RoleAlloc` is a band of dedicated warps split off the uniform pipeline, so the CTA
-    launches ``TilePlan.block_threads + 32·aux_warps`` threads. ``workers is None`` on the schedule
-    is uniform SIMT (every warp does every role's work, software-pipelined in-warp); a constructed
-    ``WarpSpec`` means specialization is on. Spelled by the ``WSPEC`` codec ``<token><np>[:<param>,
-    ...]`` per role (``p2`` / ``p2:q8`` / ``p2:q8/s1``), decided by the tile schedule.
+    """The producer band — the dedicated warps split off the uniform pipeline to drive the
+    ``Stage`` gmem→smem load half, ORTHOGONAL to the pipeline (``reduce`` / ``tile`` / ``stage``):
+    it adds no pipeline parameter, only the warp split. The COMPUTE (mma-consumer) warps are
+    implicit, sized by ``TilePlan.units``, so the CTA launches ``TilePlan.block_threads +
+    32·producer_warps`` threads. ``workers is None`` on the schedule is uniform SIMT (every warp
+    does every role's work, software-pipelined in-warp); a constructed ``WarpSpec`` means
+    specialization is on.
+
+    The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Workers.producer``), which
+    is where the retired ``WSPEC`` knob's one live decision went. Whether a row may offer it at all
+    is ``_legality.producer_transport``: a resolved TMA stage, un-split, on a kernel that is not
+    split across CTAs. That is the whole legality rule — the box copy is issued by one elected
+    thread onto a slot mbarrier any thread can parity-wait, so the fill moves warps freely, while
+    ``cp.async``'s wait-group is issuing-thread-scoped and a ``sync`` compute-fill has no async load
+    half.
 
     Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band
     rides at the TAIL of the thread block (``threadIdx.x >= block_threads``), so the compute warps'
@@ -1130,40 +1054,11 @@ class WarpSpec:
     mbarrier), the compute warps parity-wait, drain and release the slot on an "empty" mbarrier
     ring, with ``SetMaxNReg`` register redistribution between the branches."""
 
-    roles: tuple[RoleAlloc, ...] = ()
-
-    @classmethod
-    def parse(cls, spec: str | None) -> WarpSpec:
-        """Decode the ``WSPEC`` codec into a role allocation (``""`` / ``None`` = no roles). Ser/de
-        routes through :func:`decode` (``_WSPEC_SCHEMA``)."""
-        v = decode(_WSPEC_SCHEMA, spec)
-        allocs: list[RoleAlloc] = []
-        for token, role in ROLE_REGISTRY.items():
-            group = v[token]
-            if group is None:  # role absent from the codec
-                continue
-            params = tuple(sorted((p.token, group[p.token]) for p in role.params if group[p.token] != field_default(p)))
-            allocs.append(RoleAlloc(role=role, warps=group[""], params=params))
-        return cls(tuple(allocs))
+    producer_warps: int = 0
 
     def spell(self) -> str:
-        """The ``WSPEC`` codec string for this allocation (inverse of :meth:`parse`); ``""`` when
-        there are no roles (uniform SIMT)."""
-        values: dict[str, object] = {token: None for token in ROLE_REGISTRY}
-        for a in self.roles:
-            values[a.role.token] = {"": a.warps, **dict(a.params)}
-        return encode(_WSPEC_SCHEMA, values)
-
-    @property
-    def aux_warps(self) -> int:
-        """Total dedicated (non-COMPUTE) warps the split adds on top of the ``TilePlan`` warp grid."""
-        return sum(a.warps for a in self.roles)
-
-    def is_legal(self, sched: object) -> bool:
-        """True iff every allocated role is meaningful for ``sched`` (a producer needs a ``stage``).
-        A pin failing this degrades to uniform (``workers=None``) — the same pin-validity rule the
-        other codecs follow."""
-        return all(a.role.legal(sched) for a in self.roles)
+        """The band's ``p<n>`` spelling — the dump's ``band`` line; ``""`` for no band."""
+        return f"p{self.producer_warps}" if self.producer_warps else ""
 
 
 @dataclass(frozen=True)
@@ -1257,12 +1152,9 @@ __all__ = [
     "Level",
     "Placement",
     "Side",
-    "ROLE_REGISTRY",
     "ReducePlan",
     "ReduceStage",
-    "RoleAlloc",
     "Raster",
-    "RoleKind",
     "Schema",
     "Stage",
     "TilePlan",
@@ -1276,5 +1168,4 @@ __all__ = [
     "encode",
     "field_default",
     "has_scalar_atom_alias",
-    "role_for",
 ]

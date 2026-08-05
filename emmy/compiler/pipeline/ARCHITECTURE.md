@@ -1083,12 +1083,13 @@ resolvers decline it. See `lowering/kernel/ARCHITECTURE.md`.
 it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, no shipped golden carries the key, and the
 enumeration neither reads the `EMMY_WSPEC` pin nor offers a `WSPEC` level — pin `EMMY_WORK=w4x2+p2` instead. A stray
 `WSPEC` key on a stored row is no longer stripped before matching; it simply names a family no row decides, which
-the "family not decided at this fork" rule already reads as free. The `Knob` declaration is gone;
-what survives is the `WarpSpec` codec the materializer reads off `TileOp.workers`. A band is
-legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget (`block_threads + 32·aux ≤ 1024`,
-`32·aux ≤ block_threads`) with no cross-CTA split; an inventory whose band nothing can drive enumerates no row at
+the "family not decided at this fork" rule already reads as free. The `Knob` declaration is gone, and so is the
+codec that served it — what survives is one integer, `WarpSpec.producer_warps`, which the materializer reads off
+`TileOp.workers`. A band is
+legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget (`block_threads + 32·p ≤ 1024`,
+`32·p ≤ block_threads`) with no cross-CTA split; an inventory whose band nothing can drive enumerates no row at
 all, rather than silently degrading to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's
-producer/compute band split (`_stage._wspec_kloop`).
+producer/compute band split (`_stage._producer_band_kloop`).
 
 **`RASTER`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the CTA launch-order
 codec (bare/root-global; the fifth schedule-fork level): `gm<G>` iterates `G` M block-tiles fastest per

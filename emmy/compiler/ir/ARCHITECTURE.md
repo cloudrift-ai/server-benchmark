@@ -451,8 +451,8 @@ closure predicate in `passes/lowering/tile/_cut.py`, the fragment-loader row ste
 
 The schedule type system lives at the ir root in `schedule.py` (used by both the tile IR and the kernel
 materializer, so it sits beside `atom.py`, not under `tile/`) — the merge of the former
-`tile/{schedule,codec,role}.py`: the schedule value types, the codec ser/de engine, and the warp-spec role
-registry in one module.
+`tile/{schedule,codec,role}.py`: the schedule value types and the codec ser/de engine in one module. The role
+*registry* is gone with the `WSPEC` knob it served (see the producer band below).
 
 `ReducePlan` (`schedule.py`) is a list of `ReduceStage`s, one per hardware `Level` the reduce axis is
 partitioned across, coarse→fine: `GRID` (split-K across CTAs), `BLOCK` (cooperative threads within a CTA), `REG`
@@ -461,12 +461,11 @@ partitioned across, coarse→fine: `GRID` (split-K across CTAs), `BLOCK` (cooper
 or tuned. The single `REDUCE` codec knob decides the plan schedule-side; the combine itself stays in the op
 tree.
 
-The schedule codecs — `REDUCE`, `TILE` (scalar or warp `TilePlan`), `STAGE`, and `WSPEC` — share one
-schema-driven ser/de engine (the codec half of `schedule.py`): a `Schema` of typed `Field`s plus generic `desugar` / `decode` /
-`encode`. Each codec class keeps its `parse` / `spell` API and its semantics, delegating only the string ↔ struct
-conversion to the engine. The grammar collapses int and pair widths into one tuple kind and supports per-field
-params (the recursive
-`WSPEC` role case); the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept inside the value
+`STAGE` is the one codec still served by the schema-driven ser/de engine (the codec half of `schedule.py`): a
+`Schema` of typed `Field`s plus generic `desugar` / `decode` / `encode`. The value class keeps its `parse` / `spell`
+API and its semantics, delegating only the string ↔ struct conversion to the engine. The grammar collapses int and
+pair widths into one tuple kind; the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept
+inside the value
 so the round-trip stays byte-identical. Binding is order-free but each field binds at most ONCE — a repeated token
 (`d2/cp/d3`, `sync/tma`) raises rather than letting the last one win, since an order-free grammar gives a silent
 overwrite no reading the pin could have meant. The `expect <grammar>` hint every parse error carries is DERIVED from
@@ -479,15 +478,17 @@ golden corpus carry — they parse **against** a `Workers`, and are hand-written
 that reason. There is no second, self-contained reading: the retired embedded-worker spellings raise. The
 `a:scalar` / `a:none` aliases stay pin-only vocabulary for the scalar tier.
 
-`WSPEC` (warp specialization) is the worker-mapping codec — a role→warp-count allocation (`WarpSpec`; role descriptors
-in `schedule.py`, the COMPUTE consumer implicit and sized by `TilePlan.units`) carried on an **orthogonal**
-`workers: WarpSpec | None` field of the uniform schedule (`None` = uniform SIMT), **not** a union arm: it adds a warp
-split over the fixed pipeline rather than replacing it. The producer role (`p<n>`) is legal over a resolved **TMA**
-stage only (`RoleKind.legal` — the box copy is issued by one elected thread and lands on a slot mbarrier any thread
-can parity-wait, so the fill moves warp bands freely; cp.async's wait-group is issuing-thread-scoped and a `sync`
-compute-fill has no async load half). An illegal / unparseable spec — or one carrying the reserved producer `q`
-param — degrades to uniform silently; a legal one stamps and the staged K-loop materializes the split
-(`lowering/kernel/_stage._wspec_kloop`).
+The **producer band** is warp specialization, and it is one integer: `WarpSpec.producer_warps`, carried on an
+**orthogonal** `workers: WarpSpec | None` field of the uniform schedule (`None` = uniform SIMT), **not** a union arm
+— it adds a warp band over the fixed pipeline rather than replacing it. The COMPUTE consumer warps stay implicit,
+sized by `TilePlan.units`. The band is DECIDED as inventory (`WORK`'s `+p<n>`, `Workers.producer`), and whether a row
+may offer it at all is one predicate, `_legality.producer_transport`: a resolved **TMA** stage, un-split, on a kernel
+not split across CTAs — the box copy is issued by one elected thread and lands on a slot mbarrier any thread can
+parity-wait, so the fill moves warp bands freely, while cp.async's wait-group is issuing-thread-scoped and a `sync`
+compute-fill has no async load half. A row the predicate refuses is never enumerated; a stamped one is materialized
+by the staged K-loop (`lowering/kernel/_stage`). There is no role registry, no per-role param schema and no second
+legality gate: the `WSPEC` codec that carried them went with its knob, and what a schedule can express is exactly
+what an emitter reads.
 
 Lowering has ONE spelling and it lives on the node: `tile/ir.py` `Fold.lower()`. There is no free `ops.lower`
 wrapper duplicating it — which is also what keeps `tile/ir.py` free of any import back into `tile/ops.py`. Reading an

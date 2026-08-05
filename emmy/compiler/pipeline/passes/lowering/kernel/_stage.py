@@ -1064,7 +1064,7 @@ def staged_kloop(
             bk_elems=bk_elems,
             n_chunks=n_chunks,
             k_extent=k_extent,
-            aux_threads=32 * workers.aux_warps,
+            aux_threads=32 * workers.producer_warps,
             block_threads=block_threads,
             k_end=k_end,
         )

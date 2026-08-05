@@ -225,11 +225,10 @@ def seal_workers(tile) -> None:
         (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE" and hasattr(v, "coop")),
         default=1,
     )
-    ws = getattr(tile, "workers", None)
     work = derive_inventory(
         (v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE"),
         coop=coop,
-        producer=getattr(ws, "aux_warps", 0) if ws is not None else 0,
+        producer=tile.workers.producer_warps if tile.workers is not None else 0,
     )
     tile.work = work
     tile.knobs["WORK"] = work.spell() if work is not None else ""

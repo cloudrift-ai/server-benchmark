@@ -80,7 +80,7 @@ def producer_band(spec: WarpSpec, block_threads: int | None) -> str | None:
     The only rule in this module that is NOT a bound — it mixes a sum with a product, which no
     coordinate change linearizes — so it stays an ordinary arithmetic predicate.
     """
-    aux = WARP_LANES * spec.aux_warps
+    aux = WARP_LANES * spec.producer_warps
     if block_threads is None:
         return "a producer band needs a launch-thread count; this tile has none (register-only)"
     if aux > block_threads:

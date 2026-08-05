@@ -38,6 +38,16 @@ term whose operand is a NODE rather than a `Load` be scheduled at all: a materia
 transport is enumerated at the parent's `STAGE`; a computed operand IS a site, so it enumerates its own families and
 the parent's `STAGE` narrows to the compute fill.
 
+**Materialization recurses the same tree.** A row decides EVERY site the walk visits, so `_nested_slices` mirrors
+`_rows_at` (`_keeps_children` included) and stamps each nested site's slices at its own path key. Stamping the root
+alone made a nested key a knob no kernel realized — a row spelling `REDUCE@j` materialized to an empty `schedule`.
+Two consequences fall out of "one kernel, one inventory": a row's cooperative claims must AGREE rather than be
+folded with a maximum (a `REDUCE` value spells no width — it lives once in `WORK` — so two sites wanting different
+bands name a kernel the wire format cannot tell apart, and admitting both produced byte-identical duplicate rows),
+and a candidate the enumeration offers must be one materialization can build: `splitk_materialized_b` is asked at
+enumeration, not only inside `_splitk_option` where it is enforced with `pinned=True` and would turn an unpinned
+offered candidate into a raise.
+
 Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
 
 - **The candidate DOMAIN** is `search/space.py`. The two families with multiplicative coupling — the scalar and warp

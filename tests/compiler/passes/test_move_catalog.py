@@ -348,8 +348,19 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
     # over the pair (a coop edge and a tiled parent claim the same threads) and so cannot factor per
     # site.
     def claim(*values):
+        """The pair's joint inventory claim, or ``None`` when the two sites want different
+        cooperative widths — ``_merge``'s rule, since a ``REDUCE`` value spells no width and the
+        kernel has exactly one ``WORK`` entry to carry it."""
         tiles = tuple(v["TILE"] for v in values if v.get("TILE") is not None)
-        return sch._Row(knobs={}, tiles=tiles, coop=max([1, *(v["REDUCE"].coop for v in values if v.get("REDUCE") is not None)]))
+        coop = 1
+        for v in values:
+            red = v.get("REDUCE")
+            if red is None or red.coop <= 1:
+                continue
+            if coop > 1 and red.coop != coop:
+                return None
+            coop = red.coop
+        return sch._Row(knobs={}, tiles=tiles, coop=coop)
 
     by_work: dict[str, int] = {}
     for r in rows:
@@ -358,6 +369,36 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
         work = Workers.parse(work_spell or None)
         parent = sch._contraction_values(term, term.tree[0].site.node, work)
         edge = sch._site_values(term, term.tree[0].children[0].site, work, term.tree[0])
-        pairs = [(p, e) for p in parent for e in edge if sch._work_holds(claim(p, e), work)]
+        pairs = [(p, e) for p in parent for e in edge if (c := claim(p, e)) is not None and sch._work_holds(c, work)]
         assert pairs and len(pairs) <= len(parent) * len(edge), f"{work_spell!r}: {len(pairs)} pairs"
         assert n == len(pairs) * len(sch._raster_values(term)), f"{work_spell!r}: {n} != {len(pairs)} pairs x rasters"
+
+
+def test_two_site_rows_are_distinct_and_materialize_both_sites():
+    """The two halves of "enumeration recurses, materialization must too", on the same fixture.
+
+    A row is its SPELLED knob dict, so two candidate combinations that spell identically are one
+    row, not two. Since step 7 a ``REDUCE`` value carries no coop width — it lives once in ``WORK``
+    — so folding the sites' claims with ``max`` admitted four child widths under one ``t32`` parent
+    as four byte-identical rows (180 of them here). The claim is a consistency instead.
+
+    And every site the walk DECIDES must reach the op: the enumeration keys ``REDUCE@j``, so the
+    materialized ``TileOp`` must carry a slice there. Stamping the root alone made a nested key a
+    knob no kernel realized — the row said ``r2`` and ``op.schedule`` came back empty."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.knob import canonical_row_key
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    tile = _two_site_term()
+    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
+    rows, _keys, owner = sch._enumerate([term])
+
+    seen = [canonical_row_key(r) for r in rows]
+    assert len(seen) == len(set(seen)), f"{len(seen) - len(set(seen))} rows spell identically"
+
+    decided = [r for r in rows if r.get("REDUCE@j")]
+    assert decided, "the fixture must decide its nested site on some row"
+    for row in decided:
+        op = sch._materialize(owner[canonical_row_key(row)], row, "k", {})
+        assert "REDUCE@j" in op.schedule, f"row spells REDUCE@j={row['REDUCE@j']!r} but the op carries {sorted(op.schedule)}"
+        assert op.schedule["REDUCE@j"].spell() == row["REDUCE@j"], (op.schedule["REDUCE@j"].spell(), row["REDUCE@j"])

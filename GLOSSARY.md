@@ -81,6 +81,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   to the original model operation when debugging.
 - **Metadata** — Information about program data rather than the data itself, such as a tensor's shape, a kernel's
   original operation, or the number of threads needed for launch.
+- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: measurements
+  of its shape and body, tuning choices, or facts a scheduler has worked out. "The stamped features" means the ones an
+  earlier compiler pass wrote onto the operation.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
@@ -166,6 +169,22 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   estimates inside that comparison. Only a trusted online prior — trained and passing calibration — may supply those
   estimates; on the offline prior or a quarantined online prior, the default kernel set is kept.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
+- **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
+  variable (`EMMY_STAGE=d2/cp`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
+  forced configuration rather than the one the compiler would have chosen on its own.
+- **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
+  the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — flash
+  attention schedules two matrix multiplications — the name carries a suffix identifying the step, as in `TILE@dd` and
+  `TILE@pj`. The shortest name that is unambiguous is the one golden files, the tuning database and hand-set pins all
+  use. (In the code, these names are produced by walking the structure recognized for the kernel, which is why the
+  source calls the machinery the tree-path codec.)
+- **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
+  a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
+  measurement stored with it.
+- **Regime** — The settings a measurement was taken under, or that a compile is running under: chiefly the compiler
+  optimization level — `-O3` is the deployable one, while the faster-compiling `-Xcicc -O1` is used for tuning sweeps
+  because it still ranks configurations usefully — plus whether fast-math approximations are enabled. Measurements
+  taken in different regimes are not interchangeable.
 - **Candidate** — One complete set of choices that the compiler could use.
 - **Greedy selection** — Choosing the candidate that currently appears best without exploring alternatives during
   normal compilation.
@@ -177,6 +196,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Golden configuration** — A reviewed, GPU-specific schedule and latency for a standard problem shape. It is
   trusted deployment evidence and a regression reference.
 - **Evidence** — A compatible recorded measurement used to select between schedule candidates.
+- **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
+  data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
+  when compiling.
+- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the reviewed
+  golden configurations for that GPU first, then measurements recorded on the machine, then the prior's prediction,
+  and last the rule's own first option. Each step in that order is called a tier.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
 - **Quarantine** — The state in which an online model may continue learning but is not trusted to choose deployed

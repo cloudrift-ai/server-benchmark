@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 
-from emmy.compiler.ir.schedule import ReducePlan, TilePlan
+from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan
 from emmy.compiler.pipeline.knob import Knob, KnobType
 from emmy.compiler.pipeline.search.domain import Bound, Dimension, Space
 
@@ -84,17 +84,17 @@ STAGE = Knob(
     off="",
 )
 
-# Warp specialization — an env-pin alias: the role→warp split (``p<np>`` producer warps drive the
-# ``STAGE`` load half; compute warps stay on the mma) lives in the WORK inventory's ``+p`` suffix.
-# Gated on a warp ``TILE`` + a resolved **TMA** ``STAGE`` (the producer band drives the box-copy
-# mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no
-# async load half).
+# Warp specialization — RETIRED as a decision: the role→warp split (``p<np>`` producer warps drive
+# the ``STAGE`` load half; compute warps stay on the mma) is part of the WORK inventory, spelled
+# ``+p<np>``, and that is also how it is pinned. Gated on a warp ``TILE`` + a resolved **TMA**
+# ``STAGE`` (the producer band drives the box-copy mbarrier ring; cp.async's wait-group is
+# issuing-thread-scoped and a sync compute-fill has no async load half).
 WSPEC = Knob(
     "WSPEC",
     KnobType.STR,
-    help="Warp-specialization env-pin ALIAS — the producer band now rides WORK's +p suffix; a "
-    "WSPEC pin (p<np> producer[:q<window>, reserved]; empty=uniform SIMT) narrows the WORK "
-    "inventory via seal_workers. No realized row carries the key.",
+    help="RETIRED warp-specialization codec — the producer band is inventory and rides WORK's +p "
+    "suffix (pin EMMY_WORK=w4x2+p2). The declaration survives so legacy stored rows still parse; "
+    "nothing reads the pin and no realized row carries the key.",
 )
 
 
@@ -416,16 +416,20 @@ def map_tile_moves() -> list[TilePlan]:
     return [TilePlan(regs=(2, 1)), TilePlan(regs=(4, 1))]
 
 
-def stage_moves(*, warp: bool) -> list[str]:
-    """The operand-staging ``STAGE`` codec candidates — gmem-direct ``""`` first (the conservative
-    option-0), then the transport / depth / double-buffer variants. Both tiers offer the gmem→smem
-    prefetch ring depths (the scalar ring lands on the same ``staged_kloop`` phases; its slab
-    K-chunk is depth-aware, derived by the scalar stage resolver); the ``p2`` smem→register
-    double-buffer is an ``ldmatrix`` transform, warp-only. Emission is resolver-gated in
-    ``_schedule`` — a candidate is offered only when it RESOLVES against the built node, and the
-    row carries the resolved spelling."""
-    ring = ["", "d1/cp", "d2/cp/ring", "d3/cp/ring", "d4/cp/ring", "d1/tma", "d2/tma/ring", "d3/tma/ring", "d4/tma/ring"]
-    return [*ring, "d2/cp/ring/p2"] if warp else ring
+def stage_moves(*, warp: bool) -> list[Stage]:
+    """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
+    double-buffer variants. Both tiers offer the gmem→smem prefetch ring depths (the scalar ring
+    lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived by the
+    scalar stage resolver); the ``p2`` smem→register double-buffer is an ``ldmatrix`` transform,
+    warp-only.
+
+    Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the enumeration
+    leads with it as the conservative option-0. Emission is resolver-gated: a candidate is offered
+    only when it RESOLVES against the built node, and the row carries the RESOLVED spelling."""
+    ring = [
+        Stage.parse(s) for s in ("d1/cp", "d2/cp/ring", "d3/cp/ring", "d4/cp/ring", "d1/tma", "d2/tma/ring", "d3/tma/ring", "d4/tma/ring")
+    ]
+    return [*ring, Stage.parse("d2/cp/ring/p2")] if warp else ring
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is

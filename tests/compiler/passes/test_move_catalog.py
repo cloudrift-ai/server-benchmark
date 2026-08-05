@@ -271,3 +271,84 @@ def test_bare_reduce_forks_the_coop_catalog():
         return plan.spell(), (f"t{plan.coop}" if plan.coop > 1 else "")
 
     assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
+
+
+# --- the TWO-SITE product: what a flat builder structurally could not enumerate ------------------ #
+#
+# Every term in the live corpus has ONE scheduling site, so the recursion's merge — the key spelling
+# at a NON-primary site, the shared inventory both sites resolve against, the per-site row-count
+# equation — would otherwise land untested and only be found wrong when the fused cone and the flash
+# streaming pair arrive. This fixture is the cheapest term with two sites: a contraction whose B
+# channel is a COMPUTED edge (an inline fold), so the parent enumerates tile × stage × reduce and
+# the edge enumerates its own reduce partition, under one WORK.
+
+
+def _two_site_term():
+    """A contraction ``sum_k a[m, k] · b_k`` whose B edge is COMPUTED — an inline ``Fold`` over its
+    own axis. Two scheduling sites: the contraction (``TILE`` / ``STAGE`` / ``REDUCE``) and the
+    edge (``REDUCE`` / ``STAGE``), the edge keyed by its own axis."""
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
+    from emmy.compiler.ir.tile import Channel, Fold, TileOp
+    from emmy.compiler.ir.tile.ir import Placement
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    inner = fold_from_loop(
+        Loop(
+            axis=Axis("j", 256),
+            body=Body((Load(name="w_e", input="w", index=(Var("m"), Var("j"))), Accum(name="bacc", value="w_e", op="add", axes=("j",)))),
+            role=AxisRole.PLANAR,
+        )
+    )
+    node = Fold.contraction(
+        k_axis=Axis("k", 256),
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=inner, acc="acc"),),
+    )
+    return TileOp(op=node, place=Placement(free=(Axis("m", 64), Axis("n", 64))))
+
+
+def test_two_site_term_merges_both_sites_under_one_inventory():
+    """The recursion's merge, asserted on the smallest two-site term:
+
+    - every row spells BOTH sites — the contraction's families at the bare (primary) keys and the
+      computed edge's at its own axis-suffixed ones, so no leaf is missing a key another leaf has;
+    - both sites resolve against the SAME ``WORK`` entry (one kernel, one inventory), which is what
+      the work-first order buys — a coop edge and a tiled parent are simply never combined;
+    - the row count is the PER-SITE product, not a flat one.
+    """
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    tile = _two_site_term()
+    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
+    rows, keys = sch._enumerate(term)
+    assert rows, "the two-site term enumerated nothing"
+
+    # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
+    # the stored corpus uses.
+    assert keys == ["TILE", "STAGE", "STAGE@j", "REDUCE", "REDUCE@j"], keys
+    assert all(set(r) >= set(keys) for r in rows), "a leaf is missing a key its siblings spell"
+
+    # One inventory: every row's edge REDUCE resolves against the row's own WORK, and a cooperative
+    # edge is only co-representable with a per-cell parent tile.
+    from emmy.compiler.ir.schedule import ReducePlan, Workers
+
+    for r in rows:
+        work = Workers.parse(r["WORK"] or None)
+        edge = ReducePlan.parse(r["REDUCE@j"], work)
+        if edge.coop > 1:
+            assert work is not None and work.kind == "thread" and work.count == edge.coop, r
+            assert r["TILE"] == "", r  # a tiled parent claims the same threads — never both
+
+    # The row count is the product ACROSS sites, per inventory — the equation a flat builder over
+    # one node's families cannot state.
+    by_work: dict[str, int] = {}
+    for r in rows:
+        by_work[r["WORK"]] = by_work.get(r["WORK"], 0) + 1
+    for work_spell, n in by_work.items():
+        work = Workers.parse(work_spell or None)
+        parent = len(sch._contraction_values(term, term.tree[0].site.node, work))
+        edge = len(sch._site_values(term, term.tree[0].children[0].site, work))
+        assert n == parent * edge * len(sch._raster_values(term)), f"{work_spell!r}: {n} != {parent} x {edge}"

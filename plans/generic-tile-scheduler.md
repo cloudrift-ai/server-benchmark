@@ -475,26 +475,40 @@ all-`off`, with the reduce exception encoded explicitly.
 
 ## Where the tree is now
 
-**The CHOICE layer is DELETED and being rebuilt recursively.** `_schedule.py` is gone; `020_schedule` enumerates
-nothing, so every term stays unmapped and lowers on the materializer's per-cell path. The other two layers survive
-untouched and phase 1 reuses both:
+**Phase 1 has LANDED: the CHOICE layer is the recursion.** `_schedule.py` is `_inventories` → `_rows_at` over the
+site tree → `_merge`, with `_site_values` dispatching on the two node predicates. All three layers are live:
 
 | layer | owns | where | state |
 | --- | --- | --- | --- |
-| DOMAIN | which candidate values exist at all | `search/space.py` (+ `search/domain.py` for the two coupled families) | KEPT — no change planned |
-| LEGALITY | what this term's K / N / dtype / smem cap refuses | `lowering/tile/_legality.py`, raise-vs-drop by `pinned` | KEPT, currently unimported — becomes the recursion's downward filter |
-| CHOICE | which families a site offers, each option-0, row → `TileOp` | (was `lowering/tile/_schedule.py`) | **DELETED** — phase 1 rebuilds it |
+| DOMAIN | which candidate values exist at all | `search/space.py` (+ `search/domain.py` for the two coupled families) | KEPT — `stage_moves` now hands out typed `Stage`s |
+| LEGALITY | what this term's K / N / dtype / smem cap refuses | `lowering/tile/_legality.py`, raise-vs-drop by `pinned` | the recursion's downward filter; `producer_transport` added |
+| CHOICE | which families a site offers, each option-0, row → `TileOp` | `lowering/tile/_schedule.py` | **REBUILT recursively** |
 
-Phase 1's acceptance set — the roles whose correct output is already committed as a digest baseline:
+Phase 1's acceptance set — every SINGLE-SITE term, all restored:
 
 | role | covered |
 | --- | --- |
 | `FREE` | pointwise cell + the register-strip TERM VARIANT (`TILE=f<r>`) |
 | `PLANAR` / `TWISTED` | the reduce partition (heuristic option-0 + coop / ILP catalog + the matvec layout gate) |
-| `CONTRACTION`, materialized edges | tile × stage × reduce × wspec × raster, scalar + warp tiers, split-K through the `Fold ⊃ Fold` composition |
+| `CONTRACTION`, materialized edges | tile × stage × reduce × raster, scalar + warp tiers, the producer band as inventory, split-K through the `Fold ⊃ Fold` composition |
 
-Every one of those is a SINGLE-SITE term. The two that remain — a COMPUTED operand edge (the fused cone) and the
-flash streaming pair — are the multi-site ones, and are why the enumeration is recursive.
+The two that remain — a COMPUTED operand edge (the fused cone) and the flash streaming pair — are the multi-site
+ones, and are why the enumeration is recursive. Both are `_site_values` entries plus legality, not new emitters.
+
+**Measured at the phase-1 commit**: `digest_kernels.py --check` green — all 24 cases byte-identical to the baseline
+and all 14 schedulable cases landing their pins (from 0), the 10 `UNSCHEDULED` still dark; `make test` green with 50
+registry ids deleted; the enumerated row SET identical to the pre-demolition builder's on every corpus term, option-0
+included, with ONE accepted change (below). The widest term measures 132 246 rows against a 400 000 budget.
+
+**Of the three predicted row-key changes only the first fired.** (1) The deploy override is gone: `matvec_coopt`'s
+wide-K coalesced matvec enumerated ONE row under `ctx.validate_pins` and now enumerates the full 12-row catalog with
+the same `coop=32` pick leading, so the row set is a function of the term alone and the prior-free deploy is
+unchanged. (2) `_row_stage` is now a `STAGE` value (`d1/sync`, a resolver — offered exactly when the shape carries a
+shared row), but no corpus shape fires it, so no stored key moved. (3) `family_sites` vs `head(op)` cannot differ
+yet: every corpus term is single-site, which is also why phase 1 ships the two-site FIXTURE
+(`test_two_site_term_merges_both_sites_under_one_inventory`) — a contraction over a computed B edge, asserting the
+merge, the non-primary key spelling (`REDUCE@j` / `STAGE@j`), the shared inventory and the per-site row-count
+equation.
 
 ### The gates that hold the rebuild
 
@@ -580,15 +594,15 @@ Rows 9–10 must NOT be asserted in tier 0 — row 9 is enforced by the resolver
 
 ## Migration — the clean reimplementation
 
-`_schedule.py` is DELETED. `020_schedule` enumerates nothing and every term stays unmapped — the guardrail contract,
-so kernels still compile on the materializer's per-cell path and what fails is coverage, never a compile. The tree's
-measured state at the demolition commit: `make test` green with **241 registered xfails** (52 added), and
-`digest_kernels.py` reporting **0 of 23 cases landing their pins** (from 13). Those two numbers are the progress
-meter for everything below.
+`_schedule.py` was DELETED and rebuilt recursively; phase 1 has landed. A term the enumeration cannot schedule still
+yields no rows and stays unmapped — the guardrail contract, so kernels compile on the materializer's per-cell path and
+what fails is coverage, never a compile. The progress meter: `digest_kernels.py`'s **live-pin count** (0 of 24 at the
+demolition, 14 of 24 now — the remaining 10 are the `UNSCHEDULED` multi-site cases phases 2 and 3 own) and the
+**registry size** (241 registered xfails at the demolition, 50 deleted by phase 1).
 
 | phase | scope | gate |
 | --- | --- | --- |
-| **1** | **The enumerator — the target design, built once.** `inventories(term)` at the root, then `rows(site, work, ctx)` as a product over sites; `merge` spelling every slice through `ops.Sched.key`; `values(site, work, ctx)` returning TYPED slices from the unchanged `search/space.py` catalogs; `_legality.py`'s predicates as the `(term, candidate)` filter. Dispatch is the two node predicates — no `AxisRole`. Carries four IR repairs it cannot be correct without: one contraction predicate shared by `path._walk` and `family_sites`; the `composed` arm out of `Fold.role` and composed folds out of `family_sites`; the raw-loop escape separated structurally in `family_sites`; `stage_moves` returning `Stage`. Restores the single-site coverage ONLY — the strip, the reduce partition, and the contraction product over the scalar and warp tiers with split-K | **byte-identical KERNELS on the 23 digest cases, 13 of 23 pins live again**, plus `test_move_catalog`'s per-family set equality and row-count equation, plus `test_golden_knobs_are_members_of_the_move_catalog` — and the row-key diff list below is empty or explicitly accepted. 52 registry ids deleted |
+| ~~**1**~~ | **LANDED — the enumerator, the target design, built once.** `_inventories(term)` at the root, then `_rows_at(site, work)` as a product over the site tree; `_merge` spelling every slice through `ops.Sched.key`; `_site_values(site, work)` returning TYPED slices from the `search/space.py` catalogs; `_legality.py`'s predicates as the `(term, candidate)` filter. Dispatch is the two node predicates. The four IR repairs landed with it: one contraction predicate shared by `path._walk` and `family_sites`; the `composed` arm out of `Fold.role`; the raw-loop escape separated structurally in `family_sites`; `stage_moves` returning `Stage`. `resolve_row` / `RowSlices` deleted and the `WSPEC` pin alias retired | **MET**: byte-identical kernels on all 24 digest cases, 14 of 14 schedulable cases live, `make test` + `make lint` green, 50 registry ids deleted, the row set identical but for the one accepted change above |
 | 2 | CONTRACTION with computed edges — the fused norm→linear / gate⊗up cone, whose A edge is an inline node rather than a gmem `Load`. Under the recursion this is a `values` entry for the cone's sites plus legality (warp-only, sync fill mandatory, multi-channel ⇒ no cp.async/TMA) — NOT a new emitter | 4 `norm_linear` + `mlp_geglu` digest cases leave `UNSCHEDULED` + 6 recognize-boundary ids |
 | 3 | TWISTED — the flash streaming pair: streaming / chain / per-cell / split-KV over a hoisted QK operand edge and a derived PV contraction. Two sites that must agree, which is what the recursion is for; adds `twisted_warp_moves`' geometry as a `values` entry | 40 attention-pin ids + 4 attention-coverage ids; the 5 flash digest cases leave `UNSCHEDULED` |
 | 4 | `schedule()`'s own dispatch and flash-form selection once 2–3 exist; `kernel/_twist.py`'s `qk.acc` (reads a field `TilePlan` does not have — unreachable until the flash warp realizer runs, so it has no obtainable baseline until then) | registry EMPTY + `make test` + `make lint` |

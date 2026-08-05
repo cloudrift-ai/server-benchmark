@@ -35,9 +35,10 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   carries K plus one free axis) and telling M from N needs the PLACEMENT, a caller fact living on the `TileOp` (`place`
   / the `schedule` dict) with the `(m, n)` axes bound onto the `TilePlan` slice at the point of use (`TilePlan.at`);
   `as_fold()` is now the identity. Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis,
-  `TWISTED` off the combine's twist family, `CONTRACTION` off the bilinear reading or the composed split-K operand,
-  `PLANAR` otherwise — so the PLANAR demotion is a formation fact with no role rewrite (moving the edges inline is
-  enough; the same derivation then answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
+  `TWISTED` off the combine's twist family, `CONTRACTION` off the bilinear reading alone (split-K's outer reduce
+  tiles nothing and has no operand pair, so it derives `PLANAR` like any other additive fold; `Fold.composed` stays a
+  structural probe, not a role), `PLANAR` otherwise — so the PLANAR demotion is a formation fact with no role
+  rewrite (moving the edges inline is enough; the same derivation then answers `PLANAR` by itself). The path codec still spells `map` / `fold` / `a` / `b`
   segments off those readings — `PLACE@a`'s golden rows depend on it.
   The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
   family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
@@ -53,7 +54,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   RMSNorm's statistic and flash's stream are `Fold` at different monoid arities; a matmul, the fused gate⊗up edge,
   flash's QK score and the derived PV are the `Contraction` node kind (the kind IS the `CONTRACTION` role — no
   bilinear parse; a `Fold`'s role stays DERIVED (`Fold.role`), never stored: TWISTED off the derived twist family,
-  CONTRACTION off the composed split-K operand, PLANAR otherwise — so an unbindable matvec-shaped
+  CONTRACTION off the bilinear reading, PLANAR otherwise — so an unbindable matvec-shaped
   contraction, whose loads recognition keeps inline in the lift instead of building the node, derives PLANAR and
   takes the reduce tiers at schedule dispatch with no recognition-time demotion rewrite). **Sharing is arity**: the
   gate⊗up node reads one cone edge across two channels — no privileged operand slot, no let table, no reference arm.
@@ -115,10 +116,13 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   node (`axis is None` / `is_contraction`), NOT the `AxisRole` — which stays a loop annotation and a materializer
   read. The domain is `search/space.py`'s move catalog. A MATERIALIZED operand is not a site (its transport is the parent's
   `STAGE`); a COMPUTED one IS (it enumerates its own families). **No role builds `TileOp`s directly and no term
-  shape gets its own path.** It is UNDER RECONSTRUCTION: the enumerator currently emits NOTHING, so `020` leaves
-  every term unmapped — the guardrail contract, so kernels still compile on the materializer's per-cell path at
-  un-scheduled performance, and the coverage gap rides `tests/xfail_registry.py` (strict; empty is the completion
-  gate) plus `scripts/digest_kernels.py`'s per-case pin liveness →
+  shape gets its own path.** It covers the SINGLE-SITE terms today (the strip, the reduce partition, the
+  contraction product with split-K); the two MULTI-SITE families — a COMPUTED operand edge (the fused cone) and the
+  flash streaming pair — still emit nothing and each arrives as a `_site_values` entry, never a new emitter. A term
+  it cannot schedule stays unmapped — the guardrail contract, so kernels still compile on the materializer's
+  per-cell path at un-scheduled performance, and the coverage gap rides `tests/xfail_registry.py` (strict; empty is
+  the completion gate) plus `scripts/digest_kernels.py`'s per-case pin liveness. A stated row budget
+  (`MAX_ROWS`) bounds one kernel's enumeration and fails loudly rather than truncating →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 - **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
   [`GLOSSARY.md`](GLOSSARY.md)

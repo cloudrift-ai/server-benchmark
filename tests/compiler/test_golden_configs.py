@@ -232,7 +232,7 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     exactly the 1.29-1.49× perf-gap shapes). Pointwise goldens are exempt (their kernel forks
     nothing today, so there is no catalog to be a member of); a reduce golden's ``TILE`` is
     likewise uncatalogued (the reduce fork partitions K only), so only its ``REDUCE`` is pinned."""
-    from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves, splitk_moves, stage_moves, warp_tile_moves
 
     # The catalogs hand out TYPED slices; a golden's stored site value re-merges its WORK
@@ -257,7 +257,7 @@ def test_golden_knobs_are_members_of_the_move_catalog():
             pool = set(warp_tile_moves((plan.atom.name,))) if warp else scalar_moves
             assert plan in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
         stage = g.knobs.get("STAGE", "")
-        assert not stage or stage in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
+        assert not stage or Stage.parse(stage) in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
         red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
         assert red is None or red in splitk_moves() + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"

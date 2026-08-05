@@ -397,19 +397,18 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     np.testing.assert_allclose(staged.reshape(M, N), a @ b, atol=1e-3, rtol=1e-3)
 
 
-def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
-    """A legal ``WSPEC`` split — a warp tile over a resolved TMA stage — STAMPS: ``workers``
-    resolves on the ``TileOp`` and the producer band rides the ONE ``WORK`` entry as its ``+p``
-    suffix (F1 — the rows carry no WSPEC key). The honest-stamping rule holds because the
-    staged K-loop materializes the split (the producer/compute band split in
-    ``_stage._wspec_kloop``)."""
+def test_warp_matmul_stamps_the_producer_band(monkeypatch) -> None:
+    """A legal producer band — a warp tile over a resolved TMA stage — STAMPS: ``workers`` resolves
+    on the ``TileOp`` and the band rides the ONE ``WORK`` entry as its ``+p`` suffix, which is also
+    how it is PINNED (the retired ``WSPEC`` key is neither read nor written — the band is
+    inventory). The honest-stamping rule holds because the staged K-loop materializes the split
+    (the producer/compute band split in ``_stage._wspec_kloop``)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")  # warp (mma) tier
-    monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the WSPEC split, not the split fork
+    monkeypatch.setenv("EMMY_WORK", "w2x2+p1")
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the band, not the split fork
     monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
-    monkeypatch.setenv("EMMY_WSPEC", "p1")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert "WSPEC" not in tile_op.knobs, tile_op.knobs  # the band spells on WORK, never a row key
@@ -417,33 +416,20 @@ def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
     assert tile_op.workers is not None and tile_op.workers.aux_warps == 1, tile_op.workers
 
 
-_WSPEC_WARP = ("mma_m16n8k16_f16/f2x2/k2", "w2x2")
-
-
-@pytest.mark.parametrize(
-    ("tile", "stage", "wspec"),
-    [
-        (_WSPEC_WARP, None, "p2"),  # warp tier, no STAGE → producer has nothing to drive
-        (_WSPEC_WARP, "d2/cp", "p2"),  # cp.async: wait-group is issuing-thread-scoped — not driveable
-        (_WSPEC_WARP, "d2/tma/ring", "p1:q8"),  # the producer q window is reserved (inert)
-        (("f4x4", "t32x8"), "d2/cp", "p2"),  # scalar tier — WSPEC is only read on the warp path
-    ],
-)
-def test_wspec_degrades_to_uniform(monkeypatch, tile: tuple[str, str], stage: str | None, wspec: str) -> None:
-    """The ``WSPEC`` pin degrades to uniform (``workers=None``) when the split can't materialize —
-    no ``STAGE`` to drive, a non-TMA transport, a reserved per-role param (``q``), or the scalar
-    tier (no mma consumer). The same pin-validity rule the other codecs follow; the knob is then
-    not explicitly stamped (only the ``off=""`` default)."""
+def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch) -> None:
+    """A ``+p`` inventory whose band nothing can drive — cp.async, whose wait-group is
+    issuing-thread-scoped — enumerates NO row: the band is part of the inventory, so a row that
+    cannot carry it is not a row at that inventory. The term then stays UNMAPPED (the guardrail
+    contract) rather than silently dropping the band the pin asked for."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    _pin_tile(monkeypatch, tile)
-    if stage is not None:
-        monkeypatch.setenv("EMMY_STAGE", stage)
-    monkeypatch.setenv("EMMY_WSPEC", wspec)
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x2+p2")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.workers is None
-    assert tile_op.knobs.get("WSPEC", "") == ""  # off-default only, no explicit pin stamped
+    assert tile_op.workers is None and not tile_op.place.is_mapped
+    assert tile_op.knobs.get("WSPEC", "") == ""  # the retired key is never stamped
 
 
 @requires_cuda

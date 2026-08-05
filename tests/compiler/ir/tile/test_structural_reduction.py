@@ -249,8 +249,11 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         combine=combine,
     )
 
-    # The outer fold derives CONTRACTION off its composed step — the one non-bilinear arm.
-    assert axis_role(red) is AxisRole.CONTRACTION
+    # The outer fold is an ordinary additive reduce — it tiles nothing and has no operand pair, so
+    # it derives PLANAR like any other. The reassociation it carries is a STRUCTURAL probe
+    # (``Fold.composed``, what ``030_split_reduce`` consumes), never a role.
+    assert axis_role(red) is AxisRole.PLANAR
+    assert red.composed is inner
     t = _tile(red)
     sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2

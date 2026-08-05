@@ -387,8 +387,10 @@ class Fold(Stmt):
         - ``TWISTED`` iff the stored combine's twist family is non-degenerate (``exp`` — online
           softmax / flash).
         - ``CONTRACTION`` iff the bilinear reading holds (:attr:`_contraction` — a ``⊗`` lift
-          distributed over ≥ 2 operand edges under a componentwise-additive ⊕), or the step
-          composes exactly the sliced contraction (split-K's outer reduce).
+          distributed over ≥ 2 operand edges under a componentwise-additive ⊕). Split-K's outer
+          reduce is NOT one: it tiles nothing and has no operand pair, so it derives ``PLANAR``
+          like any other additive fold and :attr:`composed` — a structural probe, not a role —
+          stays the one read that recognizes the reassociation.
         - ``PLANAR`` otherwise — including an unbindable contraction (matvec-shaped 1-D output,
           no ``(m, n)`` loads, the zero-legal-rows fallback): recognition keeps its loads inline
           in the lift instead of building the node, so there are no edges for the bilinear
@@ -399,8 +401,6 @@ class Fold(Stmt):
             return AxisRole.FREE
         if component_ops(self.combine) is None:
             return AxisRole.TWISTED
-        if self.composed is not None:
-            return AxisRole.CONTRACTION  # split-K: the outer additive reduce over the sliced node
         if self._contraction is not None:
             return AxisRole.CONTRACTION  # the bilinear cell itself — the node kind that was
         return AxisRole.PLANAR

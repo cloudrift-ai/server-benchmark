@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.schedule import Stage, TilePlan, WarpSpec
+from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
@@ -77,6 +77,17 @@ def producer_band(spec: WarpSpec, block_threads: int | None) -> str | None:
         return f"producer band {aux} threads outnumbers the {block_threads} compute threads"
     if block_threads + aux > MAX_BLOCK_THREADS:
         return f"producer band {aux} + {block_threads} compute exceeds the {MAX_BLOCK_THREADS}-thread/CTA limit"
+    return None
+
+
+def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
+    """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
+    mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no
+    async load half) on a kernel that is not split across CTAs."""
+    if stage is None or stage.transport != "tma":
+        return "a producer band drives a resolved TMA stage; this row has none"
+    if reduce.needs_split:
+        return "a producer band and a cross-CTA split-K are not co-representable"
     return None
 
 
@@ -277,6 +288,7 @@ __all__ = [
     "enforce",
     "fragment_epilogue",
     "producer_band",
+    "producer_transport",
     "resolve_scalar_stage",
     "resolve_warp_stage",
     "scalar_block_threads",

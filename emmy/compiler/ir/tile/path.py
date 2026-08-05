@@ -40,8 +40,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from emmy.compiler.ir.axis import AxisRole
-from emmy.compiler.ir.tile.ir import Fold
+from emmy.compiler.ir.tile.ir import Fold, is_contraction
 
 #: The knob families whose keys address a tree site (``WSPEC`` / ``RASTER`` / ``LOOPIFY`` stay
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
@@ -98,7 +97,7 @@ def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]
     out.append((node, prefix, derived))
     if not isinstance(node, Fold):
         return
-    if node._contraction is not None:
+    if is_contraction(node):
         # The BILINEAR reading's edges carry the view-role labels ``a`` / ``b`` — the A/B split
         # rides the stored operand order, so the labels are as stable as the term. This branch
         # must precede the generic operand walk: the stored corpus keys ``PLACE@a`` against it,
@@ -151,12 +150,25 @@ def sites(root) -> tuple[Site, ...]:
     return tuple(result)
 
 
+def _is_escape(node) -> bool:
+    """Whether an operandless zero-axis fold is a RAW-LOOP-IR ESCAPE — an un-recognized cell,
+    ``030``'s finalize, the coop fused-tail sibling — rather than a pointwise strip target. The
+    discriminator is STRUCTURAL, not a role: its body carries a recognition-stamped reduce ``Loop``,
+    so the cell is a reduction whose algebra was never lifted, and tiling its "pointwise" cell would
+    strip a body that is not one."""
+    from emmy.compiler.ir.stmt import Loop, StridedLoop  # noqa: PLC0415 — stmt imports ir; keep path light
+
+    return any(isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce for s in node.body)
+
+
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """The sites ``family`` may decorate: every fold for ``REDUCE`` / ``STAGE``; ``TILE`` takes the
-    ``role=CONTRACTION`` folds plus the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a
-    non-root operandless zero-axis fold, e.g. a one-load demoted cone, is not a strip target); ``PLACE``
-    every NON-ROOT node (the child names its parent↔child seam — cut legality is structural,
-    edge-iff-closed by construction)."""
+    CONTRACTION folds (:func:`~emmy.compiler.ir.tile.ir.is_contraction` — the same question
+    :func:`_walk` asks, so the two cannot diverge on the split-K wrapper, which tiles nothing) plus
+    the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
+    zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR
+    escape); ``PLACE`` every NON-ROOT node (the child names its parent↔child seam — cut legality is
+    structural, edge-iff-closed by construction)."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
     if family == "PLACE":
@@ -167,9 +179,9 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     for s in all_sites:
         if not isinstance(s.node, Fold):
             continue
-        if s.node.axis is not None and s.node.role is AxisRole.CONTRACTION:
+        if s.node.axis is not None and is_contraction(s.node):
             out.append(s)
-        elif s.node.axis is None and not s.node.operands and s.depth == 1:
+        elif s.node.axis is None and not s.node.operands and s.depth == 1 and not _is_escape(s.node):
             out.append(s)
     return tuple(out)
 

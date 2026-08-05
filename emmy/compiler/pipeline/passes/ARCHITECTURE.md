@@ -3,8 +3,9 @@
 Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`). Per-dialect details live in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (pass order, knob table, fork semantics). The **tile-lowering** phase
 (`lowering/tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
-specializations**: it dispatches on the fold's DERIVED role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` /
-`TWISTED`, read off arity and the combine, never stored), never on a named shape (matmul / pointwise / attention) —
+specializations**: it dispatches on stored params of the fold (`axis is None` / `is_contraction` for the schedule
+walk; the derived `Fold.role` for the loop annotation the materializer reads), never on a named shape
+(matmul / pointwise / attention) —
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
@@ -74,15 +75,19 @@ raise-vs-drop from whether the family is PINNED (an unpinned warp move with an i
 the same defect in a pin raises). That is the bug class — "the pin says yes and the enumeration says no" — the
 single-home rule exists to prevent.
 
-**Under reconstruction.** The row enumerator is being rebuilt on the recursive shape above; until it lands,
-`020_schedule` enumerates NOTHING and every term stays unmapped. That is the guardrail contract, not a failure:
-kernels still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a
-compile. The rebuild restores the single-site roles first — `FREE` (the pointwise cell + the register-strip term
-variant), `PLANAR` / `TWISTED` (the reduce partition) and `CONTRACTION` (the tile × stage × reduce × raster product
-over the scalar and warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition
-`030_split_reduce` consumes) — gated on reproducing their rows byte-identically. The two MULTI-SITE families, a
-**COMPUTED operand edge** (the fused norm→linear / gate⊗up cone) and the **flash streaming pair**, follow; they are
-the reason the enumerator recurses.
+**Coverage, as it stands.** The recursion carries the SINGLE-SITE terms — the pointwise cell plus the
+register-strip term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over
+the scalar and warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce`
+consumes. The two MULTI-SITE families still enumerate nothing: a **COMPUTED operand edge** (the fused norm→linear /
+gate⊗up cone) and the **flash streaming pair**. They are the reason the enumerator recurses, and each arrives as a
+`_site_values` entry plus its legality predicates — not as a new emitter. A term the enumeration cannot schedule
+yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels still compile on the
+materializer's per-cell path, so what is missing is schedule coverage, never a compile.
+
+A row BUDGET (`_schedule.MAX_ROWS`) bounds one kernel's enumeration and fails LOUDLY when exceeded — never
+truncates. The product across sites is generated rather than hand-written, so a widened catalog multiplies where a
+flat builder would have added, and a silent truncation would read as "covered everything" while dropping whichever
+rows the walk reached last. The widest live term (a static f16 square matmul over both tiers) measures ~133k rows.
 
 Every casualty rides `tests/xfail_registry.py`, whose node-id list is the acceptance obligation — it shrinking to
 empty is the completion gate. `scripts/digest_kernels.py` is the other half: it pins each case's rendered kernel
@@ -183,7 +188,8 @@ failing several passes later:
   `PLANAR` and takes the reduce tiers at schedule dispatch — no role rewrite. Since the collapse there is ONE stored
   kind and **every role derives from arity** (`Fold.role`, never stored): `FREE` with no axis,
   `TWISTED` off the stored combine's twist family, `CONTRACTION` off the bilinear reading
-  (`Fold._contraction`) or the composed split-K operand (`Fold.composed`), `PLANAR` otherwise — so "a contraction"
+  (`Fold._contraction`) alone — split-K's outer reduce derives `PLANAR`, and `Fold.composed` is the structural probe
+  `030_split_reduce` reads, never a role — `PLANAR` otherwise — so "a contraction"
   below always means a fold that reads as one, and the lowered `Loop`'s annotation falls out of the same read; the
   schedule fork only
   stamps a `tile` onto a `replace()` copy, and `_factor.factorize` reads the facts off

@@ -225,3 +225,36 @@ def test_name_for_dedups_repeated_labels():
     # collapses adjacent duplicates so it stays a single ``rms_norm``.
     assert "rms_norm_rms_norm" not in name
     assert name.startswith("k_rms_norm_")
+
+
+def test_name_for_hash_covers_io_dtypes():
+    """Two kernels with identical bodies but a different io ``dtype_sig`` must not share a
+    name: the body carries no buffer decls, and ``plan_from_graph`` dedups kernels per name
+    (first source wins) — an aliased name hands the f32-writing twin the f16 cubin (the
+    last-layer down_proj+residual fused into the final norm's f32 cast wrote f16 bytes into
+    the f32 buffer, garbage embeddings)."""
+    loop = _pointwise_loop()
+    prov_map = {"rms_norm_0": {"kind": "RmsNormOp", "pieces": ["o"]}}
+    totals = {"rms_norm_0": {"o"}}
+    n16 = prov.name_for(loop, "o", prov_map, totals, dtype_sig="f16->f16")
+    n32 = prov.name_for(loop, "o", prov_map, totals, dtype_sig="f16->f32")
+    assert n16 != n32
+    assert n16.startswith("k_rms_norm_") and n32.startswith("k_rms_norm_")
+
+
+def test_name_for_loop_threads_output_dtype_into_name():
+    """``name_for_loop`` reads the io dtypes off the graph decls: the same LoopOp body writing
+    an f16 vs an f32 buffer names apart even when node ids and provenance agree."""
+    from emmy.compiler.pipeline.passes.loop.stamp._stamp import name_for_loop
+
+    def make(out_dtype: str) -> tuple:
+        g = Graph()
+        g.add_node(InputOp(), [], Tensor("x", (4, 8), "f16"), node_id="x")
+        g.add_node(_pointwise_loop(), ["x"], Tensor("o", (4, 8), out_dtype), node_id="o")
+        g.inputs, g.outputs = ["x"], ["o"]
+        prov.seed(g)
+        return g, g.nodes["o"]
+
+    g16, n16 = make("f16")
+    g32, n32 = make("f32")
+    assert name_for_loop(n16.op, n16, g16) != name_for_loop(n32.op, n32, g32)

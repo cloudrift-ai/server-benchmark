@@ -766,3 +766,186 @@ def test_output_reshape_folds_into_reduce_producer():
     before = _run(make_graph(), {"x": x})
     after = _run(fused, {"x": x})
     _assert_close(before, after)
+
+
+# ===================================================================
+# Flash P@V deferral vs residual epilogue: the contraction halves must
+# reunite past an exp-bearing residual stream
+# ===================================================================
+
+
+def _loops2(inner, ax0, ext0, ax1, ext1):
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.loop import Loop
+    from emmy.compiler.ir.stmt import Body
+
+    return Body((Loop(axis=Axis(name=ax0, extent=Dim(ext0)), body=Body((Loop(axis=Axis(name=ax1, extent=Dim(ext1)), body=inner),))),))
+
+
+def _make_pending_product_into_exp_residual_add():
+    """The mid-fusion state the engine reaches on every transformer layer past the first: the
+    decomposed o_proj's sum-reduce already merged into the residual add (which also reads the
+    residual stream ``res``), the bare product ``ew`` still materialized, and ``res`` one
+    producer hop from an exp (the previous layer's silu sigmoid / softmax). The product must
+    still merge into the add's reduce — the flash P@V deferral must not mistake the post-reduce
+    residual operand for a V operand (it kept every o_proj product materialized: a (b, s, k, n)
+    gmem scratch per layer, 17 GB at S=4096 on the Qwen3 embed trunk)."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    S, K, N = 4, 8, 6
+    a0, a1, a2 = Var("a0"), Var("a1"), Var("a2")
+
+    ew_cell = Body(
+        (
+            Loop(
+                axis=Axis(name="a2", extent=Dim(N)),
+                body=Body(
+                    (
+                        Load(name="i0", input="act", index=(a0, a1)),
+                        Load(name="i1", input="w", index=(a2, a1)),
+                        Assign(name="v0", op="multiply", args=("i0", "i1")),
+                        Write(output="ew", index=(a0, a1, a2), value="v0"),
+                    )
+                ),
+            ),
+        )
+    )
+    ew = LoopOp(body=_loops2(ew_cell, "a0", S, "a1", K))
+
+    exp_cell = Body(
+        (
+            Load(name="c0", input="r", index=(a0, a1)),
+            Assign(name="c1", op="exp", args=("c0",)),
+            Write(output="e", index=(a0, a1), value="c1"),
+        )
+    )
+    e = LoopOp(body=_loops2(exp_cell, "a0", S, "a1", N))
+    res_cell = Body(
+        (
+            Load(name="d0", input="r", index=(a0, a1)),
+            Load(name="d1", input="e", index=(a0, a1)),
+            Assign(name="d2", op="add", args=("d0", "d1")),
+            Write(output="res", index=(a0, a1), value="d2"),
+        )
+    )
+    res = LoopOp(body=_loops2(res_cell, "a0", S, "a1", N))
+
+    add_cell = Body(
+        (
+            Loop(
+                axis=Axis(name="a2", extent=Dim(K)),
+                body=Body(
+                    (
+                        Load(name="in0", input="ew", index=(a0, a2, a1)),
+                        Accum(name="acc0", value="in0", op="add", axes=("a2",)),
+                    )
+                ),
+            ),
+            Load(name="in1", input="res", index=(a0, a1)),
+            Assign(name="v1", op="add", args=("acc0", "in1")),
+            Write(output="y", index=(a0, a1), value="v1"),
+        )
+    )
+    add13 = LoopOp(body=_loops2(add_cell, "a0", S, "a1", N))
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("act", (S, K)), node_id="act")
+    g.add_node(InputOp(), [], Tensor("w", (N, K)), node_id="w")
+    g.add_node(InputOp(), [], Tensor("r", (S, N)), node_id="r")
+    g.add_node(ew, ["act", "w"], Tensor("ew", (S, K, N)), node_id="ew")
+    g.add_node(e, ["r"], Tensor("e", (S, N)), node_id="e")
+    g.add_node(res, ["r", "e"], Tensor("res", (S, N)), node_id="res")
+    g.add_node(add13, ["ew", "res"], Tensor("y", (S, N)), node_id="y")
+    # ``res`` doubles as a graph output — the residual stream has other readers in the real
+    # model, so the exp-bearing chain can never be absorbed into the consumer and the guard
+    # decides the product's fate alone.
+    g.inputs, g.outputs = ["act", "w", "r"], ["y", "res"]
+    return g
+
+
+def test_pending_product_reunites_past_exp_residual():
+    fused = Pipeline.build(["loop/fusion"]).run(_make_pending_product_into_exp_residual_add())
+    bare = [n.id for n in _kernel_nodes(fused) if not _has_update(n.op.body) and len(n.output.shape) > 2]
+    assert bare == [], f"bare product left materialized: {bare}"
+
+
+def test_pending_product_exp_residual_correctness():
+    act = rng.standard_normal((4, 8)).astype(np.float32)
+    w = rng.standard_normal((6, 8)).astype(np.float32)
+    r = rng.standard_normal((4, 6)).astype(np.float32)
+    _assert_correctness(_make_pending_product_into_exp_residual_add, {"act": act, "w": w, "r": r})
+
+
+def test_exp_residual_epilogue_is_not_a_flash_site():
+    """Guard-level twin of the fixpoint test: the residual operand rides the post-reduce
+    epilogue, so its upstream exp must not classify the consumer as a future P@V site."""
+    import importlib
+
+    mod = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")
+    g = _make_pending_product_into_exp_residual_add()
+    assert mod._sum_contracts_exp_producer(g, g.nodes["y"], g.nodes["ew"]) is False
+
+
+def test_pv_mid_assembly_still_deferred():
+    """The flash deferral's true positive survives the epilogue exemption: a sum-contraction
+    whose exp-adjacent operand feeds the accumulate (P@V with its softmax mid-assembly) still
+    defers the V-side compute producer."""
+    import importlib
+
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    S, K, N = 4, 8, 6
+    a0, a1, a2 = Var("a0"), Var("a1"), Var("a2")
+
+    exp_cell = Body(
+        (
+            Load(name="s0", input="scores", index=(a0, a1)),
+            Assign(name="s1", op="exp", args=("s0",)),
+            Write(output="pw", index=(a0, a1), value="s1"),
+        )
+    )
+    softmax_piece = LoopOp(body=_loops2(exp_cell, "a0", S, "a1", K))
+    vprod_cell = Body(
+        (
+            Load(name="t0", input="vin", index=(a0, a1)),
+            Assign(name="t1", op="multiply", args=("t0", "t0")),
+            Write(output="vbuf", index=(a0, a1), value="t1"),
+        )
+    )
+    vprod = LoopOp(body=_loops2(vprod_cell, "a0", K, "a1", N))
+    pv_cell = Body(
+        (
+            Loop(
+                axis=Axis(name="a2", extent=Dim(K)),
+                body=Body(
+                    (
+                        Load(name="p0", input="pw", index=(a0, a2)),
+                        Load(name="q0", input="vbuf", index=(a2, a1)),
+                        Assign(name="m0", op="multiply", args=("p0", "q0")),
+                        Accum(name="acc0", value="m0", op="add", axes=("a2",)),
+                    )
+                ),
+            ),
+            Write(output="y", index=(a0, a1), value="acc0"),
+        )
+    )
+    pv = LoopOp(body=_loops2(pv_cell, "a0", S, "a1", N))
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("scores", (S, K)), node_id="scores")
+    g.add_node(InputOp(), [], Tensor("vin", (K, N)), node_id="vin")
+    g.add_node(softmax_piece, ["scores"], Tensor("pw", (S, K)), node_id="pw")
+    g.add_node(vprod, ["vin"], Tensor("vbuf", (K, N)), node_id="vbuf")
+    g.add_node(pv, ["pw", "vbuf"], Tensor("y", (S, N)), node_id="y")
+    g.inputs, g.outputs = ["scores", "vin"], ["y"]
+    mod = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")
+    assert mod._sum_contracts_exp_producer(g, g.nodes["y"], g.nodes["vbuf"]) is True

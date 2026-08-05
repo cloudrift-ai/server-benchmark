@@ -48,7 +48,7 @@ from types import SimpleNamespace
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, TernaryExpr, Var, subst_index
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
@@ -933,14 +933,14 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             o_tmpl = by_state[expect_name]
             for j, f in enumerate(qt.ofrags):
                 sub = {m_name: qt.row_base, n_name: Literal(j * atom_n, "int")}
-                dst_index = tuple(sub.get(e.name, e) if isinstance(e, Var) else e for e in o_tmpl.index)
+                dst_index = subst_index(o_tmpl.index, sub)
                 close.append(RegStore(dst_buffer=ctx.output, dst_index=dst_index, frag=f, shape=shape, ldm=d_v, m_guard=m_guard))
             for c, row_off in zip(_COMPS, (g_expr, BinaryExpr("+", g_expr, Literal(8, "int"))), strict=True):
                 row_expr = BinaryExpr("+", qt.row_base, row_off)
                 row_writes: list[Stmt] = []
                 for comp in (pivot_name, denom_name):
                     tmpl = by_state[comp]
-                    idx = tuple(row_expr if (isinstance(e, Var) and e.name == m_name) else e for e in tmpl.index)
+                    idx = subst_index(tmpl.index, {m_name: row_expr})
                     row_writes.append(Write(output=ctx.output, index=idx, value=f"{comp}{qt.sfx}{c}"))
                 cond = t_zero if m_guard is None else BinaryExpr("&&", t_zero, BinaryExpr("<", row_expr, _ext(qk_t.axes[0])))
                 close.append(Cond(cond=cond, body=tuple(row_writes)))

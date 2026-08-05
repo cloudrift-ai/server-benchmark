@@ -50,7 +50,7 @@ from dataclasses import dataclass, replace
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var, subst_index
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
@@ -684,7 +684,7 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv) -> tuple[list[Stmt], list[Stmt
         base_index = (*(Var(a.name) for a in ctx.grid), Var(axis))
     for j in range(count):
         val = f"{out_val}_{j}" if out_val in tainted else out_val
-        idx = tuple(Literal(j, "int") if (isinstance(e, Var) and e.name == axis) else e for e in base_index)
+        idx = subst_index(base_index, {axis: Literal(j, "int")})
         close.append(Write(output=ctx.output, index=idx, value=val))
     return [], fold, close
 

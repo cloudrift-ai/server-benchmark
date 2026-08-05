@@ -326,9 +326,9 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, keys, owner = sch._enumerate([term])
+    rows, keys, _idents, origin = sch._enumerate([term])
     assert rows, "the two-site term enumerated nothing"
-    assert {t for t, _ in owner.values()} == {term}, "a single-reading term has one owner"
+    assert {reading for reading, _ in origin} == {0}, "a single-reading term has one owner"
 
     # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
     # the stored corpus uses.
@@ -400,10 +400,11 @@ def test_two_site_rows_are_distinct_and_materialize_both_sites():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, owner = sch._enumerate([term])
+    rows, _keys, idents, origin = sch._enumerate([term])
 
     seen = [canonical_row_key(r) for r in rows]
     assert len(seen) == len(set(seen)), f"{len(seen) - len(set(seen))} rows spell identically"
+    owner = {ident: (term, resolved) for ident, (_, resolved) in zip(idents, origin, strict=True)}
 
     decided = [r for r in rows if r.get("REDUCE@j")]
     assert decided, "the fixture must decide its nested site on some row"
@@ -470,7 +471,7 @@ def _first_row(tile) -> dict:
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
 
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, _owner = sch._enumerate([term])
+    rows, _keys, _idents, _origin = sch._enumerate([term])
     assert rows, "the term enumerated nothing"
     return rows[0]
 

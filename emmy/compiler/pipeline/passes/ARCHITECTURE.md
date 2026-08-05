@@ -33,6 +33,15 @@ removes a cycle — a cooperative candidate cannot be parsed without the invento
 turns three parent/child coupling rules into "the child resolves against the same `work`, and an unspellable
 candidate is simply not in `values(site, work)`".
 
+**The enumeration is memoized per term** (`_schedule._Pool` in `ctx.session_cache`): the rows are a pure function of
+`(term, ctx, pins, hints)`, so N same-shape kernels in a graph — and every tune trajectory after the first, since the
+pipeline re-runs this rule per trajectory — pay one enumeration. The cache sits BELOW the search policies (greedy and
+MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the readings re-bind per op,
+so materialization always stamps against that op's own placement and stores. The key folds in the two inputs op
+identity deliberately excludes — the symbolic-axis hints and the live schedule pins — and the ctx facts ride the
+cache's home: one `Context`, one fact set. Pool rows are read-only mappings and cached slices are asserted
+placement-free at build, so a shared pool cannot be corrupted by one consumer for another.
+
 **No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
 term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its
 transport is enumerated at the parent's `STAGE`; a computed operand IS a site, so it enumerates its own families and

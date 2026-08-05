@@ -495,6 +495,19 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
 
 
+def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
+    """Every live env pin the schedule enumeration can read — the :data:`SCHEDULE_FAMILIES`
+    knobs, bare and ``@``-keyed — as sorted ``(env var, raw value)`` pairs. The schedule pool
+    cache folds this into its key: a pin changes which rows enumerate, so two pin states must
+    never share a pool. The environ scan is this module's to make — the ``EMMY_<KNOB>``
+    namespace is knob.py-owned (the one exception to ``config.py``'s env ownership), and the
+    ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
+    import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
+
+    prefixes = tuple(config.knob_var(fam) for fam in SCHEDULE_FAMILIES)
+    return tuple(sorted((var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)))
+
+
 def knob_sort_key(name: str) -> tuple[int, str]:
     """Sort key: native ``MOVE@element`` families first (by :data:`_FAMILY_ORDER`, then
     element), then the codec knobs in :data:`KNOB_ORDER`, unknown knobs last (alpha)."""

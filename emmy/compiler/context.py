@@ -15,6 +15,7 @@ the signature alone.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from emmy import config, gpu
@@ -68,6 +69,41 @@ def _live_sm_count() -> int:
     from emmy.compiler.target import live_device_features  # noqa: PLC0415
 
     return int(live_device_features().get("sm_count") or DEFAULT_SM_COUNT)
+
+
+class SessionCache:
+    """Session-scoped LRU memo (key digest → payload), carried on :class:`Context` as AMBIENT
+    state — like the device-physical fields it is EXCLUDED from :meth:`Context.structural_key`:
+    caching must never change identity. One instance per compilation session;
+    ``dataclasses.replace`` on a Context carries the same instance forward, so a tune run's
+    trajectories share it, while a fresh Context starts cold.
+
+    Sits BELOW the search policies (the one consumer today is the schedule pool cache in
+    ``lowering/tile/_schedule``), so greedy and MCTS share hits without knowing the cache
+    exists. Only evidence-independent payloads belong here — a policy's CONCLUSIONS (a deploy
+    pick, a ranking) must never be stored, since evidence moves under a tune. Payloads must be
+    immutable; the owner asserts that at ``put`` time."""
+
+    def __init__(self, cap: int = 8) -> None:
+        self.cap = cap
+        self._store: OrderedDict[str, object] = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> object | None:
+        found = self._store.get(key)
+        if found is None:
+            self.misses += 1
+            return None
+        self._store.move_to_end(key)
+        self.hits += 1
+        return found
+
+    def put(self, key: str, value: object) -> None:
+        self._store[key] = value
+        self._store.move_to_end(key)
+        while len(self._store) > self.cap:
+            self._store.popitem(last=False)
 
 
 @dataclass(frozen=True)
@@ -148,6 +184,10 @@ class Context:
     # tier's subset), so a per-op contradiction is a pruned branch, not an error. NOT
     # in ``structural_key`` (it changes no codegen, only whether a contradiction raises).
     validate_pins: bool = True
+    # The session memo (:class:`SessionCache`) — ambient, mutable-inside, shared across
+    # ``dataclasses.replace`` copies. NOT in ``structural_key`` and ``compare=False``:
+    # caching must never change identity or context equality.
+    session_cache: SessionCache = field(default_factory=SessionCache, compare=False, repr=False)
 
     @classmethod
     def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None) -> Context:

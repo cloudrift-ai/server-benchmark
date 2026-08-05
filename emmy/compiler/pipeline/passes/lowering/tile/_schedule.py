@@ -63,6 +63,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import product
 from math import prod
+from types import MappingProxyType
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
@@ -88,7 +89,7 @@ from emmy.compiler.ir.tile.ir import is_contraction, operand_body
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled, stream_pair
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
-from emmy.compiler.pipeline.knob import canonical_row_key, family_of, values_equal
+from emmy.compiler.pipeline.knob import canonical_row_key, family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction, make_cone
@@ -107,6 +108,7 @@ from emmy.compiler.pipeline.search.space import (
     twisted_warp_moves,
     warp_tile_moves,
 )
+from emmy.compiler.structural import digest
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +181,33 @@ def _hint_extent(ax) -> int:
     """An axis's static extent, or its ``Dim`` hint when symbolic."""
     e = ax.extent
     return e.as_static() if e.is_static else (e.hint or DEFAULT_SEQ_HINT)
+
+
+def _hint_fingerprint(tile: TileOp) -> tuple[int, ...]:
+    """The hint-resolved extents of the term's SYMBOLIC axes, in walk order. ``Dim.hint`` is
+    deliberately excluded from identity (``Op.cache_key`` stays hint-independent), but the
+    enumeration SIZES against it (:func:`_hint_extent` → the free-cell cap, the coop bands), so
+    the pool cache's key must carry it — two same-key ops traced at different ``--seq-len``
+    hints enumerate different pools."""
+    out: list[int] = []
+
+    def note(ax) -> None:
+        if ax is not None and not ax.extent.is_static:
+            out.append(_hint_extent(ax))
+
+    def walk(node) -> None:
+        if not isinstance(node, Fold):
+            return
+        note(node.axis)
+        for e in node.operands:
+            walk(e)
+        for s in node.lift.body:
+            walk(s)
+
+    for a in tile.place.free:
+        note(a)
+    walk(tile.op)
+    return tuple(out)
 
 
 def _free_cells(place: Placement) -> int:
@@ -1511,26 +1540,30 @@ def _term_rows(term: _Term, work: Workers | None, rasters: list[str], spelled: s
     return out
 
 
-def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], dict]:
+def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], list[tuple], list[tuple[int, _Row]]]:
     """Every legal schedule row across the term READINGS, in the site value grammar, plus the fork's
-    site keys and the row → reading map materialization dispatches on. An empty result is the
-    guardrail contract, never a raise: the caller leaves the term unmapped.
+    site keys, each row's identity (``canonical_row_key``) and its origin — the READING INDEX and
+    resolved slices materialization dispatches on. Origins carry the index, never the ``_Term``:
+    a ``_Term`` binds one op instance, and the pool cache re-binds a cached enumeration to a fresh
+    op's own readings. An empty result is the guardrail contract, never a raise: the caller leaves
+    the term unmapped.
 
     Reading identity must survive into the prior's key space — ``build_fork_tree`` keys leaves on the
     knob dict ALONE, so two readings whose rows spell identically would average two structurally
-    different kernels under one feature row. The map below is keyed on exactly that content
-    (``canonical_row_key``) and a collision RAISES: the fix is an ``S_*`` stamp, never a new knob."""
+    different kernels under one feature row. The identity list below is exactly that content
+    (``canonical_row_key``) and a cross-reading collision RAISES: the fix is an ``S_*`` stamp, never
+    a new knob."""
     keys = _union_keys(terms)
     #: Every key the union spells, decided-empty — a reading lacking a site stamps the empty there.
     empty = {k: "" for k in keys}
     rows: list[dict] = []
-    origin: list[tuple[_Term, _Row]] = []
+    origin: list[tuple[int, _Row]] = []
     for work in _inventories(terms):
         spelled = work.spell() if work is not None else ""
-        for term in terms:
+        for reading, term in enumerate(terms):
             for row, resolved in _term_rows(term, work, _raster_values(term), spelled):
                 rows.append({**empty, **row})
-                origin.append((term, resolved))
+                origin.append((reading, resolved))
         if len(rows) > MAX_ROWS:
             raise ValueError(
                 f"schedule enumeration for {terms[0].tile.name!r} exceeds the {MAX_ROWS}-row budget "
@@ -1538,12 +1571,13 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], dict]:
                 f"narrow a catalog or add the legality predicate that bounds it, never truncate."
             )
     keys, rows = _decided(keys, rows)
-    owner: dict[tuple, tuple[_Term, _Row]] = {}
-    for row, (term, resolved) in zip(rows, origin, strict=True):
-        ident = canonical_row_key(row)
-        if owner.setdefault(ident, (term, resolved))[0] is not term:
+    idents = [canonical_row_key(row) for row in rows]
+    first: dict[tuple, int] = {}
+    for i, ident in enumerate(idents):
+        j = first.setdefault(ident, i)
+        if origin[j][0] != origin[i][0]:
             raise ValueError(
-                f"two readings of {term.tile.name!r} spell the SAME row {dict(ident)} — reading identity must "
+                f"two readings of {terms[0].tile.name!r} spell the SAME row {dict(ident)} — reading identity must "
                 f"survive into the prior's key space; distinguish them with an S_* stamp, never a new knob key."
             )
     for term in terms:
@@ -1551,10 +1585,11 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], dict]:
             raise term.pin_error  # NO inventory could spell the pin — a pin names a specific kernel
     if any(term.warp_eligible for term in terms):
         # ``S_``-prefixed — not a schedule family, so tile identity and prefix-consistency are
-        # untouched; it prices "a scalar tile where tensor cores were on offer".
+        # untouched (``canonical_row_key`` reads the tuning-knob view, so ``idents`` holds); it
+        # prices "a scalar tile where tensor cores were on offer".
         for row in rows:
             row["S_warp_eligible"] = 1.0
-    return rows, keys, owner
+    return rows, keys, idents, origin
 
 
 def _decided(keys: list[str], rows: list[dict]) -> tuple[list[str], list[dict]]:
@@ -1917,7 +1952,80 @@ def _stage_of(term: _Term, node, plan: TilePlan, spec: str) -> Stage | None:
     return _resolve_stage(term, node, plan.placed_on(term.place), Stage.parse(spec))
 
 
-# ---- the entry point ----------------------------------------------------------------------------- #
+# ---- the pool cache and the entry point ---------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _Pool:
+    """One term's enumerated schedule pool — everything :func:`schedule` derives that is
+    OP-INDEPENDENT: the fork's site keys, the rows, each row's identity and its origin (reading
+    index + resolved slices). Shared through ``ctx.session_cache`` across ops with equal
+    ``cache_key`` and across tune trajectories (the pipeline re-runs ``020_schedule`` per
+    trajectory), so it sits BELOW the search policies: greedy and MCTS hit it alike, and it holds
+    NO ranking and consults NO evidence — only what evidence cannot change belongs here.
+
+    Two invariants make the sharing sound, both enforced at :meth:`build`: rows are read-only
+    mappings (every consumer that mutates already copies — ``_Leaf``, the greedy row merge), and
+    no cached slice carries a placement binding (α-equal ops may name their axes differently, so
+    an axis-bound plan from one op materialized into another is silent cross-op corruption)."""
+
+    keys: tuple[str, ...]
+    rows: tuple
+    idents: tuple
+    origin: tuple
+    n_readings: int
+
+    @classmethod
+    def build(cls, rows: list[dict], keys: list[str], idents: list[tuple], origin: list[tuple[int, _Row]], n_readings: int) -> _Pool:
+        for _, resolved in origin:
+            for plan in (*resolved.plans.values(), *resolved.slices.values()):
+                assert getattr(plan, "axes", None) is None, f"cached slice carries a placement binding: {plan!r}"
+        return cls(tuple(keys), tuple(MappingProxyType(r) for r in rows), tuple(idents), tuple(origin), n_readings)
+
+
+def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
+    """The operand dtypes as the enumeration reads them — each term ``Load``'s buffer dtype in
+    first-use walk order, plus the output dtypes. NAME-FREE (a buffer's graph id never enters),
+    so two same-shape kernels still share a pool, while an f16 and an f32 trace of one shape —
+    equal terms, different atom eligibility — key apart. Explicit rather than via the stamped
+    ``S_dtype_*`` knobs because not every path that reaches scheduling carries the stamps."""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def note_stmt(s) -> None:
+        if isinstance(s, Fold):
+            walk(s)
+            return
+        if isinstance(s, Load) and s.input not in seen:
+            seen.add(s.input)
+            t = tile.inputs.get(s.input)
+            out.append(str(t.dtype) if t is not None else "?")
+        for b in s.nested():
+            for c in b:
+                note_stmt(c)
+
+    def walk(node) -> None:
+        if not isinstance(node, Fold):
+            return
+        for e in node.operands:
+            note_stmt(e)
+        for s in node.lift.body:
+            note_stmt(s)
+
+    walk(tile.op)
+    return (*out, "->", *(str(t.dtype) for t in tile.outputs.values()))
+
+
+def _pool_key(tile: TileOp) -> str:
+    """The pool cache key — everything the enumeration reads that the Context does not pin.
+    ``tile.cache_key()`` covers the term (the bottom-up ``structural_key``) and the knobs; the
+    three identity-excluded inputs are folded in explicitly — the operand/output dtypes
+    (:func:`_dtype_fingerprint` — the atom-eligibility input the term deliberately omits), the
+    symbolic-axis hints (:func:`_hint_fingerprint`) and the live env pins
+    (:func:`schedule_pin_fingerprint`). The ctx facts (target, smem cap, TMA, the f16acc gate)
+    need no key part: the cache lives ON the Context, so one instance never spans two fact
+    sets."""
+    return digest(tile.cache_key(), _dtype_fingerprint(tile), _hint_fingerprint(tile), schedule_pin_fingerprint())
 
 
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] | TileOp:
@@ -1926,23 +2034,40 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     Returns the lazy fork tree over the enumerated rows (levels ``[WORK, *site keys, RASTER]`` — the
     kernel-global worker inventory leads, so every deeper prefix row is self-decoding; the
     launch-order codec closes), a single ``TileOp`` when the space collapses to one row, or ``[]``
-    when nothing is enumerable (the guardrail contract — the caller leaves the term unmapped)."""
-    rows, keys, owner = _enumerate(_readings(tile, ctx))
-    if not rows:
+    when nothing is enumerable (the guardrail contract — the caller leaves the term unmapped; an
+    empty pool is cached too, so the guardrail answers from the memo on repeat).
+
+    The enumeration itself is memoized in ``ctx.session_cache`` (:class:`_Pool`): the rows are a
+    pure function of ``(term, ctx, pins, hints)``, so N same-shape ops — and every tune trajectory
+    after the first — pay one enumeration. Only the READINGS re-bind per op (:func:`_readings` is
+    cheap), so materialization always stamps against THIS op's placement and stores."""
+    terms = _readings(tile, ctx)
+    cache = getattr(ctx, "session_cache", None)
+    key = _pool_key(tile) if cache is not None else None
+    pool = cache.get(key) if cache is not None else None
+    if pool is None:
+        rows, keys, idents, origin = _enumerate(terms)
+        pool = _Pool.build(rows, keys, idents, origin, len(terms))
+        if cache is not None:
+            cache.put(key, pool)
+    assert pool.n_readings == len(terms), "a cached pool must re-bind to the same reading list its enumeration produced"
+    if not pool.rows:
         return []
+
+    owner = {ident: (terms[reading], resolved) for ident, (reading, resolved) in zip(pool.idents, pool.origin, strict=True)}
 
     def materialize(row: dict) -> TileOp:
         term, resolved = owner[canonical_row_key(row)]
         return _materialize(term, resolved, row, name, knobs)
 
-    if len(rows) == 1:
-        return materialize(rows[0])
+    if len(pool.rows) == 1:
+        return materialize(pool.rows[0])
 
     def _level(key: str) -> Level:
         return Level((key,), key=lambda r: (r.get(key, ""),))
 
-    levels = [_level(WORK.name), *(_level(k) for k in keys), _level(RASTER.name)]
-    return build_fork_tree(params=rows, levels=levels, materialize=materialize)
+    levels = [_level(WORK.name), *(_level(k) for k in pool.keys), _level(RASTER.name)]
+    return build_fork_tree(params=list(pool.rows), levels=levels, materialize=materialize)
 
 
 __all__ = ["FAMILIES", "MAX_ROWS", "schedule"]

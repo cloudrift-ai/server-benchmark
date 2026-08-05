@@ -2016,7 +2016,7 @@ def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
     return (*out, "->", *(str(t.dtype) for t in tile.outputs.values()))
 
 
-def _pool_key(tile: TileOp) -> str:
+def pool_key(tile: TileOp) -> str:
     """The pool cache key — everything the enumeration reads that the Context does not pin.
     ``tile.cache_key()`` covers the term (the bottom-up ``structural_key``) and the knobs; the
     three identity-excluded inputs are folded in explicitly — the operand/output dtypes
@@ -2043,7 +2043,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     cheap), so materialization always stamps against THIS op's placement and stores."""
     terms = _readings(tile, ctx)
     cache = getattr(ctx, "session_cache", None)
-    key = _pool_key(tile) if cache is not None else None
+    key = pool_key(tile) if cache is not None else None
     pool = cache.get(key) if cache is not None else None
     if pool is None:
         rows, keys, idents, origin = _enumerate(terms)
@@ -2070,4 +2070,4 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     return build_fork_tree(params=list(pool.rows), levels=levels, materialize=materialize)
 
 
-__all__ = ["FAMILIES", "MAX_ROWS", "schedule"]
+__all__ = ["FAMILIES", "MAX_ROWS", "pool_key", "schedule"]

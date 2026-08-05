@@ -368,6 +368,13 @@ one batched `predict`, invariant to the tree's level order. Cold, the `OfflinePr
 they match and only the golden-less forks fall to option-0 (first leaf, emission order).
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
+**And it flattens each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
+factory call — one compile attempt; never the shared `SessionCache`, which would hand MCTS cached picks): the memo
+keys on the schedule `pool_key` (the dtype / hint / pin discriminators op identity excludes) plus the node's
+blocklist content, so N same-shape kernels flatten-and-score once and the rest replay by descending the lazy tree's
+level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
+while a validate-retry with a blocked tile is a different key and re-decides.
+
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
 same-featurized siblings identically (the offline `D_*` geometry doesn't separate an `f2x4` from an `f4x2` fragment or
 the `bk` variants — 8 exact ties at the gemma-4 m16 mlp_down/o_proj forks), and one measured row / one golden prefix

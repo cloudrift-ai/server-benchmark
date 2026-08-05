@@ -147,6 +147,52 @@ def _leaf_knobs(leaf: object) -> dict:
     return dict(getattr(leaf, "knobs", None) or {}) if not isinstance(leaf, Graph) else {}
 
 
+def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
+    """The decision memo's key for one schedule fork, or ``None`` where the memo does not apply.
+
+    GREEDY-ONLY and scoped to one factory call (one compile attempt), because a decision is a
+    CONCLUSION over evidence — MCTS must explore, and evidence may move between attempts. Within
+    one attempt the pick is deterministic, so N same-shape kernels — 28 identical per-layer
+    matmuls — decide once and the rest replay by tree descent instead of a flatten-and-score.
+
+    ``TileOp``-rooted forks only, keyed on the scheduler's own ``pool_key``: it carries the
+    dtype / hint / pin discriminators op identity deliberately excludes, so the memo can never
+    serve a twin with different atom eligibility (the pool cache's f16-serves-f32 hazard, same
+    class). The rule identity separates two forks offered on one op, and the node's blocklist
+    CONTENT keys the validate-retry path — a retry with a blocked tile is a different decision."""
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+
+    if not isinstance(fp.root_op, TileOp):
+        return None
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import pool_key  # noqa: PLC0415
+
+    rule = fp.match.rule
+    node_blocked = blocked.get(fp.node_id) if blocked else None
+    return (
+        getattr(getattr(rule, "pass_", None), "name", None),
+        getattr(rule, "name", None),
+        pool_key(fp.root_op),
+        frozenset(node_blocked) if node_blocked else frozenset(),
+    )
+
+
+def _find_decided_leaf(options: list, want: dict) -> object | None:
+    """The leaf carrying exactly the memoized row ``want`` — replayed by DESCENDING the lazy fork
+    tree: a branch expands only when every knob it pins matches the row, so the walk instantiates
+    O(path × siblings) Forks, never the flat leaf set (the descent ``build_fork_tree`` was built
+    for, which the scoring pass cannot use because it must rank complete rows). ``None`` when no
+    leaf matches — emission drift between two offers of one key — and the caller re-decides."""
+    for o in options:
+        if isinstance(o, Fork) and not o.is_leaf:
+            if all(want.get(name) == value for name, value in o.knobs.items()):
+                found = _find_decided_leaf(o.expand(), want)
+                if found is not None:
+                    return found
+        elif _leaf_knobs(o) == want:
+            return o
+    return None
+
+
 def _leaf_op(leaf: object):
     """The concrete ``Op`` behind a flattened leaf, or ``None``. Reads
     ``OptionFork.option`` rather than firing ``expand()`` — a planner tree
@@ -704,6 +750,10 @@ def greedy_decide(
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     memo: dict[str, float | None] = {}  # Op.cache_key → predicted µs (None = unpriceable)
+    #: The DECISION memo (:func:`_decision_key` → the winning row + its price) — same lifetime as
+    #: the price memo, one compile attempt. A repeat offer replays by :func:`_find_decided_leaf`
+    #: descent; only genuinely new (key, blocklist) states pay the flatten-and-score.
+    decisions: dict[tuple, tuple[dict, float | None]] = {}
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     # Lazily-built per-compile DB evidence index (needs a fork point's ctx for the
@@ -723,6 +773,13 @@ def greedy_decide(
         if not loaded:
             loaded = True
             the_prior = _load_prior_safe()
+        dkey = _decision_key(fp, blocked)
+        if dkey is not None and dkey in decisions:
+            want, price = decisions[dkey]
+            found = _find_decided_leaf(fp.options, want)
+            if found is not None:
+                fp.score = price
+                return found
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
@@ -752,6 +809,8 @@ def greedy_decide(
                         price,
                     )
                     fp.score = price
+                    if dkey is not None:
+                        decisions[dkey] = (dict(live[best_i][1]), price)
                     return live[best_i][0]
             return _first_leaf(fp.options[0])  # no realizable golden → emission order
         # Flatten: greedy benches nothing, so it must pick the globally best
@@ -826,6 +885,8 @@ def greedy_decide(
             best_i = min(range(len(rows)), key=lambda i: (s[i], canonical_row_key(rows[i])))
             price = s[best_i]
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
+        if dkey is not None:
+            decisions[dkey] = (dict(live[best_i][1]), price)
         return live[best_i][0]
 
     return decide

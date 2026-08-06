@@ -49,7 +49,10 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
 
     ``baked_hf_home``: the image's own HF cache path, when it ships one (see
     ``_baked_hf_cache``). Setting HF_HOME on such an image would hide the snapshot it
-    baked in, so the override is dropped and the image's own value stands.
+    baked in, so the override is dropped and the image's own value stands — UNLESS the
+    engine args name a model beyond the baked one (a ``--speculative-config`` drafter):
+    the baked cache holds only the one snapshot and the image pins ``HF_HUB_OFFLINE=1``,
+    so the extra model can resolve only from the host cache, and the override returns.
     """
     llm = recipe.engine.llm
     model_name = recipe.model_name
@@ -61,7 +64,8 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
     engine_args = build_engine_args(llm, model_name)
     command_str = "\n      ".join(engine_args)
     extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
-    hf_home_line = "" if baked_hf_home else f"\n      - HF_HOME={model_dir}"
+    needs_extra_model = any("--speculative-config" in a for a in engine_args)
+    hf_home_line = "" if baked_hf_home and not needs_extra_model else f"\n      - HF_HOME={model_dir}"
     docker_options_lines = _render_docker_options(llm.docker_options)
 
     is_amd = recipe.deploy.gpu is not None and recipe.deploy.gpu.startswith("AMD")

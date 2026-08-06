@@ -16,19 +16,23 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 
 
-def apply_load_ops(source: np.ndarray, load_ops: tuple) -> np.ndarray:
+def apply_load_ops(source: np.ndarray, load_ops: tuple, dtype: str | None = None) -> np.ndarray:
     """Run ``load_ops`` over ``source`` using the NumPy backend.
 
     Builds a tiny single-input graph and dispatches it through the
     default ``Backend.run`` interpreter. Each load op must already have
     a working ``Op.forward`` (true for ``TransposeOp`` / ``ReshapeOp``
     by construction — those are the only ops the fold pass produces).
+
+    ``dtype`` overrides the chain's tensor dtype token — needed for
+    bits-carrier sources (an fp8 constant's raw uint8 bits), whose numpy
+    dtype name (``uint8``) is not a registered ``DataType``.
     """
     if not load_ops:
         return np.ascontiguousarray(source)
 
     g = Graph()
-    src_dtype = str(source.dtype)
+    src_dtype = dtype or str(source.dtype)
     in_id = g.add_node(op=InputOp(), inputs=[], output=Tensor("src", tuple(source.shape), src_dtype))
     g.inputs.append(in_id)
 

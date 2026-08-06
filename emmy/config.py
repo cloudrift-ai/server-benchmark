@@ -57,6 +57,7 @@ GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
+FP8_EXPAND = "EMMY_FP8_EXPAND"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -272,6 +273,16 @@ def set_readable(on: bool, *, overwrite: bool = False) -> None:
     to default readability ON without clobbering ``EMMY_READABLE=0``."""
     if overwrite or READABLE not in os.environ:
         os.environ[READABLE] = "1" if on else "0"
+
+
+def fp8_expand() -> bool:
+    """``EMMY_FP8_EXPAND`` — expand quantized weight constants into the in-graph
+    dequant cone (M2 of the FP8 plan) instead of M1's bind-time dequant. OFF by
+    default, deliberately: until the kernel transport realizes the decode cast
+    (M2b), the in-graph cone recomputes the dequant every forward, de-optimizing
+    quantized models vs the one-time bind-time dequant. Off is bit-identical to
+    M1; on is the M2 development path."""
+    return _bool(FP8_EXPAND)
 
 
 def dump_dir() -> Path | None:

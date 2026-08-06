@@ -87,7 +87,9 @@ def _candidate_keys(source_path: str) -> list[str]:
     return [c for c in cands if not (c in seen or seen.add(c))]
 
 
-def _read_shard(shard_path: str, keys: list[str], sources: dict[str, np.ndarray]) -> dict[str, str]:
+def _read_shard(
+    shard_path: str, keys: list[str], sources: dict[str, np.ndarray], bits_keys: frozenset[str] = frozenset()
+) -> dict[str, str]:
     """Read ``keys`` from one shard into ``sources``, decoding fp8 tensors to f32 values.
 
     safetensors' numpy framework has no fp8 carrier (numpy lacks a float8 dtype;
@@ -99,6 +101,11 @@ def _read_shard(shard_path: str, keys: list[str], sources: dict[str, np.ndarray]
     tensors (the unquantized modules of a quantized checkpoint — embeddings,
     norms) take the same torch route, read as f32 values (the loader's value
     dtype for bf16). Everything else keeps the numpy path bit-identical.
+
+    ``bits_keys`` names fp8-stored keys whose CONSUMING constant carries an f8
+    graph dtype (M2's expanded form) — those bind the RAW uint8 bit pattern, no
+    LUT decode, no scale; the graph's own dequant cone owns the value semantics.
+    Every other fp8 key decodes to f32 values as before.
 
     Returns the fp8 keys read, ``{key: canonical fp8 token}`` — how callers
     tell a decoded-fp8 array from a natively-float one after the read.
@@ -122,7 +129,8 @@ def _read_shard(shard_path: str, keys: list[str], sources: dict[str, np.ndarray]
 
         with safe_open(shard_path, framework="pt") as ft:
             for k, fmt in fp8.items():
-                sources[k] = decode_f8(ft.get_tensor(k).view(torch.uint8).numpy(), fmt)
+                bits = ft.get_tensor(k).view(torch.uint8).numpy()
+                sources[k] = bits if k in bits_keys else decode_f8(bits, fmt)
             for k in bf16:
                 sources[k] = ft.get_tensor(k).float().numpy()
     return fp8
@@ -152,12 +160,21 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
     read — scale applied to the decoded values, result cast to the constant's
     traced compute dtype — BEFORE the ``load_ops`` chain runs, so the chain (and
     everything downstream) sees an ordinary tensor at the promised dtype/shape.
+
+    A spec-LESS constant whose graph dtype is an f8 dtype binds RAW BITS (uint8
+    carrier, no LUT decode, no scale): that is the M2 expanded form, where the
+    graph's own dequant cone consumes the bits and the expansion already moved
+    the spec's scale onto a separate constant. Decode-to-values applies only
+    when the graph wants a non-f8 dtype from fp8 storage.
     """
     model_dir = _resolve_model_dir(model_id_or_path)
     index = _build_index(model_dir)
 
+    f8_dtypes = set(F8_SAFETENSORS_DTYPES.values())
     needed: dict[str, list[str]] = {}  # shard path → list of keys
     resolved: dict[str, tuple[str, ...]] = {}  # node_id → safetensors key(s); >1 = source_parts concat
+    bits_nodes: set[str] = set()  # node_id → bind raw fp8 bits (see docstring)
+    bits_keys: set[str] = set()  # the safetensors keys those nodes resolve to
     for nid, op in graph.loadable_constants():
         paths = [p for p, _shape in op.source_parts] if op.source_parts else [op.source_path]
         keys: list[str] = []
@@ -171,12 +188,15 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
                 logger.warning("safetensors loader: no key matched for %s (source_path=%r)", nid, path)
         if len(keys) == len(paths):  # all-or-nothing: a partial concat would bind garbage
             resolved[nid] = tuple(keys)
+            if op.quant is None and graph.nodes[nid].output.dtype.name in f8_dtypes:
+                bits_nodes.add(nid)
+                bits_keys.update(keys)
         if op.quant is not None and op.quant.scale_path in index:
             needed.setdefault(str(index[op.quant.scale_path]), []).append(op.quant.scale_path)
 
     sources: dict[str, np.ndarray] = {}
     for shard_path, keys in needed.items():
-        _read_shard(shard_path, keys, sources)
+        _read_shard(shard_path, keys, sources, bits_keys=frozenset(bits_keys))
 
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
@@ -190,5 +210,8 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
                 logger.warning("safetensors loader: scale %r missing for %s; binding undequantized", op.quant.scale_path, nid)
             else:
                 src = dequantize(src, scale, inverse=op.quant.inverse).astype(_value_np_dtype(op.source_dtype), copy=False)
-        out[nid] = apply_load_ops(src, op.load_ops)
+        # A bits-bound constant's chain runs under its f8 dtype token — the raw
+        # uint8 numpy dtype is not a registered DataType.
+        dtype = graph.nodes[nid].output.dtype.name if nid in bits_nodes else None
+        out[nid] = apply_load_ops(src, op.load_ops, dtype=dtype)
     return out

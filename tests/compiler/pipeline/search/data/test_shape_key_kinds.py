@@ -193,3 +193,49 @@ def test_joins_tolerates_sweep_dtype_flip_but_stays_strict_on_contractions():
     mm_fp16 = ShapeKey.from_matmul(512, 512, 512, "fp16")
     mm_fp32 = ShapeKey.from_matmul(512, 512, 512, "fp32")
     assert mm_fp16.joins(mm_fp16) and not mm_fp16.joins(mm_fp32)  # the real twin pair never merges
+
+
+def test_f8_dtype_class_splits_the_storage_twins():
+    """The ``dtype_class`` field (M2a of the FP8 plan): every pre-existing key keeps its
+    identity (``""`` default), an fp8-B key differs from its bf16 twin at the same
+    ``(M, N, K)``, and the two constructors agree on the class."""
+    # Existing-key stability: a pre-M2a key spelled without the field equals the same
+    # key spelled today, and the 16-bit family never stamps a class.
+    assert ShapeKey.from_matmul(512, 4096, 3840, "fp16") == ShapeKey(free_prod=512 * 4096, reduce_max=3840, is_warp=True, free_max=4096)
+    assert ShapeKey.from_matmul(512, 4096, 3840, "bf16").dtype_class == ""
+    # fp8 splits from the 16-bit twins; f16/bf16 still share one key (same bytes, same atoms).
+    fp8 = ShapeKey.from_matmul(512, 4096, 3840, "fp8")
+    bf16 = ShapeKey.from_matmul(512, 4096, 3840, "bf16")
+    assert fp8.dtype_class == "f8" and fp8.is_warp is True
+    assert fp8 != bf16 and not fp8.joins(bf16)
+    assert ShapeKey.from_matmul(512, 4096, 3840, "fp16") == bf16
+    # Every fp8 spelling names the one class.
+    for spelling in ("fp8", "f8e4m3", "f8e5m2"):
+        assert ShapeKey.from_matmul(512, 4096, 3840, spelling).dtype_class == "f8"
+
+
+def test_f8_key_agrees_between_from_matmul_and_from_s_features():
+    """The op side reads the class off the stamped dtype multiset (``992`` generates
+    ``S_dtype_*`` generically from buffer dtype names, so ``S_dtype_f8e4m3`` stamps with
+    no stamp-side change) and forces ``is_warp`` — the fp8 kernel's f32 scale constant
+    would otherwise flip the dtype-multiset warp signal, the ``"fused"`` hazard again."""
+    s = {
+        "S_ext_free_prod": 512.0 * 4096.0,
+        "S_ext_free_max": 4096.0,
+        "S_ext_reduce_max": 3840.0,
+        "S_ext_n_free_axis": 2.0,
+        "S_ext_n_reduce_axis": 1.0,
+        "S_ext_n_symbolic_axis": 0.0,
+        "S_loop_depth": 3.0,
+        "S_pw_multiply": 1.0,
+        "S_dtype_f8e4m3": 1.0,
+        "S_dtype_f32": 1.0,  # the scale constant's load
+        "S_dtype_f16": 1.0,
+    }
+    got = ShapeKey.from_s_features(s)
+    assert got == ShapeKey.from_matmul(512, 4096, 3840, "fp8")
+    assert got.is_warp is True and got.dtype_class == "f8"
+    # e5m2 storage lands in the same class.
+    s5 = dict(s)
+    s5["S_dtype_f8e5m2"] = s5.pop("S_dtype_f8e4m3")
+    assert ShapeKey.from_s_features(s5).dtype_class == "f8"

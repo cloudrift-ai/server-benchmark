@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from emmy.compiler.dtype import decode_f8
+
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
 # intrinsics (all unary). Every other op name matches a numpy attribute,
@@ -43,6 +45,13 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
+    # fp8 decode casts (M2 of the FP8 plan). The dtype-boundary cast out of an
+    # fp8 tensor cannot be a plain ``copy``: the numpy carrier is uint8 BITS, so
+    # copying would move the bit patterns, not the values — the decode IS the
+    # cast's semantics. CUDA rendering is a later milestone (the fragment-path
+    # ``cvt``); host-side these are the same LUT the bind-time dequant uses.
+    "from_f8e4m3": lambda x: decode_f8(x, "f8e4m3"),
+    "from_f8e5m2": lambda x: decode_f8(x, "f8e5m2"),
 }
 
 

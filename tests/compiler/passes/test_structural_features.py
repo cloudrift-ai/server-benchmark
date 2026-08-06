@@ -233,3 +233,38 @@ def test_matmul_features_differ_from_reduction():
     matmul_skel = {k: v for k, v in structure_features(loops[0].body).items() if not k.startswith("S_ext_")}
     rms_skel = {k: v for k, v in structure_features(_rms_body()).items() if not k.startswith("S_ext_")}
     assert matmul_skel != rms_skel
+
+
+def test_dtype_multiset_stamps_f8_generically():
+    """``S_dtype_*`` is generated from buffer dtype NAMES, so an fp8 buffer stamps
+    ``S_dtype_f8e4m3`` with no stamp-side change — the fp8 storage-class signal
+    ``ShapeKey.from_s_features`` reads (M2a of the FP8 plan)."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (8, 64), "f8e4m3"), node_id="a")
+    feats = structure_features(_rms_body(), g)
+    assert feats["S_dtype_f8e4m3"] == 1.0
+
+
+def test_expanded_fp8_matmul_stamps_the_f8_dtype_feature(monkeypatch):
+    """End to end through the loop dialect: a quantized weight constant expanded by
+    ``180_expand_quantized_constant`` (flag on) fuses its dequant cone into the matmul
+    kernel, whose stamped dtype multiset then carries the fp8 load — the identity the
+    fp8 golden/search keys join on."""
+    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+    from emmy.compiler.ir.base import ConstantOp, QuantSpec  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    spec = QuantSpec(scale_path="layer.weight_scale", scale_shape=(16, 1), scale_dtype="f32")
+    g.add_node(
+        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(16, 8), source_dtype="f16", quant=spec),
+        inputs=[],
+        output=Tensor("w", (16, 8), "f16"),
+        node_id="w",
+    )
+    g.add_node(MatmulOp(), ["x", "w"], Tensor("y", (4, 8), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    _, loops = _fused_loops(g)
+    stamped = [op for op in loops if op.knobs.get("S_dtype_f8e4m3")]
+    assert stamped, "no LoopOp stamped S_dtype_f8e4m3 for the expanded fp8-B matmul"

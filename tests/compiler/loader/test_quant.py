@@ -157,6 +157,18 @@ def test_stamp_pairs_weight_with_scale(tmp_path):
     assert spec == QuantSpec(scale_path="layer.weight_scale", scale_shape=(8, 1), scale_dtype="f32", inverse=False)
 
 
+def test_stamp_records_e5m2_fmt(tmp_path):
+    """``QuantSpec.fmt`` carries the checkpoint's storage format (e4m3 is the
+    default; an e5m2-stored weight must stamp its own token — the M2 expansion
+    types the fp8 constant from it)."""
+    bits = _finite_bits((8, 16))
+    scale = torch.full((8, 1), 0.25, dtype=torch.float32)
+    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, "f8e5m2"), "layer.weight_scale": scale}, _FP8_QC)
+    g = _weight_graph()
+    assert stamp_quant_specs(g, str(tmp_path)) == 1
+    assert g.nodes["p_w"].op.quant.fmt == "f8e5m2"
+
+
 def test_stamp_weight_scale_inv_sets_inverse(tmp_path):
     bits = _finite_bits((8, 16))
     scale = torch.full((1,), 2.0, dtype=torch.float32)
@@ -323,13 +335,29 @@ def test_loader_dequantizes_before_load_ops(tmp_path):
 
 @pytest.mark.parametrize("fmt", ["f8e4m3", "f8e5m2"])
 def test_loader_reads_specless_fp8_as_plain_values(tmp_path, fmt):
-    """An fp8 tensor with NO spec (nothing stamped) still binds — decoded values,
-    no scale — covering both storage formats through the shard reader."""
+    """A spec-less fp8 tensor bound at a NON-f8 graph dtype decodes to values (no
+    scale). Since M2a the decode is dtype-directed: decode-to-values applies only
+    when the graph wants a non-f8 dtype; an f8-dtype constant binds raw bits
+    instead (the expanded form — see the raw-bits test below). This graph traces
+    the weight at f32, so the M1 behavior is unchanged here."""
     bits = _finite_bits((8, 16))
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, fmt)})
     out = load_constants_from_safetensors(_weight_graph(), str(tmp_path))
     ref = torch.from_numpy(bits).view(_TORCH_F8[fmt]).float().numpy()
     np.testing.assert_array_equal(out["p_w"], ref)
+
+
+@pytest.mark.parametrize("fmt", ["f8e4m3", "f8e5m2"])
+def test_loader_binds_f8_dtype_constant_as_raw_bits(tmp_path, fmt):
+    """A spec-less constant whose GRAPH dtype is an f8 dtype binds the raw uint8
+    bit pattern — no LUT decode, no scale. This is the M2 expanded form: the
+    graph's own dequant cone owns the value semantics, so handing over decoded
+    values would double-decode."""
+    bits = _finite_bits((8, 16))
+    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, fmt)})
+    out = load_constants_from_safetensors(_weight_graph(dtype=fmt), str(tmp_path))
+    assert out["p_w"].dtype == np.uint8
+    np.testing.assert_array_equal(out["p_w"], bits)
 
 
 def test_loader_unquantized_checkpoint_unchanged(tmp_path):

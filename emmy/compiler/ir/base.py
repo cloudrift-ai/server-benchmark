@@ -159,7 +159,11 @@ class QuantSpec:
     ``scale_path`` is the scale tensor's key in the checkpoint's safetensors
     index (``<prefix>.weight_scale`` or ``.weight_scale_inv``); ``scale_shape``
     / ``scale_dtype`` its stored layout; ``inverse`` marks ``weight_scale_inv``
-    checkpoints (the loader divides instead of multiplying).
+    checkpoints (the loader divides instead of multiplying). ``fmt`` is the
+    weight's canonical STORAGE dtype token (``f8e4m3`` / ``f8e5m2``, per the
+    checkpoint's safetensors dtype) — what the M2 expansion pass stamps on the
+    fp8 constant it rewrites the weight into; defaults to ``f8e4m3`` so specs
+    serialized before the field existed keep loading.
 
     Granularity is DERIVED, not declared: ``block[i] = weight.shape[i] //
     scale.shape[i]`` — per-tensor (scalar scale), per-out-channel (``(N, 1)``)
@@ -172,6 +176,7 @@ class QuantSpec:
     scale_shape: tuple[int, ...]
     scale_dtype: str
     inverse: bool = False
+    fmt: str = "f8e4m3"
 
 
 @dataclass

@@ -9,6 +9,22 @@ walk; the derived `Fold.role` for the loop annotation the materializer reads), n
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
+## Quantization is not a concept past the decomposition band
+
+A quantized checkpoint is spelled as in-graph algebra at BIRTH (`loader.quant.spell_quantized_constants`, immediately
+post-trace) and dissolved as early as possible: the generic `frontend/decomposition/032_fold_constant_subgraphs` rule
+collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
+(its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
+only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
+`load_ops`. `EMMY_FP8_EXPAND` skips the fold, leaving the cone in-graph for the kernel path. Either way, downstream
+layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`), decode-trait
+elementwise ops (`ElementwiseImpl.decodes`), and graph algebra. They may NEVER know checkpoint formats, scheme names,
+scale pairing, or any quantization metadata — there is none: no shared IR type carries a quant field. The frontend
+band (the birth-time speller + the fold rule + the loader) is the only place quantization-as-a-concept exists, and a
+mechanical gate (`tests/compiler/loader/test_quant.py`) greps the tree for concept leaks. `032`'s decode-trait scope
+is the conservative first instantiation of a general constant-subgraph fold — widening it (folding decode-free
+constant cones that exist in today's models) is gated on kernel-source digest evidence.
+
 ## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its
@@ -192,7 +208,7 @@ How to comply:
   `bind_prologue_contraction` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
   bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
-  nobody designed for (a weight-side dequant cone) is covered for free.
+  nobody designed for (a weight-side decode cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
@@ -266,8 +282,9 @@ failing several passes later:
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The same rule holds on the **B side**:
   a lift whose B operand is a computed cone never falls through to the positional rule (that binding dropped the fp8
-  dequant cone's scale from the kernel). A **k-invariant multiplicative dequant** chain — a storage decode of the
-  (n, k) load times k-invariant factors — binds through the **mul-hoist** (`_atomize._hoist_multiplicative_dequant`):
+  decode cone's scale from the kernel). A **storage decode times k-invariant multiplicative factors** chain — a
+  decode of the (n, k) load ⊗ factors constant along the reduce axis — binds through the **mul-hoist**
+  (`_atomize._hoist_k_invariant_factors`):
   the factors commute out of the fold onto the accumulator in the epilogue (`Σ_k a·(s·w) = s·Σ_k a·w`, the split-K
   reassociation category) and the decode is ABSORBED by the B load's own storage dtype — every consumer converts a
   bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element

@@ -1,6 +1,8 @@
-"""FP8 checkpoint ingestion (``loader.quant`` + the safetensors loader's dequant-on-load):
-LUT decode against torch's float8 ground truth, block-derived scale application,
-quant-spec stamping from a synthetic quantized checkpoint, and end-to-end binding."""
+"""FP8 checkpoint ingestion under the dissolve-early design (``loader.quant`` + the safetensors
+loader): LUT decode against torch's float8 ground truth, block-derived scale application, the
+birth-time spelling of the dequant algebra (``spell_quantized_constants``), the generic
+constant-subgraph fold's bind-time evaluation, and end-to-end binding — plus the mechanical
+gate for the invariant that quantization is not a concept past the decomposition band."""
 
 from __future__ import annotations
 
@@ -10,10 +12,12 @@ import numpy as np
 import pytest
 
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.base import ConstantOp, QuantSpec
-from emmy.compiler.ir.frontend.ir import TransposeOp
-from emmy.compiler.loader.quant import decode_f8, dequantize, stamp_quant_specs
+from emmy.compiler.ir.base import ConstantOp
+from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+from emmy.compiler.pipeline import Pipeline
 
 from ..conftest import requires_cuda
 
@@ -22,6 +26,7 @@ torch = pytest.importorskip("torch")
 rng = np.random.default_rng(11)
 
 _TORCH_F8 = {"f8e4m3": torch.float8_e4m3fn, "f8e5m2": torch.float8_e5m2}
+_FOLD_RULE = "032_fold_constant_subgraphs"
 
 # ===================================================================
 # LUT decode vs torch float8 ground truth
@@ -123,14 +128,15 @@ def _fp8_tensor(bits: np.ndarray, fmt="f8e4m3"):
     return torch.from_numpy(np.ascontiguousarray(bits)).view(_TORCH_F8[fmt])
 
 
-def _weight_graph(shape=(8, 16), dtype="f32", source_path="layer.weight", load_ops=(), out_shape=None):
+def _weight_graph(shape=(8, 16), dtype="f32", source_path="layer.weight"):
     g = Graph()
     g.add_node(
-        op=ConstantOp(name="p_w", source_path=source_path, source_shape=shape, source_dtype=dtype, load_ops=tuple(load_ops)),
+        op=ConstantOp(name="p_w", source_path=source_path, source_shape=shape, source_dtype=dtype),
         inputs=[],
-        output=Tensor("p_w", out_shape or shape, dtype),
+        output=Tensor("p_w", shape, dtype),
         node_id="p_w",
     )
+    g.inputs, g.outputs = [], ["p_w"]
     return g
 
 
@@ -142,72 +148,143 @@ def _finite_bits(shape):
     return bits
 
 
+def _spelled(tmp_path, *, scale_shape=(8, 1), fmt="f8e4m3", inverse=False, dtype="f32", qc=_FP8_QC):
+    """Write a one-weight fp8 checkpoint, spell the graph, return ``(graph, bits, scale)``."""
+    bits = _finite_bits((8, 16))
+    scale = (np.abs(rng.standard_normal(scale_shape)) + 0.5).astype(np.float32) if scale_shape else np.float32(0.25).reshape(())
+    key = "layer.weight_scale_inv" if inverse else "layer.weight_scale"
+    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, fmt), key: torch.from_numpy(np.asarray(scale))}, qc)
+    g = _weight_graph(dtype=dtype)
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    return g, bits, scale
+
+
+def _constants(graph: Graph) -> dict[str, ConstantOp]:
+    return {nid: n.op for nid, n in graph.nodes.items() if isinstance(n.op, ConstantOp)}
+
+
+def _ops_by_type(graph: Graph, op_type) -> list:
+    return [n for n in graph.nodes.values() if isinstance(n.op, op_type)]
+
+
 # ===================================================================
-# Stamping: quantization_config + index pairing → QuantSpec
+# Birth-time spelling: quantization_config + index pairing → in-graph algebra
 # ===================================================================
 
 
-def test_stamp_pairs_weight_with_scale(tmp_path):
-    bits = _finite_bits((8, 16))
-    scale = torch.full((8, 1), 0.25, dtype=torch.float32)
-    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": scale}, _FP8_QC)
-    g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 1
-    spec = g.nodes["p_w"].op.quant
-    assert spec == QuantSpec(scale_path="layer.weight_scale", scale_shape=(8, 1), scale_dtype="f32", inverse=False)
+def test_spell_per_tensor_minimal_broadcast_form(tmp_path):
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(1, 1))
+    consts = _constants(g)
+    w = next(op for op in consts.values() if op.source_path == "layer.weight")
+    assert w.source_dtype == "f8e4m3"  # the bits constant carries the STORAGE dtype
+    scale = next(op for op in consts.values() if op.source_path == "layer.weight_scale")
+    assert scale.source_shape == (1, 1)
+    casts = [n for n in _ops_by_type(g, ElementwiseOp) if n.op.op.name == "from_f8e4m3"]
+    assert len(casts) == 1
+    # Degenerate block: no reshape pair — the scale broadcasts straight onto the weight.
+    assert not _ops_by_type(g, ReshapeOp)
+    assert any(n.op.op.name == "multiply" for n in _ops_by_type(g, ElementwiseOp))
 
 
-def test_stamp_records_e5m2_fmt(tmp_path):
-    """``QuantSpec.fmt`` carries the checkpoint's storage format (e4m3 is the
-    default; an e5m2-stored weight must stamp its own token — the M2 expansion
-    types the fp8 constant from it)."""
-    bits = _finite_bits((8, 16))
-    scale = torch.full((8, 1), 0.25, dtype=torch.float32)
-    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, "f8e5m2"), "layer.weight_scale": scale}, _FP8_QC)
-    g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 1
-    assert g.nodes["p_w"].op.quant.fmt == "f8e5m2"
+def test_spell_per_channel_no_reshape_pair(tmp_path):
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(8, 1))
+    assert not _ops_by_type(g, ReshapeOp)
+    scale_node = next(n for n in g.nodes.values() if isinstance(n.op, ConstantOp) and n.op.source_path == "layer.weight_scale")
+    assert tuple(d.as_static() for d in scale_node.output.shape) == (8, 1)
+    assert not scale_node.op.load_ops  # stored shape == declared shape
 
 
-def test_stamp_weight_scale_inv_sets_inverse(tmp_path):
-    bits = _finite_bits((8, 16))
-    scale = torch.full((1,), 2.0, dtype=torch.float32)
-    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits), "layer.weight_scale_inv": scale}, _FP8_QC)
-    g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 1
-    assert g.nodes["p_w"].op.quant.inverse is True
+def test_spell_2d_block_interleaved_reshape_pair(tmp_path):
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(2, 4))  # derived block (4, 4)
+    shapes = sorted(tuple(int(d) for d in n.op.shape) for n in _ops_by_type(g, ReshapeOp))
+    assert shapes == [(2, 4, 4, 4), (8, 16)]  # blocked view + the reshape back
+    scale_node = next(n for n in g.nodes.values() if isinstance(n.op, ConstantOp) and n.op.source_path == "layer.weight_scale")
+    # The scale binds at the interleaved (grid, 1) layout via its own load_ops reshape.
+    assert tuple(d.as_static() for d in scale_node.output.shape) == (2, 1, 4, 1)
+    assert any(isinstance(lop, ReshapeOp) for lop in scale_node.op.load_ops)
 
 
-def test_stamp_honors_modules_to_not_convert(tmp_path):
+def test_spell_inverse_scale_divides(tmp_path):
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(8, 1), inverse=True)
+    names = [n.op.op.name for n in _ops_by_type(g, ElementwiseOp)]
+    assert "divide" in names and "multiply" not in names
+
+
+def test_spell_e5m2_selects_its_cast(tmp_path):
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(1, 1), fmt="f8e5m2")
+    w = next(op for op in _constants(g).values() if op.source_path == "layer.weight")
+    assert w.source_dtype == "f8e5m2"
+    assert any(n.op.op.name == "from_f8e5m2" for n in _ops_by_type(g, ElementwiseOp))
+
+
+def test_spell_cone_keeps_the_promised_interface(tmp_path):
+    """Interface invariance: whatever the cone spells inside, the graph output tensor is
+    exactly what the trace promised — dtype, shape, and name unchanged."""
+    for i, (scale_shape, dtype) in enumerate([((1, 1), "f32"), ((8, 1), "f16"), ((2, 4), "f32")]):
+        d = tmp_path / str(i)
+        d.mkdir()
+        g, _bits, _scale = _spelled(d, scale_shape=scale_shape, dtype=dtype)
+        out = g.nodes[g.outputs[0]].output
+        assert out.dtype.name == dtype and tuple(d_.as_static() for d_ in out.shape) == (8, 16)
+        assert g.outputs == ["p_w"]  # consumers keep addressing the original node id
+
+
+def test_spell_bits_constant_carries_f8_graph_dtype(tmp_path):
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(8, 1))
+    w_node = next(n for n in g.nodes.values() if isinstance(n.op, ConstantOp) and n.op.source_path == "layer.weight")
+    assert w_node.output.dtype.name == "f8e4m3"
+    assert w_node.op.source_shape == (8, 16)
+
+
+def test_spell_is_idempotent(tmp_path):
+    """A second speller run must not re-spell the bits constant it created (its
+    ``source_dtype`` is the storage token — the idempotency guard)."""
+    g, _bits, _scale = _spelled(tmp_path, scale_shape=(8, 1))
+    nodes_after_first = set(g.nodes)
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == nodes_after_first
+
+
+def test_spell_honors_modules_to_not_convert(tmp_path):
     bits = _finite_bits((8, 16))
     qc = dict(_FP8_QC, modules_to_not_convert=["layer"])
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": torch.ones(1)}, qc)
     g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 0
-    assert g.nodes["p_w"].op.quant is None
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}  # constant left alone
 
 
-def test_stamp_skips_weight_without_scale(tmp_path):
+def test_spell_skips_weight_without_scale(tmp_path):
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(_finite_bits((8, 16)))}, _FP8_QC)
     g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 0
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
 
 
-def test_stamp_skips_non_fp8_weight(tmp_path):
+def test_spell_skips_non_fp8_weight(tmp_path):
     # quantization_config present, but this weight is stored at full precision
-    # (a modules-kept-in-bf16 member) — no spec even with a stray scale tensor.
+    # (a modules-kept-in-bf16 member) — no rewrite even with a stray scale tensor.
     _write_checkpoint(tmp_path, {"layer.weight": torch.ones(8, 16), "layer.weight_scale": torch.ones(1)}, _FP8_QC)
-    assert stamp_quant_specs(_weight_graph(), str(tmp_path)) == 0
+    g = _weight_graph()
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
 
 
-def test_stamp_noop_on_unquantized_checkpoint(tmp_path):
+def test_spell_noop_on_unquantized_checkpoint(tmp_path):
     _write_checkpoint(tmp_path, {"layer.weight": torch.ones(8, 16)})
     g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 0
-    assert g.nodes["p_w"].op.quant is None
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
 
 
-def test_stamp_compressed_tensors_fp8_scheme(tmp_path):
+def test_spell_non_dividing_scale_leaves_constant_alone(tmp_path):
+    _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(_finite_bits((8, 16))), "layer.weight_scale": torch.ones(3, 1)}, _FP8_QC)
+    g = _weight_graph()
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
+
+
+def test_spell_compressed_tensors_fp8_scheme(tmp_path):
     qc = {
         "quant_method": "compressed-tensors",
         "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 8, "strategy": "channel"}}},
@@ -228,32 +305,36 @@ def test_stamp_compressed_tensors_fp8_scheme(tmp_path):
         output=Tensor("p_h", (4, 16), "f32"),
         node_id="p_h",
     )
-    assert stamp_quant_specs(g, str(tmp_path)) == 1  # lm_head ignored
-    assert g.nodes["p_w"].op.quant is not None
-    assert g.nodes["p_h"].op.quant is None
+    g.outputs = ["p_w", "p_h"]
+    assert spell_quantized_constants(g, str(tmp_path)) == 1  # lm_head ignored
+    consts = _constants(g)
+    assert any(op.source_dtype == "f8e4m3" for op in consts.values())
+    assert consts["p_h"].source_dtype == "f32" and "p_h" in g.nodes
 
 
-def test_stamp_compressed_tensors_int_scheme_is_noop(tmp_path):
+def test_spell_compressed_tensors_int_scheme_is_noop(tmp_path):
     qc = {
         "quant_method": "compressed-tensors",
         "config_groups": {"group_0": {"weights": {"type": "int", "num_bits": 8}}},
     }
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(_finite_bits((8, 16))), "layer.weight_scale": torch.ones(1)}, qc)
-    assert stamp_quant_specs(_weight_graph(), str(tmp_path)) == 0
+    assert spell_quantized_constants(_weight_graph(), str(tmp_path)) == 0
 
 
-def test_stamp_honors_regex_ignore(tmp_path):
+def test_spell_honors_regex_ignore(tmp_path):
     qc = {
         "quant_method": "compressed-tensors",
         "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 8}}},
         "ignore": ["re:.*lay.*"],
     }
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(_finite_bits((8, 16))), "layer.weight_scale": torch.ones(1)}, qc)
-    assert stamp_quant_specs(_weight_graph(), str(tmp_path)) == 0
+    assert spell_quantized_constants(_weight_graph(), str(tmp_path)) == 0
 
 
 # ===================================================================
-# Loader: dequant-on-load binding vs the torch dequant reference
+# Loader: spell → fold → bind vs the torch dequant reference (the pre-migration
+# M1 bind-time dequant's recorded expectation — bit-for-bit, same LUT, same f32
+# multiply, same single cast into the compute dtype)
 # ===================================================================
 
 
@@ -268,78 +349,52 @@ def _torch_ref(bits, scale_np, *, fmt="f8e4m3", inverse=False):
     return vals / s if inverse else vals * s
 
 
+def _fold(graph: Graph) -> Graph:
+    return Pipeline.build(["frontend/decomposition"], select=[_FOLD_RULE]).run(graph)
+
+
 @pytest.mark.parametrize(
-    "scale_shape",
-    [(), (8, 1), (2, 4)],
-    ids=["per-tensor", "per-channel", "block"],
+    ("scale_shape", "inverse"),
+    [((), False), ((8, 1), False), ((2, 4), False), ((8, 1), True)],
+    ids=["per-tensor", "per-channel", "block", "inverse"],
 )
-def test_loader_dequantizes_stamped_weight(tmp_path, scale_shape):
-    bits = _finite_bits((8, 16))
-    scale_np = np.asarray(np.abs(rng.standard_normal(scale_shape)) + 0.5, dtype=np.float32)  # () stays a 0-d ndarray
-    _write_checkpoint(
-        tmp_path,
-        {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": torch.from_numpy(scale_np)},
-        _FP8_QC,
-    )
-    g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 1
-    out = load_constants_from_safetensors(g, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale_np))
+def test_loader_binds_folded_weight_bit_identical_to_m1(tmp_path, scale_shape, inverse):
+    g, bits, scale = _spelled(tmp_path, scale_shape=scale_shape, inverse=inverse)
+    folded = _fold(g)
+    assert set(folded.nodes) == {"p_w"}  # the whole cone collapsed into one constant
+    assert folded.nodes["p_w"].op.source_graph is not None
+    out = load_constants_from_safetensors(folded, str(tmp_path))
+    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale, inverse=inverse))
     assert out["p_w"].dtype == np.float32
 
 
-def test_loader_dequantizes_inverse_scale(tmp_path):
-    bits = _finite_bits((8, 16))
-    scale_np = np.full((8, 1), 2.0, dtype=np.float32)
-    _write_checkpoint(
-        tmp_path,
-        {"layer.weight": _fp8_tensor(bits), "layer.weight_scale_inv": torch.from_numpy(scale_np)},
-        _FP8_QC,
-    )
-    g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 1
-    out = load_constants_from_safetensors(g, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale_np, inverse=True))
-
-
 def test_loader_casts_to_traced_compute_dtype(tmp_path):
-    bits = _finite_bits((8, 16))
-    scale_np = np.array([[0.75]], dtype=np.float32)
-    _write_checkpoint(
-        tmp_path,
-        {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": torch.from_numpy(scale_np)},
-        _FP8_QC,
-    )
-    g = _weight_graph(dtype="f16")
-    stamp_quant_specs(g, str(tmp_path))
-    out = load_constants_from_safetensors(g, str(tmp_path))
+    g, bits, scale = _spelled(tmp_path, scale_shape=(1, 1), dtype="f16")
+    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
     assert out["p_w"].dtype == np.float16
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale_np).astype(np.float16))
+    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale).astype(np.float16))
 
 
-def test_loader_dequantizes_before_load_ops(tmp_path):
-    """Dequant happens when the SOURCE is read, before the ``load_ops`` chain: a
-    per-channel scale applied after the fold's transpose would mis-broadcast."""
-    bits = _finite_bits((8, 16))
-    scale_np = (np.abs(rng.standard_normal((8, 1))) + 0.5).astype(np.float32)
-    _write_checkpoint(
-        tmp_path,
-        {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": torch.from_numpy(scale_np)},
-        _FP8_QC,
-    )
-    g = _weight_graph(load_ops=(TransposeOp(axes=(1, 0)),), out_shape=(16, 8))
-    stamp_quant_specs(g, str(tmp_path))
-    out = load_constants_from_safetensors(g, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale_np).T)
+def test_loader_applies_trailing_load_ops_after_the_record(tmp_path):
+    """A layout chain folded onto the constant AFTER the record (what ``050``/``060`` append)
+    runs on the EVALUATED result — a per-channel scale applied after the transpose would
+    mis-broadcast."""
+    from dataclasses import replace
+
+    g, bits, scale = _spelled(tmp_path, scale_shape=(8, 1))
+    folded = _fold(g)
+    node = folded.nodes["p_w"]
+    node.op = replace(node.op, load_ops=(TransposeOp(axes=(1, 0)),))
+    node.outputs = (Tensor("p_w", (16, 8), "f32"),)
+    out = load_constants_from_safetensors(folded, str(tmp_path))
+    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale).T)
 
 
 @pytest.mark.parametrize("fmt", ["f8e4m3", "f8e5m2"])
-def test_loader_reads_specless_fp8_as_plain_values(tmp_path, fmt):
-    """A spec-less fp8 tensor bound at a NON-f8 graph dtype decodes to values (no
-    scale). Since M2a the decode is dtype-directed: decode-to-values applies only
-    when the graph wants a non-f8 dtype; an f8-dtype constant binds raw bits
-    instead (the expanded form — see the raw-bits test below). This graph traces
-    the weight at f32, so the M1 behavior is unchanged here."""
+def test_loader_reads_fp8_at_value_dtype_as_plain_values(tmp_path, fmt):
+    """An fp8-stored tensor bound at a NON-f8 graph dtype decodes to values (no scale) —
+    the decode is dtype-directed. This graph traces the weight at f32 with no
+    quantization_config, so nothing is spelled and the tensor reads as values."""
     bits = _finite_bits((8, 16))
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, fmt)})
     out = load_constants_from_safetensors(_weight_graph(), str(tmp_path))
@@ -349,10 +404,9 @@ def test_loader_reads_specless_fp8_as_plain_values(tmp_path, fmt):
 
 @pytest.mark.parametrize("fmt", ["f8e4m3", "f8e5m2"])
 def test_loader_binds_f8_dtype_constant_as_raw_bits(tmp_path, fmt):
-    """A spec-less constant whose GRAPH dtype is an f8 dtype binds the raw uint8
-    bit pattern — no LUT decode, no scale. This is the M2 expanded form: the
-    graph's own dequant cone owns the value semantics, so handing over decoded
-    values would double-decode."""
+    """A constant whose GRAPH dtype is an f8 dtype binds the raw uint8 bit pattern — no LUT
+    decode, no scale. This is the in-graph decode-cone form (``EMMY_FP8_EXPAND``): the graph's
+    own algebra owns the value semantics, so handing over decoded values would double-decode."""
     bits = _finite_bits((8, 16))
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, fmt)})
     out = load_constants_from_safetensors(_weight_graph(dtype=fmt), str(tmp_path))
@@ -365,25 +419,42 @@ def test_loader_unquantized_checkpoint_unchanged(tmp_path):
     w = rng.standard_normal((8, 16)).astype(np.float32)
     _write_checkpoint(tmp_path, {"layer.weight": torch.from_numpy(w)})
     g = _weight_graph()
-    assert stamp_quant_specs(g, str(tmp_path)) == 0
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
     np.testing.assert_array_equal(load_constants_from_safetensors(g, str(tmp_path))["p_w"], w)
 
 
 # ===================================================================
-# QuantSpec serialization round-trip
+# source_graph serialization round-trip
 # ===================================================================
 
 
-def test_quant_spec_survives_graph_json_roundtrip():
-    g = _weight_graph()
-    spec = QuantSpec(scale_path="layer.weight_scale", scale_shape=(2, 4), scale_dtype="f32", inverse=True)
-    g.nodes["p_w"].op.quant = spec
-    g2 = Graph.from_dict(json.loads(json.dumps(g.to_dict())))
-    assert g2.nodes["p_w"].op.quant == spec
+def test_source_graph_survives_graph_json_roundtrip(tmp_path):
+    g, bits, scale = _spelled(tmp_path, scale_shape=(2, 4))
+    folded = _fold(g)
+    g2 = Graph.from_dict(json.loads(json.dumps(folded.to_dict())))
+    record = g2.nodes["p_w"].op.source_graph
+    assert record is not None and set(record.outputs) <= set(record.nodes)
+    out = load_constants_from_safetensors(g2, str(tmp_path))
+    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale))
+
+
+def test_source_graph_structural_key_is_deterministic(tmp_path):
+    """Two independent spell+fold builds of the same checkpoint digest identically — a nested
+    ``Graph`` field must key by structure, never by object identity — and the record's own key
+    survives a JSON round-trip (persisted-IR form: the fold clears live-engine op state)."""
+    g1, _b, _s = _spelled(tmp_path, scale_shape=(8, 1))
+    folded = _fold(g1)
+    k1 = folded.structural_key()
+    g2 = _weight_graph()
+    assert spell_quantized_constants(g2, str(tmp_path)) == 1
+    assert _fold(g2).structural_key() == k1
+    record = folded.nodes["p_w"].op.source_graph
+    roundtrip = Graph.from_dict(json.loads(json.dumps(folded.to_dict()))).nodes["p_w"].op.source_graph
+    assert roundtrip.structural_key() == record.structural_key()
 
 
 # ===================================================================
-# Dequantized state dict + quantized-checkpoint detection
+# Dequantized state dict + quantized-checkpoint detection (the eager twin)
 # ===================================================================
 
 
@@ -472,9 +543,17 @@ def _tiny_fp8_checkpoint(dirpath):
     return config, ref_sd
 
 
+def _f8_constants(graph: Graph) -> dict[str, ConstantOp]:
+    return {
+        nid: n.op
+        for nid, n in graph.nodes.items()
+        if isinstance(n.op, ConstantOp) and getattr(n.output.dtype, "name", "") in ("f8e4m3", "f8e5m2")
+    }
+
+
 def test_trace_model_unquantized_checkpoint_takes_existing_path(tmp_path):
     """The same seam on an UNQUANTIZED checkpoint: detection returns None, the model
-    loads through the pre-existing ``from_pretrained`` branch, and zero specs stamp."""
+    loads through the pre-existing ``from_pretrained`` branch, and nothing is spelled."""
     transformers = pytest.importorskip("transformers")
     config = transformers.LlamaConfig(
         vocab_size=128,
@@ -492,29 +571,32 @@ def test_trace_model_unquantized_checkpoint_takes_existing_path(tmp_path):
     from emmy.commands.compile import _trace_model
 
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
-    assert all(op.quant is None for _nid, op in graph.loadable_constants())
+    assert not _f8_constants(graph)
+    assert all(op.source_graph is None for _nid, op in graph.loadable_constants())
     # from_pretrained bound the real checkpoint weights, as before the wiring.
     got = dict(wrapper.named_parameters())["model.model.embed_tokens.weight"]
     torch.testing.assert_close(got, model.model.embed_tokens.weight, rtol=0, atol=0)
 
 
-def test_trace_model_stamps_specs_and_binds_dequantized_twin(tmp_path):
+def test_trace_model_spells_cones_and_binds_dequantized_twin(tmp_path):
     """The compile/run seam on a quantized checkpoint: the traced twin carries the
-    DEQUANTIZED real weights (not from_config's random init), and quant specs land on
-    exactly the fp8-stored projection weights before any pass runs."""
+    DEQUANTIZED real weights (not from_config's random init), and the dequant algebra is
+    spelled on exactly the fp8-stored projection weights before any pass runs."""
     _config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
     from emmy.commands.compile import _trace_model
 
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
 
-    quants = {op.source_path: op.quant for _nid, op in graph.loadable_constants()}
-    stamped = {p for p, q in quants.items() if q is not None}
-    assert stamped, "no quant specs stamped"
-    assert all(".layers." in p and p.endswith(".weight") for p in stamped)
-    assert any("q_proj" in p for p in stamped) and any("down_proj" in p for p in stamped)
-    for path, q in quants.items():
-        if "embed_tokens" in path or "lm_head" in path or "norm" in path:
-            assert q is None, f"unexpected spec on {path}"
+    spelled = {op.source_path for op in _f8_constants(graph).values()}
+    assert spelled, "no fp8 bits constants spelled"
+    assert all(".layers." in p and p.endswith(".weight") for p in spelled)
+    assert any("q_proj" in p for p in spelled) and any("down_proj" in p for p in spelled)
+    for _nid, op in graph.loadable_constants():
+        if op.source_path and ("embed_tokens" in op.source_path or "lm_head" in op.source_path):
+            assert op.source_dtype != "f8e4m3", f"unexpected spelling on {op.source_path}"
+    # Each bits constant is consumed by its decode cast in-graph.
+    decode_ops = [n for n in graph.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.op.decodes is not None]
+    assert len(decode_ops) == len(spelled)
 
     params = dict(wrapper.named_parameters())
     for name, ref in ref_sd.items():
@@ -522,17 +604,13 @@ def test_trace_model_stamps_specs_and_binds_dequantized_twin(tmp_path):
         torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
 
-@requires_cuda
-def test_quantized_checkpoint_e2e_cuda_expanded(tmp_path, monkeypatch):
-    """The SAME tiny quantized model with ``EMMY_FP8_EXPAND=1`` — the M2b correctness anchor: the
-    dequant cone rides the graph into the kernels (fp8 bits in device memory, decode + mul-hoisted
-    scale realized in-kernel), same accuracy gate as the M1 bind-time-dequant test. Constants bind
-    from the CHECKPOINT (raw fp8 bits + scale tensors — the wrapper's parameters carry dequantized
-    values, which the expanded form must not see); computed buffers (mask / rotary) still come
-    from the traced wrapper."""
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
-    transformers = pytest.importorskip("transformers")
-    config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
+def _run_e2e(tmp_path, config, ref_sd):
+    """Compile the traced quantized model on the CUDA backend, bind computed buffers from the
+    wrapper and every checkpoint tensor through the safetensors loader (bits + scales for the
+    in-graph cone; record evaluation for folded constants; plain reads for the rest), and
+    return ``(emmy_logits, ref_logits, compiled)``."""
+    import transformers
+
     from emmy.commands.compile import _trace_model
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
@@ -540,9 +618,6 @@ def test_quantized_checkpoint_e2e_cuda_expanded(tmp_path, monkeypatch):
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
     backend = CudaBackend()
     compiled = backend.compile(graph)
-
-    fp8_nodes = [nid for nid, node in compiled.nodes.items() if getattr(node.output.dtype, "name", "") == "f8e4m3"]
-    assert fp8_nodes, "no fp8-dtype constant survived to the compiled graph — the expansion did not fire"
 
     buf_sources: dict[str, np.ndarray] = {}
     for path, t in wrapper.named_buffers(remove_duplicate=False):
@@ -559,90 +634,74 @@ def test_quantized_checkpoint_e2e_cuda_expanded(tmp_path, monkeypatch):
     ref_model.load_state_dict(ref_sd)
     with torch.no_grad():
         ref_logits = ref_model(input_ids=ids).logits.numpy()
+    return emmy_logits, ref_logits, compiled
 
+
+def _assert_e2e_gate(emmy_logits, ref_logits, label):
     assert not np.isnan(emmy_logits).any()
     assert np.abs(ref_logits).max() > 0.05, "reference logits suspiciously small; tolerance would be trivial"
     max_diff = np.abs(emmy_logits - ref_logits).max()
-    assert max_diff < 5e-3, f"max_diff={max_diff} vs eager dequant reference (EMMY_FP8_EXPAND=1)"
+    assert max_diff < 5e-3, f"max_diff={max_diff} vs eager dequant reference ({label})"
 
 
 @requires_cuda
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
-    """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run``
-    use, compiled on the CUDA backend and compared against the dequantized eager
-    reference — the M1 deliverable ("any FP8 checkpoint compiles and runs")."""
-    transformers = pytest.importorskip("transformers")
+    """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,
+    compiled on the CUDA backend with the DEFAULT fold: every dequant cone dissolves at 032, so
+    the kernels see plain compute-dtype constants (bind-time evaluation), and the output matches
+    the dequantized eager reference."""
     config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
-    from emmy.commands.compile import _trace_model
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.loader.binder import bind_constants
+    emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
+    assert not _f8_constants(compiled), "an f8 constant survived — the fold did not dissolve the cone"
+    assert not any(isinstance(n.op, ElementwiseOp) and n.op.op.decodes is not None for n in compiled.nodes.values())
+    _assert_e2e_gate(emmy_logits, ref_logits, "fold mode")
 
-    graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
-    backend = CudaBackend()
-    compiled = backend.compile(graph)
 
-    # Bind the way ``emmy run`` binds a whole model: sources from the traced
-    # wrapper (its parameters carry the dequantized real weights; its buffers
-    # carry the precomputed mask / rotary / position_ids).
-    sources: dict[str, np.ndarray] = {}
-    for path, t in wrapper.named_parameters(remove_duplicate=False):
-        sources[path] = t.detach().cpu().numpy().astype(np.float32, copy=False)
-    for path, t in wrapper.named_buffers(remove_duplicate=False):
-        sources[path] = t.detach().cpu().numpy().astype(np.float32, copy=False)
-
-    ids = torch.randint(0, config.vocab_size, (1, 16), generator=torch.Generator().manual_seed(3))
-    input_data = {compiled.inputs[0]: ids.numpy()}
-    input_data.update(bind_constants(compiled, sources))
-    result, _ = backend.run(compiled, input_data=input_data)
-    emmy_logits = result.outputs[compiled.outputs[0]].reshape(1, 16, config.vocab_size)
-
-    # Independent eager reference: fresh model from config, dequantized weights
-    # computed in this test (not through emmy's loader).
-    ref_model = transformers.AutoModelForCausalLM.from_config(config).float().eval()
-    ref_model.load_state_dict(ref_sd)
-    with torch.no_grad():
-        ref_logits = ref_model(input_ids=ids).logits.numpy()
-
-    assert not np.isnan(emmy_logits).any()
-    assert np.abs(ref_logits).max() > 0.05, "reference logits suspiciously small; tolerance would be trivial"
-    max_diff = np.abs(emmy_logits - ref_logits).max()
-    assert max_diff < 5e-3, f"max_diff={max_diff} vs eager dequant reference"
+@requires_cuda
+def test_quantized_checkpoint_e2e_cuda_expanded(tmp_path, monkeypatch):
+    """The SAME tiny quantized model with ``EMMY_FP8_EXPAND=1`` — the kernel-path correctness
+    anchor: the fold is skipped, the dequant cone rides the graph into the kernels (fp8 bits in
+    device memory, decode + mul-hoisted scale realized in-kernel), same numeric gate."""
+    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+    config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
+    emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
+    assert _f8_constants(compiled), "no fp8-dtype constant survived to the compiled graph — the cone did not stay in-graph"
+    _assert_e2e_gate(emmy_logits, ref_logits, "EMMY_FP8_EXPAND=1")
 
 
 # ===================================================================
-# Containment: quant metadata must not leak past the frontend band
+# Invariant gate: quantization is not a concept past the decomposition band
 # ===================================================================
 
-# The design rule: ``ConstantOp.quant``
-# is frontend-band scaffolding — stamped after trace, consulted by the loader and exactly two
-# decomposition rules, CONSUMED by ``180_expand_quantized_constant``. Everything past the
-# frontend (lowering, backends, search) must stay graph-structure-driven: a quantized weight
-# past the band is just constants + algebra. This gate makes the rule mechanical: a new
-# reader of the metadata must be frontend/loader-band code and must join the allowlist here,
-# with that justification — anything else is the leak this test exists to stop.
-_QUANT_ALLOWLIST = {
-    "emmy/commands/compile.py",  # stamping call site (post-trace, pre-pipeline)
-    "emmy/compiler/graph.py",  # QuantSpec constructor-repr serialization
-    "emmy/compiler/ir/base.py",  # the definition
-    "emmy/compiler/loader/binder.py",  # bind-time raw-bits routing
-    "emmy/compiler/loader/__init__.py",  # re-export
-    "emmy/compiler/loader/quant.py",  # decode / dequant / stamping
-    "emmy/compiler/loader/safetensors.py",  # dequant-on-load
-    "emmy/compiler/pipeline/passes/frontend/decomposition/035_merge_sibling_linears.py",  # pristine guard
-    "emmy/compiler/pipeline/passes/frontend/decomposition/180_expand_quantized_constant.py",  # the consumer
-    "emmy/compiler/trace/huggingface.py",  # quantized-twin construction
+# The invariant (see compiler/ARCHITECTURE.md, "Quantized checkpoints"): downstream layers —
+# lowering, backends, search — may know canonical dtypes (f8e4m3), decode-trait elementwise ops
+# (``ElementwiseImpl.decodes``), and graph algebra; NEVER checkpoint formats, scheme names,
+# scale pairing, or quantization metadata. The frontend band below (the birth-time speller +
+# the checkpoint readers + the twin construction and its post-trace call site) is the only
+# place quantization-as-a-concept exists. ``from_f8*`` / ``decodes`` / f8 dtype tokens are
+# sanctioned everywhere and deliberately NOT in the pattern. A new match must be
+# frontend/loader-band code and must join the allowlist with that justification — anything
+# else is the leak this gate exists to stop.
+_QUANT_CONCEPT_PATTERN = r"QuantSpec|quantization_config|quant_method|weight_scale|modules_to_not_convert|dequant"
+
+_FRONTEND_BAND_ALLOWLIST = {
+    "emmy/commands/compile.py",  # the post-trace spelling call site (twin trace + speller)
+    "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
+    "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
+    "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
 }
 
 
-def test_quant_metadata_stays_in_the_frontend_band():
+def test_quantization_concepts_stay_in_the_frontend_band():
     import re
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    pat = re.compile(r"QuantSpec|\.quant\b|\bquant=")
-    offenders = {str(p.relative_to(root)) for p in (root / "emmy").rglob("*.py") if pat.search(p.read_text())} - _QUANT_ALLOWLIST
+    pat = re.compile(_QUANT_CONCEPT_PATTERN)
+    offenders = {str(p.relative_to(root)) for p in (root / "emmy").rglob("*.py") if pat.search(p.read_text())} - _FRONTEND_BAND_ALLOWLIST
     assert not offenders, (
-        f"ConstantOp.quant / QuantSpec referenced outside the frontend/loader band: {sorted(offenders)}. "
-        "The kernel path is graph-structure-driven by design — do not consume quant metadata there "
-        "(see the allowlist comment above)."
+        f"quantization concepts referenced outside the frontend/loader band: {sorted(offenders)}. "
+        "Past the decomposition band a quantized weight is just constants + algebra — downstream "
+        "code may key on dtypes and the decode trait, never on checkpoint formats or scale "
+        "pairing (see the invariant comment above)."
     )

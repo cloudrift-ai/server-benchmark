@@ -195,17 +195,25 @@ def test_no_merge_with_folded_load_ops():
     assert _count(result, LinearOp) == 2
 
 
-def test_no_merge_with_quantized_weights():
-    """A weight carrying a quant spec is not pristine in M1 — the concat would need the
-    per-part scales concatenated too (M2 work; see the FP8 plan)."""
+def test_no_merge_with_folded_constant_subgraphs():
+    """A folded constant subgraph (``source_graph`` bind record — how a quantized weight
+    reaches 035 after ``032_fold_constant_subgraphs``) is not pristine: its evaluation has no
+    concat-of-paths spelling, so it must fail the parameter check naturally (no ``source_path``
+    / ``source_parts``) and the siblings stay unmerged."""
     from dataclasses import replace
-
-    from emmy.compiler.ir.base import QuantSpec
 
     g = _sibling_graph()
     for wid in ("w0", "w1"):
-        spec = QuantSpec(scale_path=f"m.{wid}_scale", scale_shape=(1, 1), scale_dtype="f32")
-        g.nodes[wid].op = replace(g.nodes[wid].op, quant=spec)
+        record = Graph()
+        op = g.nodes[wid].op
+        record.add_node(
+            op=ConstantOp(name=f"{wid}_bits", source_path=op.source_path, source_shape=op.source_shape, source_dtype="f8e4m3"),
+            inputs=[],
+            output=Tensor(f"{wid}_bits", op.source_shape, "f8e4m3"),
+            node_id=f"{wid}_bits",
+        )
+        record.outputs = [f"{wid}_bits"]
+        g.nodes[wid].op = replace(op, source_path=None, source_graph=record)
     result = _apply(g)
     assert _count(result, LinearOp) == 2
 

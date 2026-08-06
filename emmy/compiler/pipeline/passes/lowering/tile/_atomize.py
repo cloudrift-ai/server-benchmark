@@ -102,10 +102,10 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     return Fold.projection(body=Body(tuple(rest)), operands=src)
 
 
-def _hoist_multiplicative_dequant(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
-    """Bind a COMPUTED **B** whose cone is a k-invariant MULTIPLICATIVE dequant chain — the
-    mul-hoist. The lift's B-side value must factor as ``(storage decode of the (n, k) B load) ⊗
-    k-invariant factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT along the reduce
+def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
+    """Bind a COMPUTED **B** whose cone is a storage decode times k-invariant multiplicative
+    factors — the mul-hoist. The lift's B-side value must factor as ``(storage decode of the
+    (n, k) B load) ⊗ k-invariant factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT along the reduce
     axis commutes out of the fold (``Σ_k a·(s·w) = s·Σ_k a·w`` — the same reassociation category as
     split-K), so the factors move onto the accumulator in the EPILOGUE, and the decode is ABSORBED
     by the B load's own storage dtype (every consumer converts a bits-carrier element by dtype: the
@@ -147,7 +147,7 @@ def _hoist_multiplicative_dequant(body: list, lift: Assign, a_leaf: Load, b_leaf
             x, y = st.args
             xs, ys = cone_names(x), cone_names(y)
             if xs is None or ys is None or (b_bits in xs) == (b_bits in ys):
-                return None  # B on both sides / neither — not the dequant chain
+                return None  # B on both sides / neither — not the decode-times-factors chain
             b_side, s_side = (x, y) if b_bits in xs else (y, x)
             if st.op.name == "divide" and b_bits not in xs:
                 return None  # ``s / w`` — the divide does not commute out of the fold
@@ -241,13 +241,13 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
             # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
             raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
-        # B is NOT directly named by the lift — it rides a computed cone. A k-invariant
-        # multiplicative dequant chain binds through the mul-hoist (decode absorbed by the
-        # storage dtype, factors to the epilogue); anything else raises for the same reason as
-        # the computed-A decline above — the positional rule would bind the cone-INTERNAL load
-        # as B and silently drop the cone (measured on the M2b probe: the scale multiply
-        # vanished from the kernel).
-        hoist = _hoist_multiplicative_dequant(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+        # B is NOT directly named by the lift — it rides a computed cone. A storage decode
+        # times k-invariant multiplicative factors binds through the mul-hoist (decode absorbed
+        # by the storage dtype, factors to the epilogue); anything else raises for the same
+        # reason as the computed-A decline above — the positional rule would bind the
+        # cone-INTERNAL load as B and silently drop the cone (measured on the M2b probe: the
+        # scale multiply vanished from the kernel).
+        hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
         if hoist is not None:
             return hoist
         raise LoweringError("warp tier: the ⊗ lift's B operand is a computed cone that does not bind")

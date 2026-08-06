@@ -245,26 +245,34 @@ def test_dtype_multiset_stamps_f8_generically():
     assert feats["S_dtype_f8e4m3"] == 1.0
 
 
-def test_expanded_fp8_matmul_stamps_the_f8_dtype_feature(monkeypatch):
-    """End to end through the loop dialect: a quantized weight constant expanded by
-    ``180_expand_quantized_constant`` (flag on) fuses its dequant cone into the matmul
-    kernel, whose stamped dtype multiset then carries the fp8 load — the identity the
+def test_in_graph_fp8_decode_cone_stamps_the_f8_dtype_feature(monkeypatch):
+    """End to end through the loop dialect: with ``EMMY_FP8_EXPAND`` the birth-time decode cone
+    (bits constant → ``from_f8e4m3`` → scale multiply) survives the fold and fuses into the
+    matmul kernel, whose stamped dtype multiset then carries the fp8 load — the identity the
     fp8 golden/search keys join on."""
     monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
-    from emmy.compiler.ir.base import ConstantOp, QuantSpec  # noqa: PLC0415
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
-    spec = QuantSpec(scale_path="layer.weight_scale", scale_shape=(16, 1), scale_dtype="f32")
-    g.add_node(
-        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(16, 8), source_dtype="f16", quant=spec),
+    w = g.add_node(
+        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(16, 8), source_dtype="f8e4m3"),
         inputs=[],
-        output=Tensor("w", (16, 8), "f16"),
-        node_id="w",
+        output=Tensor("w_bits", (16, 8), "f8e4m3"),
     )
+    scale = g.add_node(
+        op=ConstantOp(name="p_w_scale", source_path="layer.weight_scale", source_shape=(16, 1), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("w_scale", (16, 1), "f32"),
+    )
+    cast = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[w], output=Tensor("w_dq", (16, 8), "f16"))
+    s_bc = broadcast_to(g, scale, (16, 8))
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=[cast, s_bc], output=Tensor("w", (16, 8), "f16"), node_id="w")
     g.add_node(MatmulOp(), ["x", "w"], Tensor("y", (4, 8), "f16"), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     _, loops = _fused_loops(g)
     stamped = [op for op in loops if op.knobs.get("S_dtype_f8e4m3")]
-    assert stamped, "no LoopOp stamped S_dtype_f8e4m3 for the expanded fp8-B matmul"
+    assert stamped, "no LoopOp stamped S_dtype_f8e4m3 for the in-graph fp8-B decode cone"

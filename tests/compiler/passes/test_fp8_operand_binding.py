@@ -193,21 +193,30 @@ def test_atom_registry_has_no_f8_atom():
 
 
 def _fp8_linear_graph(m=32, n=512, k=512):
-    """``x:f16 @ dequant(W:f8e4m3, s:(N,1))ᵀ`` — the quant-stamped LinearOp graph the expansion
-    (``EMMY_FP8_EXPAND=1``) rewrites into the in-graph dequant cone."""
+    """``x:f16 @ (from_f8e4m3(W bits) · s:(N,1))ᵀ`` — the LinearOp over the in-graph decode cone
+    the birth-time speller emits for a per-out-channel fp8 weight (``EMMY_FP8_EXPAND=1`` keeps
+    the cone for the kernel path)."""
     from emmy.compiler.graph import Graph
-    from emmy.compiler.ir.base import ConstantOp, InputOp, QuantSpec
+    from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
-    spec = QuantSpec(scale_path="layer.weight_scale", scale_shape=(n, 1), scale_dtype="f32", inverse=False, fmt="f8e4m3")
-    g.add_node(
-        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(n, k), source_dtype="f16", quant=spec),
+    w = g.add_node(
+        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(n, k), source_dtype="f8e4m3"),
         inputs=[],
-        output=Tensor("p_w", (n, k), "f16"),
-        node_id="p_w",
+        output=Tensor("p_w_bits", (n, k), "f8e4m3"),
     )
+    scale = g.add_node(
+        op=ConstantOp(name="p_w_scale", source_path="layer.weight_scale", source_shape=(n, 1), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("p_w_scale", (n, 1), "f32"),
+    )
+    cast = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[w], output=Tensor("p_w_dq", (n, k), "f16"))
+    s_bc = broadcast_to(g, scale, (n, k))
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=[cast, s_bc], output=Tensor("p_w", (n, k), "f16"), node_id="p_w")
     g.add_node(op=LinearOp(), inputs=["x", "p_w"], output=Tensor("y", (m, n), F16), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     return g

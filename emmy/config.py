@@ -276,12 +276,13 @@ def set_readable(on: bool, *, overwrite: bool = False) -> None:
 
 
 def fp8_expand() -> bool:
-    """``EMMY_FP8_EXPAND`` — expand quantized weight constants into the in-graph
-    dequant cone (M2 of the FP8 plan) instead of M1's bind-time dequant. OFF by
-    default, deliberately: until the kernel transport realizes the decode cast
-    (M2b), the in-graph cone recomputes the dequant every forward, de-optimizing
-    quantized models vs the one-time bind-time dequant. Off is bit-identical to
-    M1; on is the M2 development path."""
+    """``EMMY_FP8_EXPAND`` — keep an fp8 checkpoint's decode cone in-graph for the
+    kernel path (f8 bits in device memory, decode + scale realized in-kernel) by
+    SKIPPING the ``032_fold_constant_subgraphs`` fold. OFF by default: the fold
+    collapses the cone into one bind-time-evaluated constant (the weight
+    materializes at the compute dtype — a one-time cost instead of a per-forward
+    recompute). On is the kernel-storage development path; off is the deployable
+    default."""
     return _bool(FP8_EXPAND)
 
 

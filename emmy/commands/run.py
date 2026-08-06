@@ -283,7 +283,7 @@ def handle_run(args):
         # in-process — the ``--debug`` per-launch dumps and the ncu child's profiled
         # launches live here — so a hung kernel still poisons this process's stream.
         try:
-            input_data = _bind_inputs(compiled, module, example_args, example_kwargs)
+            input_data = _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=args.input)
         except RuntimeError as exc:
             logger.error(exc)
             sys.exit(1)
@@ -1864,7 +1864,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     return out
 
 
-def _bind_inputs(compiled, module, example_args, example_kwargs):
+def _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None):
     """Match graph inputs and constants to tensors from ``module`` / call args.
 
     Activations come from the call's positional/keyword tensors. Constants
@@ -1873,6 +1873,12 @@ def _bind_inputs(compiled, module, example_args, example_kwargs):
     constant's ``load_ops`` chain is replayed via the NumPy backend
     (see ``compiler.loader.binder``), so any compile-time-folded
     transpose / reshape is honored uniformly.
+
+    ``checkpoint`` (the model id / path, when the caller has one) covers the
+    constants a live module cannot supply: an fp8 checkpoint's weights bind as
+    raw bits + scale sources (or a folded ``source_graph`` record over them)
+    that exist only in the safetensors shards, so any still-unbound constant is
+    re-tried through the safetensors loader before the hard error below.
     """
     import numpy as np
     import torch
@@ -1909,6 +1915,16 @@ def _bind_inputs(compiled, module, example_args, example_kwargs):
         sources[path] = tensor.detach().cpu().numpy().astype(np.float32, copy=False)
 
     input_data.update(bind_constants(compiled, sources))
+
+    if checkpoint is not None and any(nid not in input_data for nid, _op in compiled.loadable_constants()):
+        from emmy.compiler.trace.huggingface import quantized_checkpoint_dir  # noqa: PLC0415
+
+        quant_dir = quantized_checkpoint_dir(checkpoint)
+        if quant_dir is not None:
+            from emmy.compiler.loader.safetensors import load_constants_from_safetensors  # noqa: PLC0415
+
+            for nid, arr in load_constants_from_safetensors(compiled, str(quant_dir)).items():
+                input_data.setdefault(nid, arr)
 
     for nid, node in compiled.nodes.items():
         if not isinstance(node.op, ConstantOp) or nid in input_data:

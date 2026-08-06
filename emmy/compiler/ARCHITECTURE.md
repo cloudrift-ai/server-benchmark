@@ -130,14 +130,22 @@ autotuning cache doesn't bust on cosmetic edits.
 ## Quantized checkpoints (FP8)
 
 A quantized checkpoint never reaches the trace: the trace runs over the bf16 architecture twin built from config
-(quantization is a property of the checkpoint, not the architecture), and each weight's `ConstantOp.quant` — a
-`QuantSpec` pairing it with its checkpoint scale — is stamped immediately post-trace from `quantization_config`.
-By default the loader consumes the spec at bind time (raw f8 bits → LUT decode → block-broadcast scale multiply),
-so the compiler sees an ordinary graph at the compute dtype; with `EMMY_FP8_EXPAND` on, the
-`180_expand_quantized_constant` decomposition rule instead spells the dequant cone in-graph (fp8-bits constant +
-scale constant + decode-cast + broadcast-multiply) so the kernel path can keep the weight in fp8 storage.
-Containment rule: quant metadata is frontend/loader-band only — everything past the frontend stays
-graph-structure-driven (a quantized weight is just constants + algebra there), and a gate test enforces the
+(quantization is a property of the checkpoint, not the architecture). Immediately post-trace,
+`loader.quant.spell_quantized_constants` rewrites each fp8-stored weight into in-graph algebra — a bits constant
+(f8 dtype, the weight's source path) + a scale constant + the dequant cone (decode-cast, broadcast-multiply, a
+reshape pair for 2-D block scales) — so from birth a quantized weight is just constants + algebra, with no metadata
+on any shared IR type. The generic `032_fold_constant_subgraphs` decomposition rule then dissolves the algebra as
+early as possible (default): the cone collapses into ONE `ConstantOp` whose `source_graph` bind record the loader
+evaluates through the NumPy backend at bind time (leaf f8 sources read as raw bits, LUT decode, f32 scale multiply,
+one cast into the compute dtype), and every later pass sees a plain constant. `EMMY_FP8_EXPAND` skips the fold: the
+cone stays in-graph and rides the B-operand cone into the kernel (fp8 bits in device memory, decode absorbed by the
+storage dtype at the fragment load, scale hoisted to the epilogue).
+
+**Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
+search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph
+algebra; they may NEVER know checkpoint formats, scheme names, scale pairing, or quantization metadata. The frontend
+band (the birth-time speller + the fold pass + the loader) is the only place quantization-as-a-concept exists; a
+mechanical gate test (`tests/compiler/loader/test_quant.py`) greps `emmy/` for concept leaks against a frontend-band
 allowlist.
 
 ## Op provenance

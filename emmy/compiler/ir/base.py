@@ -152,33 +152,6 @@ class InputOp(Op):
         raise NotImplementedError("InputOp is a sentinel; value is supplied by the executor")
 
 
-@dataclass(frozen=True)
-class QuantSpec:
-    """Pairing of a quantized checkpoint weight with its scale tensor.
-
-    ``scale_path`` is the scale tensor's key in the checkpoint's safetensors
-    index (``<prefix>.weight_scale`` or ``.weight_scale_inv``); ``scale_shape``
-    / ``scale_dtype`` its stored layout; ``inverse`` marks ``weight_scale_inv``
-    checkpoints (the loader divides instead of multiplying). ``fmt`` is the
-    weight's canonical STORAGE dtype token (``f8e4m3`` / ``f8e5m2``, per the
-    checkpoint's safetensors dtype) — what the M2 expansion pass stamps on the
-    fp8 constant it rewrites the weight into; defaults to ``f8e4m3`` so specs
-    serialized before the field existed keep loading.
-
-    Granularity is DERIVED, not declared: ``block[i] = weight.shape[i] //
-    scale.shape[i]`` — per-tensor (scalar scale), per-out-channel (``(N, 1)``)
-    and 2-D block scales are all this one form with a different block shape
-    (see the FP8 plan's type-system design). No block metadata field exists,
-    so the two shapes stay the single source of truth.
-    """
-
-    scale_path: str
-    scale_shape: tuple[int, ...]
-    scale_dtype: str
-    inverse: bool = False
-    fmt: str = "f8e4m3"
-
-
 @dataclass
 class ConstantOp(Op):
     """Fixed tensor: weights, RoPE tables, scalars. Not an activation.
@@ -200,8 +173,8 @@ class ConstantOp(Op):
     ``(path, pre-chain shape)`` pairs the loader reads individually and concatenates along
     **axis 0** before running ``load_ops`` (``merge_sibling_linears``' N-concat of sibling
     projection weights — axis 0 is the ``(N, K)`` out-features axis). Exactly one of
-    ``source_path`` / ``source_parts`` is set on a loadable constant; ``source_shape`` /
-    ``source_dtype`` describe the post-concat source.
+    ``source_path`` / ``source_parts`` / ``source_graph`` is set on a loadable constant;
+    ``source_shape`` / ``source_dtype`` describe the post-concat (or post-evaluation) source.
 
     **Value binding** — a scalar constant binds its value EXACTLY ONE of three ways, never
     ambiguously (enforced in :meth:`__post_init__`):
@@ -227,19 +200,27 @@ class ConstantOp(Op):
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
     source_shape: tuple[int, ...] | None = None
     source_dtype: str | None = None
-    # Quantized-checkpoint pairing: the source tensor is stored quantized (fp8
-    # bits) and ``quant`` names its scale tensor; the loader dequantizes to the
-    # compute dtype when the source is read, BEFORE ``load_ops`` runs (M1).
-    # ``None`` for every unquantized constant. ``fold_into_constant`` rebuilds
-    # constants via ``dataclasses.replace``, so the field propagates through
-    # the layout-fold band by construction.
-    quant: QuantSpec | None = None
+    # N-source bind record: a constant-only frontend mini-graph whose leaf
+    # ``ConstantOp``s name checkpoint source paths. The loader binds each leaf
+    # source (its own dtype rules apply — an f8-dtype leaf binds raw bits),
+    # evaluates the graph through the reference NumPy backend, and only THEN
+    # runs this constant's ``load_ops`` chain — so later layout folds
+    # (``050``/``060``) compose onto a folded constant exactly as onto a plain
+    # one. Produced by ``032_fold_constant_subgraphs`` when it collapses a
+    # constant-only cone; ``None`` for every ordinary constant.
+    # ``source_shape`` / ``source_dtype`` describe the EVALUATED (pre-chain)
+    # result. ``fold_into_constant`` rebuilds constants via
+    # ``dataclasses.replace``, so the field propagates through the layout-fold
+    # band by construction.
+    source_graph: Graph | None = None
 
     def __post_init__(self) -> None:
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
         if self.source_path is not None and self.source_parts:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_path OR source_parts, not both")
+        if self.source_graph is not None and (self.source_path is not None or self.source_parts):
+            raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_graph record OR checkpoint source paths, not both")
         if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
             self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
 

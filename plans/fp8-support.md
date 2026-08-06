@@ -22,6 +22,16 @@ FP8 story; nothing here is Qwen3.8-specific.
 - **M3 / M4 NOT STARTED** — M3 stays gated on M2 A/B evidence per the milestone's own bar (only worth starting once
   A/Bs show the residual gap is mma-rate-bound, not bytes-bound — unknowable until the staged-transport residual
   lands); the M4 serving A/B needs a serving session on a real FP8 checkpoint.
+- **Dissolve-early migration DONE (2026-08-06)** — `QuantSpec` retired per the deletion path below: quantization is
+  spelled as in-graph algebra at birth (`loader.quant.spell_quantized_constants`, post-trace) and dissolved by the
+  generic `032_fold_constant_subgraphs` rule (decode-trait-scoped constant-cone fold → one `ConstantOp` with a
+  `source_graph` bind record the loader evaluates through the numpy backend; trailing `050`/`060` transposes compose
+  onto it). `EMMY_FP8_EXPAND` now SKIPS the fold (same meaning: cone stays in-graph for the kernel path; M2's
+  `_atomize` arm unchanged). `stamp_quant_specs` / `180_expand_quantized_constant` / `ConstantOp.quant` deleted; the
+  invariant "quantization is not a concept past the decomposition band" is documented in
+  `compiler/ARCHITECTURE.md` + `passes/ARCHITECTURE.md` and enforced by a mechanical grep gate in
+  `tests/compiler/loader/test_quant.py`. Digest A/B 27/27 byte-identical both flag states; fold-mode binding
+  bit-identical to the old M1 dequant.
 
 ### M2 residual (handoff)
 
@@ -219,16 +229,18 @@ rides the normal accuracy gate, not FAST_MATH.
   epilogue mul doesn't change loop structure) and needs only the `ShapeKey` dtype-class field; whether K-blocked
   forms need their own golden `kind` is decided at M2 by whether their schedule space actually diverges.
 
-### Why `QuantSpec` exists at all (and when it could be deleted)
+### Why `QuantSpec` existed (deleted 2026-08-06 — the dissolve-early migration)
 
-Reviewed 2026-08-06 against the alternative "no spec: store bits in a standard dtype and spell the dequant cone at
-graph construction, letting constant folding recover the bind-time path". The spec never reaches the kernel — it is
-consumed by `180` and the whole kernel path is graph-structure-driven — so it has no per-scheme surface; what it
-buys is the decomposition band's constant-shaped assumptions: `035` merging and the `050`/`060` layout folds
-(including the sub-sm_90 matvec fold the `.m1.t` decode goldens require) all pattern-match a plain `ConstantOp`,
-and the bind-time fold is not free folding — `load_ops` is a single-source chain, and the cone has two sources.
-Deletion path, if ever wanted: (1) generalize `load_ops` to multi-source chains, (2) make the constant-matching
-passes cone-transparent. Until something forces (1), the spec is the cheaper end of the trade.
+Originally kept because the decomposition band's constant-shaped assumptions (`035` merging, the `050`/`060` layout
+folds) pattern-match a plain `ConstantOp`, and `load_ops` was a single-source chain while the cone has two sources.
+The deletion path was then executed: (1) `load_ops` generalized past single-source via `ConstantOp.source_graph` —
+an N-source bind record (the constant-only mini-graph itself, leaf `ConstantOp`s naming source paths) evaluated
+through the numpy backend at bind time, with the trailing `load_ops` chain still composable AFTER it; (2) the
+constant-matching passes needed no cone-transparency at all, because the generic `032_fold_constant_subgraphs` rule
+collapses the cone BEFORE they run (and a folded record naturally fails `035`'s bare-source check). Stage 2 of the
+spelling story is superseded accordingly: there is no metadata stage — the birth-time speller emits the stage-3
+algebra directly, and the layout-commute machinery `180` carried died with it (at birth there is no chain to
+commute past).
 
 ### Future-proofing: sub-byte (NVFP4 / int4)
 

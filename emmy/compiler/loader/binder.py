@@ -58,13 +58,38 @@ def assemble_source(op, sources: dict[str, np.ndarray]) -> np.ndarray | None:
     """Assemble a constant's raw pre-chain source array from ``sources``: the single
     ``source_path`` lookup, or the axis-0 concat of its ``source_parts`` (the
     ``merge_sibling_linears`` weight concat). ``None`` when any source is missing.
-    Duck-typed over ``ConstantOp`` — anything with ``source_path`` / ``source_parts``."""
+    Duck-typed over ``ConstantOp`` — anything with ``source_path`` / ``source_parts``.
+    ``source_graph`` bind records are the loaders' own business (:func:`evaluate_source_graph`)
+    — this helper answers ``None`` for them (``sources`` holds per-path arrays, and a record
+    has no single path)."""
     if op.source_parts:
         parts = [sources.get(path) for path, _shape in op.source_parts]
         if any(p is None for p in parts):
             return None
         return np.concatenate([np.ascontiguousarray(p) for p in parts], axis=0)
-    return sources.get(op.source_path)
+    return sources.get(op.source_path) if op.source_path is not None else None
+
+
+def evaluate_source_graph(record, sources: dict[str, np.ndarray]) -> np.ndarray | None:
+    """Evaluate a ``ConstantOp.source_graph`` bind record against per-path ``sources``.
+
+    Binds every leaf constant of the record through :func:`bind_constants` (each leaf's own
+    dtype rules apply — an f8-dtype leaf binds raw uint8 bits, and leaf ``load_ops`` replay),
+    then runs the record through the reference NumPy backend. ``None`` when any leaf source is
+    missing from ``sources`` — the caller skips the constant, same as a missing plain source.
+    """
+    leaf_data = bind_constants(record, sources)
+    if any(nid not in leaf_data for nid, _op in record.loadable_constants()):
+        return None
+
+    from emmy.compiler.backend.base import Backend  # noqa: PLC0415
+
+    class _NumpyInterp(Backend):
+        def compile(self, graph):
+            return graph
+
+    result, _ = _NumpyInterp().run(record, input_data=leaf_data)
+    return np.ascontiguousarray(result.outputs[record.outputs[0]])
 
 
 def bind_constants(graph: Graph, sources: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -80,13 +105,20 @@ def bind_constants(graph: Graph, sources: dict[str, np.ndarray]) -> dict[str, np
     """
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
+        if op.source_graph is not None:
+            # Folded constant subgraph (``032_fold_constant_subgraphs``): evaluate the record
+            # over the same per-path sources, then run this constant's own trailing chain.
+            val = evaluate_source_graph(op.source_graph, sources)
+            if val is not None:
+                out[nid] = apply_load_ops(val, op.load_ops)
+            continue
         src = assemble_source(op, sources)
         if src is None:
             continue
-        # An f8-dtype constant binds raw uint8 BITS (the M2 expanded form — the graph's own
-        # dequant cone owns the value semantics); its chain runs under the f8 token because the
-        # carrier's numpy dtype (uint8) is not a registered DataType. Mirrors the safetensors
-        # loader's bits-bind convention.
+        # An f8-dtype constant binds raw uint8 BITS (the in-graph decode-cone form — the
+        # graph's own algebra owns the value semantics); its chain runs under the f8 token
+        # because the carrier's numpy dtype (uint8) is not a registered DataType. Mirrors the
+        # safetensors loader's bits-bind convention.
         dt = graph.nodes[nid].output.dtype
         tok = dt.name if getattr(dt, "name", None) in ("f8e4m3", "f8e5m2") and src.dtype == np.uint8 else None
         out[nid] = apply_load_ops(src, op.load_ops, dtype=tok)
@@ -109,9 +141,10 @@ def bind_constants_from_module(graph: Graph, module) -> dict[str, np.ndarray]:  
     ``named_parameters`` dedups it down to the shared ``embed_tokens.weight``
     only, leaving the final projection unbound (→ zero logits). Tensors are cast
     to float32 numpy (the backend dtype; also sidesteps reading bf16 checkpoints
-    through numpy). Quant specs (``ConstantOp.quant``) never apply here: the
-    traced twin module carries compute-dtype weights, never fp8 tensors — only
-    the safetensors path dequantizes."""
+    through numpy). NOTE: a live module cannot supply an fp8 checkpoint's raw
+    bits or scale tensors — constants whose sources only exist in the checkpoint
+    (f8-dtype leaves, ``source_graph`` records over them) stay unbound here and
+    must come from the safetensors loader."""
     sources: dict[str, np.ndarray] = {}
     for name, t in module.state_dict().items():
         sources[name] = t.detach().cpu().float().numpy()

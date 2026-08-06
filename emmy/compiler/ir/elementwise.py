@@ -45,11 +45,11 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
-    # fp8 decode casts (M2 of the FP8 plan). The dtype-boundary cast out of an
-    # fp8 tensor cannot be a plain ``copy``: the numpy carrier is uint8 BITS, so
-    # copying would move the bit patterns, not the values — the decode IS the
-    # cast's semantics. CUDA rendering is a later milestone (the fragment-path
-    # ``cvt``); host-side these are the same LUT the bind-time dequant uses.
+    # fp8 decode casts. The dtype-boundary cast out of an fp8 tensor cannot be
+    # a plain ``copy``: the numpy carrier is uint8 BITS, so copying would move
+    # the bit patterns, not the values — the decode IS the cast's semantics.
+    # Host-side these read the one LUT in ``dtype.py``; the CUDA render
+    # converts by dtype (the fragment-path ``cvt``).
     "from_f8e4m3": lambda x: decode_f8(x, "f8e4m3"),
     "from_f8e5m2": lambda x: decode_f8(x, "f8e5m2"),
 }
@@ -100,9 +100,9 @@ class ElementwiseImpl:
     _SEMIRING: dict[str, frozenset[str]] = {"add": frozenset({"multiply"})}
     # Storage-decode ops — op name → the bits-carrier storage dtype token the op is
     # the decode cast for. This is the trait the tile binding arm (the k-invariant
-    # multiplicative dequant, ``_atomize``) keys on instead of op-name lists: a new
-    # storage format registers its decode op here (one ``_NAME_TO_FN`` entry + one
-    # row) and the binding arm covers it without change.
+    # factor hoist, ``_atomize``) keys on instead of op-name lists: a new storage
+    # format registers its decode op here (one ``_NAME_TO_FN`` entry + one row)
+    # and the binding arm covers it without change.
     _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}
 
     def __init__(self, name: str) -> None:
@@ -157,7 +157,7 @@ class ElementwiseImpl:
         bits-carrier element consumed at a value dtype converts by dtype, so the graph's
         decode op is absorbed wherever the consumer already converts (the render's promote,
         the mma fragment load) — and the tile binding arm asks THIS trait, never an op-name
-        list, to recognize a dequant cone's leaf."""
+        list, to recognize a decode cone's leaf."""
         return self._DECODES.get(self.name)
 
     @property

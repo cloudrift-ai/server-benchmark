@@ -118,9 +118,9 @@ _ALIASES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # FP8 numpy decode — the value semantics of the two fp8 bits-carrier dtypes.
 # Lives here (the generic + numpy layer) because it is dtype information, not
-# loader logic: both the safetensors loader's bind-time dequant (M1) and the
-# ``from_f8*`` decode intrinsics in ``ir/elementwise.py`` (M2's in-graph cast)
-# must share ONE table, and this module is a leaf both can import.
+# loader logic: both the loader's bind-time reads and the ``from_f8*`` decode
+# intrinsics in ``ir/elementwise.py`` (the in-graph cast) must share ONE
+# table, and this module is a leaf both can import.
 # ---------------------------------------------------------------------------
 
 # canonical token → (exponent bits, mantissa bits, exponent bias)

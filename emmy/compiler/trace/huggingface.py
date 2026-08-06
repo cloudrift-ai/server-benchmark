@@ -426,8 +426,9 @@ def quantized_checkpoint_dir(model_id_or_path: str):
 
     Detection reads only ``config.json`` (for a repo id, a single cached hub
     download); the full snapshot is fetched only when the checkpoint IS
-    quantized — the trace-and-bind path then needs the shards anyway (specs are
-    stamped from the safetensors index, weights dequantize from the shards).
+    quantized — the trace-and-bind path then needs the shards anyway (the
+    dequant algebra is spelled from the safetensors index, weights read from
+    the shards).
     """
     from pathlib import Path  # noqa: PLC0415
 

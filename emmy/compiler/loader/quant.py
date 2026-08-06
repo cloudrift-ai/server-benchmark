@@ -1,19 +1,27 @@
-"""FP8 checkpoint ingestion: quant-spec stamping and dequant-on-load math.
+"""FP8 checkpoint ingestion: birth-time spelling of the dequant algebra, plus the numpy math.
 
-Two halves, both consumed by the safetensors loader (M1 of the FP8 plan —
-weights dequantize to the compute dtype at bind time; no kernel sees fp8):
+This module is the ONE place quantization-as-a-concept exists (together with the
+safetensors loader that reads the checkpoint and ``trace/huggingface.py``'s
+architecture-twin construction). Three halves:
 
 - Pure numpy fp8 math: :func:`decode_f8` (re-exported from
   :mod:`emmy.compiler.dtype`, the leaf module the LUT lives in so the
   ``from_f8*`` decode intrinsics in ``ir/elementwise.py`` share the one table)
   and :func:`dequantize` (scale application with the granularity DERIVED from
   the weight/scale shapes — per-tensor, per-out-channel and 2-D block are one
-  broadcast form, see :class:`~emmy.compiler.ir.base.QuantSpec`).
-- :func:`stamp_quant_specs`: pair each weight ``ConstantOp`` with its scale
-  tensor per the checkpoint's ``config.json`` ``quantization_config`` and the
-  safetensors index, stamping ``ConstantOp.quant``. Runs immediately after
-  trace and before the pipeline — node replacement is safe there (nothing has
-  consumed the graph yet), and the merge/fold passes then see the spec.
+  broadcast form).
+- :func:`spell_quantized_constants`: immediately after trace, rewrite each
+  fp8-stored weight ``ConstantOp`` into in-graph algebra — a bits constant
+  (f8 dtype) + a scale constant + the decode-cast / broadcast-multiply cone.
+  From that point the graph carries NO quantization metadata; a quantized
+  weight is just constants + algebra. By default the generic
+  ``032_fold_constant_subgraphs`` pass then dissolves the cone back into one
+  bind-time-evaluated constant; with ``EMMY_FP8_EXPAND`` the cone stays
+  in-graph for the kernel path.
+- :func:`load_dequantized_state_dict`: the eager / accuracy twin's state dict,
+  every fp8 weight dequantized. Reads config + index directly (loader-band —
+  it feeds the architecture twin before any graph exists, and its whole-dict
+  semantics, consumed scales dropped, have no graph counterpart).
 """
 
 from __future__ import annotations
@@ -22,14 +30,13 @@ import json
 import logging
 import re
 from contextlib import ExitStack
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from emmy.compiler.dtype import decode_f8  # noqa: F401 — re-exported; the LUT's home is the dtype layer
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.base import QuantSpec
+from emmy.compiler.ir.base import ConstantOp
 
 logger = logging.getLogger(__name__)
 
@@ -149,22 +156,113 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     return out
 
 
-def stamp_quant_specs(graph: Graph, model_id_or_path: str) -> int:
-    """Stamp ``ConstantOp.quant`` on every quantized weight of ``graph``.
+def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape: tuple[int, ...], scale_dtype: str) -> bool:
+    """Rewrite the weight constant ``nid`` into its dequant cone. Returns ``True`` on success.
+
+    The cone (one form for every granularity — the block is DERIVED from the two shapes):
+
+        W bits (f8 ConstantOp, the weight's ``source_path``)
+          → decode cast (``from_f8e4m3`` / ``from_f8e5m2`` — the LUT decode IS the cast's
+            semantics; a plain ``copy`` would move uint8 bits, not values)
+          → [reshape to the interleaved block grid — genuine 2-D block scales only]
+          → multiply (divide on ``weight_scale_inv``) by the broadcast scale, a separate
+            ConstantOp reading ``scale_key``
+          → [reshape back]
+
+    The cone's OUTPUT tensor keeps exactly the dtype/shape the trace promised, so every
+    later pass is unaffected. A scale that does not evenly divide the weight leaves the
+    constant alone (``False``) — never a compile error.
+    """
+    # Function-level import: the broadcast helper lives with the decomposition
+    # rules that share it; importing it lazily keeps the loader package light.
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    node = graph.nodes[nid]
+    op, out = node.op, node.output
+    if op.load_ops or op.source_parts or op.value is not None:
+        return False  # only a pristine single-source trace constant is spelled (birth time — nothing has run yet)
+    if any(not d.is_static for d in out.shape):
+        return False
+    shape = tuple(d.as_static() for d in out.shape)
+
+    per_tensor = int(np.prod(scale_shape)) == 1 if scale_shape else True
+    if per_tensor:
+        grid: tuple[int, ...] = (1,) * len(shape)
+    else:
+        if len(scale_shape) != len(shape) or any(sd == 0 or wd % sd for wd, sd in zip(shape, scale_shape, strict=True)):
+            logger.warning("quantized weight %s: scale shape %s does not tile %s; constant left alone", nid, scale_shape, shape)
+            return False
+        grid = scale_shape
+    block = tuple(s // g for g, s in zip(grid, shape, strict=True))
+    # Degenerate blocks (per-tensor / per-out-channel): every axis is a whole-axis
+    # or per-element block, so the scale broadcasts straight onto the weight shape.
+    degenerate = all(g in (1, s) for g, s in zip(grid, shape, strict=True))
+    scale_decl = grid if degenerate else tuple(x for g in grid for x in (g, 1))
+    # Normalize the STORED scale layout (a ``()``/``(1,)`` per-tensor scale, or the
+    # interleaved block form) to the declared shape at bind time.
+    scale_ops: tuple = () if tuple(scale_shape) == scale_decl else (ReshapeOp(shape=scale_decl),)
+    # A bf16-stored scale reads as f32 VALUES through the loader (the bits
+    # carrier has no numpy value dtype), so the graph tensor says f32.
+    graph_scale_dtype = "f32" if scale_dtype == "bf16" else scale_dtype
+
+    frag = Graph()
+    w = frag.add_node(
+        op=ConstantOp(name=op.name, source_path=op.source_path, source_shape=shape, source_dtype=fmt),
+        inputs=[],
+        output=Tensor(f"{out.name}_bits", shape, fmt),
+    )
+    scale = frag.add_node(
+        op=ConstantOp(
+            name=f"{op.name}_scale",
+            source_path=scale_key,
+            source_shape=tuple(scale_shape),
+            source_dtype=scale_dtype,
+            load_ops=scale_ops,
+        ),
+        inputs=[],
+        output=Tensor(f"{out.name}_scale", scale_decl, graph_scale_dtype),
+    )
+    cast = frag.add_node(
+        op=ElementwiseOp(op=f"from_{fmt}"),
+        inputs=[w],
+        output=Tensor(f"{out.name}_dq", shape, out.dtype),
+    )
+    mul = ElementwiseOp(op="divide" if scale_key.endswith("_inv") else "multiply")
+    if degenerate:
+        s_bc = broadcast_to(frag, scale, shape)
+        final = frag.add_node(op=mul, inputs=[cast, s_bc], output=Tensor(out.name, shape, out.dtype))
+    else:
+        interleaved = tuple(x for g, b in zip(grid, block, strict=True) for x in (g, b))
+        blk = frag.add_node(op=ReshapeOp(shape=interleaved), inputs=[cast], output=Tensor(f"{out.name}_blk", interleaved, out.dtype))
+        s_bc = broadcast_to(frag, scale, interleaved)
+        scaled = frag.add_node(op=mul, inputs=[blk, s_bc], output=Tensor(f"{out.name}_sblk", interleaved, out.dtype))
+        final = frag.add_node(op=ReshapeOp(shape=shape), inputs=[scaled], output=Tensor(out.name, shape, out.dtype))
+    frag.outputs = [final]
+    graph.splice(frag, consumed=[nid], output=nid)
+    return True
+
+
+def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
+    """Spell every fp8-stored weight of ``graph`` as in-graph dequant algebra, at birth.
 
     Source of truth is the CHECKPOINT, not the traced module (a quantized
     checkpoint is traced through its bf16 architecture twin, whose module
     carries no fp8 tensors): the ``config.json`` ``quantization_config``
     declares the scheme, and the safetensors index supplies the pairing — a
     weight stored as fp8 whose ``<prefix>.weight_scale`` (or
-    ``.weight_scale_inv`` → ``inverse=True``) tensor is present in the index
-    gets a :class:`QuantSpec`; ``modules_to_not_convert`` / ``ignore`` entries
-    and weights with no scale tensor get NO spec and load as plain tensors.
+    ``.weight_scale_inv`` → divide) tensor is present in the index is rewritten
+    into its dequant cone (:func:`_spell_one`); ``modules_to_not_convert`` /
+    ``ignore`` entries and weights with no scale tensor are left alone and load
+    as plain tensors. Runs immediately after trace and before the pipeline —
+    node replacement is safe there (nothing has consumed the graph yet).
     Unquantized checkpoints are a no-op — zero graph change. Returns the
-    number of constants stamped.
+    number of constants spelled.
     """
-    # Function-level import: this module owns the pure math; the shard-index
-    # helpers live with the loader that also consumes them.
+    # Function-level import: this module owns the pure math + the spelling; the
+    # shard-index helpers live with the loader that also consumes them.
     from safetensors import safe_open  # noqa: PLC0415
 
     from emmy.compiler.loader.safetensors import _build_index, _candidate_keys, _resolve_model_dir  # noqa: PLC0415
@@ -176,7 +274,7 @@ def stamp_quant_specs(graph: Graph, model_id_or_path: str) -> int:
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
     index = _build_index(model_dir)
 
-    stamped = 0
+    spelled = 0
     with ExitStack() as stack:
         handles: dict[str, object] = {}  # shard path → open safe_open handle (metadata reads only)
 
@@ -187,9 +285,9 @@ def stamp_quant_specs(graph: Graph, model_id_or_path: str) -> int:
                 handle = handles[path] = stack.enter_context(safe_open(path, framework="numpy"))
             return handle.get_slice(key)
 
-        for nid, op in graph.loadable_constants():
-            if op.quant is not None or op.source_path is None:
-                continue
+        for nid, op in list(graph.loadable_constants()):
+            if op.source_path is None or op.source_dtype in F8_SAFETENSORS_DTYPES.values():
+                continue  # source-less, or an already-spelled bits constant (idempotency)
             key = next((c for c in _candidate_keys(op.source_path) if c in index), None)
             if key is None or not key.endswith(".weight") or _is_skipped(key, patterns):
                 continue
@@ -201,15 +299,15 @@ def stamp_quant_specs(graph: Graph, model_id_or_path: str) -> int:
             if scale_key is None:
                 continue  # no paired scale in the index → loads as a plain tensor
             scale_slice = _slice(scale_key)
-            spec = QuantSpec(
-                scale_path=scale_key,
+            if _spell_one(
+                graph,
+                nid,
+                fmt=F8_SAFETENSORS_DTYPES[stored],
+                scale_key=scale_key,
                 scale_shape=tuple(int(d) for d in scale_slice.get_shape()),
                 scale_dtype=scale_slice.get_dtype().lower(),
-                inverse=scale_key.endswith("_inv"),
-                fmt=F8_SAFETENSORS_DTYPES[stored],
-            )
-            graph.nodes[nid].op = replace(op, quant=spec)
-            stamped += 1
-    if stamped:
-        logger.info("stamped %d quantized weight constant(s) from %s", stamped, model_dir)
-    return stamped
+            ):
+                spelled += 1
+    if spelled:
+        logger.info("spelled %d quantized weight constant(s) from %s", spelled, model_dir)
+    return spelled

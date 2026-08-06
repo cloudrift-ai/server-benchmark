@@ -556,12 +556,13 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     model.eval()
 
     def _stamp(graph: Graph) -> Graph:
-        # Quant metadata attaches immediately after trace, before any pass runs
-        # (the merge/fold passes consult ``ConstantOp.quant``).
+        # The checkpoint's fp8 weights are spelled as in-graph algebra immediately
+        # after trace, before any pass runs — from here on the graph carries no
+        # quantization metadata (the fold pass then dissolves the cones by default).
         if quant_dir is not None:
-            from emmy.compiler.loader.quant import stamp_quant_specs  # noqa: PLC0415
+            from emmy.compiler.loader.quant import spell_quantized_constants  # noqa: PLC0415
 
-            stamp_quant_specs(graph, str(quant_dir))
+            spell_quantized_constants(graph, str(quant_dir))
         return graph
 
     if layer is None:

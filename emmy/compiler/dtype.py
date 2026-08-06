@@ -161,6 +161,38 @@ def decode_f8(bits: np.ndarray, fmt: str) -> np.ndarray:
     return _f8_lut(fmt)[np.asarray(bits).astype(np.uint8, copy=False)]
 
 
+@cache
+def _f8_finite_values(fmt: str) -> tuple[np.ndarray, int]:
+    """The ascending finite non-negative values of an fp8 format and the count of finite positive
+    codes — the encode's search table. e4m3 (``fn``): codes 0x00..0x7E are finite and ascending
+    (only 0x7F is NaN); e5m2 (IEEE): 0x00..0x7B (0x7C is inf, 0x7D..0x7F NaN)."""
+    n_finite = 0x7F if fmt == "f8e4m3" else 0x7C
+    return _f8_lut(fmt)[:n_finite].astype(np.float64), n_finite
+
+
+def encode_f8(values: np.ndarray, fmt: str) -> np.ndarray:
+    """Encode an f32/f16 array to fp8 bit patterns (uint8 carrier) — round-to-nearest-EVEN onto
+    the format's representable set, SATURATING to the max finite value (the ``cuda_fp8.h``
+    constructor's ``__NV_SATFINITE`` rounding; torch-verified for in-range values in
+    ``tests/compiler/passes/test_fp8_mma.py``), NaN → the canonical all-ones NaN code. The exact
+    inverse-of-:func:`decode_f8` semantics the ``to_f8*`` encode intrinsics carry."""
+    vals, n_finite = _f8_finite_values(fmt)
+    with np.errstate(invalid="ignore"):  # a signaling-NaN payload raises FE_INVALID on the widening cast
+        x = np.asarray(values, dtype=np.float64)
+    sign = np.signbit(x)
+    a = np.abs(x)
+    # ``vals`` is exactly the representable set, so nearest-neighbor search with a tie-to-even-code
+    # rule IS round-to-nearest-even (adjacent codes differ in the low mantissa bit; across an
+    # exponent boundary the higher code has mantissa 0 — even either way).
+    idx = np.clip(np.searchsorted(vals, a), 1, n_finite - 1)
+    lo, hi = vals[idx - 1], vals[idx]
+    take_hi = (a - lo > hi - a) | ((a - lo == hi - a) & (idx % 2 == 0))
+    code = np.where(take_hi, idx, idx - 1).astype(np.uint8)
+    code = np.where(a >= vals[-1], np.uint8(n_finite - 1), code)  # satfinite
+    code = code | (sign.astype(np.uint8) << 7)
+    return np.where(np.isnan(x), np.uint8(0x7F), code).astype(np.uint8)
+
+
 def get(dtype: str | DataType) -> DataType:
     """Resolve a name (canonical or alias) or pass through a ``DataType``."""
     if isinstance(dtype, DataType):

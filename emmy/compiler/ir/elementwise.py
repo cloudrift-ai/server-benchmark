@@ -23,7 +23,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from emmy.compiler.dtype import decode_f8
+from emmy.compiler.dtype import decode_f8, encode_f8
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -52,6 +52,11 @@ _NAME_TO_FN: dict[str, object] = {
     # converts by dtype (the fragment-path ``cvt``).
     "from_f8e4m3": lambda x: decode_f8(x, "f8e4m3"),
     "from_f8e5m2": lambda x: decode_f8(x, "f8e5m2"),
+    # fp8 encode casts — the decode twins (M3: activation storage ahead of the native fp8 mma).
+    # Host-side: round-to-nearest-even onto the representable set, saturate-to-finite, producing
+    # the uint8 bits carrier; the CUDA render spells the <cuda_fp8.h> constructor (same rounding).
+    "to_f8e4m3": lambda x: encode_f8(x, "f8e4m3"),
+    "to_f8e5m2": lambda x: encode_f8(x, "f8e5m2"),
 }
 
 

@@ -30,7 +30,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from emmy.compiler.dtype import BF16, F16, F32, DataType
+from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, DataType
+
+# Canonical dtype token → the PTX instruction's dtype field, where they differ. The mma wrapper
+# names (``emmy_mma_m16n8k32_e4m3_f32``) and the atom-name convention both spell the PTX token.
+_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2"}
 
 
 @dataclass(frozen=True)
@@ -73,9 +77,12 @@ class AtomKind:
 
     @property
     def ab_dtype(self) -> str:
-        """The shared multiplicand dtype token (``"f16"`` / ``"bf16"``) the ``MmaSyncPtx``
-        wrapper selects on (``emmy_mma_m16n8k16_{f16,bf16}``)."""
-        return self.operand_dtype("a").name
+        """The shared multiplicand dtype token the ``MmaSyncPtx`` wrapper selects on
+        (``emmy_mma_m16n8k16_{f16,bf16}_*`` / ``emmy_mma_m16n8k32_e4m3_*``) — the PTX
+        instruction's dtype field, so the fp8 dtypes spell their PTX form (``e4m3``, not
+        ``f8e4m3``), matching the atom-name convention below."""
+        name = self.operand_dtype("a").name
+        return _PTX_DTYPE.get(name, name)
 
     @property
     def c_to_a_repack(self) -> bool:
@@ -133,10 +140,18 @@ Atom = AtomKind | ScalarAtom
 #: full rate and the lowering periodically promote-adds the f16 partials into an f32 shadow
 #: fragment (``FragmentPromote``), bounding the accumulation error to one K chunk. f16 only —
 #: mma.sync has no bf16-accumulate form. Enumeration is gated (``F16_MMA_F32_ACC`` / ``FAST_MATH``).
+#: The native fp8 atoms (``m16n8k32``, M3 of the FP8 plan): both multiplicands are raw f8 bytes
+#: (4 per 32-bit fragment register), the accumulator f32. The bare PTX spelling
+#: (``mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32``) compiles on sm_89 AND sm_120 —
+#: probed 2026-08-06; the Blackwell ``.kind::f8f6f4`` qualifier is refused by ptxas on both — but
+#: the instruction does not exist below sm_89 and its effective accumulation precision is
+#: arch-dependent (reduced on sm_89), so enumeration is gated (``FP8_MMA`` / ``FAST_MATH``).
 ATOM_REGISTRY: dict[str, AtomKind] = {
     "mma_m16n8k16_f16_f32": AtomKind("mma_m16n8k16_f16_f32", (16, 8, 16), (("a", F16), ("b", F16), ("c", F32))),
     "mma_m16n8k16_bf16_f32": AtomKind("mma_m16n8k16_bf16_f32", (16, 8, 16), (("a", BF16), ("b", BF16), ("c", F32))),
     "mma_m16n8k16_f16_f16": AtomKind("mma_m16n8k16_f16_f16", (16, 8, 16), (("a", F16), ("b", F16), ("c", F16))),
+    "mma_m16n8k32_e4m3_f32": AtomKind("mma_m16n8k32_e4m3_f32", (16, 8, 32), (("a", F8E4M3), ("b", F8E4M3), ("c", F32))),
+    "mma_m16n8k32_e5m2_f32": AtomKind("mma_m16n8k32_e5m2_f32", (16, 8, 32), (("a", F8E5M2), ("b", F8E5M2), ("c", F32))),
 }
 
 

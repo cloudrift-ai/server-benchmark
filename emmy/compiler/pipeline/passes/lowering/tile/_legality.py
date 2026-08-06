@@ -173,9 +173,12 @@ def coop_band_epilogue(tail) -> str | None:
 def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
     """The inner mma K-step ``atom_k·bk`` must tile a STATIC contraction K: the warp K-loop has no
     static-K tail masking, so a partial final step reads past the operand and silently corrupts the
-    result. A SYMBOLIC K reaches the masked tier and is fine."""
+    result. A SYMBOLIC K reaches the masked tier and is fine — except on the fp8 atoms, whose
+    byte-gather fragment loaders have no masked-K zero-fill family."""
     ext = node.axis.extent
     if not ext.is_static:
+        if plan.is_warp and plan.atom.operand_dtype("a").nbytes == 1:
+            return f"atom {plan.atom.name}: the fp8 byte-gather loaders have no masked-K zero-fill — a symbolic K stays off the fp8 tier"
         return None
     k, step = ext.as_static(), plan.atom.atom_k * plan.bk
     if k % step == 0:
@@ -300,6 +303,8 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
+    if atom.operand_dtype("a").nbytes < 2:
+        return None  # fp8 atoms: ldmatrix has no byte-fragment form on these arches — gmem-direct only
     if inputs:
         for edge, role in ((c.a, "a"), (c.b, "b")):
             t = inputs.get(edge.input) if isinstance(edge, Load) else None
@@ -379,6 +384,8 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape."""
     atom = tile.atom
+    if atom.operand_dtype("a").nbytes < 2:
+        return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
     _, _, stats = cone_seam(c.a)

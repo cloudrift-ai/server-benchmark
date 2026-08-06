@@ -180,11 +180,13 @@ def test_resolve_warp_stage_admits_matched_dtypes():
     assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is not None
 
 
-def test_atom_registry_has_no_f8_atom():
-    """No fp8 mma atom is registered (W8A16: the mma consumes f16 fragments; native fp8 mma is
-    M3) — so an f8 multiplicand can never select a tensor-core cell directly."""
-    assert all(dt.name != "f8e4m3" for atom in ATOM_REGISTRY.values() for _r, dt in atom.operand_dtypes)
-    assert F32.name == "f32"  # anchor the imports
+def test_f8_atoms_are_the_gated_k32_family():
+    """The only f8-multiplicand atoms are the native m16n8k32 cells (M3) — offered solely through
+    the ``FP8_MMA``-gated enumeration — so an f8 operand still never selects a 16-bit (k16)
+    tensor-core cell, and the W8A16 path's picks are untouched."""
+    f8 = {name: atom for name, atom in ATOM_REGISTRY.items() if any(dt.name.startswith("f8") for _r, dt in atom.operand_dtypes)}
+    assert set(f8) == {"mma_m16n8k32_e4m3_f32", "mma_m16n8k32_e5m2_f32"}
+    assert all(atom.shape == (16, 8, 32) and atom.operand_dtype("c") is F32 for atom in f8.values())
 
 
 # ===================================================================

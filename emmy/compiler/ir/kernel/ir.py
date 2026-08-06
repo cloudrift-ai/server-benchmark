@@ -1254,16 +1254,15 @@ class FragmentBiasAdd(Stmt):
 def _mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: DataType | None = None) -> int:
     """Per-lane register count for an mma.sync operand of cell ``shape``.
 
-    ``a`` (M×K f16) and ``b`` (K×N f16) pack two halfs per 32-bit register;
-    ``c`` holds one float per register (f32 accumulate) or two packed halfs
-    (the f16-accumulate atom — ``dtype`` is the C element type). For
-    ``m16n8k16``: ``a[4]`` (256 halfs / 32 lanes / 2), ``b[2]`` (128 / 32 / 2),
-    ``c[4]`` f32 (128 f32 / 32) / ``c[2]`` f16."""
+    ``a`` (M×K) and ``b`` (K×N) pack two 16-bit or four 8-bit elements per 32-bit register
+    (``dtype`` is the operand element type; ``None`` keeps the 16-bit default); ``c`` holds one
+    float per register (f32 accumulate) or two packed halfs (the f16-accumulate atom). For
+    ``m16n8k16`` f16: ``a[4]`` (256 halfs / 32 lanes / 2), ``b[2]`` (128 / 32 / 2), ``c[4]`` f32
+    (128 f32 / 32) / ``c[2]`` f16; for ``m16n8k32`` fp8: ``a[4]`` (512 bytes / 32 / 4), ``b[2]``."""
     m, n, k = shape
-    if role == "a":
-        return (m * k) // 64
-    if role == "b":
-        return (k * n) // 64
+    if role in ("a", "b"):
+        per_reg = 4 if dtype is not None and dtype.nbytes == 1 else 2
+        return (m * k if role == "a" else k * n) // (32 * per_reg)
     if role == "c":
         return (m * n) // 64 if dtype is not None and dtype.nbytes == 2 else (m * n) // 32
     raise ValueError(f"mma.sync: unsupported role {role!r}; expected 'a', 'b', or 'c'")
@@ -1440,6 +1439,17 @@ class LdmatrixLoad(Stmt):
             src_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
             frag_dt = ctx.ssa_dtypes.get(self.frag) or src_dt
             targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
+            b8 = frag_dt in ("f8e4m3", "f8e5m2")
+            if b8:
+                # fp8 fragments gather RAW bytes with the k32 fragment map (the ``_b8`` helper
+                # family) — there is no per-element convert (the mma consumes storage bits), so
+                # the source buffer must already carry the fragment dtype, and no masked-K byte
+                # gather exists (the schedule offers the fp8 atoms only on a static K).
+                if src_dt != frag_dt:
+                    raise ValueError(f"fp8 mma fragment {self.frag}: source buffer {self.src_buffer!r} is {src_dt}, not {frag_dt}")
+                if self.k_zero is not None:
+                    raise ValueError("fp8 mma fragments have no masked-K byte gather — the fp8 atoms are static-K only")
+            sfx = "_b8" if b8 else ""
             if self.k_zero is not None:
                 # Masked-K (symbolic reduce): zero-fill (not clamp) the K halves
                 # past the runtime extent so the mma reduction stays correct — K is
@@ -1470,12 +1480,12 @@ class LdmatrixLoad(Stmt):
                     helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
-                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
                 helper = "emmy_mma_load_a_gmem"
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
-            return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+            return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
         if self.pair_frag is not None:
             # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).
@@ -1526,11 +1536,12 @@ class MmaSyncPtx(Stmt):
     tensor-core MMA via inline PTX (the ``s16816`` instruction).
 
     ``c_frag`` is the accumulator array (both input and output —
-    ``d = a·b + c``); ``a_frag`` / ``b_frag`` are the 16-bit multiplicand
+    ``d = a·b + c``); ``a_frag`` / ``b_frag`` are the multiplicand
     arrays filled by :class:`LdmatrixLoad`. ``shape`` spells the M/N/K.
-    ``ab_dtype`` (``"f16"`` / ``"bf16"``) tags the operand element type —
-    f16 and bf16 share the same fragment layout + ldmatrix path and differ
-    only in the PTX instruction's dtype field, so the render just picks the
+    ``ab_dtype`` (``"f16"`` / ``"bf16"`` / ``"e4m3"`` / ``"e5m2"`` — the PTX
+    dtype field, :attr:`AtomKind.ab_dtype`) tags the operand element type —
+    same-width dtypes share a fragment layout and differ only in the PTX
+    instruction's dtype field, so the render just picks the
     matching ``emmy_mma_…`` wrapper. ``c_dtype`` is the accumulator element
     type: ``"f32"`` (the default — ``float c[4]``) or ``"f16"`` (the
     f16-accumulate atom — packed ``unsigned c[2]``, full HMMA rate on the

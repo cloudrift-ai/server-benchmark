@@ -227,6 +227,11 @@ def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
         # the op itself is an identity here — like ``copy``, but never a raw
         # byte move because the arg reaches this point converted.
         return inputs[0]
+    if fn in ("to_f8e4m3", "to_f8e5m2"):
+        # fp8 encode cast — the decode twin: ``Assign.render`` computes the arg at f32 and its
+        # result-dtype demotion routes through ``target.convert``, which spells the <cuda_fp8.h>
+        # constructor (round-to-nearest-even, saturate-to-finite). Identity here, same as above.
+        return inputs[0]
     if fn == "square":
         return BinaryExpr("*", inputs[0], inputs[0])
     if fn == "reciprocal":

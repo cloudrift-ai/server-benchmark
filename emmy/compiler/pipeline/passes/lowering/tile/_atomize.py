@@ -103,14 +103,17 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
 
 
 def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
-    """Bind a COMPUTED **B** whose cone is a storage decode times k-invariant multiplicative
-    factors — the mul-hoist. The lift's B-side value must factor as ``(storage decode of the
-    (n, k) B load) ⊗ k-invariant factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT along the reduce
+    """Bind a computed operand (either side — or BOTH, the W8A8 shape) whose cone is a storage
+    decode times k-invariant multiplicative factors — the mul-hoist. Each lift argument must be
+    the operand ``Load`` itself, or factor as ``(storage decode of that side's load) ⊗ k-invariant
+    factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT along the reduce
     axis commutes out of the fold (``Σ_k a·(s·w) = s·Σ_k a·w`` — the same reassociation category as
     split-K), so the factors move onto the accumulator in the EPILOGUE, and the decode is ABSORBED
-    by the B load's own storage dtype (every consumer converts a bits-carrier element by dtype: the
-    render's promote on the scalar tier, the per-element ``F(...)`` convert of the gmem-direct
-    fragment load on the warp tier).
+    by the load's own storage dtype (every consumer converts a bits-carrier element by dtype: the
+    render's promote on the scalar tier, the per-element convert — or the fp8 atoms' raw byte
+    gather — of the gmem-direct fragment load on the warp tier). B-side factors are the M2b
+    scale; A-side factors are the W8A8 activation scale, and both hoist into ONE epilogue
+    chain (the two scale factors composed on the f32 accumulator).
 
     The chain's leaf is recognized by TRAIT, never by op name: ``ElementwiseImpl.decodes`` names
     the storage dtype an op is the decode cast for (the fp8 family today) — a new storage format
@@ -124,10 +127,9 @@ def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: L
     ``<acc>__mh`` so the epilogue's factor chain can DEFINE ``acc`` and every downstream reader of
     the fold's output (the projection stmts, the root ``Write``, the bare-case store glue) sees the
     scaled value without a rename walk — or ``None`` (not this shape)."""
-    if a_leaf is None or a_leaf.names[0] not in lift.args:
+    if a_leaf is None or b_leaf is None:
         return None
     defs = {s.name: s for s in body if isinstance(s, Assign)}
-    b_bits = b_leaf.names[0]
 
     def cone_names(name: str) -> set[str] | None:
         cone = map_cone(body, name)
@@ -138,38 +140,49 @@ def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: L
         return cone is not None and not any(refs_axis(st, k_name) for st in cone)
 
     factors: list[tuple[str, str]] = []  # (op, ssa) applied to the accumulator, outer chain first
-    cur = next(a for a in lift.args if a != a_leaf.names[0])
-    while True:
-        st = defs.get(cur)
-        if st is None:
+    for arg in lift.args:
+        if arg in (a_leaf.names[0], b_leaf.names[0]):
+            continue  # a directly-named operand — nothing to decode or hoist on this side
+        names = cone_names(arg)
+        if names is None:
             return None
-        if st.op.name in ("multiply", "divide") and len(st.args) == 2:
-            x, y = st.args
-            xs, ys = cone_names(x), cone_names(y)
-            if xs is None or ys is None or (b_bits in xs) == (b_bits in ys):
-                return None  # B on both sides / neither — not the decode-times-factors chain
-            b_side, s_side = (x, y) if b_bits in xs else (y, x)
-            if st.op.name == "divide" and b_bits not in xs:
-                return None  # ``s / w`` — the divide does not commute out of the fold
-            if not k_free(s_side):
-                return None  # a k-varying factor (2-D block scale) stays in the fold — decline
-            factors.append((st.op.name, s_side))
-            cur = b_side
-            continue
-        storage = st.op.decodes
-        if storage is not None and st.args == (b_bits,) and (b_leaf.dtype is None or b_leaf.dtype.name == storage):
-            # The chain's leaf IS the registered decode for the B load's storage dtype (the
-            # dtype is unstamped at recognize time — the kernel-IR stamp pass runs later — so
-            # an absent dtype defers to the trait alone). Absorbed by the load's dtype.
-            break
-        return None
+        in_a, in_b = a_leaf.names[0] in names, b_leaf.names[0] in names
+        if in_a == in_b:
+            return None  # both leaves in one cone / neither — not the decode-times-factors chain
+        leaf = a_leaf if in_a else b_leaf
+        bits = leaf.names[0]
+        cur = arg
+        while True:
+            st = defs.get(cur)
+            if st is None:
+                return None
+            if st.op.name in ("multiply", "divide") and len(st.args) == 2:
+                x, y = st.args
+                xs, ys = cone_names(x), cone_names(y)
+                if xs is None or ys is None or (bits in xs) == (bits in ys):
+                    return None  # the operand on both sides / neither — not the decode-times-factors chain
+                w_side, s_side = (x, y) if bits in xs else (y, x)
+                if st.op.name == "divide" and bits not in xs:
+                    return None  # ``s / w`` — the divide does not commute out of the fold
+                if not k_free(s_side):
+                    return None  # a k-varying factor (2-D block scale) stays in the fold — decline
+                factors.append((st.op.name, s_side))
+                cur = w_side
+                continue
+            storage = st.op.decodes
+            if storage is not None and st.args == (bits,) and (leaf.dtype is None or leaf.dtype.name == storage):
+                # The chain's leaf IS the registered decode for the load's storage dtype (the
+                # dtype is unstamped at recognize time — the kernel-IR stamp pass runs later — so
+                # an absent dtype defers to the trait alone). Absorbed by the load's dtype.
+                break
+            return None
     # Full coverage: every body stmt is the lift, the fold, an operand leaf, or a member of a
     # bound cone — an unaccounted stmt is a shape this binding does not understand.
     bound: set[int] = {id(st) for st in map_cone(body, lift.args[0]) or ()}
     bound |= {id(st) for st in map_cone(body, lift.args[1]) or ()}
     if any(isinstance(s, (Load, Assign)) and id(s) not in bound and s is not lift for s in body):
         return None
-    if not factors:  # a bare decode — B binds as the raw storage-dtype load, nothing to hoist
+    if not factors:  # bare decode(s) — the operands bind as the raw storage-dtype loads, nothing to hoist
         return a_leaf, b_leaf, acc, epilogue
     hoisted: list[Stmt] = []
     seen: set[int] = set()
@@ -232,6 +245,14 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             a_arg = next(a for a in lift.args if a != b_leaf.names[0])
             if a_leaf is not None and a_arg == a_leaf.names[0]:
                 return a_leaf, b_leaf, acc, epilogue
+            # A rides a computed cone. A storage decode times k-invariant multiplicative factors
+            # binds through the mul-hoist FIRST (the raw storage-dtype A load — the W8A8
+            # activation side; the fp8 warp tier needs the materialized bits, and the scalar
+            # tier's per-element promote converts them identically); any other pure MAP cone is
+            # the computed-A form and rides the sync compute-fill.
+            hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+            if hoist is not None:
+                return hoist
             cone = map_cone(body, a_arg)
             if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
                 return cone, b_leaf, acc, epilogue
@@ -241,7 +262,8 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
             # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
             raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
-        # B is NOT directly named by the lift — it rides a computed cone. A storage decode
+        # B is NOT directly named by the lift — it rides a computed cone (and A may too: the
+        # W8A8 double-cone). A storage decode
         # times k-invariant multiplicative factors binds through the mul-hoist (decode absorbed
         # by the storage dtype, factors to the epilogue); anything else raises for the same
         # reason as the computed-A decline above — the positional rule would bind the

@@ -221,7 +221,7 @@ FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
     hints=(False,),
-    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC): "
+    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA): "
     "EMMY_FAST_MATH=1 enables each one not individually pinned; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
@@ -234,6 +234,20 @@ F16_MMA_F32_ACC = Knob(
     "chain accumulates in f16 at the full HMMA rate, with a periodic register promote into f32 "
     "shadows; ~2x mma throughput on consumer dies where f32-accumulate is half rate). "
     "Pin 1 to offer on every target, 0 never; unset follows FAST_MATH (consumer-die targets only). "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+FP8_MMA = Knob(
+    "FP8_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the native fp8 tensor-core atom forks (a:mma_m16n8k32_e4m3_f32 / _e5m2_f32 — both "
+    "multiplicands consumed as raw f8 bytes at k32, scale factors on the f32 epilogue). The "
+    "instruction's effective accumulation precision is arch-dependent (reduced on sm_89, ~3e-4 rel "
+    "vs the exact f32 decode-and-fma scalar path), so the fork family is precision-trading: pin 1 "
+    "to offer, 0 never; unset follows FAST_MATH. The sm_89 hardware floor is absolute — below it "
+    "the instruction does not compile, and no pin overrides that. "
     "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
 )
 

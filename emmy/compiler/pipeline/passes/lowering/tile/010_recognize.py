@@ -179,11 +179,20 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
     # took gemma-4's GeGLU->down_proj edge off the mma tier entirely (66x).
     if len(lift.args) != 2:
         return False
+
+    def k_indexed_cone(root: str) -> bool:
+        cone = map_cone(list(body), root)
+        return bool(cone) and any(isinstance(st, Load) and k_name in {v for e in st.index for v in e.free_vars()} for st in cone)
+
     operand = next((ld for ld in k_loads if ld.names[0] in lift.args), None)
     if operand is None:
-        return False
-    cone = map_cone(list(body), next(a for a in lift.args if a != operand.names[0]))
-    return bool(cone) and any(isinstance(st, Load) and k_name in {v for e in st.index for v in e.free_vars()} for st in cone)
+        # BOTH lift args ride computed cones (the W8A8 shape: a storage-decode cone on each
+        # operand). Still a contraction when each cone carries a K-indexed load;
+        # ``bind_contraction`` arbitrates bindability — the shapes it cannot bind (e.g. the
+        # pre-scaled ``sum_k (x·s)·(y·s)``) raise there and derive PLANAR, exactly the fold the
+        # old ``return False`` produced, so nothing schedulable is lost by marking.
+        return all(k_indexed_cone(a) for a in lift.args)
+    return k_indexed_cone(next(a for a in lift.args if a != operand.names[0]))
 
 
 def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:

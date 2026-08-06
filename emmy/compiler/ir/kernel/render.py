@@ -495,6 +495,140 @@ static __device__ __forceinline__ void emmy_mma_promote_f16acc(float* c, unsigne
 
 """
 
+# Native fp8 mma prelude (the ``m16n8k32`` atom family, M3 of the FP8 plan) — appended to the mma
+# prelude ONLY when the kernel carries an fp8 ``MmaSyncPtx``, so every existing 16-bit mma kernel's
+# source stays byte-identical. Two parts:
+#
+# - ``emmy_mma_m16n8k32_{e4m3,e5m2}_f32``: the bare PTX spelling, probed 2026-08-06 — it compiles
+#   AND verifies against the LUT-decode reference on BOTH sm_89 (CUDA 13.3) and sm_120 (CUDA 13.0);
+#   ptxas refuses the Blackwell ``.kind::f8f6f4`` qualifier on sm_89 / sm_120 / sm_120a, so the bare
+#   form is the one spelling for every supported arch. Effective accumulation precision is
+#   arch-dependent: true-f32 on sm_120 (~7e-7 rel), reduced on sm_89 (~3e-4 rel measured).
+# - the ``_b8`` gmem-direct fragment loaders: the k32 8-bit fragment map packs FOUR bytes per
+#   32-bit register per lane (A: 4 regs — reg i covers row ``grp + ((i&1)?8:0)``, cols
+#   ``4·tig + ((i&2)?16:0) + 0..3``; B: 2 regs — reg i covers k ``4·tig + (i?16:0) + 0..3`` at col
+#   ``grp``; C/D keep the k16 f32 map), so the 16-bit half-pair loaders above cannot express it.
+#   These gather raw bytes — no per-element convert: the mma consumes the storage bits directly.
+#   ``ldmatrix`` has no byte-fragment form on these arches, so the fp8 atoms are gmem-direct only
+#   (the stage resolvers decline them) and there is no masked-K (``kzero``) variant — the schedule
+#   offers the atoms only on a static, step-divisible K.
+_MMA_F8_PRELUDE = """\
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_a_gmem_b8(unsigned* r, const T* g, int ldm) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int row = grp + ((i & 1) ? 8 : 0);          // M: groupID, +8 for the second row block
+        int col = (tig << 2) + ((i & 2) ? 16 : 0);  // K: 4*threadID_in_group, +16 for the k32 half
+        unsigned packed;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
+        r[i] = packed;
+    }
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_b8(unsigned* r, const T* g, int ldm) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int n = grp;                                 // N: groupID (0..7)
+        int k = (tig << 2) + (i ? 16 : 0);           // K: 4*threadID_in_group, +16 for the k32 half
+        unsigned packed;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
+        r[i] = packed;
+    }
+}
+
+// Transposed-B (``g[n][k]``, K contiguous): same fragment map with the (k, n) index roles swapped —
+// each lane reads a contiguous 4-byte K run from row ``n``. Cf. emmy_mma_load_b_gmem_trans.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_b8(unsigned* r, const T* g, int ldm) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int n = grp;
+        int k = (tig << 2) + (i ? 16 : 0);
+        unsigned packed;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
+        r[i] = packed;
+    }
+}
+
+// Masked-tile variants: clamp the lane coordinate on the gated output axis to the runtime extent
+// (duplicate reads; the RegStore guard masks their stores) — the b8 mirror of the 16-bit
+// ``_mclamp`` / ``_nclamp`` family above.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_b8(unsigned* r, const T* g, int ldm, int rows_left) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int row = grp + ((i & 1) ? 8 : 0);
+        if (row >= rows_left) row = rows_left - 1;   // M: clamp to the runtime extent
+        int col = (tig << 2) + ((i & 2) ? 16 : 0);
+        unsigned packed;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
+        r[i] = packed;
+    }
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_b8(unsigned* r, const T* g, int ldm, int cols_left) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int n = grp;
+        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        int k = (tig << 2) + (i ? 16 : 0);
+        unsigned packed;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
+        r[i] = packed;
+    }
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_b8(unsigned* r, const T* g, int ldm, int cols_left) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int n = grp;
+        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        int k = (tig << 2) + (i ? 16 : 0);
+        unsigned packed;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
+        r[i] = packed;
+    }
+}
+
+static __device__ __forceinline__ void emmy_mma_m16n8k32_e4m3_f32(float* d, const unsigned* a, const unsigned* b, const float* c) {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+                 "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\\n"
+                 : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+                   "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+}
+
+static __device__ __forceinline__ void emmy_mma_m16n8k32_e5m2_f32(float* d, const unsigned* a, const unsigned* b, const float* c) {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 "
+                 "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\\n"
+                 : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+                   "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+}
+
+"""
+
 
 def _swizzle_prelude(kernel_op: KernelOp) -> str:
     """One ``emmy_swizzle_<mode>`` helper per swizzle mode the body uses — on ``LdmatrixLoad``
@@ -668,6 +802,10 @@ def render_kernelop(
 
     uses_mma_sync = any(isinstance(s, MmaSyncPtx) for s in kernel_op.body.iter())
     mma_sync_prelude = _MMA_SYNC_PRELUDE if uses_mma_sync else ""
+    # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
+    # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate).
+    if any(isinstance(s, MmaSyncPtx) and s.ab_dtype in ("e4m3", "e5m2") for s in kernel_op.body.iter()):
+        mma_sync_prelude += _MMA_F8_PRELUDE
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"

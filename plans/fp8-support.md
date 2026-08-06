@@ -19,9 +19,19 @@ FP8 story; nothing here is Qwen3.8-specific.
   reached on BOTH cards (5090 e2e max_diff 1.5e-7, fragment-convert 5.7e-4 max_rel; sm_89/4090 verified, max_rel
   2.5e-4 through the trans fragment helper); quant-metadata containment gate test added. The BYTE WIN IS PENDING
   staged fp8 transport (see M2 residual below) — every current A/B rides the transaction-bound gmem-direct path.
-- **M3 / M4 NOT STARTED** — M3 stays gated on M2 A/B evidence per the milestone's own bar (only worth starting once
-  A/Bs show the residual gap is mma-rate-bound, not bytes-bound — unknowable until the staged-transport residual
-  lands); the M4 serving A/B needs a serving session on a real FP8 checkpoint.
+- **M3 DONE (2026-08-06, evidence gate overridden by decision)** — native fp8 mma (W8A8): `m16n8k32` e4m3/e5m2
+  atoms; the bare PTX form is THE spelling on both sm_89 and sm_120 (`.kind::f8f6f4` refused by ptxas everywhere);
+  fragment ABI verified empirically (A 4×b32, B 2×b32, C/D keep the k16 map); `FP8_MMA` knob under the FAST_MATH
+  umbrella — the rationale is the instruction's arch-dependent accumulation (sm_89 reduced-precision ~3.2e-4, sm_120
+  effectively true-f32); `to_f8*` encode intrinsics bit-exact vs torch over all finite in-range f16 (saturating
+  overflow, documented divergence); the hoist arm is side-generic — static per-tensor AND dynamic per-token amax
+  W8A8 both work end-to-end on both cards (`act_scale ⊗ weight_scale` composed on the f32 epilogue). The mma-rate
+  thesis is UNOBSERVABLE on the gmem-direct path (all fp8 arms transaction-bound; staged f16 twin 4.3–4.7× faster)
+  — the staged-transport residual gates the perf story for W8A16 and W8A8 alike.
+- **M4 NOT STARTED** — the serving A/B needs a serving session on a real FP8 checkpoint.
+- **QuantSpec RETIRED (dissolve-early migration)** — quantization is graph algebra from birth, folded at `032`;
+  the invariant "quantization is not a concept past the decomposition band" is documented in the ARCHITECTURE
+  files and enforced by a gate test. Net −165 lines.
 - **Dissolve-early migration DONE (2026-08-06)** — `QuantSpec` retired per the deletion path below: quantization is
   spelled as in-graph algebra at birth (`loader.quant.spell_quantized_constants`, post-trace) and dissolved by the
   generic `032_fold_constant_subgraphs` rule (decode-trait-scoped constant-cone fold → one `ConstantOp` with a
@@ -57,6 +67,12 @@ FP8 story; nothing here is Qwen3.8-specific.
    gmem-direct path is not the config the staged kernels will want.
 6. **sm_89 verified numerically** (max_rel 2.5e-4): below sm_90 B arrives in-graph-transposed and the trans
    fragment helper carries the same per-element convert.
+
+M3 adds to the same list: (7) the staged byte-slab drain must cover the k32 atoms too — no ldmatrix `.b8` below
+sm_100a, so the drain is a cooperative byte-slab design, and it is the perf gate for W8A16 and W8A8 alike;
+(8) the `_b8` loaders gather per byte — A/trans-B rows are 4-byte-contiguous and could vectorize to one u32 load
+where alignment is provable; (9) masked-K (`kzero`) b8 variants deliberately absent — symbolic K stays off the
+fp8 tier by legality; (10) e5m2 atoms registered and compiling but not numerics-verified.
 
 ## Current state (verified 2026-08-06)
 

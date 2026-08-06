@@ -599,7 +599,11 @@ def _promoted(node, inputs):
     if node is None or not isinstance(node.a, Load) or not inputs:
         return None
     t = inputs.get(node.a.input)
-    if getattr(getattr(t, "dtype", None), "name", None) != "f32" or not atoms_for(_channel_dtype(node, inputs)):
+    ch = _channel_dtype(node, inputs)
+    # 16-bit channels only: the promotion targets the CONVERTING compute fill, and only the
+    # 16-bit atoms have one — an f8 channel's k32 atom moves raw bytes, so promoting onto it
+    # would demote the f32 value on the slab store.
+    if getattr(getattr(t, "dtype", None), "name", None) != "f32" or ch is None or ch.nbytes == 1 or not atoms_for(ch):
         return None
     # ``a`` is a DERIVED reading, so the rewrite REBUILDS the bilinear fold over the new edge — the
     # one-``Load`` cone keeps the edge's bound name, so the regenerated lift is the same program.
@@ -675,6 +679,20 @@ def _f16acc_allowed(ctx) -> bool:
     return precision_pin(F16_MMA_F32_ACC) and ctx.f16acc_is_faster
 
 
+def _f8_mma_allowed(ctx) -> bool:
+    """Whether the native fp8 mma atom forks may be OFFERED — a precision-trading gate, off by
+    default: the instruction's effective accumulation precision is arch-dependent (reduced on
+    sm_89, ~3e-4 rel vs the exact f32 decode-and-fma scalar path; true-f32 on sm_120), so the
+    precise ``FP8_MMA`` pin — or the ``FAST_MATH`` umbrella — must offer it. The sm_89 hardware
+    floor is absolute: below it the bare ``mma...e4m3`` form does not compile, and no pin
+    overrides that. A ``TILE`` pin naming the atom bypasses this gate (pins are authoritative)."""
+    from emmy.compiler.pipeline.search.space import FP8_MMA, precision_pin  # noqa: PLC0415
+
+    if ctx.compute_capability < (8, 9):
+        return False
+    return bool(precision_pin(FP8_MMA))
+
+
 def _a_dtype(node, inputs):
     """The ``a`` edge's element dtype — the value the mma fragment reads. A MATERIALIZED edge reads
     its gmem tensor's; a COMPUTED cone reads its K-indexed leaf ``Load``'s, which is the value the
@@ -714,8 +732,28 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
     if not inputs or legal.fragment_epilogue(term.proj) is not None:
         return ()
     ab = _a_dtype(node, inputs)
+    if ab is not None and ab.nbytes == 1:
+        # The native fp8 tier (M3): offered only under the precision gate, on a MATERIALIZED f8
+        # ``a`` whose channels all carry the SAME f8 dtype (the byte-gather loaders move raw
+        # bits — a mismatched operand would be read at the wrong width) and a static K (no
+        # masked-K byte gather). Outside that, an f8 ``a`` has no warp tier at all: the sync
+        # compute fill would DEMOTE the cone's value on a 1-byte slab store. The STRUCTURAL
+        # requirements hold under any pin; the precision gate alone is bypassed by a ``TILE``
+        # pin naming an f8 atom (pins are authoritative, the ``_f16acc_allowed`` convention —
+        # the pin must also open the WORK inventories this site spells against).
+        atoms = atoms_for(ab)
+        pin = term.pin("TILE", node)
+        ok = (
+            isinstance(node.a, Load)
+            and _channel_dtype(node, inputs) == ab
+            and node.axis.extent.is_static
+            and (_f8_mma_allowed(term.ctx) or (pin is not None and any(a in pin for a in atoms)))
+        )
+        return atoms if ok else ()
     if not atoms_for(ab) and not isinstance(node.a, Load):
         ab = _channel_dtype(node, inputs)  # the demoting compute fill — an f32 cone on 16-bit B
+        if ab is not None and ab.nbytes == 1:
+            return ()  # an f8 channel under a computed cone stays off the warp tier (the fill would demote to f8)
     atoms = atoms_for(ab)
     if not atoms or not _f16acc_allowed(term.ctx):
         return atoms

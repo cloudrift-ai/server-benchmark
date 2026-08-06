@@ -61,16 +61,8 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 # burn them down by recording aux rows opportunistically (manual --ab), majors stay zero.
 EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 5090": {
-        # 2026-08-05: the m1 (gemv-tier) SCALAR siblings of the re-keyed fused forks — the
-        # computed-A re-keying that orphaned the eleven warp majors above also dropped these
-        # non-warp m1 joins (static + dynM at the qkv / qk_global / gate_up widths). Same
-        # burn-down: the 5090 fused re-seed; delete with the major entries.
-        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=30720),
-        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
+        # (2026-08-05: the m1 scalar siblings that briefly sat here — the same seam-dtype
+        # defect as the eleven warp majors, fixed in ``_cut._ws_dtype`` — are covered again.)
         ShapeKey(free_prod=33554432, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=35651584, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=557056, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
@@ -199,25 +191,13 @@ EXPECTED_GAPS = {
 # fused serving fork and the gate stayed green precisely because those keys blended into a
 # routine baseline edit (``test_no_major_key_hides_in_the_generic_baseline``).
 EXPECTED_MAJOR_GAPS = {
-    # 2026-08-05: eleven fused (computed-A) warp-contraction forks — the gemma-4 norm→linear /
-    # gate⊗up edges at the m8 / m64 / m2048 / m4096 serving widths — lost their 5090 golden join
-    # in the computed-A re-keying (the map reading's cooperative row moved onto ``REDUCE@<stat>``
-    # and re-keyed the fused rows; reproduced identically at the pre-rebuild commit, so it is not
-    # an enumeration regression). Burn-down: a 5090 card sweep re-seeding the fused widths (the
-    # 2026-08-02 seeding recipe in the gemma4 YAML); delete these entries when it lands.
-    "NVIDIA GeForce RTX 5090": {
-        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=524288, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=557056, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=33554432, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=35651584, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=125829120, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-    },
+    # 2026-08-05: the eleven fused (computed-A) warp-contraction forks the tile-scheduler
+    # rebuild listed here were not a re-keying to accept: the rebuild's one-kind ``Fold`` made
+    # ``_cut._ws_dtype`` read EVERY routed-cut seam as carrier state (f32), so each cut consumer
+    # re-wrapped into a demoting cone, keyed ``fused``, and lost its golden join. Fixed in
+    # ``_ws_dtype`` (carrier state ⇔ the child folds an axis) — all eleven keys covered again,
+    # no re-seeding needed.
+    "NVIDIA GeForce RTX 5090": set(),
     "NVIDIA GeForce RTX 4090": {
         # The 4090 majors are all one deferral: the card's mirror re-tune (box lost its GPU at
         # the PCI level; several widths have no 24 GB serving at all — m1, m192 — and the

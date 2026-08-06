@@ -9,13 +9,22 @@ local run directory.
 
 import logging
 import shlex
-from pathlib import Path
 from string import Template
 
 from emmy.planner import BenchmarkTask
 from emmy.planner.variant import Variant
 
 logger = logging.getLogger(__name__)
+
+
+def _local_result_name(variant: str, task_dir: str, remote_path: str) -> str:
+    """Local filename for a pulled result file, keeping the task_dir-relative path.
+
+    Two patterns pulling same-named files from different subdirs (std/*, fm/*)
+    must not collide, so subdir separators join the name with underscores.
+    """
+    rel = remote_path.removeprefix(f"{task_dir}/").replace("/", "_")
+    return f"{variant}_{rel}"
 
 
 def _leaf_name(key: str) -> str:
@@ -152,8 +161,7 @@ async def run_command_workload(
             remote_paths = [f"{task_dir}/{pattern}"]
 
         for remote_path in remote_paths:
-            basename = Path(remote_path).name
-            local_path = task.run_dir / f"{task.variant}_{basename}"
+            local_path = task.run_dir / _local_result_name(task.variant, task_dir, remote_path)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, remote_path, str(local_path))
             if rc_scp != 0:

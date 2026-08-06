@@ -113,6 +113,18 @@ class _ExprOps:
         return None
 
 
+def subst_index(index: tuple, sub: dict) -> tuple:
+    """A store template's index with named iteration vars replaced by this cell's expressions —
+    the ONE step every per-cell store emitter shares.
+
+    A tiled cell writes its own coordinates into an index the recognition captured once: the warp
+    flash realizer substitutes the query row base and the column literal, its state store the row
+    expression alone, and the scalar chain the register-strip ordinal. Only the substitution map
+    differs, and spelling the walk at each site is how one of them silently stops matching a Var
+    the others still rewrite. A non-``Var`` element passes through untouched."""
+    return tuple(sub.get(e.name, e) if isinstance(e, Var) else e for e in index)
+
+
 def _coerce(v: Expr | int | float) -> Expr:
     """Coerce Python int/float to Literal for operator overloading."""
     if isinstance(v, int):

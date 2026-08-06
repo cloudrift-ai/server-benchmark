@@ -26,8 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ENV_VAR = config.DUMP_DIR
-
 
 @dataclass
 class CompilerDump:
@@ -275,26 +273,6 @@ class CompilerDump:
                 stack.extend(node.inputs)
         return closure
 
-    def _collect_subgraph(self, graph: Graph, root_id: str) -> set[str]:
-        """Transitive-input closure for a compute node: itself + every
-        ``ConstantOp`` / ``InputOp`` reachable via ``node.inputs``."""
-        from emmy.compiler.ir.base import ConstantOp, InputOp
-
-        keep: set[str] = set()
-        stack = [root_id]
-        while stack:
-            cur = stack.pop()
-            node = graph.producer(cur)
-            cur = node.id if node is not None else cur
-            if cur in keep:
-                continue
-            keep.add(cur)
-            if node is None:
-                continue
-            if cur == root_id or isinstance(node.op, (ConstantOp, InputOp)):
-                stack.extend(node.inputs)
-        return keep
-
     @staticmethod
     def _safe_filename(name: str) -> str:
         return "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
@@ -427,7 +405,8 @@ def _inline_scalar_loads(body: str, scalar_inputs: dict[str, float]) -> str:
     and substitute the literal value at every use site in the body."""
     import re
 
-    pat = re.compile(r"^(\s*)(\w+)\s*=\s*load\s+(\S+)\[0\]\s*$")
+    # The prefix is whitespace at loop-IR level and a tree connector in the tile dump.
+    pat = re.compile(r"^(.*?)(\w+)\s*=\s*load\s+(\S+)\[0\]\s*$")
     name_to_lit: dict[str, str] = {}
     out_lines: list[str] = []
     for line in body.splitlines():

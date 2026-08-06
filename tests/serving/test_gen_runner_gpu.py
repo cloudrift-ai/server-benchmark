@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
-# runner's GPU paths), and the ``perf`` gating in ``tests/perf/conftest.py`` skips every
+# runner's GPU paths), and the ``perf`` gating in the root ``tests/conftest.py`` skips every
 # perf-marked item suite-wide under plain ``pytest tests/`` — a perf mark here would silently
 # drop these from ``make test`` on GPU machines.
 pytestmark = [pytest.mark.xdist_group("cuda")]

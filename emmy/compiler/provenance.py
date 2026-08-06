@@ -206,7 +206,7 @@ def _dedup_tokens(name: str) -> str:
     return "_".join(out) if out else name
 
 
-def name_for(loop: LoopOp, base_name: str, node_prov: dict, all_totals: dict[str, set[str]]) -> str:
+def name_for(loop: LoopOp, base_name: str, node_prov: dict, all_totals: dict[str, set[str]], dtype_sig: str = "") -> str:
     """Name the kernel after the original ops it implements (op provenance).
 
     A kernel that fully realizes exactly one meaningful op gets ``k_<op>_<h>``
@@ -243,9 +243,11 @@ def name_for(loop: LoopOp, base_name: str, node_prov: dict, all_totals: dict[str
         if lbl not in labels:
             labels.append(lbl)
     joined = _dedup_tokens("_".join(labels))
-    # ``structural_key`` is a pretty-printed body string; hash it to a short
-    # alphanumeric token (valid in a C identifier; identical bodies → same token).
-    h = hashlib.sha1(loop.body.structural_key().encode()).hexdigest()[:6]
+    # ``structural_key`` is a pretty-printed body string; hash it (with the caller's io
+    # ``dtype_sig`` — buffer decls are outside the body, and two kernels identical except an
+    # operand/output dtype must NOT share a name) to a short alphanumeric token (valid in a C
+    # identifier; identical bodies + dtypes → same token).
+    h = hashlib.sha1((loop.body.structural_key() + "|" + dtype_sig).encode()).hexdigest()[:6]
     cov = coverage(node_prov, all_totals)
     if len(meaningful) == 1 and cov[meaningful[0]][2]:  # single op, fully covered
         return f"k_{joined}_{h}"

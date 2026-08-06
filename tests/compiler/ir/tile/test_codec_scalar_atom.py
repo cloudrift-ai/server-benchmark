@@ -1,51 +1,47 @@
 """The pin-only scalar-atom aliases ``a:scalar`` / ``a:none``.
 
 These give a pin an *explicit* spelling of the scalar output tile — symmetric with the warp form's
-``a:<mma-atom>`` — instead of the invisible empty string. They are vocabulary only: a producer never
-emits them, so :meth:`TilePlan.spell` must always round-trip them back to the canonical scalar form
-(``""`` / ``n../f..``), and :func:`is_warp_codec` must classify them as scalar despite the ``a:``
-prefix (the one exception to "any ``a:`` token ⇒ warp").
+bare leading atom name — instead of the invisible empty string. They are vocabulary only: a producer
+never emits them, so :meth:`TilePlan.parse` must strip them and :meth:`TilePlan.spell` re-emit the
+canonical scalar form (``""`` / ``f..``), and a stripped alias must never read as the warp tier
+despite naming an "atom".
 """
 
 from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.schedule import TilePlan, has_scalar_atom_alias, is_warp_codec
+from emmy.compiler.ir.schedule import TilePlan, Workers
+
+_THREADS = Workers.parse("t8x16")
 
 
 @pytest.mark.parametrize("alias", ["a:scalar", "a:none"])
 def test_alias_is_scalar_not_warp(alias: str) -> None:
-    plan = TilePlan.parse(alias)
-    assert not is_warp_codec(alias)  # ``a:`` prefix but names the scalar atom
-    assert not plan.is_warp
+    plan = TilePlan.parse(alias, None)
+    assert not plan.is_warp  # names the scalar atom, never a tensor-core one
     assert (plan.units, plan.regs) == ((1, 1), (1, 1))  # bare alias = the per-cell tier
 
 
 @pytest.mark.parametrize(
-    ("alias", "body_units", "body_regs"),
-    [("a:scalar/f4x8", (1, 1), (4, 8)), ("a:none/n8x16", (8, 16), (1, 1)), ("a:scalar/n4x4/f2x2", (4, 4), (2, 2))],
+    ("alias", "work", "body_units", "body_regs"),
+    [("a:scalar/f4x8", None, (1, 1), (8, 4)), ("a:none", _THREADS, (1, 1), (1, 1)), ("a:scalar/f2x2", _THREADS, (16, 8), (2, 2))],
 )
-def test_alias_composes_with_scalar_body(alias: str, body_units: tuple, body_regs: tuple) -> None:
-    plan = TilePlan.parse(alias)
+def test_alias_composes_with_scalar_body(alias: str, work, body_units: tuple, body_regs: tuple) -> None:
+    plan = TilePlan.parse(alias, work)
     assert not plan.is_warp
     assert (plan.units, plan.regs) == (body_units, body_regs)
 
 
-@pytest.mark.parametrize(
-    ("alias", "canonical"),
-    [("a:scalar", ""), ("a:none", ""), ("a:scalar/f4x8", "f4x8"), ("a:none/n8x16", "n8x16")],
-)
+@pytest.mark.parametrize(("alias", "canonical"), [("a:scalar", ""), ("a:none", ""), ("a:scalar/f4x8", "f4x8")])
 def test_alias_never_survives_to_spell(alias: str, canonical: str) -> None:
     # The alias is pin-only: it must normalize to the canonical scalar spelling so it never rides a
     # stored knob dict / prior key / golden YAML.
-    assert TilePlan.parse(alias).spell() == canonical
-    assert not has_scalar_atom_alias(canonical)
+    assert TilePlan.parse(alias, None).spell() == canonical
+    assert "a:" not in TilePlan.parse(alias, None).spell()
 
 
-def test_alias_detection() -> None:
-    assert has_scalar_atom_alias("a:scalar")
-    assert has_scalar_atom_alias("a:none/f2x2")
-    assert not has_scalar_atom_alias("n8x16")
-    assert not has_scalar_atom_alias("a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4")
-    assert not has_scalar_atom_alias("")
+@pytest.mark.parametrize("spec", ["f8x16", "mma_m16n8k16_f16_f32/f2x2/k4", ""])
+def test_a_spec_without_the_alias_is_untouched(spec: str) -> None:
+    """The alias is stripped, never invented: a spelling that never carried one round-trips."""
+    assert TilePlan.parse(spec, Workers.parse("w2x1" if "mma" in spec else "")).spell() == spec

@@ -115,7 +115,7 @@ def encode_tiled(
     # Hardware limit: each boxDim must be 1..256. The driver rejects
     # violations with the opaque ``CUresult=1`` (CUDA_ERROR_INVALID_VALUE);
     # name the offending dim instead. The lowering eligibility gates (the
-    # scalar / warp stage resolvers in ``lowering/tile/_schedule.py``)
+    # scalar / warp stage resolvers)
     # filter these before codegen, so tripping this means a gate
     # regression upstream.
     for d, b in enumerate(box_extents):

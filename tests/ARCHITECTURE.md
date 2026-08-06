@@ -83,7 +83,12 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   files re-declaring the same fixtures is the signal to merge them; a file whose sections share no scaffolding
   and no subject is the signal to leave them apart.
 - **Known failures are marked inline** with `@pytest.mark.xfail`, carrying a reason that says what was
-  removed or broken and when it should come back.
+  removed or broken and when it should come back. For a deliberate whole-subsystem removal whose casualties span
+  dozens of files, prefer one registry module of exact node ids applied as a **strict** xfail from the root
+  `conftest.py` — exact ids, never path globs, so each id is an acceptance obligation and the list shrinking to
+  empty is the completion gate (the tile-scheduler rebuild ran this way; the registry was deleted when it emptied).
+- **Card-conditional expectations stay inline**, non-strict, at their own test — a flaky or SKU-specific failure
+  needs a reason that names the condition.
 
 ## Running
 
@@ -105,11 +110,14 @@ bucketing would otherwise add a function-level group that shadows the module-lev
 without it the markers land too late and CUDA tests silently scatter across workers. Non-CUDA tests are
 LPT-bucketed across the remaining workers using the cached duration table.
 
-The `perf` marker gates **suite-wide**, not just `tests/perf/`: collecting `tests/` loads `tests/perf/conftest.py`,
-whose hook skips every perf-marked item unless `-m perf` was passed. Reserve `perf` for two things — the
+The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
+perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate
+also covers subset runs like `pytest tests/serving/`. Reserve `perf` for two things — the
 perf-comparison tests `make bench-kernels` runs, and tests that genuinely cannot ride the parallel suite (today the
 two in-process vLLM engine tests, `test_vllm_plugin_gpu.py` / `test_vllm_plugin_gen_gpu.py`: the engine demands a
-large fraction of the card FREE at startup, plus checkpoint downloads and minutes of whole-model compile). A perf
+large fraction of the card FREE at startup, plus checkpoint downloads and minutes of whole-model compile — since
+`make bench-kernels` only runs `tests/perf/`, these two run nowhere by default; exercise them explicitly with
+`pytest tests/serving/ -m perf` on a machine with the card mostly free). A perf
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 

@@ -81,7 +81,7 @@ def _dyn_golden(name="square.512.dynM"):
         M=512,
         N=512,
         K=512,
-        knobs={"TILE": "n16x8/f2x2"},
+        knobs={"TILE": "f2x2", "WORK": "t16x8"},
         emmy_us=10.0,
         cublas_us=12.0,
         dynamic=True,
@@ -95,7 +95,9 @@ def test_golden_dataset_target_carries_dynamic_spec(monkeypatch):
 
     from emmy.compiler.pipeline.search import golden as gmod
 
-    static = gmod.MatmulGoldenConfig(name="square.512", M=512, N=512, K=512, knobs={"TILE": "n16x8/f2x2"}, emmy_us=9.0, cublas_us=14.0)
+    static = gmod.MatmulGoldenConfig(
+        name="square.512", M=512, N=512, K=512, knobs={"TILE": "f2x2", "WORK": "t16x8"}, emmy_us=9.0, cublas_us=14.0
+    )
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [static, _dyn_golden()])
     # Pin off-GPU: the fake goldens carry no card, so a live card would filter them to
     # the empty set and trip the uncovered-card guard.
@@ -116,7 +118,7 @@ def _two_card_goldens():
             M=512,
             N=512,
             K=512,
-            knobs={"TILE": "n16x8/f2x2"},
+            knobs={"TILE": "f2x2", "WORK": "t16x8"},
             emmy_us=9.0,
             cublas_us=14.0,
             gpu_name="NVIDIA GeForce RTX 4090",
@@ -128,7 +130,7 @@ def _two_card_goldens():
             M=512,
             N=512,
             K=512,
-            knobs={"TILE": "n16x8/f2x2"},
+            knobs={"TILE": "f2x2", "WORK": "t16x8"},
             emmy_us=8.0,
             cublas_us=12.0,
             gpu_name="NVIDIA GeForce RTX 5090",
@@ -183,7 +185,7 @@ def test_golden_dataset_excludes_foreign_only_names(monkeypatch):
         M=64,
         N=1024,
         K=1024,
-        knobs={"TILE": "n16x8/f2x2"},
+        knobs={"TILE": "f2x2", "WORK": "t16x8"},
         emmy_us=20.0,
         cublas_us=30.0,
         gpu_name="NVIDIA GeForce RTX 4090",
@@ -321,7 +323,9 @@ def test_loop_sets_dynamic_per_target(monkeypatch):
         return SimpleNamespace(best_reward=None, assembled=None), None
 
     monkeypatch.setattr(tune, "_tune_one", capture)
-    static = gmod.MatmulGoldenConfig(name="square.512", M=512, N=512, K=512, knobs={"TILE": "n16x8/f2x2"}, emmy_us=9.0, cublas_us=14.0)
+    static = gmod.MatmulGoldenConfig(
+        name="square.512", M=512, N=512, K=512, knobs={"TILE": "f2x2", "WORK": "t16x8"}, emmy_us=9.0, cublas_us=14.0
+    )
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [static, _dyn_golden()])
     # Pin off-GPU: the fake goldens carry no card, so a live card would filter them to
     # the empty set and trip the uncovered-card guard.

@@ -360,8 +360,7 @@ def gen_m1_tier(default: int = 1) -> int:
     qkv 14, down 76, gate_up 142 on the 5090), and the flip criterion held e2e: c=1 TPOT
     17.92/18.98 beats the bucket-32 path's 18.0/19.1 with c=8/c=64 unchanged (m1 routes
     only T==1). Set 0 to fall back to bucket-padded decode at T=1. The remaining ~1.6 ms
-    to stock is the split-chain / kernel-count / seam work of
-    plans/decode-parity-closers.md. See `serving/gen_runner.py`."""
+    to stock is split-chain / kernel-count / seam work. See `serving/gen_runner.py`."""
     return int_env(GEN_M1_TIER, default)
 
 

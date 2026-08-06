@@ -824,7 +824,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # computed in reaches the graph anyway (the traced scalar constants are f32, so
     # ``f16 ** f32 -> f32`` promotes the whole chain), but dropping the closing ``type_as``
     # left the norm OUTPUT f32 too. Every consumer then became a mixed f32xf16 contraction,
-    # which is not offered the staged (``d2/tma/ring``) transports — the gemma-4 prefill
+    # which is not offered the staged (``d2/tma``) transports — the gemma-4 prefill
     # norm->qkv projections deployed at 147-174 us each on a spilling ``w1x1`` tile instead
     # of the ~31-51 us their pure-f16 goldens record.
     #

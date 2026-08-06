@@ -30,15 +30,6 @@ def _classify_create_failure(stderr: str) -> Exception:
     return TerminalProvisionError(f"gcloud create failed: {stderr.strip()}")
 
 
-def _duration_to_seconds(duration: str) -> int:
-    """Convert a GCP duration string (e.g. '2h', '30m', '1800s') to seconds."""
-    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    suffix = duration[-1]
-    if suffix in units:
-        return int(duration[:-1]) * units[suffix]
-    return int(duration)
-
-
 # ── Command builders ───────────────────────────────────────────────
 
 

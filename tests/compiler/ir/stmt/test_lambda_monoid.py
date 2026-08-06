@@ -26,6 +26,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Lambda, Load, Loop,
 from emmy.compiler.ir.stmt.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
 from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
 from emmy.compiler.ir.tile.ir import Fold
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 # --- the mini loop-IR interpreter (the agreement test's right-hand side) ------------------------- #
 
@@ -213,7 +214,7 @@ def _id_fold(op: str, value_stmts, acc: str, axis: Axis, value_name: str) -> Fol
     construction, so the derived ``loop`` reproduces this exact body)."""
     accum = Accum(name=acc, value=value_name, op=op, axes=(axis.name,))
     loop = Loop(axis=axis, body=Body((*value_stmts, accum)), role=AxisRole.PLANAR)
-    fold = Fold.from_loop(loop)
+    fold = fold_from_loop(loop)
     assert fold is not None
     return fold
 
@@ -283,7 +284,7 @@ def test_agreement_online_softmax() -> None:
     x = rng.normal(size=20) * 2.0
     axis = Axis("k", 20)
     step = Body((Load(name="x0", input="x", index=(Var("k"),)), *exp_merge(("m_i", "l_i"), ("x0", 1.0), key="m_i")))
-    fold = Fold.from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED))
+    fold = fold_from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED))
     assert fold is not None
     env = _run_loop(fold.loop, {"m_i": float("-inf"), "l_i": 0.0}, {"x": x})
     lift = Lambda(params=("k", "x0"), body=Body(()), results=("x0", 1.0))
@@ -306,7 +307,7 @@ def test_agreement_flash_arity3() -> None:
             *exp_merge(("m_i", "l_i", "O_i"), ("s0", 1.0, "v0"), key="m_i"),
         )
     )
-    fold = Fold.from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED))
+    fold = fold_from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED))
     assert fold is not None
     env = _run_loop(fold.loop, {"m_i": float("-inf"), "l_i": 0.0, "O_i": 0.0}, {"s": s, "v": v})
     lift = Lambda(params=("j", "s0", "v0"), body=Body(()), results=("s0", 1.0, "v0"))

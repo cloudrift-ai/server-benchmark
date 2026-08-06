@@ -178,16 +178,16 @@ def test_is_warp_and_mma_atom_tier_discriminator():
     tier (no atom)."""
     assert not is_warp({}) and mma_atom({}) is None
     assert not is_warp({"TILE": ""}) and mma_atom({"TILE": ""}) is None
-    assert not is_warp({"TILE": "n32x8/f2x4"})  # scalar fragment names no atom
-    assert is_warp({"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2"})
-    assert mma_atom({"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2"}) == "mma_m16n8k16_f16_f32"
+    assert not is_warp({"TILE": "f2x4", "WORK": "t32x8"})  # scalar fragment names no atom
+    assert is_warp({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"})
+    assert mma_atom({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"}) == "mma_m16n8k16_f16_f32"
 
 
 def test_scalar_tile_features_from_thread_tile():
     """``knob_features`` emits the ``D_*`` occupancy family for a scalar row from its
     ``TILE`` codec free split (``par_n·par_m`` threads, ``par_m·reg_m × par_n·reg_n``
     output) — ``n32x8`` parallel thread-tile, ``f2x4`` register sub-tile."""
-    sf = knob_features({"TILE": "n32x8/f2x4"})
+    sf = knob_features({"TILE": "f2x4", "WORK": "t32x8"})
     assert any(k.startswith("D_") for k in sf)
     assert sf["D_threads"] == 32 * 8
     assert sf["D_tile_m"] == 8 * 4 and sf["D_tile_n"] == 32 * 2
@@ -199,12 +199,12 @@ def test_warp_tile_features_from_warp_tile():
     ``m16n8k16``) are read off the parsed atom. A scalar ``TILE`` value → empty."""
     from emmy.compiler.pipeline.search.features import _warp_tile_features  # noqa: PLC0415
 
-    wf = _warp_tile_features({"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "S_ext_free_prod": 2048 * 2048})
+    wf = _warp_tile_features({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048 * 2048})
     assert wf["D_threads"] == 128.0  # WM·WN·32
     assert wf["D_tile_m"] == 2 * 2 * 16  # WM·FM·atom_m
     assert wf["D_tile_n"] == 2 * 2 * 8  # WN·FN·atom_n
     assert "D_log2_ctas" in wf and "D_log2_waves" in wf  # occupancy present (free_prod given)
-    assert _warp_tile_features({"TILE": "n32x8/f2x4"}) == {}  # scalar fragment → empty
+    assert _warp_tile_features({"TILE": "f2x4", "WORK": "t32x8"}) == {}  # scalar fragment → empty
 
 
 # ---------------------------------------------------------------------------
@@ -328,19 +328,19 @@ def test_knob_features_typed_knobs(monkeypatch):
 
 
 def test_knob_features_stage_codec():
-    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/ring]``) featurizes to the ``D_stage_*``
-    family; an absent / gmem-direct stage contributes nothing."""
-    feats = knob_features({"STAGE": "d3/tma/ring"})
+    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``) featurizes to the
+    ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""
+    feats = knob_features({"STAGE": "d3/tma"})
     assert feats["D_stage_depth"] == 3.0
     assert feats["D_stage_async"] == 1.0
     assert feats["D_stage_tma"] == 1.0
-    assert feats["D_stage_ring"] == 1.0
+    assert feats["D_stage_split"] == 0.0
     assert feats["D_stage_reg_depth"] == 1.0  # no /p<n> ⇒ register pipeline OFF
     sync = knob_features({"STAGE": "d2/cp"})
     assert sync["D_stage_depth"] == 2.0 and sync["D_stage_async"] == 1.0 and sync["D_stage_tma"] == 0.0
     # The smem→register double-buffer (``p<n>``) featurizes orthogonally to the gmem→smem ring.
-    pp = knob_features({"STAGE": "d3/cp/ring/p2"})
-    assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0 and pp["D_stage_ring"] == 1.0
+    pp = knob_features({"STAGE": "d3/cp/p2"})
+    assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0
     assert not any(k.startswith("D_stage_") for k in knob_features({"STAGE": ""}))
 
 
@@ -349,7 +349,7 @@ def test_stage_codec_reg_depth_roundtrip():
     omitted so an unstaged-register config spells byte-identical to before the field existed."""
     from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
 
-    assert Stage.parse("d3/cp/ring/p2") == Stage(depth=3, transport="cp.async", ring=True, reg_depth=2)
+    assert Stage.parse("d3/cp/p2") == Stage(depth=3, transport="cp.async", reg_depth=2)
     assert Stage.parse("d2/cp/p4").reg_depth == 4
     assert Stage.parse("d2/cp").reg_depth == 1  # absent ⇒ OFF
     assert Stage(depth=2, transport="cp.async", reg_depth=2).spell() == "d2/cp/p2"
@@ -363,7 +363,7 @@ def test_stage_codec_reg_depth_roundtrip():
 def test_knob_features_mma_expansion():
     # The warp fragment names its atom on the ``TILE`` codec (``a:<atom>``); ``knob_features``
     # expands its physical cell / dtype properties into the ``MMA_*`` family.
-    feats = knob_features({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1"})
+    feats = knob_features({"TILE": "mma_m16n8k16_f16_f32/f1x1", "WORK": "w1x1"})
     assert feats["MMA_tier"] == 1.0
     assert (feats["MMA_atom_m"], feats["MMA_atom_n"], feats["MMA_atom_k"]) == (16.0, 8.0, 16.0)
     assert feats["MMA_a_bits"] == 16.0  # f16 operand
@@ -397,8 +397,8 @@ def test_format_tuning_knobs_skips_struct():
 def test_format_tuning_knobs_canonical_order():
     """The codec knobs render in canonical order (``KNOB_ORDER`` = ``TILE``, ``REDUCE``,
     ``STAGE``), not alphabetical — shared with the ``emmy eval`` golden tables."""
-    out = format_tuning_knobs({"STAGE": "d2/cp", "REDUCE": "b32", "TILE": "a:mma_m16n8k16_f16_f32/w2x2"})
-    assert out == "TILE=a:mma_m16n8k16_f16_f32/w2x2, REDUCE=b32, STAGE=d2/cp"
+    out = format_tuning_knobs({"STAGE": "d2/cp", "REDUCE": "coop", "TILE": "mma_m16n8k16_f16_f32/f1x1"})
+    assert out == "TILE=mma_m16n8k16_f16_f32/f1x1, REDUCE=coop, STAGE=d2/cp"
 
 
 def test_apply_knobs_env_no_raw_falls_back_to_env(monkeypatch):
@@ -422,7 +422,7 @@ def test_family_and_axis_of():
 def test_family_value_reads_bare_or_suffixed():
     assert family_value({"TILE@d": "x"}, "TILE") == "x"
     assert family_value({"TILE": "x"}, "TILE") == "x"
-    assert family_value({"REDUCE": "b8"}, "TILE") is None
+    assert family_value({"REDUCE": "coop"}, "TILE") is None
 
 
 def test_pin_key_matches():
@@ -484,8 +484,8 @@ def test_is_off_value(monkeypatch):
 def test_bare_and_axis_named_featurize_identically():
     """A single-node kernel's bare ``TILE`` / ``STAGE`` and their ``@<axis>`` forms parse, featurize,
     and match identically — the migration is invisible on one-node kernels (the parity bar)."""
-    bare = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "d2/cp", "S_ext_free_prod": 4096.0}
-    axed = {"TILE@d": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE@d": "d2/cp", "S_ext_free_prod": 4096.0}
+    bare = {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE": "d2/cp", "S_ext_free_prod": 4096.0}
+    axed = {"TILE@d": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE@d": "d2/cp", "S_ext_free_prod": 4096.0}
     assert knob_features(bare) == knob_features(axed)
     assert tile_signature(bare) == tile_signature(axed)
     assert is_warp(bare) == is_warp(axed) is True
@@ -496,11 +496,11 @@ def test_display_renders_keys_as_stored():
     """Since phase 3 the stampers spell the canonical codec key, so the view renders keys AS
     STORED — bare stays bare, an explicit ``@`` spelling (flash's pair, the fused kernel's cone
     stat) stays explicit; there is no display collapse between memory and storage."""
-    one = dict(tuning_knob_items({"TILE": "n4/f2", "REDUCE": "b8", "STAGE": "d2/cp"}))
+    one = dict(tuning_knob_items({"TILE": "f2", "REDUCE": "coop", "STAGE": "d2/cp"}))
     assert set(one) == {"TILE", "REDUCE", "STAGE"}
-    flash = dict(tuning_knob_items({"TILE@dd": "n4/f2", "TILE@pj": "n2/f4", "REDUCE": "b8"}))
+    flash = dict(tuning_knob_items({"TILE@dd": "f2", "TILE@pj": "f4", "REDUCE": "coop"}))
     assert set(flash) == {"TILE@dd", "TILE@pj", "REDUCE"}
-    fused = dict(tuning_knob_items({"REDUCE@a1": "b128", "TILE": "", "REDUCE": ""}))
+    fused = dict(tuning_knob_items({"REDUCE@a1": "coop", "TILE": "", "REDUCE": ""}))
     assert set(fused) == {"REDUCE@a1", "TILE", "REDUCE"}
 
 
@@ -514,14 +514,15 @@ def test_multinode_flash_keys_apart_and_pools_per_node():
     ``MMA_tier`` = 2.0 over the two warp nodes. This is the case the flat one-key schema can't express."""
     from emmy.compiler.pipeline.search.features import _node_axes, _node_slice, _schedule_node_features
 
-    qk_tile = "a:mma_m16n8k16_f16_f32/w4x1/f2x2/k2"  # WM·WN·32 = 128 threads
-    pv_tile = "a:mma_m16n8k16_f16_f32/w2x2/f4x1/k2"  # WM·WN·32 = 128 threads
+    qk_tile = "mma_m16n8k16_f16_f32/f2x2/k2"  # over the shared w4x1 inventory: 128 threads
+    pv_tile = "mma_m16n8k16_f16_f32/f4x1/k2"  # the same inventory, its own register tile
     knobs = {
         "TILE@d": qk_tile,
         "STAGE@d": "d2/cp",
-        "REDUCE@sk": "b8",
+        "REDUCE@sk": "",
         "TILE@sk": pv_tile,
         "STAGE@sk": "d2/cp",
+        "WORK": "w4x1",  # one kernel, one inventory — both nodes share the warp map
         "S_ext_free_prod": 4096.0,
     }
     assert knobs["TILE@d"] != knobs["TILE@sk"]  # the two tiles key apart in the flat dict
@@ -539,11 +540,11 @@ def test_node_slice_addresses_per_node_struct():
     a one-node kernel with a bare ``S_ext_reduce_prod`` featurizes byte-identically (bare fallback)."""
     from emmy.compiler.pipeline.search.features import _node_slice
 
-    knobs = {"TILE@d": "n4/f2", "TILE@sk": "n2/f4", "S_ext_reduce_prod": 8.0, "S_ext_reduce_prod@sk": 512.0}
+    knobs = {"TILE@d": "f2", "TILE@sk": "f4", "S_ext_reduce_prod": 8.0, "S_ext_reduce_prod@sk": 512.0}
     assert _node_slice(knobs, "d")["S_ext_reduce_prod"] == 8.0  # no @d override → bare fallback
     assert _node_slice(knobs, "sk")["S_ext_reduce_prod"] == 512.0  # addressed override wins
     # One-node bare stamp: the slice for the sole node is the whole dict (byte-identical featurizer).
-    assert _node_slice({"TILE": "n4/f2", "S_ext_reduce_prod": 8.0}, None) == {"TILE": "n4/f2", "S_ext_reduce_prod": 8.0}
+    assert _node_slice({"TILE": "f2", "S_ext_reduce_prod": 8.0}, None) == {"TILE": "f2", "S_ext_reduce_prod": 8.0}
 
 
 def test_precision_pin_precedence(monkeypatch):
@@ -573,10 +574,22 @@ def test_values_equal_canonicalizes_tile_atom_alias():
     genuinely different tile still mismatches."""
     from emmy.compiler.pipeline.knob import values_equal
 
-    assert values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")
-    assert values_equal("TILE@d", "a:mma_m16n8k16_bf16/w1x1/f1x2/k8", "a:mma_m16n8k16_bf16_f32/w1x1/f1x2/k8")
-    assert not values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2")
-    assert not values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k4")
+    assert values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k2")
+    assert values_equal("TILE@d", "mma_m16n8k16_bf16/f1x2/k8", "mma_m16n8k16_bf16_f32/f1x2/k8")
+    assert not values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f16/f2x2/k2")
+    assert not values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k4")
+
+
+def test_values_equal_canonicalizes_stage_token_order():
+    """A ``STAGE`` pin binds order-free but spells in schema order, so a hand pin ``cp/d2`` must
+    verify against the realized ``d2/cp`` — this runs on the DEPLOY path (the golden-row match),
+    where a false mismatch drops the recorded row. A genuinely different pipeline still misses."""
+    from emmy.compiler.pipeline.knob import values_equal
+
+    assert values_equal("STAGE", "cp/d2", "d2/cp")
+    assert values_equal("STAGE@a1", "split/tma/d1", "d1/tma/split")
+    assert not values_equal("STAGE", "d2/cp", "d3/cp")
+    assert not values_equal("STAGE", "d1/tma", "d1/tma/split")
 
 
 def test_knob_pinned_scopes_and_restores(monkeypatch):
@@ -627,9 +640,9 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     recurring unpinned-``REDUCE`` phantom-regression class) — this is the recorder-side fix."""
     from emmy.compiler.pipeline.knob import stamp_schedule_families
 
-    out = stamp_schedule_families({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "REDUCE": "g2k", "STAGE": "", "S_ext_free_prod": 64.0})
+    out = stamp_schedule_families({"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "g2k", "STAGE": "", "S_ext_free_prod": 64.0})
     # Realized values pass through; the struct stamp is dropped (not a tuning decision).
-    assert out["TILE"] == "a:mma_m16n8k16_f16_f32/w1x1/f1x1" and out["REDUCE"] == "g2k"
+    assert out["TILE"] == "mma_m16n8k16_f16_f32/f1x1" and out["REDUCE"] == "g2k"
     assert "S_ext_free_prod" not in out
     # Families the compile never stamped are pinned as declined (OFF spelling) — WORK included
     # (F1: the worker-inventory family replaced WSPEC in SCHEDULE_FAMILIES).
@@ -637,7 +650,7 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     assert "WSPEC" not in out  # retired from the recording view — the +p band rides WORK
     # A family present under an explicit ``@`` spelling (flash's TILE pair, the cone stat's
     # REDUCE) counts as present — the fill never duplicates it under the bare key.
-    axed = stamp_schedule_families({"TILE@dd": "n4/f2", "REDUCE@a1": "b8"})
-    assert axed["TILE@dd"] == "n4/f2" and axed["REDUCE@a1"] == "b8"
+    axed = stamp_schedule_families({"TILE@dd": "f2", "REDUCE@a1": "coop"})
+    assert axed["TILE@dd"] == "f2" and axed["REDUCE@a1"] == "coop"
     assert "TILE" not in axed and "REDUCE" not in axed
     assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WORK"] == "" and axed["RASTER"] == ""

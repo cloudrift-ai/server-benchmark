@@ -19,82 +19,15 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Compiler** (Graph IR dialects, passes, backends) → [`emmy/compiler/ARCHITECTURE.md`](emmy/compiler/ARCHITECTURE.md) and child docs
 - **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
   [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
-- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR
-  has exactly THREE node kinds (all in `ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`, stored in
-  the λ-foldMap spelling (1m–1p): an iteration `axis`, a pure **`lift`** `Lambda` (`λ(k, v₁…vₙ) → S` — the
-  element's SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE monoid's flat **`(init,
-  combine)`** fields (ONE program, its results the fold's real accumulator names; the free helpers in
-  `ir/stmt/algebra`), and a symmetric tuple of
-  **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params); the bilinear
-  **`Contraction`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
-  shared `a` operand edge and the product `Channel`s `(b_i, acc_i)` (arity N = the fused gate⊗up edge; sharing is
-  the node's arity), with the placement/schedule fields (`axes`, `lead_axes`, `tile`, `stage`) UNSET in the stored
-  term — caller facts, stamped onto a `replace()` copy at the point of use (`Contraction.placed`, a pure field
-  stamp; `as_fold()` survives only as the node's DERIVED λ reading, consumed by the cross-partition `Reduction`
-  machinery and the PLANAR demotion, its loop body byte-identical to the node's own) — and the lift/projection
-  wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
-  The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
-  family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
-  `AxisRole`; the retired `Algebra` bundle's lowering-side reads live in `passes/lowering/_reduction.Reduction`
-  (the materializer's + `030_split_reduce`'s view). `Fold.from_loop` reconstructs the algebra from the loop BODY
-  alone (degenerate facts off its `Accum`s; a twisted merge regenerated-and-byte-compared, or extracted against a
-  `like` fold for a split partial), returns `None` for a non-λ-representable loop (the
-  callers keep the raw-loop-IR `Map` escape) and its byte-identity gate compares the derived body/axis only — the
-  matvec demotion is a formation fact. There is NO stored `step` SEQUENCE (deleted at step 7): the composed
-  evaluations DERIVE — flash's kv stream λ-spells with its QK score a HOISTED operand edge and its PV
-  synthesized+memoized inside the derived blocked evaluation (`Fold.step_stmts()` the one consumer read), and
-  split-K's outer reduce is the identity-lift composition (`ir.composed_contraction` the one read). A bare sum,
-  RMSNorm's statistic and flash's stream are `Fold` at different monoid arities; a matmul, the fused gate⊗up edge,
-  flash's QK score and the derived PV are the `Contraction` node kind (the kind IS the `CONTRACTION` role — no
-  bilinear parse; a `Fold`'s role stays DERIVED (`Fold.role`), never stored: TWISTED off the derived twist family,
-  CONTRACTION off the composed split-K operand, PLANAR otherwise — so an unbindable matvec-shaped
-  contraction, whose loads recognition keeps inline in the lift instead of building the node, derives PLANAR and
-  takes the reduce tiers at schedule dispatch with no recognition-time demotion rewrite). **Sharing is arity**: the
-  gate⊗up node reads one cone edge across two channels — no privileged operand slot, no let table, no reference arm.
-  `Fold.loop` splices each operand's body before the first read of its bound param and flattens
-  nested nodes in place — the derived loop depends only on the stored params; kernel identity is the α-INVARIANT
-  TERM HASH (`ops.term_key`: canonical renumbering + hash-time ANF body-order canonicalization, consumed by
-  `op_cache_key`'s TileOp arm and `Graph.structural_key`'s op field — never the lowered nest). An operand edge has
-  two inhabitants
-  — MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone via `_atomize.make_cone`).
-  **Edge iff closed** holds BY CONSTRUCTION (positional operand binding; `ir.captured_values` demoted to the
-  validation reading) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
-  flash's PV, whose `P` reads the running state — sits BELOW the seam lattice, a derived schedule site excluded
-  from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
-  site. **The `Contraction`'s placement/schedule fields are STAMPED, never stored**: the stored node is pure
-  algebra (`k_axis` + the `a` edge + `Channel`s), and the placed reading the tensor-core/staged tiers require —
-  the `(m, n)` `Side` geometry + `tile`/`stage` — is stamped onto a `replace()` copy by `Contraction.placed(m,
-  n, lead, tile, stage)` from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads
-  to the materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices (`ir.shared_operand` is the
-  placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
-  SCHEDULE fact read off the node's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
-  SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam
-  is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.fn` — never a node field —
-  and since 1q the fn of every recognized term is a STRICT pure `Lambda`: the root-store `Write`s (and the
-  rms/softmax output-sweep `Loop` around them) ride `TileOp.stores` — `Store` decorations at the kernel boundary,
-  reconstituted on demand by `effect_tail` (the scheduler's tail gates, the materializer's peel and
-  `030_split_reduce` all read through it, so the lowered kernels are byte-identical to the stored-`Write` era; the
-  raw-loop-IR kernels that are not recognized algebra — the un-recognized escape cell, `030`'s finalize, the coop
-  fused-tail sibling — keep an impure fn through the one `_loop_ir_fn` arm).
-  A bare reduce is a root `Fold`; softmax/RMSNorm is `Map(fn=per-cell normalize, sources=(Fold,))` + a sweep
-  `Store`; the fused norm→linear /
-  gate⊗up composition is `Map(fn=combine, sources=(Contraction,))` over the product node (a fork sibling of its
-  coop-reduce form — option-0 stays coop; warp mma rows ride the sync compute-fill); a pure pointwise cell is a
-  `Map(sources=())` + its root `Store`s. Every schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in `TileOp.schedule` — a dict keyed by the
-  tree-path codec's canonical key (`ir/tile/path.py`: ONE walker + resolver, short-path-canonical — bare for the
-  primary node, `TILE@dd`/`TILE@pj` on flash; read/written through `ops.Sched`), the term staying pure and
-  IMMUTABLE across the schedule search; the `TileOp` keeps `op + place + work + workers + knobs + schedule` (`work`
-  is the ONE worker inventory, derived loudly from the TILE slices), and a sliced axis's window is the one
-  `Axis.window`; the root stores are `TileOp.stores`. The stampers spell knob keys via the same resolver and
-  VALUES site-locally (step 7): the worker inventory once in `WORK` (`w<M>x<N>[+p<np>]`/`t<N>[x<M>]`, sealed by
-  `seal_workers`; the retired `WSPEC` row family's producer band rides `+p`), `TILE`/`REDUCE` values shed their
-  worker tokens — so the stamped row IS the stored/golden spelling (legacy spellings are loudly-validated pin
-  aliases; the golden corpus re-spelled mechanically). Dispatch reads the
-  role/algebra off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
-  any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
-  streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
-  synthesized contraction node — a twisted monoid is a monoid,
-  selected structurally not as a distinct kind) →
+- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**). The stored tile IR has
+  exactly ONE node kind, the general `Fold` (`reduce(⊕) ∘ map(f)` in the λ-foldMap spelling); `Map` and `Contraction`
+  are DERIVED READINGS answered by predicates, roles derive from arity, and a node carries no placement and no
+  schedule — the slices live in `TileOp.schedule`, keyed by the tree-path codec. Storage, readings, edges, term
+  identity and the codec → [`emmy/compiler/ir/tile/ARCHITECTURE.md`](emmy/compiler/ir/tile/ARCHITECTURE.md); the
+  schedule value types and their wire formats → [`emmy/compiler/ir/ARCHITECTURE.md`](emmy/compiler/ir/ARCHITECTURE.md).
+  The SCHEDULE step (`020_schedule`) is ONE recursive row enumerator over the site tree — `WORK` chosen at the root,
+  the sites a product under it, term READINGS the one mechanism above that product, and a term it cannot schedule
+  left unmapped (the guardrail contract) →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 - **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
   [`GLOSSARY.md`](GLOSSARY.md)
@@ -180,7 +113,8 @@ Quick test models / scripts (for local iteration):
 - Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_model_kernels.py`, `bench_golden_set.py`,
   `bench_gen_*.py`, `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`,
   `remote_node_collect.py`, `golden_neighbor_bench.py`, `digest_kernels.py` — the kernel-source byte-identity
-  gate for tile-IR storage migrations) — run with `--help` for usage;
+  gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
+  usage;
   the skills that drive them document the flows.
 
 ## Key Make Targets

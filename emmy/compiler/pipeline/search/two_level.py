@@ -37,7 +37,7 @@ pass index:
 - **Inner** (:func:`_inner_reward_async`) tunes each finalized kernel *independently*
   in its own single-node slice (:func:`single_node_graph`) with a plain
   :class:`TuningSearch` over :data:`LOWERING_PASSES` only. Results key
-  structurally (:func:`op_cache_key`), so they transfer to the assembled graph
+  structurally (:meth:`~emmy.compiler.ir.base.Op.cache_key`), so they transfer to the assembled graph
   unchanged AND are shared across outer terminals (a shared op is a DB hit).
 
 The inner search runs for **every** op on every pass — it is never skipped on
@@ -62,7 +62,6 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-from emmy.compiler.pipeline.search.keys import op_cache_key
 from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.structural import digest
@@ -80,7 +79,7 @@ logger = logging.getLogger(__name__)
 
 # Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner
 # per-op search runs these on a single-node slice so the finalized LoopOp body
-# — and thus its ``op_cache_key`` — is never re-touched by ``loop/fusion``,
+# — and thus its ``Op.cache_key`` — is never re-touched by ``loop/fusion``,
 # which is what keeps inner-tuned ``perf`` / ``lowering`` rows transferable to
 # the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks
 # pass-list edits automatically. The pre-partition tile rules (005's split
@@ -97,7 +96,7 @@ def outer_pipeline() -> Pipeline:
     An outer terminal is a graph whose kernel set is final:
     the keep(SMEM) side is one fused ``TileGraphOp`` (``seed_fused``), the cut side
     its producer + consumer; :func:`_inner_reward_async` picks each up as its own
-    slice (own patience, own progress leaf, deduped by ``op_cache_key``) and tunes
+    slice (own patience, own progress leaf, deduped by ``Op.cache_key``) and tunes
     its tiling via :data:`LOWERING_PASSES`.
 
     Tiling (``enumeration``/partition) is **inner**, deliberately NOT driven here:
@@ -215,7 +214,7 @@ async def _inner_reward_async(
 
     ``progress`` (a duck-typed :class:`~emmy.commands.tune_progress.TuneProgress`,
     or ``None``) drives the CLI progress bar: one op leaf ticked per *unique* kernel,
-    the live tail updated per benched variant. Leaves are deduped by ``op_cache_key``
+    the live tail updated per benched variant. Leaves are deduped by ``Op.cache_key``
     before iteration; multiplicity is preserved so ``total_us`` weights each unique
     kernel's best by its node count (order-stable, identical to per-node iteration)."""
     from collections import OrderedDict  # noqa: PLC0415
@@ -241,7 +240,7 @@ async def _inner_reward_async(
     for nid, _op in _kernel_nodes(fused_graph):
         for pid in fused_producer_ids(fused_graph, fused_graph.nodes[nid]):
             absorbed[pid] = nid
-    # Group structurally-identical LoopOps under one ``op_cache_key`` —
+    # Group structurally-identical LoopOps under one ``Op.cache_key`` —
     # insertion order = first occurrence (drives the progress tail name).
     # Ops with no cache key are unreachable through the bench path so they
     # don't enter the dedup map at all (matches the previous filter).
@@ -249,7 +248,7 @@ async def _inner_reward_async(
     for nid, op in _kernel_nodes(fused_graph):
         if nid in absorbed:
             continue  # tuned inside its consumer's fold-offer slice
-        key = op_cache_key(op)
+        key = op.cache_key()
         if key is None:
             continue
         if key in unique:

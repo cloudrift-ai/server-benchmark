@@ -184,6 +184,17 @@ _CUDA_CLI_GROUP = "cuda-cli"
 def pytest_collection_modifyitems(config, items):
     import heapq
 
+    # Deselect ``perf`` unless explicitly requested. Lives here — not in
+    # ``tests/perf/conftest.py`` — so the gate holds for ANY ``tests/``
+    # collection (e.g. ``pytest tests/serving/``), not only runs that happen
+    # to collect ``tests/perf/`` and load its conftest.
+    selected = config.getoption("-m") or ""
+    if "perf" not in selected:
+        skip_perf = pytest.mark.skip(reason="perf marker not selected; run with `pytest -m perf`")
+        for item in items:
+            if "perf" in item.keywords:
+                item.add_marker(skip_perf)
+
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for
     # in-process device work, ``cuda-cli`` for ``run_cli`` subprocess

@@ -3,8 +3,7 @@
 Motivating incident (2026-07-29, TinyLlama-1.1B on an RTX 4080): a cold deploy shipped a fused-norm
 decode kernel ~150x off the DRAM floor (10 ms/layer — a 54x serving TPOT gap vs stock vLLM) and nothing
 surfaced it; the server booted clean and was simply slow. Root-causing it took a per-kernel attribution
-session (`plans/emmy-serve-performance-findings.md`). This audit turns that class of failure into one
-boot log line.
+session. This audit turns that class of failure into one boot log line.
 
 Mechanism: each STATIC twin program is event-timed once at boot and compared against its
 **weight-streaming floor** — every bound constant must be read at least once per forward, so

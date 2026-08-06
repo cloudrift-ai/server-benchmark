@@ -19,6 +19,7 @@ from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
@@ -74,10 +75,6 @@ def _walk(value, *, on_expr, on_axis):
     if is_dataclass(value) and not isinstance(value, Stmt):
         return type(value)(**{f.name: _walk(getattr(value, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(value)})
     return value
-
-
-def _stage_kwargs(stage, *, on_expr, on_axis):
-    return {f.name: _walk(getattr(stage, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(stage)}
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +319,22 @@ def _(s: Cond, ctx: SimplifyCtx) -> Stmt:
 
 # Tile-IR Stmt registrations were DEMOLISHED along with the tile IR; pending
 # rebuild.
+
+
+def has_contraction_tail(stmts) -> bool:
+    """True if the post-reduce tail contracts over a NEW free axis — a ``Loop`` whose body holds an
+    inner reduce ``Loop``. This is the fused norm→linear shape, distinguished from a plain softmax
+    tail (a single sweep over the SAME axis). ``Body.accums`` supplies the deep accumulator scan.
+
+    A statement-SHAPE predicate, so it lives beside :func:`projection_distributes` rather than in
+    the scheduler that asks: the reduce tiers read it to price a tail, and the shared-row stage
+    gate to decide there is one to share a row with."""
+    for s in stmts:
+        if isinstance(s, Loop) and any(isinstance(c, Loop) and Body(c.body).accums for c in s.body):
+            return True
+        if any(has_contraction_tail(list(b)) for b in s.nested()):
+            return True
+    return False
 
 
 def projection_distributes(body, states: tuple[str, ...]) -> bool:

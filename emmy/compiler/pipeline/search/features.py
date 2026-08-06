@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 from emmy.compiler.pipeline.knob import (
     _AXIS_FAMILIES,
@@ -33,65 +34,61 @@ from emmy.compiler.pipeline.knob import (
 # artifacts carry no stamp and default to it). Version 2 is the retired blind encoding of the
 # codec vocabulary: the warp ``TilePlan.bk`` never reached the features, ``_free_slots`` sorted
 # the warp grid wide-is-n (transposed siblings collapsed; ``tile_m``/``tile_n`` mislabelled),
-# warp rows dropped the split-K finalize letter, and the ``STAGE`` ``alt`` / ``REDUCE`` ``b<n>t``
-# letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit on v2
-# are semantically stale.
+# warp rows dropped the split-K finalize letter, and the ``STAGE`` group-granularity / ``REDUCE``
+# ``coop-t`` letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit
+# on v2 are semantically stale.
 # Bump on any incompatible knob-spelling or feature-encoding change.
+#
+# A BUMP IS OWED and deliberately deferred to the end of the tile-scheduler refactor. The ``STAGE``
+# re-spelling already moved the weight KEYS (``D_stage_ring`` deleted, ``D_stage_alt`` →
+# ``D_stage_split``), so a v3 row recorded under the retired grammar now featurizes as gmem-direct
+# rather than being dropped — ``Stage.parse`` raises on ``/ring`` and ``/alt`` and the featurizers
+# degrade a ``ValueError`` to ``{}`` / ``None``. Bumping is what would keep those rows out, but it
+# HARD-ERRORS the shipped ``offline_weights.json`` (``prior/offline.py`` raises on a ``feat_ver``
+# mismatch with no fallback), so it cannot land without ``emmy fit --artifact`` in the same commit.
+# Until then: the prior loses the ``ring`` signal (collinear with ``depth >= 2 AND async``, so no
+# real loss) and cannot price ``split`` (weightless, scores 0 — and nothing enumerates it yet).
 FEATURIZER_VERSION = 3
 
 
-def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -> dict[str, float]:
-    """The per-role boundary-masked structural features (``S_masked_m/n/k``).
+def _row_values(knobs: dict) -> tuple:
+    """This row's ``(WORK, TILE, STAGE, REDUCE)`` values, family keys read axis-aware so flash's
+    ``TILE@dd`` reads like a bare one — the pooled read; a per-node featurizer loops the keys
+    itself. Each is resolved against the ONE ``WORK`` inventory by the caller, exactly as the
+    scheduler materializes a row: per key, never as a fixed-arity tuple.
 
-    A tile boundary-masks an output / reduce axis when the extent is symbolic or a
-    static non-divisor of the chosen tile — a *consequence* of the shape/tile
-    pairing, not a tunable choice — so it belongs with the ``S_`` structural
-    identity, not a tuning knob. Masking is only known once the tile geometry is
-    chosen, so the producers stamp it at materialize / enumeration time; the
-    feature definition lives here, beside the featurizer that reads it
-    (``_geom_feats`` → ``D_neg_masked_*``).
+    A featurizer only ever sees a REALIZED row, where an absent family IS its decided empty
+    (``stamp_schedule_families`` fills in every family the passes declined) — so absent reads as
+    ``""`` here, not as the unset-pin ``None`` the enumeration reads it as."""
 
-    Split per role so the prior can learn that K-masking (SYNC-pinned, ring-declined) prices
-    differently from M / N output masking. Only the masked roles are emitted — an unmasked kernel
-    carries none, so its structural identity is unchanged and the featurizer defaults a missing flag
-    to ``0.0``. ``S_masked_*`` pass through :func:`knob_features` as raw floats via the
-    ``STRUCT_PREFIX`` branch automatically."""
-    feats: dict[str, float] = {}
-    if m:
-        feats[f"{STRUCT_PREFIX}masked_m"] = 1.0
-    if n:
-        feats[f"{STRUCT_PREFIX}masked_n"] = 1.0
-    if k:
-        feats[f"{STRUCT_PREFIX}masked_k"] = 1.0
-    return feats
+    def val(family: str) -> str:
+        v = family_value(knobs, family)
+        return "" if v is None else str(v)
 
-
-def _row_workers(knobs: dict):
-    """The row's ``WORK`` inventory (:class:`~emmy.compiler.ir.schedule.Workers`), or ``None``
-    — absent / empty / unparseable. The site-value grammar (step 7 F1) factors the worker
-    geometry out of the TILE/REDUCE values into this one entry, so every geometry featurizer
-    resolves its parse against it; a legacy row (the golden YAML corpus) has no ``WORK`` key
-    and its values decode self-contained."""
-    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
-
-    try:
-        return Workers.parse(str(knobs.get("WORK") or ""))
-    except ValueError:
-        return None
+    return str(knobs.get("WORK") or ""), val("TILE"), val("STAGE"), val("REDUCE")
 
 
 def _tile_plan(knobs: dict):
-    """The row's parsed :class:`TilePlan` — the SITE value resolved against the row's ``WORK``
-    inventory (``schedule.resolve_site_tile``, which also accepts the legacy embedded-worker
-    spellings self-contained and disambiguates the empty-TILE-beside-thread-WORK unit-register
-    tile from the coop tier via the REDUCE value) — or ``None`` for the per-cell / untiled
-    forms and unparseable values."""
-    from emmy.compiler.ir.schedule import resolve_site_tile  # noqa: PLC0415
+    """The row's resolved :class:`TilePlan`, or ``None`` for the per-cell / untiled forms and for a
+    row that does not resolve — a geometry featurizer degrades to "no tile geometry" rather than
+    failing a whole fit on one unreadable row. Resolving through ``resolve_site_tile`` is what
+    disambiguates the empty-``TILE``-beside-thread-``WORK`` unit-register tile from the coop tier."""
+    work, tile, _stage, reduce = _row_values(knobs)
+    return _resolved_tile(work, tile, reduce)
 
-    spec = family_value(knobs, "TILE")
-    red = family_value(knobs, "REDUCE")
+
+@lru_cache(maxsize=4096)
+def _resolved_tile(work: str, tile: str, reduce: str):
+    """:func:`_tile_plan`'s parse, memoized on the SPELLING TUPLE — the value vocabulary is tiny
+    (dozens of distinct spellings) beside the row count (~100k per pool), and one row's
+    featurization reaches this parse through several independent features, so the memo removes
+    the dominant per-row cost of a scoring or fit pass. Safe to share the returned plan: every
+    schedule value type is frozen and placement binds by COPY (``TilePlan.at`` is a replace)."""
+    from emmy.compiler.ir.schedule import ReducePlan, Workers, resolve_site_tile  # noqa: PLC0415
+
     try:
-        plan = resolve_site_tile(str(spec) if spec is not None else None, _row_workers(knobs), str(red) if red is not None else "")
+        inv = Workers.parse(work)
+        plan = resolve_site_tile(tile, inv, ReducePlan.parse(reduce, inv).coop)
     except ValueError:
         return None
     return plan if plan.is_tiled else None
@@ -101,9 +98,9 @@ def mma_atom(knobs: dict) -> str | None:
     """The concrete tensor-core atom-kind name carried by ``knobs``, or ``None`` for the scalar
     tier (no warp fragment).
 
-    The atom is named by the ``TILE`` value's warp form — legacy ``a:<atom>/…`` or the site
-    spelling's bare leading atom (resolved against the row's ``WORK`` inventory). A scalar
-    ``TILE`` (``f..`` / ``n../f..`` or empty) names no atom → ``None``."""
+    The atom is named by the ``TILE`` value's warp form — the bare leading atom token, resolved
+    against the row's ``WORK`` inventory. A scalar ``TILE`` (``f..`` or empty) names no atom →
+    ``None``."""
     plan = _tile_plan(knobs)
     return plan.atom.name if plan is not None and plan.is_warp else None
 
@@ -117,7 +114,7 @@ def is_warp(knobs: dict) -> bool:
 
 def _stage_features(knobs: dict) -> dict[str, float]:
     """Engineered ``D_*`` features for the operand-staging decision (the ``STAGE`` codec
-    ``d<depth>/sync|cp|tma[/ring]``). The prior prices the smem pipeline: a deeper / async
+    ``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``). The prior prices the smem pipeline: a deeper / async
     transport trades smem footprint + a fill prologue for K-loop overlap. Absent / empty
     ``STAGE`` (the gmem-direct baseline) contributes nothing (``{}``); a present codec emits
     the pipeline depth and a small transport one-hot so the model separates the synchronous
@@ -127,23 +124,43 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     spec = family_value(knobs, "STAGE")
     if not spec:
         return {}
-    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
-
-    try:
-        st = Stage.parse(spec)
-    except ValueError:
+    st = _parsed_stage(str(spec))
+    if st is None:
         return {}
     return {
         "D_stage_depth": float(st.depth),
         "D_stage_async": 1.0 if st.is_async else 0.0,
         "D_stage_tma": 1.0 if st.transport == "tma" else 0.0,
-        "D_stage_ring": 1.0 if st.ring else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)
-        # The alternating single-slab pipeline (``/alt`` — the flash stream's FA-2 choreography,
-        # which also stages Q): enumerated as a sibling of the paired ring on flash rows, so
-        # without this flag ``d1/tma/alt`` featurized byte-identically to plain ``d1/tma``.
-        "D_stage_alt": 1.0 if st.alt else 0.0,
+        # The per-edge transport split (``/split`` — the flash stream's FA-2 choreography, which
+        # also stages Q): enumerated as a sibling of the paired ring on flash rows, so without
+        # this flag ``d1/tma/split`` featurizes byte-identically to plain ``d1/tma``.
+        "D_stage_split": 1.0 if st.split else 0.0,
     }
+
+
+@lru_cache(maxsize=1024)
+def _parsed_stage(spec: str):
+    """``Stage.parse`` memoized on the spelling (``None`` on an unparseable one) — same rationale
+    as :func:`_resolved_tile`."""
+    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
+
+    try:
+        return Stage.parse(spec)
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=1024)
+def _parsed_reduce(reduce: str, work: str):
+    """``ReducePlan.parse`` against the row's inventory, memoized on the spelling pair —
+    ``ValueError`` maps to ``None`` (the caller owns the coop-without-inventory degrade)."""
+    from emmy.compiler.ir.schedule import ReducePlan, Workers  # noqa: PLC0415
+
+    try:
+        return ReducePlan.parse(reduce, Workers.parse(work))
+    except ValueError:
+        return None
 
 
 # Per-node structural features the featurizer reads per axis-group (``S_ext_reduce_prod@<axis>`` etc):
@@ -169,7 +186,7 @@ def _node_axes(knobs: dict) -> list[str | None]:
     ``STAGE`` for the primary stream — appends the ``""`` bare-remainder group so the primary
     node's slices keep contributing to the sum-pool (byte-identical to the retired ``@kv``
     spelling's own group). ``[]`` when the kernel carries no schedule codec at all (a pure
-    pointwise ``Map``)."""
+    pointwise zero-axis fold)."""
     axes: list[str] = []
     seen: set[str] = set()
     has_bare = False
@@ -365,30 +382,31 @@ class _Decomp:
     cta: int = 1
     coop: int = 1
     finalize: str = "atomic"
-    # The ``b<n>t`` transposed cooperative band (k-major matvec lane mapping) — a different
-    # kernel from the interleaved ``b<n>`` at the same width, so it must reach both the features
-    # and the ``tile_signature`` identity (``b<n>t`` goldens are recorded in the per-GPU YAMLs).
+    # The ``coop-t`` transposed cooperative band (k-major matvec lane mapping) — a different
+    # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
+    # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU YAMLs).
     coop_transposed: bool = False
 
 
 def _reduce_decomp(knobs: dict) -> _Decomp:
     """The primary reduce axis's ``(cta, coop, reg)`` partition factors, decoded from the
-    single ``REDUCE`` codec knob (``g<n>`` cta / ``b<n>`` coop / ``r<n>`` reg — the reduce
+    single ``REDUCE`` codec knob (``g<cta>`` cta / ``coop[-t]`` coop / ``r<reg>`` reg — the reduce
     tier's one decomposition knob, decided in the ``_schedule`` helper). The ``serial``
     remainder is derived from the schedule (``ceil(extent / parallel)``), not a knob, so it
     stays the ``_Decomp`` default."""
-    from emmy.compiler.ir.schedule import ReducePlan  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import ReducePlan, Workers  # noqa: PLC0415
 
     spec = family_value(knobs, "REDUCE")
-    try:
-        plan = ReducePlan.parse_site(str(spec) if spec is not None else None, _row_workers(knobs))
-    except ValueError:
+    work, _tile, _stage, reduce = _row_values(knobs)
+    plan = _parsed_reduce(reduce, work)
+    if plan is None:
         if spec and "coop" in str(spec):
             # A site ``coop`` value with no WORK inventory in the dict (a fork PREFIX row cut
             # above the WORK level, or a stripped evidence dict): the width is genuinely
             # unknown — degrade to the serial decomposition rather than raise mid-featurize.
             return _Decomp()
-        raise
+        ReducePlan.parse(reduce, Workers.parse(work))  # re-raise the original error, uncached
+        raise AssertionError("unreachable — the uncached parse must raise what the memo mapped to None")
     # ``finalize`` must be forwarded here AND by every ``_geom_feats`` caller: dropping it leaves
     # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
     # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
@@ -420,20 +438,15 @@ def _tile_bk(knobs: dict) -> int:
 
 
 def _stage_sig(knobs: dict) -> tuple | None:
-    """The structural staging identity ``(depth, transport, ring, alt)`` for ``tile_signature``,
-    or ``None`` when ``STAGE`` is absent / empty (the gmem-direct baseline). ``alt`` (the flash
-    stream's alternating single-slab pipeline) is a different variant from the paired ring, so it
-    is part of the identity."""
+    """The structural staging identity ``(depth, transport, split)`` for ``tile_signature``,
+    or ``None`` when ``STAGE`` is absent / empty (the gmem-direct baseline). ``split`` (one
+    transport per staged edge — the flash stream's form) is a different pipeline from the single
+    grouped transport, so it is part of the identity."""
     spec = family_value(knobs, "STAGE")
     if not spec:
         return None
-    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
-
-    try:
-        st = Stage.parse(spec)
-    except ValueError:
-        return None
-    return (st.depth, st.transport, st.ring, st.alt)
+    st = _parsed_stage(str(spec))
+    return (st.depth, st.transport, st.split) if st is not None else None
 
 
 def _geom_feats(
@@ -649,7 +662,7 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     )
     out = {k: g[k] for k in _REDUCE_FEATURE_KEYS if k in g}
     out["D_reduce_ilp"] = math.log2(max(float(d.fold), 1.0))
-    # The ``b<n>t`` transposed band: same thread count as its interleaved twin, entirely different
+    # The ``coop-t`` transposed band: same thread count as its interleaved twin, entirely different
     # kernel (k-major lane sweep, smem-tree combine) — without this flag the two featurize
     # byte-identically. Coop moves enumerate on the TILE-less / per-cell tier only, so this block
     # is the one place the letter needs to surface.

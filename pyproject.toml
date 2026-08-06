@@ -6,12 +6,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "emmy-ml"
 version = "0.3.0"
-description = "Deploy and benchmark LLM inference on GPU servers using vLLM"
+description = "Optimized GPU compiler for LLM inference. Choose from a list of optimized recipes or optimize your own model via kernel fusion, autotuning, and advanced scheduling. Run benchmarks across different GPU types and configurations, track results and share experiments with the community."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{ name = "CloudRift", email = "support@cloudrift.ai" }]
+authors = [{ name = "CloudRift", email = "hello@cloudrift.ai" }]
 keywords = ["llm", "inference", "benchmark", "vllm", "sglang", "cuda", "gpu", "compiler"]
 classifiers = [
     "Development Status :: 3 - Alpha",

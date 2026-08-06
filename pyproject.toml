@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "emmy-ml"
 version = "0.3.0"
-description = "Optimized GPU compiler for LLM inference. Choose from a list of optimized recipes or optimize your own model via kernel fusion, autotuning, and advanced scheduling. Run benchmarks across different GPU types and configurations, track results and share experiments with the community."
+description = "Optimized LLM compiler, benchmarking, and deployment stack."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"

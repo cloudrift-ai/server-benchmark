@@ -221,7 +221,7 @@ def _deserialize_field(k, v):
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
-        # (``"Map(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
+        # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
     # (``Placement(...)`` / ``TilePlan(...)`` / ``ReducePlan(...)`` / ``Stage(...)`` /
@@ -293,11 +293,13 @@ def _stmt_eval_scope() -> dict:
     global _STMT_EVAL_SCOPE
     if _STMT_EVAL_SCOPE is not None:
         return _STMT_EVAL_SCOPE
+    import math as _math
+
     import numpy as _np
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis, AxisRole, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -349,6 +351,9 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
+        # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
+        # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
+        "Window": Window,
         "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,
@@ -360,13 +365,17 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
-        # A dumped ``Map.fn`` lambda is strict for every recognized term (the root stores left
+        # ``repr(float('-inf'))`` is ``-inf`` — the online-softmax ``Fold.init`` running max, and
+        # any other non-finite literal, needs the bare names in scope to round-trip.
+        "inf": _math.inf,
+        "nan": _math.nan,
+        # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
         # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
-        # rebuild through the same ``_loop_ir_fn`` arm ``Map`` construction uses.
+        # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
         "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Map`` / ``Fold`` / ``Contraction``) and the
+    # The tile-IR structural nodes (``Fold`` node) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
@@ -375,12 +384,13 @@ def _stmt_eval_scope() -> dict:
     # back. Auto-populate every public class from these modules (``setdefault`` so the
     # explicit stmt/expr entries above win on any name clash) — a new node/knob field
     # needs no edit here.
+    import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_axis_mod, _sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -979,13 +989,12 @@ class Graph:
                 op_payload: tuple = ("body", body.structural_key())
             else:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-                from emmy.compiler.ir.tile.ops import term_key  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (step 7 — the canonically
-                    # renumbered term, ``ops.term_key``); every other field keeps its repr.
+                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
+                    # the bottom-up term key); every other field keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return term_key(o.op)
+                        return o.structural_key()
                     return repr(_unwrap_dims(getattr(o, name)))
 
                 attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)

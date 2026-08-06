@@ -205,12 +205,12 @@ def test_sibling_regret_buckets_by_family_from_parent_delta():
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
 
     nodes = [
-        NodeRow("Pt", None, "ctx", "mm", {"REDUCE@d": "b64"}, 1.0, 1),
-        NodeRow("t1", "Pt", "ctx", "mm", {"REDUCE@d": "b64", "TILE@d": "n8x8/f2x2"}, 1.0, 2),
-        NodeRow("t2", "Pt", "ctx", "mm", {"REDUCE@d": "b64", "TILE@d": "n16x16/f4x4"}, 2.0, 2),
-        NodeRow("Pr", None, "ctx", "mm", {}, 1.0, 1),
-        NodeRow("r1", "Pr", "ctx", "mm", {"REDUCE@d": "b64"}, 1.0, 2),
-        NodeRow("r2", "Pr", "ctx", "mm", {"REDUCE@d": "g2k/b64"}, 2.0, 2),
+        NodeRow("Pt", None, "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t16x16"}, 1.0, 1),
+        NodeRow("t1", "Pt", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t16x16", "TILE@d": "f2x2"}, 1.0, 2),
+        NodeRow("t2", "Pt", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t16x16", "TILE@d": "f4x4"}, 2.0, 2),
+        NodeRow("Pr", None, "ctx", "mm", {"WORK": "t64"}, 1.0, 1),
+        NodeRow("r1", "Pr", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64"}, 1.0, 2),
+        NodeRow("r2", "Pr", "ctx", "mm", {"REDUCE@d": "g2k/coop", "WORK": "t64"}, 2.0, 2),
     ]
     fams = sorted(fam for _, fam, _, _ in diagnostics.sibling_regret(_FlatPrior(), nodes))
     assert fams == ["REDUCE", "TILE"]
@@ -223,8 +223,8 @@ def test_sibling_regret_family_falls_back_without_parent_row():
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
 
     nodes = [
-        NodeRow("s1", "GONE", "ctx", "mm", {"REDUCE@d": "b64", "STAGE@d": "d2/cp"}, 1.0, 5),
-        NodeRow("s2", "GONE", "ctx", "mm", {"REDUCE@d": "b64", "STAGE@d": "d3/tma"}, 2.0, 5),
+        NodeRow("s1", "GONE", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64", "STAGE@d": "d2/cp"}, 1.0, 5),
+        NodeRow("s2", "GONE", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64", "STAGE@d": "d3/tma"}, 2.0, 5),
     ]
     recs = diagnostics.sibling_regret(_BMPrior(), nodes)
     assert len(recs) == 1
@@ -595,10 +595,10 @@ def test_anchor_prefix_matching_is_registry_canonical():
     """Real-knob matching goes through the pin gate's helpers: a bare atom-ALIAS
     golden TILE matches its canonically-stamped axis-keyed realization; a different
     geometry does not; a family the golden doesn't record is no constraint."""
-    gold = {"TILE": "a:mma_m16n8k16_f16/w2x2/f4x4/k2"}
-    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2", "STAGE@a2": "d2/cp/ring"}
+    gold = {"TILE": "mma_m16n8k16_f16/f4x4/k2"}
+    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "mma_m16n8k16_f16_f32/f4x4/k2", "STAGE@a2": "d2/cp"}
     assert diagnostics._golden_prefix_consistent(stamped, gold)
-    assert not diagnostics._golden_prefix_consistent({**stamped, "TILE@a2": "a:mma_m16n8k16_f16_f32/w1x1/f1x1"}, gold)
+    assert not diagnostics._golden_prefix_consistent({**stamped, "TILE@a2": "mma_m16n8k16_f16_f32/f1x1"}, gold)
 
 
 def test_anchor_level_zero_unbuilt_branch_and_o3_only_ops():

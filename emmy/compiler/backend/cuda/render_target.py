@@ -14,8 +14,6 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 
 from __future__ import annotations
 
-from emmy.compiler import dtype as _dtype
-
 _TYPE_NAME: dict[str, str] = {"f32": "float", "f16": "__half", "f16x2": "__half2"}
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
@@ -164,11 +162,3 @@ class CudaRenderTarget:
                 return ("uint4", "__half")
             return None
         return None
-
-
-def _ensure_canonical(dtype: str) -> str:
-    """Coerce a CUDA C type name back to the canonical dtype token, so
-    callers that hold an arbitrary spelling can still ask the target."""
-    if dtype in _TYPE_NAME:
-        return dtype
-    return _dtype.get(dtype).name

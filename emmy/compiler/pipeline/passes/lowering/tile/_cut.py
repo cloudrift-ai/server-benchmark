@@ -11,12 +11,12 @@ hierarchy — a piece's entry may itself cut (the cone piece re-recognizes as th
 and its routing entry cuts the statistic out). NO routing entry = fuse = the recognized form —
 the deployment-safety default, spelled as absence.
 
-The realizer is seam-agnostic by design: the two seam shapes (a ``Map`` projection seam, a fold
+The realizer is seam-agnostic by design: the two seam shapes (a zero-axis ``Fold`` projection seam, a fold
 operand edge) fall out of the node kinds — the child's index space is DERIVED (the enclosing
 iteration axes its lowered body reads: parent free axes + ancestor fold axes), the workspace
 dtype from the seam kind (a fold child's carrier state is **f32**, mirroring the split-reduce
 workspace rule; a value seam keeps its leaf operand dtype — the same bytes the fused form's A
-slab stored), and the piece bodies from ``ops.lower`` with loop-invariant stmts placed at the
+slab stored), and the piece bodies from ``Fold.lower`` with loop-invariant stmts placed at the
 shallowest level that defines their reads. Legality is structural (edge-iff-closed holds by
 construction); an open seam cannot be spelled because ``PLACE`` sites are tree children.
 """
@@ -35,10 +35,18 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, _operand_name, effect_tail
-from emmy.compiler.ir.tile.ops import lower
+from emmy.compiler.ir.tile.ir import (
+    Fold,
+    _operand_result_names,
+    deep_defines,
+    deep_reads,
+    effect_tail,
+    is_contraction,
+    operand_name,
+)
+from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
-from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
+from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
@@ -61,7 +69,8 @@ def _place_pins() -> dict[str, str]:
 
 #: The schedule knob families a golden / ``--ab`` row pins. A live pin from any of them marks a
 #: pinned re-record compile, where the pin — not a recorded routing entry — must decide the form.
-_SCHEDULE_FAMILIES = ("TILE", "STAGE", "REDUCE", "WORK", "RASTER", "WSPEC")
+#: ONE list (``knob.SCHEDULE_FAMILIES``): the retired ``WSPEC`` alias is gone from it because
+#: nothing reads that pin any more, so treating it as live suppressed routing for no decision.
 
 
 def _schedule_pins_live() -> bool:
@@ -72,9 +81,9 @@ def _schedule_pins_live() -> bool:
     where every fused golden replay failed against its own recorded spelling as soon as a
     same-shape ``.cut`` routing row landed). Bare schedule pins apply compile-wide, so this
     suppression is compile-wide too — matching ``Knob.narrow``'s bare-pin scope."""
-    if any(config.knob_raw(f) is not None for f in _SCHEDULE_FAMILIES):
+    if any(config.knob_raw(f) is not None for f in SCHEDULE_FAMILIES):
         return True
-    return any(family_of(k) in _SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
+    return any(family_of(k) in SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
 
 
 def _card_has_routing(gpu_name, cap) -> bool:
@@ -91,22 +100,15 @@ def _card_has_routing(gpu_name, cap) -> bool:
 
 
 def _has_computed_a(node) -> bool:
-    """Whether the tree carries a computed-A :class:`Contraction` — an ``a`` edge stored INLINE
-    (a cone node) rather than materialized (a gmem ``Load``). The structural twin of the offer
-    signal ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers
-    enumerate the ``sync`` compute-fill): at the routing consult no offer exists yet, but the
-    routing reference tree does, and the edge inhabitant is the same fact."""
-    if isinstance(node, Contraction) and not isinstance(node.a, Load):
-        return True
-    if isinstance(node, Map):
-        children = node.sources
-    elif isinstance(node, Fold):
-        children = node.operands
-    elif isinstance(node, Contraction):
-        children = (node.a, *(ch.b for ch in node.channels))
-    else:
-        return False
-    return any(_has_computed_a(c) for c in children if isinstance(c, (Map, Fold, Contraction)))
+    """Whether the tree carries a computed-A contraction — an ``a`` edge stored INLINE (a cone
+    node) rather than materialized (a gmem ``Load``). The structural twin of the offer signal
+    ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers enumerate
+    the ``sync`` compute-fill): at the routing consult no offer exists yet, but the routing
+    reference tree does, and the edge inhabitant is the same fact.
+
+    Walked through ``path.sites`` — the ONE node walk in the layer, already imported here — rather
+    than a private recursion over ``operands``."""
+    return any(is_contraction(s.node) and not isinstance(s.node.a, Load) for s in sites(node))
 
 
 def _routing_entry(ctx, knobs: dict, root=None):
@@ -155,28 +157,46 @@ def _routing_entry(ctx, knobs: dict, root=None):
     return min(entries, key=lambda g: g.emmy_us or float("inf"))
 
 
+def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
+    """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
+    iteration-space names (``axes``) excluded.
+
+    DEMOTED to a validation check at 1q: operands bind POSITIONALLY to lift params, so an edge
+    cannot see the fold's state or its siblings — **edge iff closed holds by construction** — and
+    the cut is the one decision that still consults the scan. It is the executable statement of
+    that invariant, and the honest reading of the one legal capture: flash's ``P = exp(s − m)``
+    genuinely reads the online-softmax carrier's running max, updated by the merge stmts of the
+    very loop step that consumes it (legal: an inline operand's one home is always inside the
+    scope it captures from) — which is why that seam is not cuttable.
+
+    Returned sorted, so callers can put it straight into an error message."""
+    stmts = list(root.lower())
+    defs: set[str] = set()
+    for s in stmts:
+        defs |= deep_defines(s)
+    return tuple(sorted(deep_reads(stmts) - defs - axes))
+
+
 def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     """Structural cut legality — the plan's edge-iff-closed reading plus two v1 shape gates:
 
     - the child produces ONE component (a product fold's per-component separation is
       deliberately forfeited at tile level — the sanctioned cut for the fused edge is the
       shared ``a`` operand, never a channel);
-    - the child is CLOSED over values (``captured_values`` — its demoted validation role: a
+    - the child is CLOSED over values (:func:`_captured_values` — its demoted validation role: a
       state-capturing composition like flash's ``P`` sits in the step at its semantic position
       and is simply not cuttable);
-    - the seam is not the pure-copy degenerate: cutting a root ``Map``'s only source when the
+    - the seam is not the pure-copy degenerate: cutting a root zero-axis fold's only source when the
       projection body is empty and the store is a plain write leaves a parent that merely
       copies the workspace back out — the child IS the kernel, the tree does not shrink, and
       the recursion never terminates."""
-    from emmy.compiler.ir.tile.ir import _operand_name, _operand_result_names, axis_names, captured_values  # noqa: PLC0415
-
     child = site.node
     if len(_operand_result_names(child)) != 1:
         return False
-    if captured_values(child, axis_names(root) | {a.name for a in free}):
+    if _captured_values(child, axis_names(root) | {a.name for a in free}):
         return False
-    trivial_body = isinstance(root, Map) and not len(root.body) and all(st.sweep is None for st in stores)
-    if trivial_body and any(s is child for s in root.sources):
+    trivial_body = (isinstance(root, Fold) and root.axis is None) and not len(root.body) and all(st.sweep is None for st in stores)
+    if trivial_body and any(s is child for s in root.operands):
         return False
     # The PARENT must be closed once the seam materializes: replace the child with its workspace
     # ``Load`` and require no residual free value reads. A seam whose subtree feeds the parent
@@ -184,10 +204,10 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     # channel's accumulator while the seam value is only the gate's — is not a cut: only the
     # seam value crosses the kernel boundary, so the second path's def would vanish with the
     # subtree (found live: ``Assign v9: arg 'acc1' not defined`` on the m4096 geglu cut).
-    probe = Load(name=_operand_name(child), input="__seam_probe", index=())
+    probe = Load(name=operand_name(child), input="__seam_probe", index=())
     parent_tree = _replace_edge(root, child, probe)
     sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}  # boundary-store sweeps live off-term (1q)
-    if captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
+    if _captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
         return False
     return True
 
@@ -252,7 +272,7 @@ def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:
     reads (its own bound axes excluded), in enclosing order: the parent placement's free axes,
     then the ancestor fold axes along the path down to the seam."""
     reads: set[str] = set()
-    for s in lower(child):
+    for s in child.lower():
         reads |= _member_reads(s)
     return [a for a in (*free, *ancestors) if a.name in reads]
 
@@ -263,17 +283,11 @@ def _ancestor_axes(root, child) -> tuple[Axis, ...]:
     def walk(node, acc: tuple[Axis, ...]) -> tuple[Axis, ...] | None:
         if node is child:
             return acc
-        if isinstance(node, Map):
-            edges = node.sources
-        elif isinstance(node, Fold):
-            edges = node.operands
-        elif isinstance(node, Contraction):
-            edges = (node.a, *(ch.b for ch in node.channels))
-        else:
-            edges = ()
-        below = (*acc, node.axis) if isinstance(node, (Fold, Contraction)) else acc
+        edges = node.operands if isinstance(node, Fold) else ()
+        # A ZERO-AXIS node contributes no fold axis to the path (it does not iterate).
+        below = (*acc, node.axis) if isinstance(node, Fold) and node.axis is not None else acc
         for e in edges:
-            if isinstance(e, (Map, Fold, Contraction)):
+            if isinstance(e, Fold):
                 got = walk(e, below)
                 if got is not None:
                     return got
@@ -318,11 +332,11 @@ def _nest(stmts: list[Stmt], axes: list[Axis]) -> list[Stmt]:
 def _ws_dtype(child, inputs: dict):
     """The seam workspace dtype: a fold child bridges raw carrier STATE — **f32**, the
     split-reduce workspace rule (a reduced statistic must not round-trip through the output
-    dtype) — while a value seam (a ``Map`` child — the cone's per-cell normalize) keeps its leaf
+    dtype) — while a value seam (a zero-axis ``Fold`` child — the cone's per-cell normalize) keeps its leaf
     operand's dtype: the same bytes the fused form's A slab stored, so numerics match."""
-    if isinstance(child, (Fold, Contraction)):
+    if isinstance(child, Fold):
         return F32
-    for s in lower(child):
+    for s in child.lower():
         for ld in Body(tuple([s])).loads:
             t = (inputs or {}).get(ld.input)
             if t is not None:
@@ -333,21 +347,15 @@ def _ws_dtype(child, inputs: dict):
 def _replace_edge(node, child, load: Load):
     """The parent tree with the seam child replaced by ``load`` — the cut terminal (every edge
     admits ``Load``). Positional bindings hold: the load defines the child's bound name."""
-    _nodes = (Map, Fold, Contraction)
-    if isinstance(node, Map):
-        if any(s is child for s in node.sources):
-            return Map(fn=node.fn, sources=tuple(load if s is child else s for s in node.sources))
-        return Map(fn=node.fn, sources=tuple(_replace_edge(s, child, load) if isinstance(s, _nodes) else s for s in node.sources))
     from dataclasses import replace as _dc_replace  # noqa: PLC0415
 
-    if isinstance(node, Fold):
-        if any(e is child for e in node.operands):
-            return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
-        return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, _nodes) else e for e in node.operands))
-    if isinstance(node, Contraction):
-        sub = lambda e: load if e is child else (_replace_edge(e, child, load) if isinstance(e, _nodes) else e)  # noqa: E731
-        return _dc_replace(node, a=sub(node.a), channels=tuple(_dc_replace(ch, b=sub(ch.b)) for ch in node.channels))
-    return node
+    if not isinstance(node, Fold):
+        return node
+    # ONE arm for the one stored kind: every reading's edges are ``operands``, so replacing the
+    # seam is the same rewrite whether the node reads as a map, a reduce or a contraction.
+    if any(e is child for e in node.operands):
+        return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
+    return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, Fold) else e for e in node.operands))
 
 
 def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site) -> Graph:
@@ -361,7 +369,7 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     kind)."""
     out = root.output
     child = site.node
-    child_name = _operand_name(child)
+    child_name = operand_name(child)
     ws = f"{out.name}__cut_{child_name}"
     if ws in match.graph.nodes:
         raise RuleSkipped(f"seam already cut — {ws} exists")
@@ -373,14 +381,14 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     logger.info("placement: cutting %s (%s → %s + residue) on %s", spelled, root.id, ws, out.name)
 
     # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
-    child_stmts = [*lower(child), Write(output=ws, index=ws_index, value=child_name)]
+    child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
     child_body = _nest(child_stmts, axes)
     child_op = LoopOp(body=Body(tuple(child_body)))
 
     # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
     load = Load(name=child_name, input=ws, index=ws_index)
     parent_tree = _replace_edge(tile_op, child, load)
-    parent_cell = effect_tail(lower(parent_tree), stores)
+    parent_cell = effect_tail(parent_tree.lower(), stores)
     parent_body = _nest(list(parent_cell), list(free))
     parent_op = LoopOp(body=Body(tuple(parent_body)))
 

@@ -83,7 +83,12 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   files re-declaring the same fixtures is the signal to merge them; a file whose sections share no scaffolding
   and no subject is the signal to leave them apart.
 - **Known failures are marked inline** with `@pytest.mark.xfail`, carrying a reason that says what was
-  removed or broken and when it should come back.
+  removed or broken and when it should come back. For a deliberate whole-subsystem removal whose casualties span
+  dozens of files, prefer one registry module of exact node ids applied as a **strict** xfail from the root
+  `conftest.py` — exact ids, never path globs, so each id is an acceptance obligation and the list shrinking to
+  empty is the completion gate (the tile-scheduler rebuild ran this way; the registry was deleted when it emptied).
+- **Card-conditional expectations stay inline**, non-strict, at their own test — a flaky or SKU-specific failure
+  needs a reason that names the condition.
 
 ## Running
 

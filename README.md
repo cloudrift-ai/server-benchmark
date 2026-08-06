@@ -4,7 +4,7 @@
   <a href="https://discord.gg/cloudrift"><img src="https://img.shields.io/discord/1150997934113030174?label=Discord" alt="Discord"></a>
 </p>
 
-**Compile → Benchmark → Deploy** any LLM on any GPU. vLLM, SGLang, or create your own specialized deployment using a hackable compiler.
+**Compile → Benchmark → Deploy** any LLM on any GPU. Optimized compiler, LLM benchmarking, and deployment stack. Optimize inference via kernel fusion, autotuning, and advanced scheduling. See the blog post: [*Outperforming vLLM (cuBLAS and FlashAttention) on Gemma4-12B*](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
 
 ## Install
 
@@ -18,28 +18,13 @@ cd emmy && make setup
 A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse it into one kernel, run it, and inspect the emitted CUDA. See the blog post: [*A Principled ML Compiler Stack in 5,000 Lines of Python*](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1).
 
 ```bash
-# Compile a single layer
+# Compile a single operation
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
-# Benchmark, profile and optimize kernels locally
+# Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
-# Compile full model from HuggingFace (will download weights)
-emmy compile Qwen/Qwen3-Embedding-0.6B
 ```
 
-The experimental fixed-shape DiT block adapter needs the image extra and compares the identical selected block across
-eager PyTorch, `torch.compile`, and Emmy:
-
-```bash
-pip install -e ".[compile,image]"
-emmy run facebook/DiT-XL-2-256 --adapter dit --layer 0 --bench \
-  --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 --json dit-layer0.json
-```
-
-This block-level workload traces only the checkpoint's transformer component, not its VAE or scheduler. The
-`facebook/DiT-XL-2-256` checkpoint is licensed
-[CC-BY-NC-4.0](https://huggingface.co/facebook/DiT-XL-2-256).
-
-Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into two kernels:
+Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
 
 ```bash
 emmy compile -c "
@@ -59,7 +44,6 @@ Principled compilation stack with six IR stages, each printable on demand via `-
 4. **Tile IR** — schedules kernels onto GPU
 5. **Kernel IR** — materializes the schedule into framework-agnostic hardware primitives
 6. **CUDA** — optimized CUDA code ready for `nvcc`
-
 
 **Readable Schedule**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir tile`
 ```
@@ -153,12 +137,12 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 ## Benchmark
 
 ```bash
-emmy bench recipes/*                                    # All recipes
-emmy bench experiments/.../optimal_mcr_rtx5090          # An experiment
-emmy bench recipes/* --filter "deploy.gpu=*5090*"       # Subset
-emmy bench recipes/* --gpu-concurrency 4                # Parallel VMs per GPU
-emmy bench recipes/* --local                            # On this machine
-emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated hosts
+emmy bench experiments/gemma-4-12B/*                                    # All Gemma experiments
+emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090                    # A single experiment
+emmy bench experiments/gemma-4-12B/* --filter "deploy.gpu=*5090*"       # Subset
+emmy bench experiments/gemma-4-12B/* --gpu-concurrency 4                # Parallel VMs per GPU
+emmy bench experiments/gemma-4-12B/* --local                            # On this machine
+emmy bench experiments/gemma-4-12B/* --ssh user@host1 --ssh user@host2  # Pre-allocated hosts
 ```
 
 External contributors: open a PR with an experiment under `experiments/{model}/{name}/`, then a maintainer triggers a cloud run by commenting `/run-experiment` on the PR.
@@ -167,25 +151,20 @@ External contributors: open a PR with an experiment under `experiments/{model}/{
 
 ```bash
 # Remote server via SSH
-emmy deploy ssh --recipe recipes/GLM-4.6-FP8 --ssh user@host
+emmy deploy ssh --recipe recipes/gemma-4-12B-it --ssh user@host
 
 # Local Docker Compose
-emmy deploy local --recipe recipes/Qwen3-Coder-30B-A3B-Instruct-AWQ
+emmy deploy local --recipe recipes/gemma-4-12B-it
 
 # Cloud (auto-provisions a VM)
-emmy deploy cloud --recipe recipes/GLM-4.6-FP8 --gpu "NVIDIA H200 141GB" --gpu-count 8
-
-# Teardown / preview
-emmy deploy ssh --recipe recipes/GLM-4.6-FP8 --ssh user@host --teardown
-emmy deploy ssh --recipe recipes/GLM-4.6-FP8 --ssh user@host --dry-run
+emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
 ```
 
 ## Serve (compiled embeddings via vLLM)
 
 ```bash
 # vLLM's OpenAI shell (/v1/embeddings, tokenizer, scheduler, pooler) over emmy-compiled kernels
-pip install -e ".[compile,serving]"
-emmy serve Qwen/Qwen3-Embedding-0.6B                  # extra flags pass through to vllm serve
+emmy serve Qwen/Qwen3-Embedding-0.6B
 
 curl localhost:8000/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-Embedding-0.6B","input":"Hello"}'
@@ -194,28 +173,6 @@ curl localhost:8000/v1/embeddings -H 'Content-Type: application/json' \
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ```
-
-See [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md); embedding recipes
-(`recipes/Qwen3-Embedding-*`) A/B this against stock vLLM via `emmy bench`.
-
-## Generate (chat) — experimental
-
-```bash
-# Standalone generation oracle (no vLLM) — re-runs the whole prefix each step, O(S²); the
-# token-for-token reference (matches HF eager greedy, e.g. on TinyLlama-1.1B-Chat).
-emmy generate TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt "The capital of France is" --max-new-tokens 10
-
-# Serve a chat model through emmy-compiled per-layer kernels (vLLM owns the OpenAI API /
-# sampler / scheduler / paged KV-cache / lm_head; emmy owns embed + the trunk).
-emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --generate
-curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"TinyLlama/TinyLlama-1.1B-Chat-v1.0","messages":[{"role":"user","content":"Hi"}]}'
-```
-
-**Status:** correctness complete for decoder-only **Llama / Qwen3** (full-causal, fp16, TP=1). Perf is **not yet
-hardened** — host-sync interleave at the per-layer seam, and `serve` compiles 2× n_layers programs (startup- and
-memory-heavy → small models for now). See [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md) for
-the design.
 
 ## Recipe
 
@@ -230,7 +187,7 @@ engine:
     context_length: 16384
     max_concurrent_requests: 512
     vllm:
-      image: "vllm/vllm-openai:v0.17.0"
+      image: "vllm/vllm-openai:v0.23.0"
       extra_args: "--kv-cache-dtype fp8"
 
 benchmark:
@@ -310,12 +267,8 @@ make format    # auto-fix
     - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
     - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
     - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see [ARCHITECTURE.md](emmy/compiler/pipeline/ARCHITECTURE.md))
-    - [rules/](emmy/compiler/rules/) — rewrite rules (decomposition, optimization, fusion, lowering)
-    - [program/](emmy/compiler/program/) — kernel program assembly (LoopOp → KernelOp → CudaOp)
-    - [cuda/](emmy/compiler/cuda/) — CUDA source rendering and runtime helpers
     - [backend/](emmy/compiler/backend/) — numpy / loop / CUDA execution (see [ARCHITECTURE.md](emmy/compiler/backend/ARCHITECTURE.md))
       - [cuda/](emmy/compiler/backend/cuda/) — CUDA backend internals (see [ARCHITECTURE.md](emmy/compiler/backend/cuda/ARCHITECTURE.md))
-    - [tuning.py](emmy/compiler/tuning.py) — autotuning utilities
   - [recipe/](emmy/recipe/) — Recipe loading, dataclass types, engine flag mapping (see [ARCHITECTURE.md](emmy/recipe/ARCHITECTURE.md))
   - [serving/](emmy/serving/) — vLLM out-of-tree embedding plugin (see [ARCHITECTURE.md](emmy/serving/ARCHITECTURE.md))
   - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration
@@ -340,11 +293,11 @@ make format    # auto-fix
 
 ## Contributing
 
-1. Branch from `main` (e.g. `feature/my-change`).
-2. Follow [STYLE.md](STYLE.md) and per-directory `ARCHITECTURE.md` files.
-3. Add tests in `tests/` (see [tests/ARCHITECTURE.md](tests/ARCHITECTURE.md)).
-4. `make test && make lint` (use `make format` to auto-fix).
-5. Open a PR against `main`.
+1. Fork and branch from `main` (e.g. `feature/my-change`)
+2. Follow [STYLE.md](STYLE.md) and per-directory `ARCHITECTURE.md` files
+3. Add tests in `tests/` (see [tests/ARCHITECTURE.md](tests/ARCHITECTURE.md))
+4. `make test && make lint` (use `make format` to auto-fix)
+5. Open a PR against trunk
 
 ## License
 

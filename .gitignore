@@ -84,3 +84,6 @@ docs/.vercel
 /docs/yarn-debug.log*
 /docs/yarn-error.log*
 /local_data/
+
+# Recipes staged into the package for a distribution build (scripts/prepare_dist.py)
+/emmy/recipes/

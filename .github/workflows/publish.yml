@@ -1,8 +1,18 @@
 name: Publish to PyPI
 
+# Two ways in:
+#   * publish a GitHub Release by hand — the tag carries the version;
+#   * run this workflow with a version input — it publishes to PyPI first and
+#     then creates the tag and release, so a failed upload leaves nothing behind.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release — must match pyproject.toml (e.g. 0.3.0)"
+        required: true
+        type: string
 
 jobs:
   test:
@@ -41,6 +51,8 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,18 +60,33 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Verify version matches tag
+      - name: Verify version matches the release
+        id: version
         run: |
           PKG_VERSION=$(python -c "
           import tomllib
           with open('pyproject.toml', 'rb') as f:
               print(tomllib.load(f)['project']['version'])
           ")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Version mismatch: pyproject.toml=$PKG_VERSION, tag=$TAG_VERSION"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WANT_VERSION="${{ inputs.version }}"
+            if git ls-remote --exit-code --tags origin "refs/tags/v$WANT_VERSION" >/dev/null 2>&1; then
+              echo "::error::Tag v$WANT_VERSION already exists"
+              exit 1
+            fi
+          else
+            WANT_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if [ "$PKG_VERSION" != "$WANT_VERSION" ]; then
+            echo "::error::Version mismatch: pyproject.toml=$PKG_VERSION, release=$WANT_VERSION"
             exit 1
           fi
+          echo "version=$WANT_VERSION" >> "$GITHUB_OUTPUT"
+
+      # Bundle the recipes into the package, and point the README's repo-relative
+      # links at GitHub — PyPI renders the README detached from the repo.
+      - name: Stage the source tree for distribution
+        run: python scripts/prepare_dist.py --recipes --readme
 
       - run: pip install build
 
@@ -83,3 +110,23 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Only for the dispatched path: a hand-published release already has both.
+  github-release:
+    needs: [build, publish]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --generate-notes

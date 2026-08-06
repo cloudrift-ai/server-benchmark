@@ -8,8 +8,9 @@ All tests use **pytest** with **pytest-asyncio** (`asyncio_mode = "auto"` in `py
 
 `tests/` mirrors the `emmy/` source tree: a test directory exists because a source package does, and a test
 module is named for the source module it covers. To find the tests for `emmy/<a>/<b>.py`, look in
-`tests/<a>/test_<b>.py`. The one file at the root that belongs to no package is `conftest.py` — shared fixtures
-plus the CUDA / LPT xdist routing hook (see **Running**).
+`tests/<a>/test_<b>.py`. Two files sit at the root: `conftest.py` — shared fixtures plus the CUDA / LPT xdist
+routing hook (see **Running**) — and `test_emmy.py`, which mirrors `emmy/emmy.py`, the CLI entrypoint that belongs
+to no subpackage.
 
 Mirroring is the rule, not a coincidence — when a source package grows subpackages, the test directory follows.
 `tests/compiler/pipeline/search/` is the worked example: its `data/`, `policy/`, and `prior/` subdirectories exist

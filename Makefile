@@ -72,6 +72,7 @@ VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell 
 
 wheel: setup
 	./venv/bin/pip install --quiet build
+	./venv/bin/python scripts/prepare_dist.py --recipes
 	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without

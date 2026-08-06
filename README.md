@@ -9,6 +9,14 @@
 ## Install
 
 ```bash
+pip install emmy-ml          # the CLI, with the recommended recipes bundled
+emmy --version
+```
+
+The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). To hack on emmy
+itself, clone instead:
+
+```bash
 git clone https://github.com/cloudrift-ai/emmy.git
 cd emmy && make setup
 ```
@@ -160,6 +168,10 @@ emmy deploy local --recipe recipes/gemma-4-12B-it
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
 ```
 
+`--recipe` also takes the bare name of a recipe bundled with the installed package (`--recipe gemma-4-12B-it`),
+which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
+its run directories. A path that exists always wins, so an edited working copy is never overwritten.
+
 ## Serve (compiled embeddings via vLLM)
 
 ```bash
@@ -242,7 +254,19 @@ emmy vm delete cloudrift --instance-id <id>
 make test      # run pytest
 make lint      # ruff check + format check
 make format    # auto-fix
+make wheel     # build the wheel into dist/
 ```
+
+### Release
+
+Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** workflow with that same version. It
+lints, tests, builds, uploads to PyPI via trusted publishing, and only then creates the tag and GitHub release — so
+a failed upload leaves nothing behind. Publishing a GitHub release by hand works too, and takes the version from
+the tag.
+
+`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies `recipes/*/recipe.yaml` into
+the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative links to absolute GitHub
+URLs, which the workflow runs because PyPI renders the README detached from the repo.
 
 ## Project Structure
 

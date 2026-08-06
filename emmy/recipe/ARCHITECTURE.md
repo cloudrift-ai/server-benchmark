@@ -10,8 +10,18 @@ The `recipe` package owns all recipe-related logic: YAML loading, matrix expansi
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
+- `bundled.py` — `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an installed wheel
 
 ## Key Design Decisions
+
+### Bundled Recipes Are Copied Out Before Use
+
+A wheel carries every `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because `recipes/`
+sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in site-packages,
+whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories there. So
+`resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe into the
+current directory and returns that path. An existing directory always takes precedence, so a name that matches both
+a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
 
 ### Matrix Expansion for Benchmark Sweeps
 

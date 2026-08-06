@@ -126,6 +126,8 @@ Quick test models / scripts (for local iteration):
 - `make format` — auto-format code and fix lint violations
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
 - `make bench-kernels` — run per-kernel perf comparison vs PyTorch (`tests/perf/`, requires CUDA)
+- `make wheel` — build the wheel into `dist/` (stages the bundled recipes first; see the Release section of
+  `README.md`)
 - `make clean` — remove venv and generated files
 
 ## Documentation Conventions

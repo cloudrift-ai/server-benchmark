@@ -2,6 +2,7 @@
 """Server benchmark tools — CLI entrypoint."""
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 
 from emmy.commands.bench import register_bench_command
 from emmy.commands.compare import register_compare_command
@@ -23,8 +24,17 @@ from emmy.commands.vm import register_vm_command
 from emmy.logging_setup import setup_cli_logging
 
 
+def _package_version():
+    """Installed distribution version, or "unknown" for a plain source checkout."""
+    try:
+        return version("emmy-ml")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Server benchmark tools")
+    parser.add_argument("--version", action="version", version=f"emmy {_package_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # deploy subcommand with target sub-subcommands

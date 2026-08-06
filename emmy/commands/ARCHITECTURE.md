@@ -215,6 +215,14 @@ emmy
 
 ## CLI Reference
 
+`emmy --version` prints the installed distribution version (`unknown` when running straight from a source checkout
+with nothing installed).
+
+Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` via `--recipe`, and `bench`'s
+positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
+installed package, copying it into the current directory first. An existing path always wins over a bundled name.
+See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
+
 ### `emmy deploy local`
 
 Runs `docker compose` directly on the current machine. Auto-detects the local GPU via PCI sysfs and selects the matching `matrices` entry from the recipe.

@@ -15,7 +15,7 @@ from emmy.provisioning.cloud import (
 )
 from emmy.provisioning.host import RemoteHost
 from emmy.provisioning.remote import provision_remote
-from emmy.recipe import resolve_for_hardware
+from emmy.recipe import resolve_for_hardware, resolve_recipe_dir
 from emmy.redact import register_secret
 from emmy.timing import PHASE_REMOTE_PROVISION, PHASE_VM_PROVISION, PhaseTimer
 
@@ -30,7 +30,7 @@ def handle_cloud(args):
 
 
 async def _handle_cloud(args):
-    recipe = resolve_for_hardware(args.recipe, args.gpu, args.gpu_count)
+    recipe = resolve_for_hardware(resolve_recipe_dir(args.recipe), args.gpu, args.gpu_count)
     logger.info(f"GPU: {recipe.deploy.gpu_count}x {recipe.deploy.gpu}")
 
     ssh_key = os.path.expanduser(args.ssh_key)

@@ -14,6 +14,10 @@ a recipe is a deployable artifact. The recipe format itself — matrices, `cross
 validation, `docker_options`, command recipes — is documented in
 [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md); this file is about **what belongs here** and why.
 
+Every `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without a
+checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
+that. Only the recipe files travel — the committed benchmark results beside them do not.
+
 ## recipes/ vs experiments/
 
 The two directories use the same YAML format and are easy to confuse. The distinction is intent, and it decides

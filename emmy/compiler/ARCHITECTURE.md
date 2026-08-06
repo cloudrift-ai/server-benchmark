@@ -127,6 +127,19 @@ autotuning cache doesn't bust on cosmetic edits.
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on
   CPU — fusion correctness can be checked without a GPU.
 
+## Quantized checkpoints (FP8)
+
+A quantized checkpoint never reaches the trace: the trace runs over the bf16 architecture twin built from config
+(quantization is a property of the checkpoint, not the architecture), and each weight's `ConstantOp.quant` — a
+`QuantSpec` pairing it with its checkpoint scale — is stamped immediately post-trace from `quantization_config`.
+By default the loader consumes the spec at bind time (raw f8 bits → LUT decode → block-broadcast scale multiply),
+so the compiler sees an ordinary graph at the compute dtype; with `EMMY_FP8_EXPAND` on, the
+`180_expand_quantized_constant` decomposition rule instead spells the dequant cone in-graph (fp8-bits constant +
+scale constant + decode-cast + broadcast-multiply) so the kernel path can keep the weight in fp8 storage.
+Containment rule: quant metadata is frontend/loader-band only — everything past the frontend stays
+graph-structure-driven (a quantized weight is just constants + algebra there), and a gate test enforces the
+allowlist.
+
 ## Op provenance
 
 `provenance.py` threads a single `Node.hints["prov"]` map —

@@ -4,6 +4,50 @@ Goal: make FP8 checkpoints work in emmy end-to-end — compile / run / tune / se
 (FP8 release expected alongside bf16, as with Qwen3.5/3.6), only model-level work remains. This plan is the general
 FP8 story; nothing here is Qwen3.8-specific.
 
+## Status (2026-08-06)
+
+- **Phase 0 DONE** — `fold_into_constant` rebuilds via `dataclasses.replace`, layout nodes inherit their own
+  operand's dtype (branch-local propagation); kernel-source digest A/B 27/27 byte-identical.
+- **M1 DONE** — dequant-on-load ingestion: f8 dtypes + `QuantSpec`/`ConstantOp.quant`, LUT decode, block-broadcast
+  scale, bf16-twin trace; tiny per-channel fp8 checkpoint e2e on the 5090 matches the dequantized eager reference
+  (max diff 1.8e-7); non-quantized path bit-identical.
+- **M2a DONE** — `180_expand_quantized_constant` (gated behind `EMMY_FP8_EXPAND`, default off) + fp8 search identity
+  (`ShapeKey.dtype_class`, `S_dtype_f8*`, golden spellings); flag-off digest A/B 27/27 byte-identical; loop fusion
+  pulls the whole dequant cone into one matmul kernel.
+- **M2b DONE** — fp8-B through the warp tier (W8A16): k-invariant multiplicative dequant binding (mul-hoist onto the
+  f32 epilogue, decode absorbed by the storage dtype, trait-recognized via `ElementwiseImpl.decodes`); warp tier
+  reached on BOTH cards (5090 e2e max_diff 1.5e-7, fragment-convert 5.7e-4 max_rel; sm_89/4090 verified, max_rel
+  2.5e-4 through the trans fragment helper); quant-metadata containment gate test added. The BYTE WIN IS PENDING
+  staged fp8 transport (see M2 residual below) — every current A/B rides the transaction-bound gmem-direct path.
+- **M3 / M4 NOT STARTED** — M3 stays gated on M2 A/B evidence per the milestone's own bar (only worth starting once
+  A/Bs show the residual gap is mma-rate-bound, not bytes-bound — unknowable until the staged-transport residual
+  lands); the M4 serving A/B needs a serving session on a real FP8 checkpoint.
+
+### M2 residual (handoff)
+
+1. **Staged fp8-B transport + convert-at-drain is the actual byte win.** Warp staged transports refuse a
+   storage-dtype operand (correctly — slabs byte-copy at the atom's element width), so every current A/B measures
+   the transaction-bound gmem-direct path. Measured on the 5090, fp8-B vs the f16 twin at MxKxN with K=N=4096:
+
+   | M | fp8-B vs f16 twin |
+   | --- | --- |
+   | 32 | 0.26x |
+   | 512 | 0.45x |
+   | 4096 | 0.63x |
+
+   Caveat: at M=32 the f16 twin's B is L2-resident, so the ratio overstates the steady-state gap. The win lands by
+   staging the raw f8 bytes through the slab and converting at the drain into fragments.
+2. **Fused / composed forms decline → reduce tiers.** Norm→linear, gate-up, and merged siblings (per-part scale
+   concat) don't reach the warp tier with an fp8 B yet.
+3. **Bench-harness fp8 sources are broken.** The `run.py` reproducer draws f32 randoms per `source_path` (garbage
+   when reinterpreted as f8 bits), and `torch_ref` has no `from_f8*` op mapping.
+4. **bf16-activation W8A16** needs the `cuda_name`-based fragment-convert spelling — `type_name` has no bf16 entry
+   (pre-existing gap).
+5. **fp8 `ShapeKey` keys exist but goldens are unseeded** — pointless before (1); the greedy pick on the
+   gmem-direct path is not the config the staged kernels will want.
+6. **sm_89 verified numerically** (max_rel 2.5e-4): below sm_90 B arrives in-graph-transposed and the trans
+   fragment helper carries the same per-element convert.
+
 ## Current state (verified 2026-08-06)
 
 - The dtype universe is f32 / f16 / bf16 (+ f16x2, i32/i64/bool). No fp8 anywhere in `emmy/`

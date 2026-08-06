@@ -96,7 +96,7 @@ them.
 |-----------------|--------------------------------------------------------------------------------|
 | `Op`            | Base class. Subclasses implement `infer_output_shape` and `forward` (numpy).   |
 | `InputOp`       | Sentinel: graph input tensor. Value supplied by the executor.                  |
-| `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative (`merge_sibling_linears`' weight concat): `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain — exactly one of `source_path` / `source_parts` is set on a loadable constant. |
+| `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative (`merge_sibling_linears`' weight concat): `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain — exactly one of `source_path` / `source_parts` is set on a loadable constant. `quant` (a `QuantSpec` pairing the weight with its checkpoint scale) is frontend/loader-band metadata — stamped post-trace, consumed by the loader or the quantized-constant expansion, never read past the frontend (see `compiler/ARCHITECTURE.md`). |
 | `_keepdim_axis` | Shape helper shared by `ReduceOp` (tensor) and `MeanOp` (frontend).            |
 
 ## `expr.py`
@@ -152,7 +152,9 @@ base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 behind the four sites that used to switch on the reduce op name (`Accum.render`'s
 `+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expr`, and
 `ReduceOp.forward` / `ScanOp.forward`'s numpy reductions). `op.selecting` (the
-max/min family) drives the init-placement dtype choice.
+max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
+dtype an op is the decode cast for (the f8 family today) — the trait the dequant binding
+arm queries instead of matching op names.
 
 ## `loop/`
 

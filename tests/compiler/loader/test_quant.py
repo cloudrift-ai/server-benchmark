@@ -613,7 +613,7 @@ def test_quantized_checkpoint_e2e_cuda(tmp_path):
 # Containment: quant metadata must not leak past the frontend band
 # ===================================================================
 
-# The design rule (plans/fp8-support.md, "Why QuantSpec exists at all"): ``ConstantOp.quant``
+# The design rule: ``ConstantOp.quant``
 # is frontend-band scaffolding — stamped after trace, consulted by the loader and exactly two
 # decomposition rules, CONSUMED by ``180_expand_quantized_constant``. Everything past the
 # frontend (lowering, backends, search) must stay graph-structure-driven: a quantized weight
@@ -644,5 +644,5 @@ def test_quant_metadata_stays_in_the_frontend_band():
     assert not offenders, (
         f"ConstantOp.quant / QuantSpec referenced outside the frontend/loader band: {sorted(offenders)}. "
         "The kernel path is graph-structure-driven by design — do not consume quant metadata there "
-        "(see plans/fp8-support.md and the allowlist comment above)."
+        "(see the allowlist comment above)."
     )

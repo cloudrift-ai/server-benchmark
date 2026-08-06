@@ -259,10 +259,10 @@ make wheel     # build the wheel into dist/
 
 ### Release
 
-Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** workflow with that same version. It
-lints, tests, builds, uploads to PyPI via trusted publishing, and only then creates the tag and GitHub release — so
-a failed upload leaves nothing behind. Publishing a GitHub release by hand works too, and takes the version from
-the tag.
+Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** workflow — it takes the version from
+there, and refuses to run if that version is already tagged. It lints, tests, builds, uploads to PyPI via trusted
+publishing, and only then creates the tag and GitHub release, so a failed upload leaves nothing behind. Publishing
+a GitHub release by hand works too; the tag must agree with `pyproject.toml`.
 
 `scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies `recipes/*/recipe.yaml` into
 the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative links to absolute GitHub

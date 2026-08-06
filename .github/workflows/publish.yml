@@ -1,18 +1,13 @@
 name: Publish to PyPI
 
-# Two ways in:
-#   * publish a GitHub Release by hand — the tag carries the version;
-#   * run this workflow with a version input — it publishes to PyPI first and
-#     then creates the tag and release, so a failed upload leaves nothing behind.
+# pyproject.toml holds the version either way. Two ways in:
+#   * run this workflow — it publishes to PyPI first and then creates the tag and
+#     release, so a failed upload leaves nothing behind;
+#   * publish a GitHub Release by hand — the tag must then agree with pyproject.
 on:
   release:
     types: [published]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release — must match pyproject.toml (e.g. 0.3.0)"
-        required: true
-        type: string
 
 jobs:
   test:
@@ -60,7 +55,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Verify version matches the release
+      - name: Resolve the version to publish
         id: version
         run: |
           PKG_VERSION=$(python -c "
@@ -69,19 +64,17 @@ jobs:
               print(tomllib.load(f)['project']['version'])
           ")
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            WANT_VERSION="${{ inputs.version }}"
-            if git ls-remote --exit-code --tags origin "refs/tags/v$WANT_VERSION" >/dev/null 2>&1; then
-              echo "::error::Tag v$WANT_VERSION already exists"
+            # We mint the tag ourselves, so pyproject is the only input. Bumping it
+            # is what makes a release; refuse if that bump was forgotten.
+            if git ls-remote --exit-code --tags origin "refs/tags/v$PKG_VERSION" >/dev/null 2>&1; then
+              echo "::error::v$PKG_VERSION is already released — bump version in pyproject.toml"
               exit 1
             fi
-          else
-            WANT_VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          if [ "$PKG_VERSION" != "$WANT_VERSION" ]; then
-            echo "::error::Version mismatch: pyproject.toml=$PKG_VERSION, release=$WANT_VERSION"
+          elif [ "$PKG_VERSION" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::Version mismatch: pyproject.toml=$PKG_VERSION, tag=$GITHUB_REF_NAME"
             exit 1
           fi
-          echo "version=$WANT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
       # Bundle the recipes into the package, and point the README's repo-relative
       # links at GitHub — PyPI renders the README detached from the repo.

@@ -708,7 +708,7 @@ _CONSUMER_REGS = 240
 _SM_REGFILE = 65536
 
 
-def _wspec_kloop(
+def _producer_band_kloop(
     *,
     transport: TmaTransport,
     drain: Callable[[Expr], list[Stmt]],
@@ -1032,7 +1032,7 @@ def staged_kloop(
     slot generation (``chunk // ring``); cp.async ignores it (it gates on the commit group instead).
 
     ``workers`` (a resolved :class:`~emmy.compiler.ir.schedule.WarpSpec`) splits the same phases
-    across producer / compute warp bands instead (:func:`_wspec_kloop`) — TMA transport only (the
+    across producer / compute warp bands instead (:func:`_producer_band_kloop`) — TMA transport only (the
     scheduler's legality gate), ``block_threads`` naming the compute band.
 
     ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
@@ -1051,20 +1051,20 @@ def staged_kloop(
     # bit-identical to gmem-direct. Static callers pass plain ``int``s.
     if workers is not None:
         symbolic = isinstance(k_extent, Dim)
-        assert not symbolic, "warp-spec + symbolic-kv staging is not built (WSPEC drives static-kv TMA only)"
+        assert not symbolic, "producer-band + symbolic-kv staging is not built (the band drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         # A banded stream start is not built for the producer/compute band split — stream the full
         # extent (the band FragmentMask keeps every skipped-candidate step at the fold identity, so
-        # dropping the OPTIMIZATION is exact; only the tile-skip is lost under WSPEC).
-        return _wspec_kloop(
+        # dropping the OPTIMIZATION is exact; only the tile-skip is lost under the band).
+        return _producer_band_kloop(
             transport=transport,
             drain=drain,
             ring=min(depth, n_chunks) if n_chunks >= 2 else 1,
             bk_elems=bk_elems,
             n_chunks=n_chunks,
             k_extent=k_extent,
-            aux_threads=32 * workers.aux_warps,
+            aux_threads=32 * workers.producer_warps,
             block_threads=block_threads,
             k_end=k_end,
         )

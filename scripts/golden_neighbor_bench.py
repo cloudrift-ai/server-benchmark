@@ -297,7 +297,7 @@ def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple
         gate = FAST_MATH.pinned("1") if fast_math else nullcontext()
         with gate:
             if kind == "matmul":
-                rows, _ = _enumerate(rep.M, rep.N, rep.K, rep.dtype, ctx)
+                rows = _enumerate(rep.M, rep.N, rep.K, rep.dtype, ctx)
             else:
                 # A dynamic golden enumerates its hint-sized static twin's pool (the snippet
                 # is concrete-sized) — the accepted approximation the offline fit also uses.

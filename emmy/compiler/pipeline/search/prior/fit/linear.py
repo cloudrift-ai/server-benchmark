@@ -62,11 +62,14 @@ PARAM_NAMES = ("atomic_free_weight", "atomic_free_split_threshold")
 
 def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, np.ndarray]:
     """The two feature columns :func:`~..offline.atomic_free_term` reads, defaulted exactly as the
-    deployed ``feats.get`` calls do when the featurization omits them (finalize 0.0, split count 1.0)."""
+    deployed ``feats.get`` calls do when the featurization omits them (finalize 0.0, split count 1.0).
+
+    Copies, never column views: :func:`fit_weights` z-scores its pools IN PLACE, and these values must
+    stay in raw units — the interaction compares a split COUNT against its threshold."""
     idx = {n: j for j, n in enumerate(names)}
     n_rows = len(mat)
-    fin = mat[:, idx["D_finalize_kernel"]] if "D_finalize_kernel" in idx else np.zeros(n_rows)
-    spl = mat[:, idx["D_splitk"]] if "D_splitk" in idx else np.ones(n_rows)
+    fin = mat[:, idx["D_finalize_kernel"]].copy() if "D_finalize_kernel" in idx else np.zeros(n_rows)
+    spl = mat[:, idx["D_splitk"]].copy() if "D_splitk" in idx else np.ones(n_rows)
     return fin, spl
 
 
@@ -122,11 +125,26 @@ def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng,
     gidx = [g.pinned_idx for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.
-    allf = np.concatenate(mats, axis=0)
-    mu, sd = allf.mean(0), allf.std(0)
+    # Two streaming passes (mean, then squared deviation) and an IN-PLACE scaling, rather than
+    # one concatenated copy plus a fresh list: ``Group.matrix`` already returned a private array,
+    # and the pools are large enough that holding several copies of the dataset at once decides
+    # whether the fit runs at all — after the tile-scheduler rebuild one fp16 golden enumerates
+    # ~78k rows and the golden corpus is ~18 GB, so the concatenate + comprehension spelling
+    # peaked near 70 GB and died. Same values — the second pass is the population variance
+    # ``allf.std(0)`` computed, and identical rows stay identical under an affine map, so the
+    # rank ties this objective counts (``>=``) are exactly the ties it counted before.
+    n = sum(len(m) for m in mats)
+    mu = sum(m.sum(0) for m in mats) / n
+    sd = np.sqrt(sum(((m - mu) ** 2).sum(0) for m in mats) / n)
     sd[sd == 0] = 1.0
-    matsz = [(m - mu) / sd for m in mats]
-    gates = [gate_columns(m, names) for m in mats]  # raw columns: the gate reads split counts, not z-scores
+    # BEFORE the scaling, and as copies: the interaction compares a raw split COUNT against a raw
+    # threshold, and the in-place pass below would otherwise both standardize those values and
+    # write through the column views.
+    gates = [gate_columns(m, names) for m in mats]
+    for m in mats:
+        m -= mu
+        m /= sd
+    matsz = mats
 
     def loss(w: np.ndarray, ranks: list[int]) -> float:
         return objective(ranks) + l2 * l2_penalty(w, sd)

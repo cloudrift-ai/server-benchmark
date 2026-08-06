@@ -138,7 +138,7 @@ def test_try_rewrite_refreshes_swapped_op_io() -> None:
     instance whose I/O is still ``_seed_io_placeholders``' ``(f32, ())`` stubs — ``Match.is_alive``
     snapshots ``Node`` identity and cannot see an op swap. ``Candidate.try_rewrite`` must refresh
     each consumed node's op I/O against the live graph before invoking the rule: a rule reading
-    stale placeholder dtypes mis-schedules (the gemma o_proj misdeploy — ``_warp_atoms`` read
+    stale placeholder dtypes mis-schedules (the gemma o_proj misdeploy — the warp atom gate read
     placeholder f32 off an all-f16 graph, never offered the mma tier, and greedy shipped a scalar
     tile 16x the kernel's own measured mma rows)."""
     from emmy.compiler.pipeline.pipeline import Cursor, Pattern, Rule, RuleSkipped

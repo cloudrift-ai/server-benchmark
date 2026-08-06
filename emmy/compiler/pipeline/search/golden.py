@@ -43,7 +43,7 @@ mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
 fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
 GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
 warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
-(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
+(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma``, the 2026-07-02 seventh
 sweep). Ranking lives in ``search/prior/OfflinePrior`` (the ``D_*`` geometry
 features over ``features.knob_features``).
 """
@@ -56,12 +56,6 @@ from pathlib import Path
 import yaml
 
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-
-# Qwen3-Embedding-0.6B linear dims (mirrors ``tests/perf/cases.py``).
-QWEN3_06B_HIDDEN = 1024  # hidden_size
-QWEN3_06B_INTER = 3072  # intermediate_size (gate / up / down)
-QWEN3_06B_Q_DIM = 2048  # fused Q-projection output (16 heads * 128)
-QWEN3_06B_KV_DIM = 1024  # fused K/V-projection output (8 heads * 128)
 
 
 def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = False) -> str:
@@ -100,20 +94,18 @@ def fast_math_knobs(knobs: dict) -> bool:
     under the ``FAST_MATH`` / ``F16_MMA_F32_ACC`` gate, so regime-aware consumers (the
     ``eval`` rank / reproduction views) pin the gate on before comparing against it. Replay
     itself needs no gate — the recorded ``TILE`` pin is authoritative."""
-    from emmy.compiler.ir.schedule import TilePlan, Workers, is_warp_codec  # noqa: PLC0415 — keep module import-light
+    from emmy.compiler.ir.schedule import TilePlan, Workers  # noqa: PLC0415 — keep module import-light
 
     from .space import FAST_EXP  # noqa: PLC0415
 
     def _atom_of(spec: str):
-        """The warp atom a TILE value names — legacy ``a:<atom>`` or the site form's bare
-        leading atom (parsed under a dummy warp inventory: the units never reach the atom)."""
+        """The warp atom a ``TILE`` value names — the site form's bare leading atom, parsed under
+        a dummy warp inventory (the units never reach the atom)."""
         try:
-            if is_warp_codec(spec):
-                return TilePlan.parse(spec).atom
-            plan = TilePlan.parse_site(spec, Workers(kind="warp", units=(1, 1)))
-            return plan.atom if plan.is_warp else None
+            plan = TilePlan.parse(spec, Workers(kind="warp", units=(1, 1)))
         except ValueError:
             return None  # an unparseable historic spelling can't name an f16acc atom
+        return plan.atom if plan.is_warp else None
 
     for k, v in knobs.items():
         s = str(v).strip()
@@ -131,8 +123,8 @@ def _knobs_env(knobs: dict) -> str:
 
     Structural-feature knobs (``STRUCT_PREFIX``) are dropped — a repro command
     pins tuning decisions, not the kernel's structural identity. ``WARPSPEC`` (the pre-rebuild
-    boolean spelling still on old golden rows; the live codec is ``WSPEC``) rides through like
-    any other knob."""
+    boolean spelling still on old golden rows; the live spelling is ``WORK``'s ``+p<n>`` band) rides
+    through like any other knob."""
     return ",".join(f"{k}={v}" for k, v in knobs.items() if not k.startswith(STRUCT_PREFIX))
 
 
@@ -280,7 +272,7 @@ class MatmulGoldenConfig(GoldenConfig):
     def repro_command(self, ir: str = "cuda") -> str:
         """A runnable ``emmy`` command that rebuilds this config's kernel.
 
-        e.g. ``EMMY_KNOBS="TILE=n32x8/f4x26,STAGE=d2/tma" emmy compile -c "torch.matmul(...)" --ir cuda``
+        e.g. ``EMMY_KNOBS="TILE=f4x26,WORK=t32x8,STAGE=d2/tma" emmy compile -c "torch.matmul(...)" --ir cuda``
         """
         dyn = "".join(f" --dynamic {s}" for s in self.dynamic_specs())
         return f'EMMY_KNOBS="{_knobs_env(self.knobs)}" emmy compile -c "{self.snippet()}"{dyn} --ir {ir}'
@@ -365,7 +357,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 class RmsNormGoldenConfig(GoldenConfig):
     """A golden config for RMSNorm ``(M, K) → (M, K)`` (``torch.nn.RMSNorm(K)``).
 
-    RMSNorm is a ``Map(body=sweep, source=Fold)``: a per-row mean-of-squares reduce
+    RMSNorm is a ``Fold.projection(body=sweep, source=Fold)``: a per-row mean-of-squares reduce
     over ``K`` feeds an rsqrt that rescales every element of the row (the ``k_rms_norm``
     kernel). It is reduce-tier — the good config reduces each row cooperatively
     (``REDUCE`` coop>1), so it shares the reduce regime's arithmetic key (free=M, reduce=K)
@@ -498,7 +490,7 @@ class NormLinearGoldenConfig(GoldenConfig):
     """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
     ``rms_norm(x, (H,))·nw @ W`` in ONE mma kernel (``(M, H) → (M, N)``).
 
-    This is the single-channel computed-A ``Contraction`` (``010_recognize``'s
+    This is the single-channel computed-A contraction (``010_recognize``'s
     ``bind_prologue_contraction`` merge): the per-row RMSNorm statistic rides the A cone as a
     ``sync`` compute-fill prologue and the warp mma rows contract the scaled A against ``W`` — a
     different kernel family than the bare ``mlp_gate_up`` matmul (which round-trips ``xn`` through
@@ -508,7 +500,7 @@ class NormLinearGoldenConfig(GoldenConfig):
     the ``rms_norm`` and the ``mlp_gate_up`` matmul goldens. The reference is torch's UNFUSED
     decomposition (``F.rms_norm`` eager + ``@``), so the ratio compares emmy's one fused mma against
     PyTorch's norm-then-matmul. Its ONLY realizable configs are the sync compute-fill tiles
-    (``d1/d2/sync``, no ``d2/tma/ring``) — record the tuned twin's ``record_knobs`` verbatim.
+    (``d1/d2/sync``, no ``d2/tma``) — record the tuned twin's ``record_knobs`` verbatim.
 
     The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares ``kind="fused"`` but is a distinct
     snippet — see :class:`MlpGeGluGoldenConfig` (both matmuls must share ONE RMSNorm output, which a
@@ -693,7 +685,7 @@ class AttentionGoldenConfig(GoldenConfig):
         # kernel keys its tile differently at pin time), so it MUST record a single bare TILE. A
         # dynamic FAST-MATH golden records the sibling-atom **PV plan** as that bare TILE (the exact
         # string its static twin stamps on TILE@<pv_k>) — the pinned branch of
-        # ``_twisted_warp_options`` recovers the geometry from it and keeps scores f32-accumulate.
+        # the twisted warp enumeration recovers the geometry from it and keeps scores f32-accumulate.
         keyed = [k for k in self.knobs if k.startswith("TILE@")]
         if self.dynamic and keyed:
             raise ValueError(

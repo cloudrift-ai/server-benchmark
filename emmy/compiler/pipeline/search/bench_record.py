@@ -144,13 +144,11 @@ def _offer_site(op) -> object | None:
     (verified against real tune rows on an RTX 4090 — without the fallback, every
     mma-path kernel was silently unrecordable, i.e. exactly the fast tensor-core
     variants this module exists to capture). ``None`` when neither exists."""
-    from emmy.compiler.pipeline.search.keys import dialect_of, source_chain  # noqa: PLC0415
-
     site = fallback = None
-    for anc in source_chain(op):
+    for anc in op.source_chain():
         if not any(k.startswith("S_") for k in getattr(anc, "knobs", {}) or {}):
             continue
-        dialect = dialect_of(anc)
+        dialect = anc.dialect
         if dialect == "loop":
             site = anc
         elif dialect == "tile":

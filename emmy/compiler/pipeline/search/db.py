@@ -3,7 +3,7 @@
 Pure persistence layer — no MCTS state, no propagation walks. Tables:
 
 - ``loop_op`` / ``tile_op`` / ``kernel_op`` / ``cuda_op`` — one row per
-  op encountered along a lowering chain. Keyed by ``op_cache_key``.
+  op encountered along a lowering chain. Keyed by ``Op.cache_key``.
   Each row stores the JSON form (for programmatic inspection) and the
   pretty-printed form (for human inspection).
 - ``lowering`` — best-known child for each parent op, one row per
@@ -266,7 +266,7 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     """The *validity* companion to :func:`implausible_value_reason` — the reason the row's
     stamped kernel could never have launched, or ``None``. A ``cp.async``-staged warp tile
     whose slab (``depth · (tile_m + tile_n) · bk_elems · elem_bytes``, the
-    ``_resolve_warp_stage`` sizing) exceeds the card's dynamic-smem opt-in cap cannot
+    warp stage sizing) exceeds the card's dynamic-smem opt-in cap cannot
     materialize — pre-#330 code stamped such stages anyway, the materializer rejected the
     main kernel, and the bench recorded the surviving combine kernel's cached µs as an
     ``ok`` measurement of the whole op. On shapes too small for the latency floor to
@@ -283,8 +283,8 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     from emmy.compiler.ir.schedule import Stage, TilePlan, Workers  # noqa: PLC0415
 
     try:
-        work = Workers.parse(str(f.get("WORK") or ""))  # site rows factor the units here (F1)
-        tp, st = TilePlan.parse_site(tile_spec, work), Stage.parse(stage_spec)
+        work = Workers.parse(str(f.get("WORK") or ""))  # the row's unit widths live here, not in TILE
+        tp, st = TilePlan.parse(tile_spec, work), Stage.parse(stage_spec)
     except ValueError:
         return None
     if not tp.is_warp:
@@ -333,10 +333,10 @@ class SearchDB:
     #       topology shifted vs. the legacy downstream forks.
     #   2: explicit-knob OFF sentinels — every variant now stamps every planner
     #       knob (tier-foreign ones get an OFF value: WM/WN/MMA on scalar,
-    #       BM/BN/BR/FK on warp), so ``op_cache_key`` (which folds the knob dict)
+    #       BM/BN/BR/FK on warp), so ``Op.cache_key`` (which folds the knob dict)
     #       shifts for every TileOp/KernelOp. Stale ``lowering`` rows won't match.
     #   3: the RASTER launch-order codec — every contraction row now spells a fifth
-    #       schedule family (``RASTER: ''``/``gm8``), so ``op_cache_key`` shifts for every
+    #       schedule family (``RASTER: ''``/``gm8``), so ``Op.cache_key`` shifts for every
     #       matmul TileOp/KernelOp; cached pre-RASTER chains would silently replay
     #       old-key kernels and starve the new rows of evidence.
     _SCHEMA_VERSION = 3

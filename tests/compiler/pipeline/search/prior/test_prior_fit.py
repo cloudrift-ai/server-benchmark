@@ -25,6 +25,7 @@ from emmy.compiler.pipeline.search.prior.fit import (
     build_artifact,
     feature_matrix,
     fit_weights,
+    gate_columns,
     objective,
     rank_of_golden,
     raw_weights,
@@ -163,6 +164,20 @@ def test_fit_scores_the_deployed_quality_interaction_included(dynamic, monkeypat
     fitted = fit.score_rows(group)
     deployed = np.array([prior.quality({**row, **stamp}) for row in rows])
     assert np.allclose(fitted, deployed)
+
+
+def test_gate_columns_survive_the_in_place_z_scoring():
+    """The interaction's inputs stay in RAW units through the fit's standardization. ``fit_weights``
+    z-scores its pools IN PLACE (the memory fix that keeps an 18 GB corpus fittable), so the columns
+    must be copied out beforehand: a view would be standardized underneath the comparison, and a split
+    COUNT centred near zero never clears its threshold, silently switching the whole term off."""
+    names = ["D_finalize_kernel", "D_splitk", "D_other"]
+    mat = np.array([[1.0, 8.0, 5.0], [0.0, 2.0, 7.0], [1.0, 4.0, 9.0]])
+    fin, spl = gate_columns(mat, names)
+    mat -= mat.mean(0)
+    mat /= mat.std(0)  # exactly what fit_weights does to its pools afterwards
+    assert list(fin) == [1.0, 0.0, 1.0]
+    assert list(spl) == [8.0, 2.0, 4.0]
 
 
 # --- raw-space L2 regularization ---------------------------------------------------

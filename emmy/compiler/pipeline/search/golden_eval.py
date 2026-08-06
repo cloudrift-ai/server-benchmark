@@ -70,11 +70,10 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> list[dict]:
     return rows
 
 
-def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context) -> tuple[list[dict], tuple[str, ...]]:
+def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context) -> list[dict]:
     """Reconstruct the planner's matmul enumeration for a shape (:func:`enumerate_graph` over the
-    bare matmul graph, TILE-family rows). The second element is kept for the historic
-    ``(rows, knob_names)`` shape — no caller reads it."""
-    return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE"), ()
+    bare matmul graph, TILE-family rows)."""
+    return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE")
 
 
 def _offline_scorer(M: int, N: int, K: int, ctx: Context, *, dynamic: bool = False) -> Callable[[dict], float]:
@@ -135,7 +134,7 @@ def evaluate_golden(
 
     gate = F16_MMA_F32_ACC.pinned("1") if golden_knobs and fast_math_knobs(golden_knobs) else nullcontext()
     with gate:
-        rows, _ = _enumerate(M, N, K, dtype, ctx)
+        rows = _enumerate(M, N, K, dtype, ctx)
     if not rows:
         return {}, None, 0, None
     if scorer is None:
@@ -155,10 +154,3 @@ def evaluate_golden(
     # golden) and optimistic (strictly-greater only), whose gap is the plateau width.
     rank, rank_opt = dual_rank(scores, gidx) if gidx is not None else (None, None)
     return rows[best], rank, len(rows), rank_opt
-
-
-def pick_matmul(M: int, N: int, K: int, dtype: str, ctx: Context) -> dict:
-    """Best knob row for an ``(M, K) @ (K, N)`` matmul under the offline prior —
-    no online data, no measurements. Thin wrapper over :func:`evaluate_golden`
-    (no golden to match). Returns ``{}`` if nothing enumerates."""
-    return evaluate_golden(M, N, K, dtype, {}, ctx)[0]

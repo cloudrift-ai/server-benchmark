@@ -236,6 +236,20 @@ def test_compose_defers_to_baked_hf_home(sample_config):
     assert "HUGGING_FACE_HUB_TOKEN=token" in env
 
 
+def test_compose_baked_hf_home_yields_to_speculative_drafter(sample_config):
+    """A speculative-config lane names a model the baked cache does not hold, and the
+    image pins offline mode — the drafter can resolve only from the host cache, so the
+    HF_HOME override returns for exactly this case (the emmy+MTP lanes booted with
+    'Invalid repository ID' for the drafter otherwise, 2026-08-06)."""
+    sample_config["engine"]["llm"]["vllm"]["extra_args"] = (
+        '--speculative-config \'{"method":"mtp","model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":2}\''
+    )
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1, baked_hf_home="/opt/emmy/hf")
+    env = yaml.safe_load(result)["services"]["vllm_0"]["environment"]
+    assert "HF_HOME=/mnt/models" in env
+
+
 def test_compose_baked_hf_home_keeps_extra_env(sample_config):
     """Dropping the HF_HOME override must not disturb the recipe's own env lines."""
     sample_config["engine"]["llm"]["vllm"]["extra_env"] = {"EMMY_FAST_MATH": "1"}

@@ -439,8 +439,10 @@ never a schedule; the loader rejects a mixed entry, and the schedule golden tier
 retired single-namespace hazards — a cut row tying its knob-identical fused twin — cannot return) — or an
 authoritative `PLACE` pin picks a cut seam; the realizer (`lowering/tile/_cut.py`) splits the tree there: the child
 subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
-index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child's carrier state
-bridges as **f32** per the split-reduce workspace rule, a value seam keeps its leaf operand dtype), and the parent
+index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child — one that FOLDS AN
+AXIS — bridges carrier state as **f32** per the split-reduce workspace rule, while a zero-axis projection child is
+the value seam and keeps its leaf operand dtype: in the one-kind IR every node is a `Fold`, so the axis is the
+discriminator, not the class), and the parent
 consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal). Both pieces re-recognize as fresh
 roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries through the full deploy hierarchy —
 recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic

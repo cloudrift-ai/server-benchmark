@@ -23,7 +23,7 @@
 # The `:latest` pin is deliberate — these lanes track the current release rather than a
 # frozen one. The cost is that a run does NOT record which emmy revision it measured, so
 # capture `docker inspect`'s digest (or the tag list) alongside any numbers you intend to
-# compare against the article; `latest` today is digest b9756d62 = the 58733e02 build.
+# compare against the article; `latest` as of 2026-08-05 is digest 5add12d3 = the 78f5364f build.
 #
 # What the baked artifacts do NOT cover. Both cost only BOOT TIME — each lane still runs the
 # kernels its own configuration selects, and reports the numbers that configuration is meant
@@ -52,11 +52,10 @@
 # after the 2026-07-26 parity rev (m2048 golden tier + rider split).
 #
 #
-# CONTEXT RAISED TO 16384 (2026-07-31), up from the article's 8448. Both engines move
-# together so the A/B stays fair, but this recipe NO LONGER REPRODUCES THE PUBLISHED
-# TABLE — a run here and the article's numbers differ in protocol, not just in code, and
-# the difference is not a regression. Re-measure the whole grid before comparing anything
-# to the blog post, or check out the 8448 revision to reproduce it.
+# CONTEXT 16384 (raised 2026-07-31 from the original 8448 measurement). The article was
+# re-measured and updated to the 16384 protocol before publication (2026-08-01, the
+# article-reproduction session's re-run) — a run here compares against the published
+# table directly.
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/serving_rtx5090 --local

@@ -333,8 +333,13 @@ def _ws_dtype(child, inputs: dict):
     """The seam workspace dtype: a fold child bridges raw carrier STATE — **f32**, the
     split-reduce workspace rule (a reduced statistic must not round-trip through the output
     dtype) — while a value seam (a zero-axis ``Fold`` child — the cone's per-cell normalize) keeps its leaf
-    operand's dtype: the same bytes the fused form's A slab stored, so numerics match."""
-    if isinstance(child, Fold):
+    operand's dtype: the same bytes the fused form's A slab stored, so numerics match. In the
+    one-kind IR "fold child" means the child FOLDS AN AXIS: a zero-axis projection is the value
+    seam, whatever reduces ride inside its operands. (``isinstance(child, Fold)`` alone matches
+    every node since the ``Map``/``Contraction`` merge — that spelling made every seam f32, and
+    an f32 A cannot ride the warp atoms bare, so every cut consumer re-wrapped into a demoting
+    cone, keyed ``fused``, and deployed the parent's fused golden instead of its own matmul row.)"""
+    if isinstance(child, Fold) and child.axis is not None:
         return F32
     for s in child.lower():
         for ld in Body(tuple([s])).loads:

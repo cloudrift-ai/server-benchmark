@@ -11,12 +11,12 @@ def _variant(params):
 
 
 def test_local_result_name_top_level_file_keeps_flat_name():
-    assert _local_result_name("rtx5090x1", "~/emmy/task", "~/emmy/task/accum_error.json") == "rtx5090x1_accum_error.json"
+    assert _local_result_name("rtx5090x1", "accum_error.json") == "rtx5090x1_accum_error.json"
 
 
 def test_local_result_name_subdir_files_do_not_collide():
-    std = _local_result_name("rtx4090x1", "~/emmy/task", "~/emmy/task/std/golden_bench.json")
-    fm = _local_result_name("rtx4090x1", "~/emmy/task", "~/emmy/task/fm/golden_bench.json")
+    std = _local_result_name("rtx4090x1", "std/golden_bench.json")
+    fm = _local_result_name("rtx4090x1", "fm/golden_bench.json")
     assert std == "rtx4090x1_std_golden_bench.json"
     assert fm == "rtx4090x1_fm_golden_bench.json"
     assert std != fm

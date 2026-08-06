@@ -118,9 +118,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same cupy array fed to both builds), so
   the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
   twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
-  routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` (default off) lets
-  vLLM's paged attention write directly into the M=1 post twin's `attn_out` input backing — the prefix upload
-  self-copy-skips on pointer equality, dropping the per-layer D2D seam copy from the captured decode graph.
+  routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
+  vLLM's paged attention write directly into the post program's `attn_out` input backing — since A4 for EVERY
+  tier (`post_attn_backing` routes rows exactly like `forward_layer_post_device`: M=1, decode bucket, exact
+  chunk, symbolic; rider widths return None — one contiguous attention output cannot alias two programs'
+  buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the attention→post seam copy
+  from captured decode graphs and eager chunk steps alike.
   **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
   shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays

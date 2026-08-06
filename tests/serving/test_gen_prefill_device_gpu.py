@@ -58,6 +58,20 @@ def test_run_device_sym_matches_host_path():
         runner._pre_decode[0], runner._pre_decode[0].input_names[0]
     )
 
+    # A4 routing pins: ``post_attn_backing`` must return the ``attn_out`` input backing of the
+    # SAME program ``forward_layer_post_device`` routes each width to; rider widths (no single
+    # contiguous backing) and over-capacity widths return None.
+    def _attn_ptr(plist):
+        return plist[0].program.arrays["attn_out"].data.ptr
+
+    m1_expect = runner._post_m1 if runner._post_m1 is not None and runner._post_m1[0] is not None else runner._post_decode
+    assert runner.post_attn_backing(0, 1).data_ptr() == _attn_ptr(m1_expect)
+    assert runner.post_attn_backing(0, 8).data_ptr() == _attn_ptr(runner._post_decode)
+    assert runner.post_attn_backing(0, 32).data_ptr() == _attn_ptr(runner._post_prefill)
+    assert runner.post_attn_backing(0, 40) is None  # rider split
+    assert runner.post_attn_backing(0, 56).data_ptr() == _attn_ptr(runner._post)
+    assert runner.post_attn_backing(0, 65) is None  # over capacity
+
     rng = np.random.default_rng(0)
     H = config.hidden_size
     close = lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)  # noqa: E731
@@ -71,6 +85,16 @@ def test_run_device_sym_matches_host_path():
     # unwinds the chaining rewire AND re-sizes the shared capacity buffers to each call's
     # shape (a later device call at a larger T would then refuse on capacity) — serving never
     # mixes the two paths on one runner, and neither may this test.
+    # A4 aliased-post value check (decode tier, eager): attention "writes" into the backing
+    # view, the post upload self-copy-skips, and the result must match the host path on the
+    # same values (compared in phase 2, after the host calls are allowed to unchain).
+    rng_a4 = np.random.default_rng(7)
+    attn8 = (rng_a4.standard_normal((8, config.num_attention_heads * 16)) * 0.3).astype(np.float16)
+    res8 = (rng_a4.standard_normal((8, H)) * 0.3).astype(np.float16)
+    backing8 = runner.post_attn_backing(0, 8)
+    backing8.copy_(torch.from_numpy(attn8).cuda())
+    out8_dev = runner.forward_layer_post_device(0, backing8, torch.from_numpy(res8).cuda()).cpu().numpy()
+
     cases = []
     for T in (24, 40, 56):
         hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
@@ -104,3 +128,6 @@ def test_run_device_sym_matches_host_path():
         check(out.astype(np.float32), out_np.astype(np.float32))
         q2_np, _, _ = runner.forward_layer_pre(0, out)
         check(q2.astype(np.float32), q2_np.astype(np.float32))
+
+    out8_np = runner.forward_layer_post(0, attn8, res8)
+    close(out8_dev.astype(np.float32), out8_np.astype(np.float32))

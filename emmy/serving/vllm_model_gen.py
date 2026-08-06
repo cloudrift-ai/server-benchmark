@@ -330,14 +330,13 @@ class EmmyGenModel(nn.Module):
     def _forward_device(self, ids, positions):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
-        t = ids.shape[0]
         hidden = self.runner.embed_device(ids)  # [T, H] CUDA
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
             q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
-            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn and t == 1 else None
+            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn else None  # A4: any tier; the backing router decides
             if attn_out is None:
                 attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)

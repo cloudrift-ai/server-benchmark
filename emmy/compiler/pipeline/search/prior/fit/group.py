@@ -31,10 +31,17 @@ import numpy as np
 # ``n16384``, ``k8192``, ``hd128``) — stripped by :func:`op_family`.
 _VARIANT_SEG = re.compile(r"fp16|dynM|(?:hd|[hsnk])?\d+")
 
-# The default feature view: the ``D_*`` geometry/occupancy features plus ``MMA_tier`` (the warp/scalar tier
-# discriminator, where the featurization still emits it) — the ``S_*`` / ``H_*`` shape/regime features are
-# constant within a shape, so they drop out of a within-shape ranking.
-DEFAULT_FEATURES = "D_*,MMA_tier"
+# The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
+# vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
+# (32 for the f32-accumulate atom, 16 for the f16-accumulate one). The ``S_*`` / ``H_*`` shape/regime features
+# are constant within a shape, so they drop out of a within-shape ranking.
+#
+# ``MMA_acc_bits`` is load-bearing: the f16-accumulate fork is spelled in the TILE codec's atom token, so a row
+# taking it is identical under every ``D_*`` feature to its f32-accumulate sibling. While the view dropped it,
+# 93% of a fast-math pool's rows sat in a tied pair no weight vector could separate, and 125 of the 280 RTX 5090
+# matmul goldens had a tied candidate ahead of them in emission order — unrankable at top-1 by construction.
+# The remaining ``MMA_*`` (``MMA_atom_m/n/k``, ``MMA_a_bits``) measured exactly neutral, so they stay out.
+DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
 
 
 def feature_view(spec: str):

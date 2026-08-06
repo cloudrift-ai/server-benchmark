@@ -207,7 +207,7 @@ def _repo_commit() -> str:
 
 
 def handle_fit(args) -> None:
-    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, _PARAM_KEYS  # noqa: PLC0415
 
     if args.trainer != "linear" or args.data != "golden":
         raise SystemExit(
@@ -228,23 +228,33 @@ def handle_fit(args) -> None:
     incumbent = storage.read_json(config.offline_path() or _DEFAULT_FILE)
     if not isinstance(incumbent, dict) or "params" not in incumbent:
         raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
+    # The fitted scalar params seed from the incumbent; the rest of its params block (``scale``,
+    # rank-neutral) carries through to the artifact unchanged. A pre-2026-08-05 artifact whose block
+    # still lists the retired gate weights simply loses them here — they are linear terms now.
+    seed_params = {n: float(incumbent["params"].get(n, 0.0)) for n in fit_linear.PARAM_NAMES}
+    carried = {k: v for k, v in incumbent["params"].items() if k not in fit_linear.PARAM_NAMES and k in _PARAM_KEYS}
 
     # Full-train: the incumbent process exactly — seeded from the shipped artifact's
     # weights (lenient read: a refit after a featurizer change is exactly when versions
     # mismatch, and a stale key simply seeds 0.0). A fit with no dynamic cases carries
     # the incumbent's dynamic set forward into the shippable model.
     def full_train_fit(groups, rng):
-        full = fit_two_stage(groups, names, seed_weights=incumbent.get("weights", {}), rng=rng, samples=args.samples, l2=args.l2)
+        full = fit_two_stage(
+            groups, names, seed_weights=incumbent.get("weights", {}), seed_params=seed_params, rng=rng, samples=args.samples, l2=args.l2
+        )
         dyn_raw = full.dyn_raw if full.dyn_raw is not None else incumbent.get("weights_dynamic", full.static_raw)
         dyn_note = f"dynamic {topk_table(full.dyn_ranks)}" if full.dyn_ranks is not None else "carried from incumbent (no dynamic cases)"
-        shipped = fit_linear.TwoStageFit(full.static_raw, full.static_ranks, dyn_raw, full.dyn_ranks)
-        return shipped, f"static {topk_table(full.static_ranks)}; {dyn_note}"
+        shipped = fit_linear.TwoStageFit(full.static_raw, full.static_ranks, dyn_raw, full.dyn_ranks, full.params)
+        params_note = ", ".join(f"{k}={v:g}" for k, v in sorted(full.params.items()))
+        return shipped, f"static {topk_table(full.static_ranks)}; {dyn_note}; params {params_note}"
 
     # Fold-seeding policy lives here (recorded in the header): fold models seed from
     # ZEROS — the incumbent's weights were fit on every golden, so seeding folds from
-    # them would leak each held-out golden into its own holdout model.
+    # them would leak each held-out golden into its own holdout model. The scoring params
+    # seed from the incumbent in both cases: they are two scalars the fold fits re-derive,
+    # not a per-golden memory.
     def fit_model(groups, rng):
-        return fit_two_stage(groups, names, seed_weights={}, rng=rng, samples=args.samples, l2=args.l2)
+        return fit_two_stage(groups, names, seed_weights={}, seed_params=seed_params, rng=rng, samples=args.samples, l2=args.l2)
 
     header = {
         "trainer": args.trainer,
@@ -266,7 +276,7 @@ def handle_fit(args) -> None:
         axes=axes,
         seed=args.seed,
         header=header,
-        params=incumbent["params"],
+        params=carried,
         provenance={
             "fitted": datetime.date.today().isoformat(),
             "script": "emmy fit",

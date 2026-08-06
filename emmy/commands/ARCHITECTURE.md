@@ -387,8 +387,9 @@ golden dataset) exists today; other combinations exit with "not yet supported". 
 coordinate-descent-from-seed, the incumbent practice), `--l2 λ` (the raw-space L2 penalty strength in the fit loss —
 default the declared tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude
 identified, the D_pow2_threads 686 incident), `--seed`, `--folds {op_family,gpu,both,none}` (default `both`),
-`--features SPEC` (the feature view — comma-separated names, trailing `*` = prefix glob; default `D_*,MMA_tier`,
-recorded in the metrics header and artifact provenance so two fits are only compared under matching views), `--out DIR`
+`--features SPEC` (the feature view — comma-separated names, trailing `*` = prefix glob; default
+`D_*,MMA_tier,MMA_acc_bits`, recorded in the metrics header and artifact provenance so two fits are only compared
+under matching views), `--out DIR`
 (default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run record two fits
 are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and one `cv.<axis>`
 block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and `weights.json`, the full-train

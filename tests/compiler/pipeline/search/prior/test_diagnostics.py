@@ -328,11 +328,11 @@ def _planted_offline(weights: dict[str, float]):
 
 
 def test_offline_explain_sums_to_the_scored_quality():
-    """The exact-sum invariant: ``explain_features`` terms (linear + the three
-    ``gate:*`` pseudo-terms) sum to the same quality ``mean_score_features``
+    """The exact-sum invariant: ``explain_features`` terms (the linear ones plus the
+    ``gate:atomic_free`` pseudo-term) sum to the same quality ``mean_score_features``
     exponentiates — so a two-row term diff IS the model's preference gap. The
-    atomic-free gate is enabled explicitly (it defaults OFF since the 2026-07-07
-    golden-gate check) so the interaction's sign flip stays covered."""
+    atomic-free interaction is enabled explicitly (it defaults OFF since the 2026-07-07
+    golden-gate check) so its sign flip stays covered."""
     import math  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
@@ -341,14 +341,17 @@ def test_offline_explain_sums_to_the_scored_quality():
     feats = {
         "D_pow2_threads": 1.0,
         "D_near_waves": 0.7,
-        "D_splitk": 8.0,  # ≥ threshold → the atomic-free gate REWARDS the deferred finalize
+        "D_splitk": 8.0,  # ≥ threshold → the atomic-free interaction REWARDS the deferred finalize
         "D_finalize_kernel": 1.0,
         "D_scalar_on_warp_eligible": 1.0,
         "D_splitk_roundtrip": 19.0,
     }
     terms = p.explain_features(feats)
-    assert {"gate:atomic_free", "gate:scalar_on_warp", "gate:splitk_roundtrip"} <= set(terms)
-    assert terms["gate:atomic_free"] > 0 and terms["gate:scalar_on_warp"] < 0
+    assert "gate:atomic_free" in terms
+    assert terms["gate:atomic_free"] > 0
+    # The retired hand gates are linear terms now: they decompose under their own feature names,
+    # priced by the fitted weight and nothing else.
+    assert "gate:scalar_on_warp" not in terms and "gate:splitk_roundtrip" not in terms
     assert math.isclose(p.mean_score_features(feats), math.exp(-p._scale * sum(terms.values())))
     # Below the split threshold the gate flips to a penalty — and the sum still matches.
     narrow = {**feats, "D_splitk": 2.0}

@@ -564,9 +564,8 @@ def _golden_prefix_consistent(feats: dict, gold: dict) -> bool:
     false-mismatch). A family the golden doesn't record, or an axis-keyed golden pin
     that matches no node key, is no constraint (prefix semantics: only *decided,
     comparable* knobs can disagree)."""
-    from emmy.compiler.pipeline.knob import family_of, ingest_legacy_row, pin_key_matches, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of, pin_key_matches, values_equal  # noqa: PLC0415
 
-    gold = ingest_legacy_row(gold)  # legacy worker halves gate as a synthesized WORK constraint (F1)
     for k, v in feats.items():
         if k.startswith(("S_", "H_")):
             continue

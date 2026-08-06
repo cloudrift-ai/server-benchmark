@@ -1,0 +1,8 @@
+{
+  "label": "Tutorials",
+  "position": 7,
+  "link": {
+    "type": "generated-index",
+    "description": "Learn how Emmy's compiler turns a model into GPU code, and how it chooses between the many correct ways of doing that."
+  }
+}

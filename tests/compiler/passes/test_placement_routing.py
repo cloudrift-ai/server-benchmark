@@ -76,13 +76,13 @@ def _norm_linear_graph(S: int = 32, H: int = 1024, inter: int = 3072) -> Graph:
 
 def test_is_routing_reads_place_only_knob_dicts() -> None:
     routing = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut"})
-    sched = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"TILE": "n16x8/f4x8"})
+    sched = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"TILE": "f4x8", "WORK": "t16x8"})
     assert routing.is_routing and not sched.is_routing
     assert not MatmulGoldenConfig(name="t", M=64, N=64, K=64).is_routing  # key-only: no knobs
 
 
 def test_loader_rejects_a_mixed_routing_schedule_entry() -> None:
-    mixed = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut", "TILE": "n16x8/f4x8"})
+    mixed = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut", "TILE": "f4x8", "WORK": "t16x8"})
     with pytest.raises(ValueError, match="routing"):
         _require_routing_split(mixed)
     _require_routing_split(MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut"}))  # pure routing OK
@@ -117,7 +117,7 @@ def test_place_sites_are_the_non_root_nodes() -> None:
     seams = family_sites("PLACE", all_sites)
     assert seams and all(s.depth > 1 for s in seams)
     # The cone edge spells through the view-role label — the plan's worked spelling.
-    cone = c_map.sources[0].a  # noqa: F841 — the a edge carries its role label on the stored node
+    cone = c_map.operands[0].a  # noqa: F841 — the a edge carries its role label on the stored node
     labels = {spell(c_map, "PLACE", s.node, all_sites=all_sites) for s in seams}
     assert "PLACE@a" in labels
     assert resolve(c_map, "PLACE@a", all_sites=all_sites).node is next(

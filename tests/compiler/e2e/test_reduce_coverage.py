@@ -143,15 +143,31 @@ def _compile_run(
 # Cooperative combine matrix — op type × reduction variant × shape mode.
 # --------------------------------------------------------------------------- #
 
-# Reduce-partition variants, pinned via the ``REDUCE`` codec (the schedule's ``020_schedule``
-# decision, authoritative when pinned). Each has a distinct lowering STRUCTURE, asserted below
-# (not just output accuracy):
-#   serial (``""``)        — one thread per cell, no cross-thread / register fold
-#   coop_warp (``b32``)    — a single-warp ``__shfl_xor_sync`` butterfly
-#   coop_hier (``b128``)   — the 4-warp hierarchical shuffle→smem-tree
-#   ilp (``r4``)           — standalone ILP: 4 register accumulators + a register tree (no coop)
-#   ilp_coop (``r2/b32``)  — ILP composed with coop: 2 register accs, register tree, then shuffle
-_COOP_VARIANTS = {"serial": "", "coop_warp": "b32", "coop_hier": "b128", "ilp": "r4", "ilp_coop": "r2/b32"}
+# Reduce-partition variants, pinned as ``(REDUCE, WORK)`` — the step-7 value grammar, where the
+# cooperative WIDTH lives in the kernel-global ``WORK`` inventory and ``REDUCE`` keeps only the
+# site-local partition kind. Each has a distinct lowering STRUCTURE, asserted below (not just
+# output accuracy):
+#   serial   (``""``)             — one thread per cell, no cross-thread / register fold
+#   coop_warp (``coop`` @ t32)    — a single-warp ``__shfl_xor_sync`` butterfly
+#   coop_hier (``coop`` @ t128)   — the 4-warp hierarchical shuffle→smem-tree
+#   ilp      (``r4``)             — standalone ILP: 4 register accumulators + a register tree
+#   ilp_coop (``r2/coop`` @ t32)  — ILP composed with coop: 2 register accs, tree, then shuffle
+_COOP_VARIANTS = {
+    "serial": ("", ""),
+    "coop_warp": ("coop", "t32"),
+    "coop_hier": ("coop", "t128"),
+    "ilp": ("r4", ""),
+    "ilp_coop": ("r2/coop", "t32"),
+}
+
+
+def _reduce_env(variant: str) -> dict[str, str]:
+    """The ``(REDUCE, WORK)`` pin pair for a variant — ``WORK`` only when the partition has a
+    cooperative width to carry (a serial / pure-ILP row's launch geometry stays derived)."""
+    spec, work = _COOP_VARIANTS[variant]
+    return {"EMMY_REDUCE": spec, **({"EMMY_WORK": work} if work else {})}
+
+
 # Degenerate (mean / amax), twisted full-row (softmax), and the prologue / prologue+epilogue
 # carriers (sumsq / l2) — the pre-map and projection ride the same cooperative combine.
 _REDUCE_OPS = ("mean", "amax", "softmax", "sumsq", "l2")
@@ -206,7 +222,7 @@ def test_cooperative_combine_accuracy(op, variant, shape, monkeypatch):
     divisor is the runtime extent too (a ``context_value`` constant resolved at launch), so
     dynamic ``mean`` divides by the right count."""
     code, ref_fn = _OPS[op]
-    got, xs, src = _compile_run(code, {"EMMY_REDUCE": _COOP_VARIANTS[variant]}, monkeypatch, dynamic=_SHAPES[shape], seq=_DYNAMIC_SEQ)
+    got, xs, src = _compile_run(code, _reduce_env(variant), monkeypatch, dynamic=_SHAPES[shape], seq=_DYNAMIC_SEQ)
     want = ref_fn(xs).reshape(got.shape)
     diff = float(np.abs(got - want).max())
     assert diff < 1e-3, f"{op}/{variant}/{shape}: combine mismatch (max abs err {diff})"
@@ -237,7 +253,7 @@ def test_symbolic_cooperative_softmax_sweep(monkeypatch, seq):
     carries the runtime ``seq_len`` arg + the cooperative ``__shfl_xor_sync`` combine over the
     strided ``< seq_len`` bound (vs the old degenerate per-thread serial reduce), in a 2-warp
     block."""
-    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "b64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
+    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "coop", "EMMY_WORK": "t64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
     want = _ref_softmax(xs).reshape(got.shape)
     assert got.shape == (8, seq)
     diff = float(np.abs(got - want).max())
@@ -258,8 +274,8 @@ def test_symbolic_cooperative_softmax_sweep(monkeypatch, seq):
 def test_attention_combine_accuracy(variant, monkeypatch):
     """The flash ``(m, l, O)`` twisted-monoid carrier is accurate AND emits the pinned combine
     serially and with a cooperative-KV combine — a 3-component warp butterfly over the static
-    KV axis (the same carrier-generic combine, ``coop_warp`` = ``b32``)."""
-    env = {"EMMY_REDUCE": _COOP_VARIANTS[variant]}
+    KV axis (the same carrier-generic combine, ``coop_warp`` = ``coop`` at ``WORK=t32``)."""
+    env = _reduce_env(variant)
     code, ref_fn = _OPS["attention"]
     got, xs, src = _compile_run(code, env, monkeypatch)
     want = ref_fn(xs).reshape(got.shape)

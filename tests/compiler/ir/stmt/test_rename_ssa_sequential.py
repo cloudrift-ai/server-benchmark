@@ -22,6 +22,7 @@ from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Load
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _find_load(body, input_buf: str) -> Load:
@@ -79,7 +80,7 @@ def test_fold_combine_tracks_accum_rename() -> None:
             )
         ),
     )
-    fold = Fold.from_loop(loop)
+    fold = fold_from_loop(loop)
     assert fold is not None
 
     out = rename_ssa_sequential(Body((fold,)))

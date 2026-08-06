@@ -74,9 +74,9 @@ def test_ratio_and_golden_derive(emmy_us, cublas_us, ratio, golden):
 
 
 def test_repro_command_round_trips_knobs_and_snippet():
-    c = MatmulGoldenConfig(name="square.2048", M=2048, N=2048, K=2048, knobs={"TILE": "n32x8/f4x26", "STAGE": "d2/tma"})
+    c = MatmulGoldenConfig(name="square.2048", M=2048, N=2048, K=2048, knobs={"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/tma"})
     cmd = c.repro_command()
-    assert 'EMMY_KNOBS="TILE=n32x8/f4x26,STAGE=d2/tma"' in cmd
+    assert 'EMMY_KNOBS="TILE=f4x26,WORK=t32x8,STAGE=d2/tma"' in cmd
     assert c.snippet() in cmd
     assert "--ir cuda" in cmd
 
@@ -127,13 +127,21 @@ def test_golden_configs_set_is_well_formed():
             # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure
             # reduce. Site grammar (F2): the coop width rides the entry's WORK inventory.
             red = next((v for k, v in c.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), None)
-            coop = ReducePlan.parse_site(red, Workers.parse(c.knobs.get("WORK") or "")).coop
+            coop = ReducePlan.parse(red, Workers.parse(c.knobs.get("WORK") or "")).coop
             assert coop > 1, f"{c.name} reduce-family golden must be cooperative (REDUCE coop>1, got {coop})"
         elif isinstance(c, AttentionGoldenConfig):
             assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
         else:
             assert c.M > 0 and c.N > 0, c.name
-        assert c.emmy_us > 0 and c.cublas_us > 0, c.name
+        # Latencies are recorded in PAIRS or not at all. A measured entry carries both; an
+        # UNMEASURED entry (both exactly 0.0) records a verified-deployable SCHEDULE with no timing
+        # — the deploy tier accepts it and ranks it last (``_golden_evidence_index`` sorts on
+        # ``emmy_us or inf``), so it decides a shape no measured entry covers and yields the moment
+        # one is recorded. One-sided is always a recording bug: ``ratio`` would silently read 0 or
+        # divide by a missing baseline.
+        measured = (c.emmy_us > 0, c.cublas_us > 0)
+        assert measured in ((True, True), (False, False)), f"{c.name}: latencies must be recorded in pairs, got {c.emmy_us}/{c.cublas_us}"
+        assert c.emmy_us >= 0 and c.cublas_us >= 0, c.name
         assert c.ratio >= 0.0, c.name
         assert c.golden == (c.ratio >= 0.95), c.name
         assert fork_nothing or c.knobs, f"{c.name} has no recorded knobs"
@@ -200,15 +208,15 @@ def test_goldens_speak_native_codecs_and_featurize():
         work = Workers.parse(g.knobs.get("WORK") or "")
         tile = g.knobs.get("TILE")
         if tile:
-            TilePlan.parse_site(tile, work)  # parses (warp or scalar site form), or raises
-        ReducePlan.parse_site(g.knobs.get("REDUCE"), work)
+            TilePlan.parse(tile, work)  # parses (warp or scalar site form), or raises
+        ReducePlan.parse(g.knobs.get("REDUCE"), work)
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
         # A gemv-class M=1 row (``TILE: ''`` + a coop block-reduce) is scalar BY DESIGN — a
         # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
         # empty featurization is the correct one, not an accident. Exempt exactly that shape.
         if isinstance(g, MatmulGoldenConfig):
-            if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse_site(g.knobs.get("REDUCE"), work).coop > 1:
+            if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse(g.knobs.get("REDUCE"), work).coop > 1:
                 continue  # gemv-class row (coop / g<w>k/coop-t): scalar by design, no tile geometry
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
@@ -224,12 +232,12 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     exactly the 1.29-1.49× perf-gap shapes). Pointwise goldens are exempt (their kernel forks
     nothing today, so there is no catalog to be a member of); a reduce golden's ``TILE`` is
     likewise uncatalogued (the reduce fork partitions K only), so only its ``REDUCE`` is pinned."""
-    from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves, splitk_moves, stage_moves, warp_tile_moves
 
-    # The catalogs speak the LEGACY spellings the enumeration generates; a site-form golden
-    # (F2) re-merges its WORK inventory to test membership — the same reconstruction the pin
-    # ingestion performs, so "member" means "the replayed pin selects an enumerated row".
+    # The catalogs hand out TYPED slices; a golden's stored site value re-merges its WORK
+    # inventory into the same slice — so "member" means "the replayed pin selects an enumerated
+    # row".
     scalar_moves = set(scalar_tile_moves())
     for g in GOLDEN_CONFIGS:
         where = f"{g.name} ({g.gpu_name})"
@@ -237,24 +245,59 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         if isinstance(g, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure reduce.
             reduce_spec = next((v for k, v in g.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), "")
-            legacy_red = ReducePlan.parse_site(reduce_spec, work).spell() if reduce_spec else ""
-            assert not legacy_red or legacy_red in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+            red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
+            assert red is None or red in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
             continue
         if not isinstance(g, MatmulGoldenConfig):
             continue
         tile = g.knobs.get("TILE", "")
-        plan = TilePlan.parse_site(tile, work) if tile else None
+        plan = TilePlan.parse(tile, work) if tile else None
         warp = plan is not None and plan.is_warp
         if plan is not None:
             pool = set(warp_tile_moves((plan.atom.name,))) if warp else scalar_moves
-            assert plan.spell() in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
+            assert plan in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
         stage = g.knobs.get("STAGE", "")
-        assert not stage or stage in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
+        assert not stage or Stage.parse(stage) in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
-        legacy_red = ReducePlan.parse_site(reduce_spec, work).spell() if reduce_spec else ""
-        assert not legacy_red or legacy_red in splitk_moves(warp=warp) + coop_reduce_moves(), (
-            f"{where}: REDUCE {reduce_spec!r} not enumerable"
-        )
+        red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
+        assert red is None or red in splitk_moves() + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+
+
+def test_attention_golden_geometry_is_a_member_of_the_twisted_grid():
+    """The flash half of the permanence gate. Attention goldens were checked against NO domain at
+    all — the matmul test above skips every non-``MatmulGoldenConfig`` — so nothing said whether a
+    recorded flash row was reachable, and the plan carried
+    ``dit_xl_2.attn.s256``'s ``k5`` as an open "may be a hand pin" question.
+
+    It is reachable, and the question rested on reading ``k5`` as a key-atom count. It is not:
+    ``/k<bk>`` is the K-chunk, which ``twisted_warp_moves`` derives from the head dim rather than
+    drawing from ``_FLASH_KEY_ATOMS``. What the grid generates is the free geometry
+    ``(warps_m, key_atoms, q_tiles)`` = ``(WORK.units[0], reg_n, reg_m)`` of the SCORE site, and
+    every recorded golden's is a member.
+
+    The PV site (``TILE@pj``) is deliberately not checked here: its ``wn·fn·atom_n == d_v``
+    factorization is derived from the head dim, so it has no ladder to belong to — which is also
+    why ``f2x9`` is legal there and would be nonsense on the score site."""
+    from emmy.compiler.ir.schedule import TilePlan, Workers
+    from emmy.compiler.pipeline.search.golden import AttentionGoldenConfig
+    from emmy.compiler.pipeline.search.space import twisted_warp_moves
+
+    grid = set(twisted_warp_moves())
+    checked = 0
+    for g in GOLDEN_CONFIGS:
+        if not isinstance(g, AttentionGoldenConfig):
+            continue
+        work = Workers.parse(g.knobs.get("WORK") or "")
+        # A static row keys the score site ``TILE@dd``; a dynamic one records a single bare ``TILE``
+        # naming the same plan (the schema requires it — see the dynamic-attention any-of contract).
+        spec = g.knobs.get("TILE@dd") or g.knobs.get("TILE") or ""
+        if not spec or work is None:
+            continue
+        plan = TilePlan.parse(spec, work)
+        triple = (work.units[0], plan.reg_n, plan.reg_m)
+        assert triple in grid, f"{g.name} ({g.gpu_name}): flash geometry {triple} not in twisted_warp_moves()"
+        checked += 1
+    assert checked >= 40, f"only {checked} attention goldens carried a score-site TILE — the gate stopped covering them"
 
 
 # --- dynamic (symbolic-axis) goldens -----------------------------------------
@@ -344,7 +387,7 @@ def test_goldens_by_name_returns_every_config_under_a_name(monkeypatch):
     the old one); ``goldens_by_name`` returns them all, empty for an unknown name."""
     from emmy.compiler.pipeline.search import golden as gmod
 
-    a, b = _dup({"TILE": "n16x8/f2x2"}, 12.0), _dup({"TILE": "n16x8/f4x4"}, 14.0)
+    a, b = _dup({"TILE": "f2x2", "WORK": "t16x8"}, 12.0), _dup({"TILE": "f4x4"}, 14.0)
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [a, b])
     assert gmod.goldens_by_name("dup.512") == [a, b]
     assert gmod.goldens_by_name("nope") == []
@@ -358,7 +401,7 @@ def test_resolve_golden_arg_stashes_all_matches(monkeypatch):
 
     from emmy.compiler.pipeline.search import golden as gmod
 
-    a, b = _dup({"TILE": "n16x8/f2x2"}, 12.0), _dup({"TILE": "n16x8/f4x4"}, 14.0)
+    a, b = _dup({"TILE": "f2x2", "WORK": "t16x8"}, 12.0), _dup({"TILE": "f4x4"}, 14.0)
     # Dataset.from_golden reads golden.GOLDEN_CONFIGS via a lazy import, so this patch is seen.
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [a, b])
 
@@ -367,7 +410,7 @@ def test_resolve_golden_arg_stashes_all_matches(monkeypatch):
     args = Namespace(golden="dup.512", code=None, input=None, ir=None)
     cmod.resolve_golden_arg(args)
     assert [s.name for s in args.golden_configs] == ["dup.512", "dup.512"]
-    assert [s.knobs for s in args.golden_configs] == [{"TILE": "n16x8/f2x2"}, {"TILE": "n16x8/f4x4"}]
+    assert [s.knobs for s in args.golden_configs] == [{"TILE": "f2x2", "WORK": "t16x8"}, {"TILE": "f4x4"}]
     assert args.code == a.snippet()
     assert all(s.source == "golden" for s in args.golden_configs)
 
@@ -390,7 +433,7 @@ def test_resolve_golden_arg_applies_dynamic_spec(monkeypatch):
         M=512,
         N=512,
         K=512,
-        knobs={"TILE": "n16x8/f2x2"},
+        knobs={"TILE": "f2x2", "WORK": "t16x8"},
         emmy_us=12.0,
         cublas_us=14.0,
         dynamic=True,
@@ -412,7 +455,9 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
     """The fused RMSNorm→linear computed-A golden: its snippet is the ``F.rms_norm(x)·nw @ w`` form
     that traces to the megakernel, its shape_key carries ``kind="fused"`` with ``is_warp=True`` (a
     computed-A contraction is a warp mma), and the dynamic twin excludes the symbolic M."""
-    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2", "STAGE": "d2/sync"})
+    c = NormLinearGoldenConfig(
+        name="nl", M=32, H=3840, N=4096, knobs={"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "STAGE": "d2/sync"}
+    )
     snip = c.snippet()
     assert "F.rms_norm(x,(3840,),nw)" in snip and snip.strip().endswith("@ w")
     assert "dtype=torch.float16" in snip  # fp16 default → warp mma
@@ -433,7 +478,7 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
 def test_mlp_geglu_golden_snippet_shape_key_and_flops():
     """The fused RMSNorm→gate⊗up→GeGLU multi-channel golden: the lambda-bound shared-``r`` snippet,
     ``kind="fused"`` keyed on the ``(M, inter)`` GeGLU output, and the dynamic twin excludes M."""
-    knobs = {"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4", "STAGE": "d1/sync"}
+    knobs = {"TILE": "mma_m16n8k16_f16_f32/f2x2/k4", "WORK": "w1x8", "STAGE": "d1/sync"}
     c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs=knobs)
     snip = c.snippet()
     assert "lambda r:" in snip and "F.rms_norm(x,(3840,),nw)" in snip and "approximate='tanh'" in snip
@@ -451,13 +496,13 @@ def test_fast_math_regime_derived_from_knobs():
     the entry fast-math; the acc-unspecified atom ALIAS resolves to f32-accumulate → standard."""
     from emmy.compiler.pipeline.search.golden import fast_math_knobs
 
-    std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4", "STAGE": "d4/tma/ring", "FAST_EXP": False}
-    alias = {"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2"}  # historic spelling = f32-acc
-    scalar = {"TILE": "n32x8/f4x4", "REDUCE": "b8"}
+    std = {"TILE": "mma_m16n8k16_f16_f32/f2x4", "WORK": "w2x4", "STAGE": "d4/tma", "FAST_EXP": False}
+    alias = {"TILE": "mma_m16n8k16_f16/f2x2/k2", "WORK": "w2x2"}  # historic spelling = f32-acc
+    scalar = {"TILE": "f4x4", "WORK": "t32x8", "REDUCE": ""}
     assert not fast_math_knobs(std) and not fast_math_knobs(alias) and not fast_math_knobs(scalar)
-    assert fast_math_knobs({"TILE@d": "a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8"})
-    assert fast_math_knobs({"TILE": "n32x8/f4x4", "FAST_EXP": True})
-    fm_knobs = {"TILE@d": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2"}
+    assert fast_math_knobs({"TILE@d": "mma_m16n8k16_f16_f16/f2x4/k8", "WORK": "w2x4"})
+    assert fast_math_knobs({"TILE": "f4x4", "WORK": "t32x8", "FAST_EXP": True})
+    fm_knobs = {"TILE@d": "mma_m16n8k16_f16_f16/f2x2/k2", "WORK": "w2x2"}
     assert MatmulGoldenConfig(name="square.128.fp16", M=128, N=128, K=128, dtype="fp16", knobs=fm_knobs).fast_math
     assert not MatmulGoldenConfig(name="square.128.fp16", M=128, N=128, K=128, dtype="fp16", knobs=std).fast_math
 
@@ -466,11 +511,11 @@ def test_f16acc_golden_tile_stays_reachable():
     """The permanence rule extends to a fast-math golden: the membership pool is built from the
     entry's OWN parsed atom, so an f16-accumulate spelling is a member of its warp grid without
     any gate."""
-    from emmy.compiler.ir.schedule import TilePlan
+    from emmy.compiler.ir.schedule import TilePlan, Workers
     from emmy.compiler.pipeline.search.space import warp_tile_moves
 
-    plan = TilePlan.parse("a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2")
-    assert plan.spell() in set(warp_tile_moves((plan.atom.name,)))
+    plan = TilePlan.parse("mma_m16n8k16_f16_f16/f4x8/k2", Workers.parse("w2x2"))
+    assert plan in set(warp_tile_moves((plan.atom.name,)))
 
 
 def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):
@@ -485,11 +530,11 @@ def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):
     for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
         monkeypatch.delenv(var, raising=False)
     ctx = Context.from_target((12, 0))
-    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
+    fm = {"TILE": "mma_m16n8k16_f16_f16/f2x2/k2", "WORK": "w2x2", "STAGE": "", "REDUCE": ""}
     _, rank, pool, _ = golden_eval.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
     assert rank is not None and pool > 0, "fast-math golden must rank inside the self-gated enumeration"
     assert os.environ.get("EMMY_F16_MMA_F32_ACC") is None, "the scoped pin must restore"
-    std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
+    std = {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE": "", "REDUCE": ""}
     _, rank_std, pool_std, _ = golden_eval.evaluate_golden(128, 128, 128, "fp16", std, ctx)
     assert rank_std is not None
     assert pool_std < pool, "the standard enumeration must not silently grow fast-math rows"
@@ -534,17 +579,15 @@ def test_fused_golden_requires_a_cone_anchor():
     Key-only instances (empty knobs) and phase-4 ROUTING entries (``PLACE`` keys only — the cut
     set, no schedules to anchor) are exempt."""
     common = dict(M=32, H=3840, N=4096, gpu_name="X", compute_cap=(12, 0))
-    NormLinearGoldenConfig(name="ok.sync", knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2", "STAGE": "d2/sync"}, **common)
+    NormLinearGoldenConfig(name="ok.sync", knobs={"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x16", "STAGE": "d2/sync"}, **common)
     NormLinearGoldenConfig(name="ok.axis", knobs={"STAGE@a3": "d1/sync"}, **common)
     NormLinearGoldenConfig(name="ok.routing", knobs={"PLACE@cone": "cut"}, **common)
     NormLinearGoldenConfig(name="ok.keyonly", knobs={}, **common)
     with pytest.raises(ValueError, match="sync STAGE"):
-        NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "w1x16/f2x2", "STAGE": "d2/tma/ring"}, **common)
+        NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "f2x2", "STAGE": "d2/tma"}, **common)
     with pytest.raises(ValueError, match="sync STAGE"):
         # ``cp.async`` contains "sync" as a substring — the segment match must not accept it.
-        MlpGeGluGoldenConfig(
-            name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async/ring"}, gpu_name="X", compute_cap=(12, 0)
-        )
+        MlpGeGluGoldenConfig(name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async"}, gpu_name="X", compute_cap=(12, 0))
 
 
 def test_neighbor_bench_group_id_covers_every_recorded_kind():

@@ -16,9 +16,18 @@ Implementers today:
 - :class:`emmy.compiler.ir.stmt.body.Body` — canonicalized body
   rendering with SSA / axis / commutative-arg / external-buffer names
   normalized away.
+- :class:`emmy.compiler.ir.tile.ir.Fold` /
+  :class:`emmy.compiler.ir.tile.ir.TileOp` — the tile term's α-invariant
+  identity, digested bottom-up from per-node canonical content plus the
+  children's cached keys (``ir/tile/_key.py``); excludes placement,
+  schedule slices, workers and stores.
 - :class:`emmy.compiler.context.Context` — codegen-affecting
   compilation knobs (compute capability today; tuning overrides as they
-  land). Excludes ambient I/O fields (dump dirs, verbosity).
+  land). Excludes ambient I/O fields (dump dirs, verbosity, the session
+  cache).
+
+``Op.cache_key`` layers on these: each kernel-bearing dialect folds its
+content identity with the op's knob dict for the tuning / cubin caches.
 
 The cache layer in the autotuning loop keys candidates by these digests,
 so adding a field to an implementer is an explicit decision: include it

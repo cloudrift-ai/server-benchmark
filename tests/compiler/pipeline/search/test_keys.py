@@ -1,4 +1,4 @@
-"""``op_cache_key`` — a static matmul and its symbolic-axis (masked-tile) twin
+"""``Op.cache_key`` — a static matmul and its symbolic-axis (masked-tile) twin
 must never share a key, at any stage.
 
 No key rewrite was needed for the symbolic work: the loop/tile/kernel key digests
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.search.keys import op_cache_key
 from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
 
 SNIPPET = "torch.matmul(torch.randn(64,64), torch.randn(64,64))"
@@ -23,7 +22,7 @@ def _keys(dynamic: bool, passes) -> set[str]:
     shapes = build_torch_dynamic_shapes(parse_position_specs(["seq_len@x0:0"])) if dynamic else None
     graph, _, _ = graph_from_code(SNIPPET, dynamic_shapes=shapes)
     compiled = Pipeline.build(passes).run(graph)
-    keys = {op_cache_key(n.op) for n in compiled.nodes.values()}
+    keys = {n.op.cache_key() for n in compiled.nodes.values()}
     keys.discard(None)
     assert keys, "no kernel-bearing ops produced a key"
     return keys

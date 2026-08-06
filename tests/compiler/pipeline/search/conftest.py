@@ -25,7 +25,8 @@ F16_MATMUL_FEATS = {
     "S_loop_depth": 3.0,
     "S_ext_n_symbolic_axis": 1.0,
     "S_dtype_f16": 2.0,
-    "TILE@a2": "a:mma_m16n8k16_f16/w1x8/f2x8/k8",
+    "TILE@a2": "mma_m16n8k16_f16/f2x8/k8",
+    "WORK": "w1x8",
     "REDUCE@a2": "g2k",
 }
 

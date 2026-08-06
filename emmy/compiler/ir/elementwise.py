@@ -98,6 +98,12 @@ class ElementwiseImpl:
     # the table is *data* so tropical ``(min, +)`` etc. is a one-line add when a
     # consumer exists — but DO NOT add unused semirings (simplicity-first).
     _SEMIRING: dict[str, frozenset[str]] = {"add": frozenset({"multiply"})}
+    # Storage-decode ops — op name → the bits-carrier storage dtype token the op is
+    # the decode cast for. This is the trait the tile binding arm (the k-invariant
+    # multiplicative dequant, ``_atomize``) keys on instead of op-name lists: a new
+    # storage format registers its decode op here (one ``_NAME_TO_FN`` entry + one
+    # row) and the binding arm covers it without change.
+    _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}
 
     def __init__(self, name: str) -> None:
         fn = _NAME_TO_FN.get(name)
@@ -143,6 +149,16 @@ class ElementwiseImpl:
         family) instead of accumulating magnitude — an Accum over one may keep
         the input dtype rather than promote to the accumulating dtype."""
         return self.name in self._SELECTING
+
+    @property
+    def decodes(self) -> str | None:
+        """The storage dtype token this op is the decode cast for (``from_f8e4m3`` →
+        ``"f8e4m3"``), else ``None``. The trait behind the dtype-directed decode rule: a
+        bits-carrier element consumed at a value dtype converts by dtype, so the graph's
+        decode op is absorbed wherever the consumer already converts (the render's promote,
+        the mma fragment load) — and the tile binding arm asks THIS trait, never an op-name
+        list, to recognize a dequant cone's leaf."""
+        return self._DECODES.get(self.name)
 
     @property
     def semiring_product(self) -> bool:

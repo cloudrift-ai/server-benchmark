@@ -892,7 +892,7 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     if want is None or (want.transport == "tma" and not term.ctx.has_tma):
         return None
     if tile.is_warp:
-        return legal.resolve_warp_stage(node, tile, want, budget)
+        return legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
     return legal.resolve_scalar_stage(node, tile, want, term.tile.inputs, budget)
 
 

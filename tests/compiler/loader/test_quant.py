@@ -523,6 +523,50 @@ def test_trace_model_stamps_specs_and_binds_dequantized_twin(tmp_path):
 
 
 @requires_cuda
+def test_quantized_checkpoint_e2e_cuda_expanded(tmp_path, monkeypatch):
+    """The SAME tiny quantized model with ``EMMY_FP8_EXPAND=1`` — the M2b correctness anchor: the
+    dequant cone rides the graph into the kernels (fp8 bits in device memory, decode + mul-hoisted
+    scale realized in-kernel), same accuracy gate as the M1 bind-time-dequant test. Constants bind
+    from the CHECKPOINT (raw fp8 bits + scale tensors — the wrapper's parameters carry dequantized
+    values, which the expanded form must not see); computed buffers (mask / rotary) still come
+    from the traced wrapper."""
+    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+    transformers = pytest.importorskip("transformers")
+    config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
+    from emmy.commands.compile import _trace_model
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+
+    graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+
+    fp8_nodes = [nid for nid, node in compiled.nodes.items() if getattr(node.output.dtype, "name", "") == "f8e4m3"]
+    assert fp8_nodes, "no fp8-dtype constant survived to the compiled graph — the expansion did not fire"
+
+    buf_sources: dict[str, np.ndarray] = {}
+    for path, t in wrapper.named_buffers(remove_duplicate=False):
+        buf_sources[path] = t.detach().cpu().numpy().astype(np.float32, copy=False)
+    input_data: dict = dict(bind_constants(compiled, buf_sources))
+    input_data.update(load_constants_from_safetensors(compiled, str(tmp_path)))
+
+    ids = torch.randint(0, config.vocab_size, (1, 16), generator=torch.Generator().manual_seed(3))
+    input_data[compiled.inputs[0]] = ids.numpy()
+    result, _ = backend.run(compiled, input_data=input_data)
+    emmy_logits = result.outputs[compiled.outputs[0]].reshape(1, 16, config.vocab_size)
+
+    ref_model = transformers.AutoModelForCausalLM.from_config(config).float().eval()
+    ref_model.load_state_dict(ref_sd)
+    with torch.no_grad():
+        ref_logits = ref_model(input_ids=ids).logits.numpy()
+
+    assert not np.isnan(emmy_logits).any()
+    assert np.abs(ref_logits).max() > 0.05, "reference logits suspiciously small; tolerance would be trivial"
+    max_diff = np.abs(emmy_logits - ref_logits).max()
+    assert max_diff < 5e-3, f"max_diff={max_diff} vs eager dequant reference (EMMY_FP8_EXPAND=1)"
+
+
+@requires_cuda
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run``
     use, compiled on the CUDA backend and compared against the dequantized eager

@@ -83,7 +83,13 @@ def bind_constants(graph: Graph, sources: dict[str, np.ndarray]) -> dict[str, np
         src = assemble_source(op, sources)
         if src is None:
             continue
-        out[nid] = apply_load_ops(src, op.load_ops)
+        # An f8-dtype constant binds raw uint8 BITS (the M2 expanded form — the graph's own
+        # dequant cone owns the value semantics); its chain runs under the f8 token because the
+        # carrier's numpy dtype (uint8) is not a registered DataType. Mirrors the safetensors
+        # loader's bits-bind convention.
+        dt = graph.nodes[nid].output.dtype
+        tok = dt.name if getattr(dt, "name", None) in ("f8e4m3", "f8e5m2") and src.dtype == np.uint8 else None
+        out[nid] = apply_load_ops(src, op.load_ops, dtype=tok)
     return out
 
 

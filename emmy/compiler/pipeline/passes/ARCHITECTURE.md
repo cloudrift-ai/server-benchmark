@@ -264,7 +264,21 @@ failing several passes later:
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
-  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The same rule holds on the **B side**:
+  a lift whose B operand is a computed cone never falls through to the positional rule (that binding dropped the fp8
+  dequant cone's scale from the kernel). A **k-invariant multiplicative dequant** chain — a storage decode of the
+  (n, k) load times k-invariant factors — binds through the **mul-hoist** (`_atomize._hoist_multiplicative_dequant`):
+  the factors commute out of the fold onto the accumulator in the epilogue (`Σ_k a·(s·w) = s·Σ_k a·w`, the split-K
+  reassociation category) and the decode is ABSORBED by the B load's own storage dtype — every consumer converts a
+  bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element
+  convert on the warp tier, `emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>`). The chain's leaf is recognized by TRAIT —
+  `ElementwiseImpl.decodes` names the storage dtype an op is the decode cast for (the fp8 family today), so a new
+  storage format registers one decode op and never touches the binding arm. Staged copy transports refuse a
+  storage-dtype operand (the slab byte-copies at the ATOM's element width — `resolve_warp_stage`'s operand-dtype gate,
+  the scalar resolver's 1-byte decline), so such a contraction rides the warp tier gmem-direct. The arm's boundary is
+  the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
+  codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
+  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**

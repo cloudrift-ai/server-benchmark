@@ -282,7 +282,7 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, elem_bytes
     return all((x * elem_bytes) % _TMA_ALIGN == 0 for x in inner)
 
 
-def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> Stage | None:
+def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
     gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
     slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose single depth-1 slot
@@ -291,10 +291,20 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> St
     A resolver rather than a predicate because the legal answer is a SIZE, not a yes/no: this is the
     one enforcement point for the smem budget, and returning the largest legal stage is what keeps
     an over-budget row out of the fork instead of failing at materialization.
-    """
+
+    ``inputs`` (the per-buffer tensors) gates operand dtypes: the copy transports byte-copy into
+    slabs sized AT THE ATOM'S operand width, so an operand traced at any other dtype (an fp8-stored
+    B — 1-byte elements into a 2-byte slab) would mis-size the slab and the ldmatrix drain would
+    read garbage. Such an operand DECLINES here and keeps the warp tier gmem-direct, whose fragment
+    load converts per element (the same rule flash's ``stageable`` flag states)."""
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
+    if inputs:
+        for edge, role in ((c.a, "a"), (c.b, "b")):
+            t = inputs.get(edge.input) if isinstance(edge, Load) else None
+            if t is not None and t.dtype != atom.operand_dtype(role):
+                return None
     a_nbytes = atom.operand_dtype("a").nbytes
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
@@ -569,6 +579,11 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     if tile.n.mask or c.b_trans:
         return None
     if not inputs or not isinstance(c.a, Load) or not isinstance(c.b, Load) or c.a.input not in inputs:
+        return None
+    # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
+    # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier
+    # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
+    if any(t is not None and t.dtype.nbytes < 2 for t in (inputs.get(c.a.input), inputs.get(c.b.input))):
         return None
     if stage.transport == "tma" and not (
         _tma_operand_rank(c.a.index, tile.m.axis.name, c.axis.name) and _tma_operand_rank(c.b.index, tile.n.axis.name, c.axis.name)

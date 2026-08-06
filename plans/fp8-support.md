@@ -175,6 +175,17 @@ rides the normal accuracy gate, not FAST_MATH.
   epilogue mul doesn't change loop structure) and needs only the `ShapeKey` dtype-class field; whether K-blocked
   forms need their own golden `kind` is decided at M2 by whether their schedule space actually diverges.
 
+### Why `QuantSpec` exists at all (and when it could be deleted)
+
+Reviewed 2026-08-06 against the alternative "no spec: store bits in a standard dtype and spell the dequant cone at
+graph construction, letting constant folding recover the bind-time path". The spec never reaches the kernel — it is
+consumed by `180` and the whole kernel path is graph-structure-driven — so it has no per-scheme surface; what it
+buys is the decomposition band's constant-shaped assumptions: `035` merging and the `050`/`060` layout folds
+(including the sub-sm_90 matvec fold the `.m1.t` decode goldens require) all pattern-match a plain `ConstantOp`,
+and the bind-time fold is not free folding — `load_ops` is a single-source chain, and the cone has two sources.
+Deletion path, if ever wanted: (1) generalize `load_ops` to multi-source chains, (2) make the constant-matching
+passes cone-transparent. Until something forces (1), the spec is the cheaper end of the trade.
+
 ### Future-proofing: sub-byte (NVFP4 / int4)
 
 The same three layers extend without new machinery:

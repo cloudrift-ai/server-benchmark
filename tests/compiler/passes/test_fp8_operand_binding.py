@@ -12,6 +12,8 @@ operand (the slab byte-copy cannot convert); the warp tier stays reachable gmem-
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from emmy.compiler.dim import Dim
@@ -241,7 +243,11 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda(monkeypatch):
     sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]
     mma_src = next((s for s in sources if s and "mma.sync" in s), None)
     assert mma_src is not None, "no mma kernel — the fp8-B contraction did not reach the warp tier"
-    assert "emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>" in mma_src  # the fragment-boundary decode
+    # The fragment-boundary decode. Below sm_90 the 050/060 constant folds don't fire, so B
+    # arrives in-graph-transposed and the TRANS fragment helper carries the same per-element
+    # convert — verified numerically on a 4090 (max_rel 2.5e-4); either spelling is the warp
+    # tier with the decode at the fragment load.
+    assert re.search(r"emmy_mma_load_b_gmem(_trans)?<__nv_fp8_e4m3, __half>", mma_src)
 
     input_data: dict = {"x": x}
     input_data.update(bind_constants(compiled, {"layer.weight": bits, "layer.weight_scale": scale}))

@@ -607,3 +607,42 @@ def test_quantized_checkpoint_e2e_cuda(tmp_path):
     assert np.abs(ref_logits).max() > 0.05, "reference logits suspiciously small; tolerance would be trivial"
     max_diff = np.abs(emmy_logits - ref_logits).max()
     assert max_diff < 5e-3, f"max_diff={max_diff} vs eager dequant reference"
+
+
+# ===================================================================
+# Containment: quant metadata must not leak past the frontend band
+# ===================================================================
+
+# The design rule (plans/fp8-support.md, "Why QuantSpec exists at all"): ``ConstantOp.quant``
+# is frontend-band scaffolding — stamped after trace, consulted by the loader and exactly two
+# decomposition rules, CONSUMED by ``180_expand_quantized_constant``. Everything past the
+# frontend (lowering, backends, search) must stay graph-structure-driven: a quantized weight
+# past the band is just constants + algebra. This gate makes the rule mechanical: a new
+# reader of the metadata must be frontend/loader-band code and must join the allowlist here,
+# with that justification — anything else is the leak this test exists to stop.
+_QUANT_ALLOWLIST = {
+    "emmy/commands/compile.py",  # stamping call site (post-trace, pre-pipeline)
+    "emmy/compiler/graph.py",  # QuantSpec constructor-repr serialization
+    "emmy/compiler/ir/base.py",  # the definition
+    "emmy/compiler/loader/binder.py",  # bind-time raw-bits routing
+    "emmy/compiler/loader/__init__.py",  # re-export
+    "emmy/compiler/loader/quant.py",  # decode / dequant / stamping
+    "emmy/compiler/loader/safetensors.py",  # dequant-on-load
+    "emmy/compiler/pipeline/passes/frontend/decomposition/035_merge_sibling_linears.py",  # pristine guard
+    "emmy/compiler/pipeline/passes/frontend/decomposition/180_expand_quantized_constant.py",  # the consumer
+    "emmy/compiler/trace/huggingface.py",  # quantized-twin construction
+}
+
+
+def test_quant_metadata_stays_in_the_frontend_band():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    pat = re.compile(r"QuantSpec|\.quant\b|\bquant=")
+    offenders = {str(p.relative_to(root)) for p in (root / "emmy").rglob("*.py") if pat.search(p.read_text())} - _QUANT_ALLOWLIST
+    assert not offenders, (
+        f"ConstantOp.quant / QuantSpec referenced outside the frontend/loader band: {sorted(offenders)}. "
+        "The kernel path is graph-structure-driven by design — do not consume quant metadata there "
+        "(see plans/fp8-support.md and the allowlist comment above)."
+    )

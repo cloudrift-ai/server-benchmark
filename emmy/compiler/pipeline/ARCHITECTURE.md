@@ -325,6 +325,12 @@ writes it (`search/prior/fit/`, driven by `emmy fit`). Building the training cas
 `emmy/commands/fit.py`, because reconstructing the set of candidates a golden competed against needs the command
 layer's tracer for the golden's little PyTorch snippet, which `pipeline/` never imports.
 
+`offline_weights.json` is the one artifact anything loads by default. A sibling file in that directory is a **scoped
+experiment**, not a second default: `offline_weights_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
+is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Each such file says so in its
+`provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
+the shipped weights outside the slice it was fit on.
+
 What a newcomer needs to know about the fit:
 
 - **The fit optimizes the deployed score itself, not a linear stand-in for it.** `OfflinePrior.quality` and the

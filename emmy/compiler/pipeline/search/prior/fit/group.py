@@ -64,16 +64,20 @@ DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
 # has three levels and is the only feature separating the f16-accumulate atom from its f32 sibling.
 #
 # Both exclusions are expressiveness-neutral by construction — the model can express exactly the same
-# ranking functions with 52 coordinates as with 71 — so this buys a smaller, faster, better-identified
-# fit, not a different model. (Dropping ``S_ext_n_symbolic_axis`` from the VIEW does not affect the
-# static-vs-dynamic weight-set choice: ``OfflinePrior`` reads that stamp off the row directly, never
-# through the weights.)
+# ranking functions with these 53 coordinates as with all 72 — so this buys a smaller, faster,
+# better-identified fit, not a different model. (Dropping ``S_ext_n_symbolic_axis`` from the VIEW does
+# not affect the static-vs-dynamic weight-set choice: ``OfflinePrior`` reads that stamp off the row
+# directly, never through the weights.)
+#
+# ``D_stage_prefetch`` is the one feature here that is a step rather than a measurement — see its
+# definition in ``search/features.py`` for why the linear model cannot form it from ``D_stage_depth``.
 MATMUL_FEATURES = (
     "D_aspect,D_bm_band,D_cells,D_ctas_ge_sm,D_finalize_kernel,D_l2_bm,D_l2_bn,D_l2_cells_occ,D_l2_reuse,"
     "D_l2_threads,D_log2_area,D_log2_ctas,D_log2_waves,D_near_area,D_near_cells,D_near_intensity,"
     "D_near_kchunks,D_near_threads,D_near_tilen,D_near_waves,D_raster_group,D_reduce_ilp,"
     "D_reduce_transposed,D_reuse,D_scalar_on_warp_eligible,D_splitk,D_splitk_deficit,D_splitk_excess,"
-    "D_splitk_le2,D_splitk_roundtrip,D_square,D_stage_async,D_stage_depth,D_stage_reg_depth,D_stage_tma,"
+    "D_splitk_le2,D_splitk_roundtrip,D_square,D_stage_async,D_stage_depth,D_stage_prefetch,"
+    "D_stage_reg_depth,D_stage_tma,"
     "D_threads,D_tile_m,D_tile_n,D_tilen_clean,D_tma_aspect,D_tma_grid_m,D_tma_grid_n,D_tma_l2_splitk,"
     "D_tma_log2_area,D_w_grid_aspect,D_w_grid_m,D_w_grid_n,D_w_l2_bk,D_w_near_bk,D_wspec_warps,"
     "MMA_a_bits,MMA_acc_bits"

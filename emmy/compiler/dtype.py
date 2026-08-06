@@ -67,6 +67,13 @@ F16 = DataType("f16", np.dtype(np.float16), 2)
 # round-trips through serialization. CUDA-side spelling is
 # ``__nv_bfloat16`` (see ``backend/cuda/dtype.py``).
 BF16 = DataType("bf16", np.dtype(np.uint16), 2)
+# FP8 storage formats (e4m3 = 4 exponent / 3 mantissa bits, e5m2 = 5 / 2).
+# Same bits-carrier precedent as BF16: NumPy has no first-class fp8, so
+# uint8 carries the bit pattern; the loader decodes to real values at bind
+# time (M1) and CUDA-side conversion is a later milestone. CUDA spellings
+# are ``__nv_fp8_e4m3`` / ``__nv_fp8_e5m2`` (see ``backend/cuda/dtype.py``).
+F8E4M3 = DataType("f8e4m3", np.dtype(np.uint8), 1)
+F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # Two ``__half`` values packed into a 32-bit register, semantically a
 # 2-wide vector of fp16 — the first ``StructuredType``. Same numpy dtype as
 # F16 since numpy doesn't distinguish — packing is a CUDA-side storage detail;
@@ -88,7 +95,7 @@ I64 = DataType("i64", np.dtype(np.int64), 8)
 BOOL = DataType("bool", np.dtype(np.bool_), 1)
 
 
-_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, BF16, F16x2, I32, I64, BOOL)}
+_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, BF16, F8E4M3, F8E5M2, F16x2, I32, I64, BOOL)}
 
 # Aliases let callers feed PyTorch/numpy-style names without re-canonicalizing
 # at every callsite. The canonical name (``F32.name == "f32"``) is what lands
@@ -99,6 +106,8 @@ _ALIASES: dict[str, str] = {
     "float16": "f16",
     "half": "f16",
     "bfloat16": "bf16",
+    "float8_e4m3fn": "f8e4m3",  # torch spelling ("fn" — finite + NaN, no inf)
+    "float8_e5m2": "f8e5m2",
     "int32": "i32",
     "int64": "i64",
     "long": "i64",

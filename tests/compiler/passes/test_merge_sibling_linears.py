@@ -195,6 +195,21 @@ def test_no_merge_with_folded_load_ops():
     assert _count(result, LinearOp) == 2
 
 
+def test_no_merge_with_quantized_weights():
+    """A weight carrying a quant spec is not pristine in M1 — the concat would need the
+    per-part scales concatenated too (M2 work; see the FP8 plan)."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.base import QuantSpec
+
+    g = _sibling_graph()
+    for wid in ("w0", "w1"):
+        spec = QuantSpec(scale_path=f"m.{wid}_scale", scale_shape=(1, 1), scale_dtype="f32")
+        g.nodes[wid].op = replace(g.nodes[wid].op, quant=spec)
+    result = _apply(g)
+    assert _count(result, LinearOp) == 2
+
+
 def test_no_merge_across_different_activations():
     g = Graph()
     for i, xid in enumerate(("x", "y")):

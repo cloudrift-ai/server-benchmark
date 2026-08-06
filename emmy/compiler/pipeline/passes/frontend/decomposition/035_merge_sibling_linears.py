@@ -27,7 +27,8 @@ Guards, each a ``RuleSkipped``:
   trading the saved launches back. Models whose projections feed real compute (gemma/Qwen's
   per-head norms, any in-graph SDPA) merge freely.
 - **shared parameter** (tied embeddings) / **mixed bias presence** / **non-pristine parameter**
-  (a ``load_ops`` chain already folded in) — the concat semantics need a bare ``(N, K)``
+  (a ``load_ops`` chain already folded in, or a quantized-checkpoint pairing — ``quant`` — whose
+  per-part scale concat is M2 work) — the concat semantics need a bare ``(N, K)``
   checkpoint weight and, when present, a bare ``(N,)`` checkpoint bias per part.
 - **mismatched K / dtype** — not the same contraction.
 
@@ -59,6 +60,11 @@ def _parameter(graph: Graph, lin: Node, index: int, rank: int) -> Node | None:
         return None
     op = param.op
     if op.value is not None or op.context_value is not None or op.load_ops:
+        return None
+    if op.quant is not None:
+        # A quantized weight is not pristine for merging in M1 — the concat would
+        # need the per-part scales concatenated on the same axis (M2 work; see the
+        # FP8 plan). The weight dequantizes at bind time and deploys unmerged.
         return None
     if op.source_path is None and not op.source_parts:
         return None

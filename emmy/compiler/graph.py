@@ -177,6 +177,7 @@ def _serialize_field(v):
     this on load.
     """
     from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.base import QuantSpec
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.tensor.ir import IndexSource
@@ -186,6 +187,10 @@ def _serialize_field(v):
     # body-Stmt path uses, so it survives JSON instead of being stringified by
     # ``json.dumps(default=str)`` (which ``_deserialize_field`` couldn't reverse).
     if isinstance(v, IndexSource):
+        return repr(v)
+    # ``ConstantOp.quant`` — same constructor-repr round-trip (``QuantSpec`` is
+    # in the eval scope, so ``_maybe_eval_ctor`` rehydrates it on load).
+    if isinstance(v, QuantSpec):
         return repr(v)
     if isinstance(v, (list, tuple)) and v and all(isinstance(x, IndexSource) for x in v):
         return [repr(x) for x in v]
@@ -300,6 +305,7 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
     from emmy.compiler.ir.axis import Axis, AxisRole, Window
+    from emmy.compiler.ir.base import QuantSpec
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -361,6 +367,8 @@ def _stmt_eval_scope() -> dict:
         "WarpShuffle": WarpShuffle,
         "ElementwiseImpl": ElementwiseImpl,
         "IndexSource": IndexSource,
+        # ``ConstantOp.quant`` serializes as its constructor repr (see ``_serialize_field``).
+        "QuantSpec": QuantSpec,
         "DataType": DataType,
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.

@@ -8,10 +8,13 @@ the FX graph. The mask is precomputed and stapled on as a buffer; HF's
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = False, slice_last_logits: bool = False) -> nn.Module:
@@ -416,3 +419,73 @@ class _PassThroughMask:
 
     def __call__(self, *_, **__):
         return self._wrapper.causal_mask
+
+
+def quantized_checkpoint_dir(model_id_or_path: str):
+    """The local checkpoint dir when the model is an FP8-quantized checkpoint, else ``None``.
+
+    Detection reads only ``config.json`` (for a repo id, a single cached hub
+    download); the full snapshot is fetched only when the checkpoint IS
+    quantized — the trace-and-bind path then needs the shards anyway (specs are
+    stamped from the safetensors index, weights dequantize from the shards).
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import _fp8_quant_config  # noqa: PLC0415
+
+    p = Path(model_id_or_path)
+    if p.is_dir():
+        return p if _fp8_quant_config(p) is not None else None
+    from huggingface_hub import hf_hub_download  # noqa: PLC0415
+
+    try:
+        cfg_path = hf_hub_download(model_id_or_path, "config.json")
+    except Exception as e:  # detection is best-effort: an unreadable config means
+        # "not a quantized checkpoint here" and the pre-existing from_pretrained
+        # path keeps ownership of error reporting (bad id, gated repo, offline).
+        logger.debug("quantized-checkpoint detection skipped for %s: %s", model_id_or_path, e)
+        return None
+    if _fp8_quant_config(Path(cfg_path).parent) is None:
+        return None
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+    return _resolve_model_dir(model_id_or_path)
+
+
+def load_quantized_twin(model_dir, dtype):
+    """Architecture twin of a quantized checkpoint, carrying the DEQUANTIZED real weights.
+
+    A quantized checkpoint cannot go through ``from_pretrained`` as-is —
+    transformers would engage its own fp8 machinery, and the trace is
+    quantization-blind (quantization is a property of the checkpoint, not the
+    architecture; see the FP8 plan). So: build the plain architecture from
+    config with ``quantization_config`` stripped, then load the checkpoint's
+    tensors with every fp8 weight dequantized
+    (``loader.quant.load_dequantized_state_dict``) — the returned module is
+    both the trace subject and the eager / accuracy reference. ``strict=False``
+    tolerates non-persistent buffers absent from the checkpoint (rotary
+    ``inv_freq``); ``tie_weights()`` re-asserts tied embeddings after the load
+    (see ``binder.py``'s state_dict-vs-named_parameters note).
+    """
+    import numpy as np  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import load_dequantized_state_dict  # noqa: PLC0415
+
+    config = AutoConfig.from_pretrained(model_dir)
+    if getattr(config, "quantization_config", None) is not None:
+        delattr(config, "quantization_config")
+    model = AutoModelForCausalLM.from_config(config).to(dtype)
+    state: dict = {}
+    for k, v in load_dequantized_state_dict(model_dir).items():
+        t = torch.from_numpy(np.ascontiguousarray(v))
+        state[k] = t.to(dtype) if t.is_floating_point() else t
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected:
+        logger.warning("quantized twin: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
+    if missing:
+        logger.info("quantized twin: %d module tensors not in checkpoint (e.g. %s)", len(missing), missing[0])
+    model.tie_weights()
+    model.eval()
+    return model

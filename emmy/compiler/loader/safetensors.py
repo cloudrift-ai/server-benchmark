@@ -21,8 +21,10 @@ from pathlib import Path
 
 import numpy as np
 
+from emmy.compiler import dtype as _dtype
 from emmy.compiler.graph import Graph
 from emmy.compiler.loader.binder import apply_load_ops
+from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES, decode_f8, dequantize
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,58 @@ def _candidate_keys(source_path: str) -> list[str]:
     return [c for c in cands if not (c in seen or seen.add(c))]
 
 
+def _read_shard(shard_path: str, keys: list[str], sources: dict[str, np.ndarray]) -> dict[str, str]:
+    """Read ``keys`` from one shard into ``sources``, decoding fp8 tensors to f32 values.
+
+    safetensors' numpy framework has no fp8 carrier (numpy lacks a float8 dtype;
+    ``get_tensor`` raises), so fp8 keys re-open the shard through the torch
+    framework and a zero-copy ``uint8`` view exposes the bit pattern for the LUT
+    decode. Chosen over parsing the shard's raw byte ranges ourselves (which
+    would duplicate format knowledge here); torch is available in every flow
+    that reaches a quantized checkpoint — the trace itself requires it. BF16
+    tensors (the unquantized modules of a quantized checkpoint — embeddings,
+    norms) take the same torch route, read as f32 values (the loader's value
+    dtype for bf16). Everything else keeps the numpy path bit-identical.
+
+    Returns the fp8 keys read, ``{key: canonical fp8 token}`` — how callers
+    tell a decoded-fp8 array from a natively-float one after the read.
+    """
+    from safetensors import safe_open
+
+    fp8: dict[str, str] = {}  # key → canonical fp8 token
+    bf16: list[str] = []
+    with safe_open(shard_path, framework="numpy") as f:
+        for k in set(keys):
+            stored = f.get_slice(k).get_dtype()
+            fmt = F8_SAFETENSORS_DTYPES.get(stored)
+            if fmt is not None:
+                fp8[k] = fmt
+            elif stored == "BF16":
+                bf16.append(k)
+            else:
+                sources[k] = f.get_tensor(k)
+    if fp8 or bf16:
+        import torch  # noqa: PLC0415
+
+        with safe_open(shard_path, framework="pt") as ft:
+            for k, fmt in fp8.items():
+                sources[k] = decode_f8(ft.get_tensor(k).view(torch.uint8).numpy(), fmt)
+            for k in bf16:
+                sources[k] = ft.get_tensor(k).float().numpy()
+    return fp8
+
+
+def _value_np_dtype(source_dtype: str | None) -> np.dtype:
+    """Numpy VALUE dtype for a constant's traced dtype: the registry carrier when it
+    holds real values (f32 / f16); f32 for bits-carrier dtypes (bf16 — uint16 holds
+    the pattern, not values; f32 is the numpy-side value dtype, the same convention
+    as ``bind_constants_from_module``)."""
+    if source_dtype is None:
+        return np.dtype(np.float32)
+    np_dt = _dtype.get(source_dtype).np
+    return np_dt if np.issubdtype(np_dt, np.floating) else np.dtype(np.float32)
+
+
 def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict[str, np.ndarray]:
     """Bind every parameter/buffer ``ConstantOp`` from the model's safetensors.
 
@@ -92,9 +146,13 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
     as ``input_data``. Scalar constants (``value is not None``) and
     constants without a ``source_path`` are skipped — the backend
     materializes them on its own.
-    """
-    from safetensors import safe_open
 
+    A constant carrying a :class:`~emmy.compiler.ir.base.QuantSpec` (``op.quant``,
+    stamped by ``loader.quant.stamp_quant_specs``) dequantizes when its SOURCE is
+    read — scale applied to the decoded values, result cast to the constant's
+    traced compute dtype — BEFORE the ``load_ops`` chain runs, so the chain (and
+    everything downstream) sees an ordinary tensor at the promised dtype/shape.
+    """
     model_dir = _resolve_model_dir(model_id_or_path)
     index = _build_index(model_dir)
 
@@ -113,12 +171,12 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
                 logger.warning("safetensors loader: no key matched for %s (source_path=%r)", nid, path)
         if len(keys) == len(paths):  # all-or-nothing: a partial concat would bind garbage
             resolved[nid] = tuple(keys)
+        if op.quant is not None and op.quant.scale_path in index:
+            needed.setdefault(str(index[op.quant.scale_path]), []).append(op.quant.scale_path)
 
     sources: dict[str, np.ndarray] = {}
     for shard_path, keys in needed.items():
-        with safe_open(shard_path, framework="numpy") as f:
-            for k in set(keys):
-                sources[k] = f.get_tensor(k)
+        _read_shard(shard_path, keys, sources)
 
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
@@ -126,5 +184,11 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
         if keys is None:
             continue
         src = np.concatenate([sources[k] for k in keys], axis=0) if op.source_parts else sources[keys[0]]
+        if op.quant is not None:
+            scale = sources.get(op.quant.scale_path)
+            if scale is None:  # spec stamped from an index the checkpoint no longer matches
+                logger.warning("safetensors loader: scale %r missing for %s; binding undequantized", op.quant.scale_path, nid)
+            else:
+                src = dequantize(src, scale, inverse=op.quant.inverse).astype(_value_np_dtype(op.source_dtype), copy=False)
         out[nid] = apply_load_ops(src, op.load_ops)
     return out

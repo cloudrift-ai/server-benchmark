@@ -152,6 +152,28 @@ class InputOp(Op):
         raise NotImplementedError("InputOp is a sentinel; value is supplied by the executor")
 
 
+@dataclass(frozen=True)
+class QuantSpec:
+    """Pairing of a quantized checkpoint weight with its scale tensor.
+
+    ``scale_path`` is the scale tensor's key in the checkpoint's safetensors
+    index (``<prefix>.weight_scale`` or ``.weight_scale_inv``); ``scale_shape``
+    / ``scale_dtype`` its stored layout; ``inverse`` marks ``weight_scale_inv``
+    checkpoints (the loader divides instead of multiplying).
+
+    Granularity is DERIVED, not declared: ``block[i] = weight.shape[i] //
+    scale.shape[i]`` — per-tensor (scalar scale), per-out-channel (``(N, 1)``)
+    and 2-D block scales are all this one form with a different block shape
+    (see the FP8 plan's type-system design). No block metadata field exists,
+    so the two shapes stay the single source of truth.
+    """
+
+    scale_path: str
+    scale_shape: tuple[int, ...]
+    scale_dtype: str
+    inverse: bool = False
+
+
 @dataclass
 class ConstantOp(Op):
     """Fixed tensor: weights, RoPE tables, scalars. Not an activation.
@@ -200,6 +222,13 @@ class ConstantOp(Op):
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
     source_shape: tuple[int, ...] | None = None
     source_dtype: str | None = None
+    # Quantized-checkpoint pairing: the source tensor is stored quantized (fp8
+    # bits) and ``quant`` names its scale tensor; the loader dequantizes to the
+    # compute dtype when the source is read, BEFORE ``load_ops`` runs (M1).
+    # ``None`` for every unquantized constant. ``fold_into_constant`` rebuilds
+    # constants via ``dataclasses.replace``, so the field propagates through
+    # the layout-fold band by construction.
+    quant: QuantSpec | None = None
 
     def __post_init__(self) -> None:
         if self.value is not None and self.context_value is not None:

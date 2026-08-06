@@ -531,21 +531,38 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
         logger.error("torch and transformers are required: pip install torch transformers")
         sys.exit(1)
 
+    from emmy.compiler.trace.huggingface import load_quantized_twin, quantized_checkpoint_dir
     from emmy.compiler.trace.torch import trace_module
 
     logger.info("Pulling %s...", model_id)
     dtype = torch.float32 if layer is None else torch.float16
-    try:
-        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
-    except ValueError as e:
-        # Only fall back to executing the repo's custom modeling code when
-        # transformers explicitly requires it (e.g. MiniCPM3). Models that ship
-        # remote code but also have a built-in class (e.g. Phi-4-mini) must use
-        # the built-in path — their remote code may not match this transformers.
-        if "trust_remote_code" not in str(e):
-            raise
-        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+    quant_dir = quantized_checkpoint_dir(model_id)
+    if quant_dir is not None:
+        # FP8 checkpoint: trace the architecture twin from config, carrying the
+        # dequantized real weights (from_pretrained would engage transformers'
+        # own fp8 machinery — the trace is quantization-blind; see the FP8 plan).
+        model = load_quantized_twin(quant_dir, dtype)
+    else:
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+        except ValueError as e:
+            # Only fall back to executing the repo's custom modeling code when
+            # transformers explicitly requires it (e.g. MiniCPM3). Models that ship
+            # remote code but also have a built-in class (e.g. Phi-4-mini) must use
+            # the built-in path — their remote code may not match this transformers.
+            if "trust_remote_code" not in str(e):
+                raise
+            model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
     model.eval()
+
+    def _stamp(graph: Graph) -> Graph:
+        # Quant metadata attaches immediately after trace, before any pass runs
+        # (the merge/fold passes consult ``ConstantOp.quant``).
+        if quant_dir is not None:
+            from emmy.compiler.loader.quant import stamp_quant_specs  # noqa: PLC0415
+
+            stamp_quant_specs(graph, str(quant_dir))
+        return graph
 
     if layer is None:
         from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper, stamp_sliding_windows
@@ -560,13 +577,13 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
             attention_mask = build_causal_mask(seq_len, dtype)
             position_ids = torch.arange(seq_len).unsqueeze(0)
             args_t = (input_ids, attention_mask, position_ids)
-            graph = trace_module(wrapper, args_t, dynamic_shapes=dynamic_shapes)
+            graph = _stamp(trace_module(wrapper, args_t, dynamic_shapes=dynamic_shapes))
             stamp_sliding_windows(graph, _find_text_decoder(model).config)
             return graph, (wrapper, args_t, {})
 
         wrapper = build_full_model_wrapper(model, seq_len, dtype)
         input_ids = torch.zeros((1, seq_len), dtype=torch.long)
-        graph = trace_module(wrapper, (input_ids,), dynamic_shapes=dynamic_shapes)
+        graph = _stamp(trace_module(wrapper, (input_ids,), dynamic_shapes=dynamic_shapes))
         stamp_sliding_windows(graph, _find_text_decoder(model).config)
         return graph, (wrapper, (input_ids,), {})
 
@@ -592,7 +609,7 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
         from emmy.compiler.trace.huggingface import build_layer_wrapper, stamp_sliding_windows
 
         wrapper = build_layer_wrapper(block, decoder.rotary_emb, hidden_size, dtype, layer_type=layer_type)
-        graph = trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes)
+        graph = _stamp(trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes))
         stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
         return graph, (wrapper, (x,), {})
 
@@ -610,7 +627,7 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     ple = build_synthetic_ple(block, seq_len, dtype)
     if ple is not None:
         kwargs["per_layer_input"] = ple
-    graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
+    graph = _stamp(trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes))
     stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
     return graph, (block, (x,), kwargs)
 

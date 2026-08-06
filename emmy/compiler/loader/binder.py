@@ -99,7 +99,9 @@ def bind_constants_from_module(graph: Graph, module) -> dict[str, np.ndarray]:  
     ``named_parameters`` dedups it down to the shared ``embed_tokens.weight``
     only, leaving the final projection unbound (→ zero logits). Tensors are cast
     to float32 numpy (the backend dtype; also sidesteps reading bf16 checkpoints
-    through numpy)."""
+    through numpy). Quant specs (``ConstantOp.quant``) never apply here: the
+    traced twin module carries compute-dtype weights, never fp8 tensors — only
+    the safetensors path dequantizes."""
     sources: dict[str, np.ndarray] = {}
     for name, t in module.state_dict().items():
         sources[name] = t.detach().cpu().float().numpy()

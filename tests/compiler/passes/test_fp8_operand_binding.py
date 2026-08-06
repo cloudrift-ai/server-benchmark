@@ -6,8 +6,9 @@ factors binds as the RAW storage-dtype ``Load`` (the decode absorbed by dtype �
 converts a bits-carrier element by dtype) with the factors moved onto the accumulator in the
 epilogue (``Σ_k a·(s·w) = s·Σ_k a·w``). A shape the arm cannot hoist — a k-varying (2-D block)
 scale, a non-decode computed B — raises, and the recognizer demotes the cell to ``PLANAR`` (the
-guardrail contract: unmapped, never mis-scheduled). Staged copy transports refuse a storage-dtype
-operand (the slab byte-copy cannot convert); the warp tier stays reachable gmem-direct.
+guardrail contract: unmapped, never mis-scheduled). A storage-dtype (fp8) B now also STAGES — a
+raw byte slab whose drain converts to the atom's fragments (``test_fp8_staged``); a mismatch that
+is not a byte slab still refuses and keeps the warp tier gmem-direct.
 """
 
 from __future__ import annotations
@@ -153,7 +154,7 @@ def test_bare_decode_binds_raw_load_without_epilogue():
 
 
 # ===================================================================
-# Staged transports refuse an f8 operand (the copy transport cannot convert)
+# Staged transports: an f8 B stages as a byte slab; other mismatches refuse
 # ===================================================================
 
 
@@ -167,11 +168,14 @@ def _warp_contraction():
     return node, tile
 
 
-def test_resolve_warp_stage_refuses_f8_operand():
+def test_resolve_warp_stage_offers_the_byte_staged_b():
+    """The M2b refusal is replaced by the byte-staged offer: an fp8-stored B under a 16-bit atom
+    resolves on every copy transport (the raw byte slab, converted at the drain — the full
+    legality/parity battery is ``test_fp8_staged``)."""
     node, tile = _warp_contraction()
     inputs = {"x": Tensor("x", (512, 4096), F16), "w_bits": Tensor("w_bits", (4096, 4096), F8E4M3)}
     for spec in ("d2/cp", "d2/tma"):
-        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None
+        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
 
 
 def test_resolve_warp_stage_admits_matched_dtypes():
@@ -248,7 +252,9 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda(monkeypatch):
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": ""}):
+    # STAGE pinned to gmem-direct: this test anchors the gmem-direct fragment-convert spelling
+    # (the staged byte-slab forms are ``test_fp8_staged``'s).
+    with _pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_fp8_linear_graph(m, n, k))
 
     sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]

@@ -1398,6 +1398,13 @@ class LdmatrixLoad(Stmt):
     # matrices addressed by lanes 0-15, ``pair_frag`` those of lanes 16-31. Staged role-"b"
     # NONE-swizzle only; ``src_index`` stays the FIRST (low) fragment's tile base.
     pair_frag: str | None = None
+    # A staged 1-BYTE (fp8) operand slab: ldmatrix is b16-only below sm_100a, so the drain is the
+    # cooperative per-lane byte gather instead — the SAME lane→element map the gmem-direct
+    # fragment loaders spell, pointed at the smem slab. A 16-bit destination fragment (W8A16)
+    # converts per element via the loader's F template arg; an fp8 fragment (the k32 atoms)
+    # repacks raw bytes via the ``_b8`` family. NONE-swizzle by construction; the padded row
+    # stride rides ``ldm``. Staged only.
+    byte_slab: bool = False
 
     def deps(self) -> tuple[str, ...]:
         return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
@@ -1419,7 +1426,10 @@ class LdmatrixLoad(Stmt):
             variant = "x4 pair" if self.b_trans else "x4.trans pair"
             pair = f"({self.frag}, {self.pair_frag})"
             return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
-        variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
+        if self.byte_slab:
+            variant = "byte gather"
+        else:
+            variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
 
@@ -1486,6 +1496,35 @@ class LdmatrixLoad(Stmt):
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
             return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+        if self.byte_slab:
+            # Staged 1-byte (fp8) slab — the cooperative byte-gather drain: the gmem fragment
+            # loaders' lane→element map pointed at the smem slab (generic-address loads; ptxas
+            # resolves them to LDS after inlining). A 16-bit fragment (W8A16) converts per
+            # element via the loader's F template arg (the same ``<__nv_fp8_e4m3, __half>``
+            # spelling as the gmem-direct convert); an fp8 fragment (the k32 atoms) repacks raw
+            # bytes via the ``_b8`` family. ``flat`` already strides the PADDED slab decl and
+            # ``ldm`` carries the same padded row stride, so the two agree by construction.
+            slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f8e4m3")
+            frag_dt = ctx.ssa_dtypes.get(self.frag) or "f16"
+            k_contig = self.role == "a" or self.b_trans  # each lane's K run is slab-contiguous
+            if frag_dt in ("f8e4m3", "f8e5m2"):
+                # k32 byte repack. Contiguous-K lanes load one u32 (the ``_smem_b8v`` family);
+                # a canonical K-major B strides its 4 bytes across rows — the scalar gather.
+                if k_contig:
+                    trans = "_trans" if self.b_trans else ""
+                    call = f"emmy_mma_load_{self.role}_smem{trans}_b8v<{ctx.type_name(slab_dt)}>"
+                else:
+                    call = "emmy_mma_load_b_gmem_b8"
+            elif self.b_trans and frag_dt == "f16":
+                # W8A16 pair convert: one fp8x2 load + one hardware cvt.rn.f16x2 per k-half.
+                x2 = {"f8e4m3": "__nv_fp8x2_e4m3", "f8e5m2": "__nv_fp8x2_e5m2"}[slab_dt]
+                call = f"emmy_mma_load_b_smem_trans_f8_f16<{ctx.type_name(slab_dt)}, {x2}>"
+            else:
+                # Canonical K-major B (K-strided bytes) or a bf16 fragment: the scalar
+                # per-element convert via the gmem loader template, pointed at the slab.
+                trans = "_trans" if self.b_trans else ""
+                call = f"emmy_mma_load_{self.role}_gmem{trans}<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
+            return [f"{_pad(ctx.indent)}{call}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
         if self.pair_frag is not None:
             # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).
@@ -2382,6 +2421,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         k_zero=None if s.k_zero is None else (sigma.apply(s.k_zero[0]), sigma.apply(s.k_zero[1])),
         b_trans=s.b_trans,
         pair_frag=None if s.pair_frag is None else rename(s.pair_frag),
+        byte_slab=s.byte_slab,
     )
 
 

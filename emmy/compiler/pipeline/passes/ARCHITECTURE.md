@@ -290,9 +290,13 @@ failing several passes later:
   bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element
   convert on the warp tier, `emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>`). The chain's leaf is recognized by TRAIT —
   `ElementwiseImpl.decodes` names the storage dtype an op is the decode cast for (the fp8 family today), so a new
-  storage format registers one decode op and never touches the binding arm. Staged copy transports refuse a
-  storage-dtype operand (the slab byte-copies at the ATOM's element width — `resolve_warp_stage`'s operand-dtype gate,
-  the scalar resolver's 1-byte decline), so such a contraction rides the warp tier gmem-direct. The arm's boundary is
+  storage format registers one decode op and never touches the binding arm. The warp staged transports carry a
+  storage-dtype operand as a RAW BYTE SLAB (each operand slab sized at its OWN element width; ldmatrix is b16-only
+  below sm_100a, so the byte slab drains through a cooperative per-lane gather — the gmem fragment loaders' lane map
+  pointed at smem, converting to 16-bit fragments under a k16 atom / repacking raw bytes under the fp8 k32 atoms —
+  bit-identical to gmem-direct; `resolve_warp_stage`'s byte-slab arm states the 16-divisibility legality, and the
+  cp.async byte slab pads its rows by `_stage.BYTE_SLAB_PAD` for the drain's bank spread). The scalar resolver still
+  declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
   the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
   codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
   demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every

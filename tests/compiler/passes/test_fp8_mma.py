@@ -229,8 +229,11 @@ def test_k32_never_offered_on_16bit_operands(monkeypatch):
     assert atoms_for(F16) == ("mma_m16n8k16_f16_f32",)
 
 
-def test_f8_atoms_decline_staged_transports():
-    """ldmatrix has no byte-fragment form on these arches — the fp8 atoms stay gmem-direct."""
+def test_f8_atoms_offer_staged_byte_slabs():
+    """ldmatrix has no byte-fragment form on these arches, so the fp8 atoms' staged form is the
+    cooperative byte-slab drain — the resolver OFFERS it on the copy transports (the refusal this
+    replaced kept every fp8 arm on the transaction-bound gmem-direct path; the parity/legality
+    battery is ``test_fp8_staged``)."""
     from emmy.compiler.ir.schedule import Stage
     from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
 
@@ -238,7 +241,7 @@ def test_f8_atoms_decline_staged_transports():
     tile = TilePlan.parse(f"{K32}/f4x1/k4", Workers.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
     inputs = {"a_bits": Tensor("a_bits", (512, 512), F8E4M3), "w_bits": Tensor("w_bits", (512, 512), F8E4M3)}
     for spec in ("d2/cp", "d2/tma"):
-        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None
+        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
 
 
 # ===================================================================
@@ -272,7 +275,7 @@ def test_k32_mma_matches_lut_reference_cuda(monkeypatch):
     m, n, k = 32, 64, 64
     rng = np.random.default_rng(11)
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": f"{K32}/f2x2/k1", "WORK": "w1x4", "REDUCE": ""}):
+    with _pinned_knobs({"TILE": f"{K32}/f2x2/k1", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)
@@ -358,7 +361,7 @@ def test_w8a8_static_act_quant_e2e_cuda(monkeypatch):
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": ""}):
+    with _pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"
@@ -447,7 +450,7 @@ def test_w8a8_dynamic_per_token_amax_cuda(monkeypatch):
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": ""}):
+    with _pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_dyn_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32" in s), None)

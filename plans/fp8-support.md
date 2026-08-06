@@ -17,8 +17,9 @@ FP8 story; nothing here is Qwen3.8-specific.
 - **M2b DONE** — fp8-B through the warp tier (W8A16): k-invariant multiplicative dequant binding (mul-hoist onto the
   f32 epilogue, decode absorbed by the storage dtype, trait-recognized via `ElementwiseImpl.decodes`); warp tier
   reached on BOTH cards (5090 e2e max_diff 1.5e-7, fragment-convert 5.7e-4 max_rel; sm_89/4090 verified, max_rel
-  2.5e-4 through the trans fragment helper); quant-metadata containment gate test added. The BYTE WIN IS PENDING
-  staged fp8 transport (see M2 residual below) — every current A/B rides the transaction-bound gmem-direct path.
+  2.5e-4 through the trans fragment helper); quant-metadata containment gate test added. **Staged fp8 transport +
+  convert-at-drain LANDED 2026-08-06** (see M2 residual 1 below for the design + measured table) — fp8-B now rides
+  the same d<n>/cp|tma staged fork family as the 16-bit operands, bit-identical to gmem-direct.
 - **M3 DONE (2026-08-06, evidence gate overridden by decision)** — native fp8 mma (W8A8): `m16n8k32` e4m3/e5m2
   atoms; the bare PTX form is THE spelling on both sm_89 and sm_120 (`.kind::f8f6f4` refused by ptxas everywhere);
   fragment ABI verified empirically (A 4×b32, B 2×b32, C/D keep the k16 map); `FP8_MMA` knob under the FAST_MATH
@@ -26,8 +27,8 @@ FP8 story; nothing here is Qwen3.8-specific.
   effectively true-f32); `to_f8*` encode intrinsics bit-exact vs torch over all finite in-range f16 (saturating
   overflow, documented divergence); the hoist arm is side-generic — static per-tensor AND dynamic per-token amax
   W8A8 both work end-to-end on both cards (`act_scale ⊗ weight_scale` composed on the f32 epilogue). The mma-rate
-  thesis is UNOBSERVABLE on the gmem-direct path (all fp8 arms transaction-bound; staged f16 twin 4.3–4.7× faster)
-  — the staged-transport residual gates the perf story for W8A16 and W8A8 alike.
+  thesis is now OBSERVABLE with the staged byte slab (M2 residual 1): staged W8A8 at square-4096 reaches 317 TFLOPS
+  / 433.4 µs on the 5090 — 1.13x the f16acc golden twin (489 µs).
 - **M4 NOT STARTED** — the serving A/B needs a serving session on a real FP8 checkpoint.
 - **QuantSpec RETIRED (dissolve-early migration)** — quantization is graph algebra from birth, folded at `032`;
   the invariant "quantization is not a concept past the decomposition band" is documented in the ARCHITECTURE
@@ -45,18 +46,30 @@ FP8 story; nothing here is Qwen3.8-specific.
 
 ### M2 residual (handoff)
 
-1. **Staged fp8-B transport + convert-at-drain is the actual byte win.** Warp staged transports refuse a
-   storage-dtype operand (correctly — slabs byte-copy at the atom's element width), so every current A/B measures
-   the transaction-bound gmem-direct path. Measured on the 5090, fp8-B vs the f16 twin at MxKxN with K=N=4096:
+1. **DONE (2026-08-06) — staged fp8 transport + the cooperative byte-slab drain.** `resolve_warp_stage` now OFFERS
+   the staged form for 1-byte operands on the EXISTING d<n>/cp|tma fork family (no new knob; the 16-bit enumeration
+   is unchanged — asserted by test + digest 27/27): the operand stages as a RAW BYTE slab (per-operand element
+   widths; TMA via the U8 `CUtensorMap`) and, since ldmatrix is b16-only below sm_100a, drains through a
+   cooperative byte gather — W8A16 converts to f16 fragments (trans-B pairs via one hardware `cvt.rn.f16x2.e4m3x2`),
+   the k32 atoms repack raw bytes (contiguous-K lanes as single u32 loads). Bit-identical to gmem-direct on every
+   transport/depth (same converts, same K order). cp.async byte slabs pad rows 16 B (`BYTE_SLAB_PAD` — drain goes
+   4-way → ≤2-way conflicted per the lane→bank oracle; regression-tested); legality: 16-divisible inner spans
+   (canonical-B also N % 16), symbolic K still refused. Measured 5090 (pinned same-tile arms, K=N=4096):
 
-   | M | fp8-B vs f16 twin |
-   | --- | --- |
-   | 32 | 0.26x |
-   | 512 | 0.45x |
-   | 4096 | 0.63x |
+   | M | fp8-B best staged vs best f16 arm | note |
+   | --- | --- | --- |
+   | 32 | 1.02x (g8k d3/tma, 10.5 vs 10.8 µs) | both weights L2-resident — byte win invisible |
+   | 512 | 0.92x (d2/tma 110.3 vs 101.8 µs) | mma/issue-bound at this tile |
+   | 4096 | 0.83x W8A16 (591.9 vs 489 µs f16acc golden) / **1.13x W8A8** (433.4 µs, 317 TFLOPS, f4x8/k2 w4x2 d2/tma) | compute-bound — W8A16 pays the convert, W8A8 collects the fp8 mma rate |
 
-   Caveat: at M=32 the f16 twin's B is L2-resident, so the ratio overstates the steady-state gap. The win lands by
-   staging the raw f8 bytes through the slab and converting at the drain into fragments.
+   The BYTE-WIN regime is DRAM-bound decode (weights past L2): M=32 K=N=8192 → staged fp8-B **31.0 µs vs 85.5 µs**
+   best f16 on the 5090 (2.76x; staging itself is 1.44x over gmem-direct fp8 at 44.6 µs), and on the **4090**
+   (cp.async only — no TMA below sm_90) **39.8 µs vs 159.8 µs** best f16 (4.01x, both arms best-of split-K ×
+   staged; the f16 arm is genuinely DRAM-bound at ~840 GB/s while the fp8 B half-fits the 72 MB L2). At K=N=4096
+   with both weights L2-resident the two arms tie on both cards (0.99–1.02x). At square-4096 the M2b thesis's
+   "M=4096 is DRAM-bound" premise was wrong on the 5090 — the f16acc twin runs at 206 GB/s, far under DRAM, so the
+   large-M story is W8A8's mma rate (above), not bytes. 4090 verification: the fp8 battery + the staged tests pass
+   38/38 (TMA pins correctly resolve to gmem-direct below sm_90 — the tests gate them on the live arch).
 2. **Fused / composed forms decline → reduce tiers.** Norm→linear, gate-up, and merged siblings (per-part scale
    concat) don't reach the warp tier with an fp8 B yet.
 3. **Bench-harness fp8 sources are broken.** The `run.py` reproducer draws f32 randoms per `source_path` (garbage
@@ -68,11 +81,11 @@ FP8 story; nothing here is Qwen3.8-specific.
 6. **sm_89 verified numerically** (max_rel 2.5e-4): below sm_90 B arrives in-graph-transposed and the trans
    fragment helper carries the same per-element convert.
 
-M3 adds to the same list: (7) the staged byte-slab drain must cover the k32 atoms too — no ldmatrix `.b8` below
-sm_100a, so the drain is a cooperative byte-slab design, and it is the perf gate for W8A16 and W8A8 alike;
-(8) the `_b8` loaders gather per byte — A/trans-B rows are 4-byte-contiguous and could vectorize to one u32 load
-where alignment is provable; (9) masked-K (`kzero`) b8 variants deliberately absent — symbolic K stays off the
-fp8 tier by legality; (10) e5m2 atoms registered and compiling but not numerics-verified.
+M3 adds to the same list: (7) **DONE with (1)** — the staged byte-slab drain covers the k32 atoms (byte repack,
+u32 loads on contiguous-K lanes); (8) the GMEM-direct `_b8` loaders still gather per byte — the smem drains now
+vectorize (u32 / fp8x2), but the gmem path's alignment is unproven, so the gmem vectorization is still open;
+(9) masked-K (`kzero`) b8 variants deliberately absent — symbolic K stays off the fp8 tier by legality (staged
+included); (10) e5m2 atoms registered and compiling but not numerics-verified.
 
 ## Current state (verified 2026-08-06)
 

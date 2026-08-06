@@ -38,6 +38,7 @@ from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.pipeline.passes.lowering.kernel._stage import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -273,16 +274,17 @@ def _warp_cp_async(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_tra
     return bk_elems % _CP_ASYNC_MIN_ELEMS == 0 and (b_trans or tile_n % _CP_ASYNC_MIN_ELEMS == 0)
 
 
-def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, elem_bytes: int, mask_n: bool, b_trans: bool) -> bool:
-    """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims. A transposed B boxes
-    N-major, so N drops out of the alignment gate."""
+def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: int, b_bytes: int, mask_n: bool, b_trans: bool) -> bool:
+    """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims — each operand's
+    box inner dim and gmem inner stride at its OWN element width (a byte-staged fp8 B sizes at
+    1 B). A transposed B boxes N-major, so N drops out of the alignment gate."""
     if mask_n or not (k_axis.extent.is_static and n_axis.extent.is_static):
         return False
     k, n = k_axis.extent.as_static(), n_axis.extent.as_static()
     if k % bk_elems:
         return False
-    inner = (bk_elems, k) if b_trans else (bk_elems, tile_n, k, n)
-    return all((x * elem_bytes) % _TMA_ALIGN == 0 for x in inner)
+    inner = (bk_elems * a_bytes, k * a_bytes) + ((bk_elems * b_bytes, k * b_bytes) if b_trans else (tile_n * b_bytes, n * b_bytes))
+    return all(x % _TMA_ALIGN == 0 for x in inner)
 
 
 def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
@@ -296,23 +298,40 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     an over-budget row out of the fork instead of failing at materialization.
 
     ``inputs`` (the per-buffer tensors) gates operand dtypes: the copy transports byte-copy into
-    slabs sized AT THE ATOM'S operand width, so an operand traced at any other dtype (an fp8-stored
-    B — 1-byte elements into a 2-byte slab) would mis-size the slab and the ldmatrix drain would
-    read garbage. Such an operand DECLINES here and keeps the warp tier gmem-direct, whose fragment
-    load converts per element (the same rule flash's ``stageable`` flag states)."""
+    slabs sized at each operand's element width, so a slab is byte-copied verbatim and the drain
+    reads exactly the bytes the fill deposited. Two dtype forms resolve: an operand traced AT the
+    atom's operand dtype (the 16-bit family — ldmatrix drain), and a 1-byte (fp8-stored) operand —
+    a B under a 16-bit atom stages as a RAW BYTE slab drained by the cooperative convert gather
+    (W8A16), and the fp8 (k32) atoms stage both operands as byte slabs drained by the byte repack.
+    Any other mismatch DECLINES and keeps the warp tier gmem-direct, whose fragment load converts
+    per element (the same rule flash's ``stageable`` flag states). A byte slab's fill runs 16 B
+    chunks and its cp.async row pad is 16 B (``_stage.BYTE_SLAB_PAD``), so its inner span — and,
+    canonical-B, the gmem row stride N — must be 16-divisible."""
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
-    if atom.operand_dtype("a").nbytes < 2:
-        return None  # fp8 atoms: ldmatrix has no byte-fragment form on these arches — gmem-direct only
+    bk_elems = tile.bk * atom.atom_k
+    m, n = tile.m, tile.n
+    a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
     if inputs:
         for edge, role in ((c.a, "a"), (c.b, "b")):
             t = inputs.get(edge.input) if isinstance(edge, Load) else None
-            if t is not None and t.dtype != atom.operand_dtype(role):
-                return None
-    a_nbytes = atom.operand_dtype("a").nbytes
-    bk_elems = tile.bk * atom.atom_k
-    m, n = tile.m, tile.n
+            if t is None or t.dtype == atom.operand_dtype(role):
+                continue
+            if role == "b" and t.dtype.nbytes == 1 and b_nbytes == 2:
+                b_nbytes = 1  # fp8-B under a 16-bit atom: byte slab, convert at the drain
+                continue
+            return None
+    for eb, inner, row_axis in (
+        (a_nbytes, bk_elems, None),
+        (b_nbytes, bk_elems if c.b_trans else n.tile, None if c.b_trans else n.axis),
+    ):
+        if eb != 1:
+            continue
+        if inner % 16:
+            return None  # byte slab: 16 B chunks + the 16 B row pad need a 16-divisible inner span
+        if row_axis is not None and (not row_axis.extent.is_static or row_axis.extent.as_static() % 16):
+            return None  # canonical byte B: the 16 B gmem chunks stride rows of N bytes
     rank_ok = (
         isinstance(c.a, Load)
         and isinstance(c.b, Load)  # a descriptor needs a gmem address on BOTH edges
@@ -320,11 +339,18 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
         and _tma_operand_rank(c.b.index, n.axis.name, c.axis.name)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
-    tma_ok = stage.transport == "tma" and rank_ok and box_ok and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, n.mask, c.b_trans)
+    tma_ok = (
+        stage.transport == "tma"
+        and rank_ok
+        and box_ok
+        and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.b_trans)
+    )
     cp_ok = stage.transport == "cp.async" and _warp_cp_async(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
     if not (tma_ok or cp_ok):
         return None
-    slot_bytes = (m.tile + n.tile) * bk_elems * a_nbytes
+    pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
+    b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.b_trans else (bk_elems, n.tile + pad_b)
+    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + b_rows * b_cols * b_nbytes
     if slot_bytes > budget:
         return None
     depth = clamp_depth(stage, slot_bytes, budget)

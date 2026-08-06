@@ -629,6 +629,61 @@ static __device__ __forceinline__ void emmy_mma_m16n8k32_e5m2_f32(float* d, cons
 
 """
 
+# Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``LdmatrixLoad``
+# (a staged 1-byte operand), so every other kernel's source stays byte-identical. ldmatrix is
+# b16-only below sm_100a, so a staged fp8 slab drains through a cooperative per-lane gather with
+# the same lane→element maps as the gmem fragment loaders — and, where the slab keeps K
+# CONTIGUOUS per lane (the transposed-B N-major slab; every k32 A slab), the per-byte gathers
+# vectorize:
+#
+# - ``emmy_mma_load_b_smem_trans_f8_f16`` (W8A16, k16): each lane's (k, k+1) byte pair loads as
+#   ONE fp8x2 and converts with ONE hardware ``cvt.rn.f16x2.e4m3x2`` (the <cuda_fp8.h>
+#   ``operator __half2()``, low byte → low half — exactly the fragment's pair order). Same
+#   per-element convert as the gmem-direct path, so staged stays bit-identical to it.
+# - ``emmy_mma_load_{a,b_trans}_smem_b8v`` (W8A8, k32): each lane's 4-byte K run loads as ONE
+#   u32 (little-endian — byte j lands in fragment byte j, matching the ``_b8`` gathers).
+#
+# Alignment holds by construction: k offsets are 2-/4-element aligned, the padded byte-slab row
+# stride (``BYTE_SLAB_PAD``) is 16-divisible, and the slab base is 16 B-aligned (the byte-slab
+# ``Smem.align``). The K-STRIDED byte reads (a canonical K-major B slab) have no vector form and
+# reuse the gmem loader templates pointed at the slab instead.
+_F8_STAGED_PRELUDE = """\
+template <typename T, typename T2>
+static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_f8_f16(unsigned* r, const T* g, int ldm) {
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
+        __half2 h2 = __half2(*reinterpret_cast<const T2*>(g + grp * ldm + k));
+        r[i] = *reinterpret_cast<unsigned*>(&h2);
+    }
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_a_smem_b8v(unsigned* r, const T* g, int ldm) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int row = grp + ((i & 1) ? 8 : 0);          // M: groupID, +8 for the second row block
+        int col = (tig << 2) + ((i & 2) ? 16 : 0);  // K: 4*threadID_in_group, +16 for the k32 half
+        r[i] = *reinterpret_cast<const unsigned*>(p + row * ldm + col);
+    }
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_b8v(unsigned* r, const T* g, int ldm) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int k = (tig << 2) + (i ? 16 : 0);           // K: 4*threadID_in_group, +16 for the k32 half
+        r[i] = *reinterpret_cast<const unsigned*>(p + grp * ldm + k);
+    }
+}
+
+"""
+
 
 def _swizzle_prelude(kernel_op: KernelOp) -> str:
     """One ``emmy_swizzle_<mode>`` helper per swizzle mode the body uses — on ``LdmatrixLoad``
@@ -803,9 +858,12 @@ def render_kernelop(
     uses_mma_sync = any(isinstance(s, MmaSyncPtx) for s in kernel_op.body.iter())
     mma_sync_prelude = _MMA_SYNC_PRELUDE if uses_mma_sync else ""
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
-    # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate).
+    # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate). The
+    # staged byte-slab drain helpers likewise join only when a byte-slab drain is present.
     if any(isinstance(s, MmaSyncPtx) and s.ab_dtype in ("e4m3", "e5m2") for s in kernel_op.body.iter()):
         mma_sync_prelude += _MMA_F8_PRELUDE
+    if any(isinstance(s, LdmatrixLoad) and s.byte_slab for s in kernel_op.body.iter()):
+        mma_sync_prelude += _F8_STAGED_PRELUDE
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"

@@ -53,13 +53,12 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     The tile layer (``enumeration`` + ``assembly`` + ``split``) runs ABOVE the
     kernel pass layer; a tile pass importing ``lowering.kernel`` is a back-edge in
     the pass DAG — a tile pass depending on a downstream kernel pass's internals.
-    Structural predicates the two layers share (``is_matmul_reduce``,
-    ``segmentable_k_extent``, ``reduce_body_has_coupled_accum``,
-    ``classify_fragment_epilogue``, the fused-edge ``map_transform`` /
-    ``split_monoid_producer``) live in ``lowering/_predicates.py`` — pure ``ir.*``
-    queries imported by both layers.
+    What the two layers genuinely share lives in the ``lowering/`` root modules —
+    ``_addr`` (addressing algebra: ``gmem_row_stride``, ``BYTE_SLAB_PAD``) and
+    ``_reduction`` (``Reduction``, ``loop_state_head``) — pure ``ir.*`` queries and
+    layout facts imported by both layers.
 
-    If this fires: move the shared helper into ``lowering/_predicates`` and import
+    If this fires: move the shared helper into a ``lowering/`` root module and import
     it there from both layers, rather than reaching down into ``lowering/kernel``.
     """
     tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "tile"

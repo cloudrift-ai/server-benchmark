@@ -40,9 +40,9 @@ from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
-    BYTE_SLAB_PAD,
     CpAsyncTransport,
     CtaTile,
     Operand,
@@ -426,7 +426,7 @@ def _slab_operands(
     else). ``elems`` are the per-operand element dtypes (``DataType`` or ``None`` = the
     transport-level dtype) — a mixed-dtype scalar contraction (fp32 A × fp16 B) must size each slab
     and fill by its OWN element width. ``pads`` are the per-operand slab row pads in elements
-    (:data:`~emmy.compiler.pipeline.passes.lowering.kernel._stage.BYTE_SLAB_PAD` on a
+    (:data:`~emmy.compiler.pipeline.passes.lowering._addr.BYTE_SLAB_PAD` on a
     cp.async-staged byte slab; 0 everywhere else)."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):

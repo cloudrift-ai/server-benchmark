@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all test modules."""
 
+import json
 import os
 import random
 import subprocess
@@ -83,9 +84,41 @@ RECIPES_DIR = os.path.join(PROJECT_ROOT, "recipes")
 # tagged via @pytest.mark.xdist_group so `--dist=loadgroup` routes every
 # item in a bucket to the same worker. Theoretical makespan is the load
 # of the heaviest bucket (lower bound = longest single test).
+#
+# The pytest cache only helps a box that has already run the suite once —
+# CI starts every job with an empty one, so the balancing never fired there
+# and the long poles landed wherever chance put them. ``durations.json`` is
+# the checked-in baseline that makes the FIRST run balanced: a nodeid → seconds
+# map, regenerated with ``make test-durations`` (``pytest --write-durations``).
+# It holds only the entries worth scheduling around (see ``_MIN_RECORDED``);
+# anything absent is assumed cheap (``_UNKNOWN_COST``). A stale or partial
+# baseline costs balance, never correctness — the cache overlays it, so a local
+# run's own measurements always win over the committed numbers.
 
 _DURATIONS_KEY = "test_durations/call"
+_DURATIONS_FILE = os.path.join(os.path.dirname(__file__), "durations.json")
 _CALL_DURATIONS: dict[str, float] = {}
+
+#: Below this the entry is not worth a line in the baseline — a test this cheap
+#: cannot move the makespan, and listing all of them would churn the file on
+#: every rename.
+_MIN_RECORDED = 0.05
+#: What an unlisted test is assumed to cost when bucketing (see ``_MIN_RECORDED``).
+_UNKNOWN_COST = 0.05
+#: A test this slow MUST be in the baseline or the bucketing plans around a hole — the
+#: staleness gate below fails the run until it is recorded. Deliberately far above
+#: ``_MIN_RECORDED``: the bar has to survive the machine-speed spread (a CI runner is
+#: several times slower than a dev box), and only a pole-sized test can actually distort
+#: the plan. Nothing near the recording threshold can drift into this range.
+_GATE_SECONDS = 5.0
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--write-durations",
+        action="store_true",
+        help="Rewrite tests/durations.json (the checked-in LPT bucketing baseline) from this run's timings.",
+    )
 
 
 def pytest_runtest_logreport(report):
@@ -93,7 +126,45 @@ def pytest_runtest_logreport(report):
         _CALL_DURATIONS[report.nodeid] = report.duration
 
 
+def _load_baseline() -> dict[str, float]:
+    try:
+        with open(_DURATIONS_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
 def pytest_sessionfinish(session):
+    # ``workerinput`` marks an xdist WORKER — only the controller sees every
+    # test's report, and letting each worker write would race on the file.
+    is_controller = not hasattr(session.config, "workerinput")
+    if session.config.getoption("--write-durations") and _CALL_DURATIONS and is_controller:
+        # This run's measurements REPLACE the file rather than merging into it, so a
+        # renamed or deleted test drops out on its own. Merging kept ghosts alive, and a
+        # ghost is worse than a missing entry: the bucketer plans a slot for a test that
+        # will never run (the two whole-card gate entries, 340 s and 150 s, outlived the
+        # split into shards). Regenerate with `make test-durations`, which runs the WHOLE
+        # suite — pointing this at a subset writes a baseline covering only that subset.
+        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED}
+        with open(_DURATIONS_FILE, "w") as fh:
+            json.dump(dict(sorted(fresh.items())), fh, indent=1)
+            fh.write("\n")
+
+    # Staleness gate: a test heavy enough to shape the schedule must be IN the baseline,
+    # or CI plans its buckets around a hole and the new long pole lands wherever chance
+    # puts it — the exact failure this whole mechanism exists to prevent. Checked here
+    # rather than as a test case: only the controller, and only after the last report,
+    # holds every test's duration (an xdist worker sees just its own slice).
+    if is_controller and _CALL_DURATIONS:
+        baseline = _load_baseline()
+        missing = sorted(((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline), reverse=True)
+        if missing:
+            session.exitstatus = 1
+            print(f"\nERROR: {len(missing)} test(s) at or over {_GATE_SECONDS:g}s are missing from {_DURATIONS_FILE}:")
+            for d, n in missing:
+                print(f"  {d:7.1f}s  {n}")
+            print("Run `make test-durations` and commit the result, so the worker bucketing plans around them.")
+
     cache = getattr(session.config, "cache", None)
     if cache is None or not _CALL_DURATIONS:
         return
@@ -211,21 +282,20 @@ def pytest_collection_modifyitems(config, items):
         else:
             other_items.append(it)
 
+    # The committed baseline first, this box's own cache over it — a local run's
+    # measurements beat the checked-in numbers on the machine that took them,
+    # while CI (empty cache) still gets a balanced first run off the baseline.
+    durations = _load_baseline()
     cache = getattr(config, "cache", None)
-    if cache is None:
-        items[:] = cuda_items + other_items
-        return
-    durations = cache.get(_DURATIONS_KEY, {}) or {}
+    if cache is not None:
+        durations.update(cache.get(_DURATIONS_KEY, {}) or {})
     nworkers = _num_workers(config)
     if not durations or nworkers is None or nworkers < 2:
         items[:] = cuda_items + other_items
         return
 
-    known = sorted(durations[it.nodeid] for it in other_items if it.nodeid in durations)
-    fallback = known[len(known) // 2] if known else 0.0
-
     def dur(item) -> float:
-        return durations.get(item.nodeid, fallback)
+        return durations.get(item.nodeid, _UNKNOWN_COST)
 
     sorted_others = sorted(other_items, key=dur, reverse=True)
 
@@ -234,8 +304,14 @@ def pytest_collection_modifyitems(config, items):
     # nworkers we fall back to a single bucket (no-op grouping). Sum
     # CUDA-item durations into one CUDA load so it competes for ordering
     # with the other heavy buckets.
+    #
+    # Off-GPU there is nothing to reserve FOR: every CUDA item skips in
+    # microseconds, so the two chains cost nothing and holding workers back
+    # for them just shrinks the pool. That was the CI shape — a 4-core runner
+    # squeezed the whole suite onto 2 workers to reserve 2 for chains of
+    # pure skips.
     cuda_load = sum(dur(it) for it in cuda_items)
-    other_workers = max(1, nworkers - 2)
+    other_workers = max(1, nworkers - (2 if torch.cuda.is_available() else 0))
 
     # LPT: pop the lightest bucket, add this item, push back.
     buckets: list[tuple[float, int, list]] = [(0.0, w, []) for w in range(other_workers)]

@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint format git-sha-guard \
+.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -18,6 +18,7 @@ help:
 	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, push a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
+	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -46,8 +47,17 @@ format: setup
 # blowup on big register-tile kernels). This is the CORRECTNESS lane — -O1 changes
 # runtime perf, not numerics, and the deployable perf tests (tests/perf, -m perf) run
 # at -O3 via `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3.
+# --durations: the slowest tests are printed on every run (CI included), so a new long
+# pole is visible in the log the moment it lands rather than after someone profiles.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
+	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
+
+# Regenerate tests/durations.json — the checked-in per-test timings the conftest
+# LPT-buckets on, so CI's first (cache-less) run is balanced. Runs serially: xdist
+# workers contend for cores and would record inflated, unusable times. Commit the
+# result when the balance has drifted (a new heavy test, a big pass-cost change).
+test-durations: setup
+	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -q -p no:randomly --write-durations
 
 # The name the docs reference; the stock (no tune DB) lane is the default.
 bench-kernels: bench-kernels-clean

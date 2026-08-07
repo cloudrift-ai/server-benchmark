@@ -100,18 +100,6 @@ def _cp_async_width(slab_cols: int, elem_bytes: int) -> int:
     return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
 
 
-# Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
-# byte-gather drain (no ldmatrix below sm_100a — the fragment loads are per-lane byte gathers)
-# reads the slab at the fragment lane map's row strides, and a dense power-of-two byte row lands
-# every 4-row group in the same bank quartet (4-way conflicts measured by the lane→bank oracle on
-# both the k16 convert drain and the k32 repack drain, either B orientation). 16 extra bytes per
-# row breaks the stride while keeping every 16 B cp.async chunk aligned (the byte-staging
-# legality requires the data cols to be 16-divisible, so ``cols + 16`` stays 16 B-periodic).
-# Derived, not tuned — the same fixed-pad reasoning as the flash ``_twist._PAD``. cp.async only:
-# a TMA box deposit is dense (its byte slab stays unpadded and eats the measured conflicts).
-BYTE_SLAB_PAD = 16
-
-
 def cp_async_fill(
     *,
     slab: str,

@@ -166,6 +166,27 @@ expert, shared-none), not E/layer.
    isolated benches). Decode TPOT target: within 15% of the k-experts weight-bytes ceiling.
 3. A/B vs stock vLLM serving OLMoE bf16 on the same card.
 
+#### M1 findings (2026-08-06, RTX 5090, OLMoE fp16)
+
+- Landed: static expert twins (`moe.expert.one` / `moe.expert.bucket`) + the lean launch loop (lock/stream
+  hoisted around the per-expert loop, cupy weight views minted once at boot, pointer-swap zero-copy on
+  descriptor-free tiers — TMA descriptors bake pointers at build, verified wrong under a naive swap). Decode
+  c=1 TPOT 48 → **17.9 ms/token**; c=8 aggregate 186 tok/s; greedy parity unchanged; boot roofline audit clean.
+- Launch-chain breakdown: per-expert launch cost through the per-call symbolic path was 0.23 ms, of which the
+  12 MB weight copy is ~15 µs — **Python framing is the wall, not weight bytes**. Post-twins the residual is
+  ~117 µs × ~128 expert launches per step, eager.
+- A/B vs stock vLLM (same card, fused-MoE + FULL decode capture, warm): stock c=1 TPOT **2.15 ms** (at the
+  ~1.7 ms k-experts weight-bytes floor), c=8 **1599 tok/s** — emmy is 8.3–8.6× behind. **Launch-bound decode is
+  confirmed**, so per §2 the capture decision moves into M2: the per-expert Python launch chain must go
+  (fixed-sequence dispatch with graph-exec param updates, device-side indirection, per-layer graphs, or the
+  sorted grouped-GEMM pass), not be shaved.
+- Expert-shape golden seeding SKIPPED, deliberately: with decode launch-bound at ~9×, kernel-level tuning is
+  noise; goldens come after the dispatch model changes. (The M1 "within 15% of the weight-bytes ceiling" target
+  is not reachable under per-expert Python dispatch.)
+- Operational: stock vLLM's first OLMoE boot JIT-compiles FlashInfer `fused_moe_120` — unbounded ninja
+  parallelism OOM-kills nvcc on a 60 GB box (`MAX_JOBS=4` fixes it), and the 600 s engine-core startup timeout
+  can fire mid-JIT (a retry resumes the cached build).
+
 ### M2 — prefill lane + capture decision
 
 1. Prefill expert bucket twin (+ rider-style split) with `.dynM` fallback; seed the `.dynM` expert goldens.

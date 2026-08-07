@@ -294,6 +294,8 @@ class EmmyGenRunner:
         prefill_bucket=0,
         moe=None,
         expert_sym=None,
+        expert_decode=None,
+        expert_m1=None,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
@@ -310,9 +312,21 @@ class EmmyGenRunner:
         self._prefill_bucket = prefill_bucket
         self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
         # MoE third seam: per-layer dict (router module + the 3-D expert weight tensors) or None
-        # for dense layers; one shared expert program serves every layer (weights are inputs).
+        # for dense layers; one shared expert program PER TIER serves every layer (weights are
+        # inputs): static M=decode_bucket and M=1 twins for the decode hot path, the symbolic
+        # program as the any-width fallback. A tier whose schedule stages no operand through a
+        # TMA descriptor (descriptors bake pointers at build) launches with POINTER-SWAPPED
+        # per-expert weight slices — no D2D weight copy; descriptor-bearing tiers fall back to
+        # the upload copy, still correct.
         self._moe = moe
         self._expert_sym = expert_sym
+        self._expert_decode = expert_decode
+        self._expert_m1 = expert_m1
+        self._expert_swap_safe = {
+            id(prog): not any("_desc" in a for launch in prog.program.compiled.launches for a in launch.arg_names)
+            for prog in (expert_sym, expert_decode, expert_m1)
+            if prog is not None
+        }
         # Layer-0 convenience scalars — correct for homogeneous models (Qwen3 / Llama). Gemma-4's
         # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
         self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta[0]
@@ -513,7 +527,12 @@ class EmmyGenRunner:
         # device memory instead of scaling with num_layers.
         arena = BufferArena()
         moe_meta: list = []  # per-layer: None (dense) or the router + 3-D expert weight tensors
-        expert_sym = None  # ONE symbolic expert program shared by every MoE layer (weights are inputs)
+        # ONE expert program per tier, shared by every MoE layer (weights are inputs): the
+        # symbolic any-width program plus static decode-bucket / M=1 twins (the decode hot
+        # path — the symbolic grids are the wrong shape at decode widths).
+        expert_sym = None
+        expert_decode = None
+        expert_m1 = None
         for i, block in enumerate(layers):
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
@@ -537,20 +556,48 @@ class EmmyGenRunner:
                 shape_key = (tuple(experts.gate_up_proj.shape[1:]), tuple(experts.down_proj.shape[1:]), type(experts.act_fn).__name__)
                 if expert_sym is None:
                     expert_shape_key = shape_key
+                    example_w = [
+                        torch.zeros(*experts.gate_up_proj.shape[1:], dtype=dtype),
+                        torch.zeros(*experts.down_proj.shape[1:], dtype=dtype),
+                    ]
                     with torch.device("cpu"):
                         expert_sym = build(
                             "moe.expert.sym",
                             expert_w,
-                            [
-                                torch.zeros(8, hidden, dtype=dtype),
-                                torch.zeros(*experts.gate_up_proj.shape[1:], dtype=dtype),
-                                torch.zeros(*experts.down_proj.shape[1:], dtype=dtype),
-                            ],
+                            [torch.zeros(8, hidden, dtype=dtype), *example_w],
                             ["x"],
                             np_dtype,
                             arena=arena,
                             capacity=max_tokens,
                         )
+                        # Static expert twins — the decode hot path. Same failure contract as
+                        # the per-layer twins: a compile failure drops the tier, the symbolic
+                        # program stays the correct fallback. Names avoid the ".decode"/".m1"
+                        # pack keep-filter suffixes — these tiers are not gated by the per-layer
+                        # twin flags.
+                        if decode_ok:
+                            try:
+                                expert_decode = build(
+                                    "moe.expert.bucket",
+                                    expert_w,
+                                    [torch.zeros(decode_bucket, hidden, dtype=dtype), *example_w],
+                                    None,
+                                    np_dtype,
+                                    arena=arena,
+                                )
+                            except Exception as ex:  # noqa: BLE001 — any compile failure → symbolic fallback
+                                logger.warning("[gen_runner] expert bucket-twin compile failed (%s); experts ride the symbolic program", ex)
+                        try:
+                            expert_m1 = build(
+                                "moe.expert.one",
+                                expert_w,
+                                [torch.zeros(1, hidden, dtype=dtype), *example_w],
+                                None,
+                                np_dtype,
+                                arena=arena,
+                            )
+                        except Exception as ex:  # noqa: BLE001 — any compile failure → bucket/symbolic fallback
+                            logger.warning("[gen_runner] expert M=1 twin compile failed (%s); single-row experts ride the bucket twin", ex)
                 elif shape_key != expert_shape_key:
                     raise NotImplementedError(
                         f"MoE layers disagree on expert shape/activation (layer {i}: {shape_key} vs {expert_shape_key}) — "
@@ -794,6 +841,8 @@ class EmmyGenRunner:
             prefill_bucket=prefill_bucket,
             moe=moe_meta if any(m is not None for m in moe_meta) else None,
             expert_sym=expert_sym,
+            expert_decode=expert_decode,
+            expert_m1=expert_m1,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
@@ -826,6 +875,11 @@ class EmmyGenRunner:
                 (f"chunk.m{prefill_bucket}", "post", runner._post_prefill),
             )
             if plist is not None and plist[li] is not None
+        ]
+        named += [
+            (f"moe.expert.{tag}", prog)
+            for tag, prog in ((f"bucket.m{decode_bucket}", expert_decode), ("one.m1", expert_m1))
+            if prog is not None
         ]
         audit_boot_programs(named)
         return runner
@@ -896,15 +950,22 @@ class EmmyGenRunner:
         if self._moe is not None:
             # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
             # vLLM's profiled footprint (same contract as the embed table above). The expert
-            # tensors ARE the model's dominant weights; per-expert launches feed dim-0 slices
-            # of them as program inputs (the launch upload still copies each slice — the decode
-            # perf lane retires that).
-            for m in self._moe:
-                if m is None:
-                    continue
-                m["gate"] = m["gate"].to("cuda")
-                m["gate_up"] = m["gate_up"].cuda()
-                m["down"] = m["down"].cuda()
+            # tensors ARE the model's dominant weights. The per-expert cupy views are minted
+            # ONCE here (``cp.from_dlpack`` negotiates a stream sync per call — 2·E·layers of
+            # them don't belong on the per-step path) and reused by every expert launch.
+            import cupy as cp
+
+            from emmy.compiler.backend.gpu_lock import gpu_lock
+
+            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                for m in self._moe:
+                    if m is None:
+                        continue
+                    m["gate"] = m["gate"].to("cuda")
+                    m["gate_up"] = m["gate_up"].cuda()
+                    m["down"] = m["down"].cuda()
+                    m["gate_up_cp"] = [cp.from_dlpack(w) for w in m["gate_up"]]
+                    m["down_cp"] = [cp.from_dlpack(w) for w in m["down"]]
         self._dev_ready = True
 
     def adopt_embed_table(self, weight, *, scale=1.0):
@@ -1020,17 +1081,58 @@ class EmmyGenRunner:
 
     def _moe_combine(self, moe, xn):
         """The torch half of the MoE third seam: route via the HF router module (linear +
-        softmax + top-k — ops the tracer cannot map), launch the shared expert program once per
-        HIT expert on that expert's routed rows (per-expert dim-0 slices of the 3-D weight
-        tensors passed as program inputs — the launch upload D2D-copies each slice into the
-        program's input buffer; retiring that copy is the decode perf lane's work), and
-        weighted-scatter the partials. ``xn[T, H]`` → combined expert output ``[T, H]``."""
+        softmax + top-k — ops the tracer cannot map), launch the tier-routed shared expert
+        program once per HIT expert on that expert's routed rows, and weighted-scatter the
+        partials. ``xn[T, H]`` → combined expert output ``[T, H]``. The GPU lock and the cupy
+        external-stream bind are hoisted around the WHOLE per-expert loop — per-launch framing,
+        not the weight bytes, was the measured decode wall (~0.23 ms/launch through the
+        symbolic per-call path)."""
+        import cupy as cp
+        import torch
+
+        from emmy.compiler.backend.gpu_lock import gpu_lock
+
         self._ensure_device()
-        return combine_routed_experts(
-            xn,
-            moe["gate"](xn),
-            lambda e, rows: self._expert_sym.run_device_sym([rows, moe["gate_up"][e], moe["down"][e]])[0],
-        )
+        gated = moe["gate"](xn)
+        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            return combine_routed_experts(xn, gated, lambda e, rows: self._launch_expert(moe, e, rows))
+
+    def _launch_expert(self, moe, e, rows):
+        """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock + the
+        external-stream bind). Tier routing mirrors the main programs: M=1 twin, then the
+        decode-bucket twin (pad → run → slice; stale prefix rows are per-token-independent),
+        then the symbolic program. A swap-safe tier (no TMA descriptors — descriptors bake
+        pointers at build) takes the per-expert weight slices by POINTER SWAP into
+        ``program.arrays`` — no D2D weight copy; otherwise the slices upload normally. Eager
+        only — ``run_once`` on torch's current stream, never under an outer capture (MoE
+        serves eager; see the boot guard)."""
+        import cupy as cp
+        import torch
+
+        t = rows.shape[0]
+        if t == 1 and self._expert_m1 is not None:
+            prog, sym = self._expert_m1, False
+        elif self._expert_decode is not None and t <= self._decode_bucket:
+            prog, sym = self._expert_decode, False
+        else:
+            prog, sym = self._expert_sym, True
+        p = prog.program
+        feed = {"x": cp.from_dlpack(rows.detach().contiguous())}
+        w_gu, w_dn = moe["gate_up_cp"][e], moe["down_cp"][e]
+        if self._expert_swap_safe[id(prog)]:
+            p.arrays["w_gate_up"] = w_gu
+            p.arrays["w_down"] = w_dn
+        else:
+            feed["w_gate_up"] = w_gu
+            feed["w_down"] = w_dn
+        if sym:
+            p.set_sym_values({"num_tokens": t})
+        p.upload_prefix_device(feed)
+        p.run_once()
+        outs = p.output_prefix_device({"num_tokens": t} if sym else None)
+        # A VIEW of the shared output buffer: the caller's weighted index_add_ consumes it
+        # before the next expert launch overwrites it (same stream, ordered).
+        return torch.from_dlpack(outs[prog.output_names[0]])[:t]
 
     def post_attn_backing(self, layer: int, rows: int):
         """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post

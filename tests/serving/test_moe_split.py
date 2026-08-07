@@ -73,6 +73,8 @@ def test_moe_expert_shares_one_shape_across_experts():
     torch.manual_seed(0)
     cfg = _tiny_olmoe_config(transformers)
     block = OlmoeDecoderLayer(cfg, layer_idx=0).eval()
+    for p in block.parameters():  # bare-layer params are torch.empty — init or the assert below is nondeterministic
+        torch.nn.init.normal_(p, std=0.2)
     _, _, expert = build_moe_split_wrapper(block)
     _, experts = moe_block_parts(block.mlp)
 

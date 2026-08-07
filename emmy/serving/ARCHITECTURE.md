@@ -152,8 +152,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   outputs; the layer output is a fresh torch tensor), and serve eager only — the routed dispatch host-syncs, which a
   whole-step decode capture cannot record: `_is_moe_model` in `emmy/commands/serve.py` auto-adds `--enforce-eager`
   (local-config probe, UX only) and `EmmyGenModel.__init__` authoritatively rejects an MoE boot with capture enabled.
-  The expert-slice launch upload still D2D-copies each slice into the program's input buffer; retiring that copy
-  (and the symbolic-tier cost at decode widths) is the decode perf lane's work.
+  **Expert tiers (decode perf lane):** the expert program comes in three tiers mirroring the main ladder — static
+  M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), and the symbolic
+  fallback — routed per HIT expert by its routed row count. Per-launch framing, not weight bytes, was the measured
+  decode wall (~0.23 ms/launch through the per-call symbolic path), so `_moe_combine` hoists the GPU lock + the
+  cupy stream bind around the whole per-expert loop and `_launch_expert` issues bare `upload_prefix_device` +
+  `run_once` calls; the per-expert cupy weight views are minted once at `_ensure_device`. A tier whose schedule
+  stages no operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by
+  POINTER SWAP into `program.arrays` — no D2D weight copy; descriptor-bearing tiers upload the slices normally.
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does

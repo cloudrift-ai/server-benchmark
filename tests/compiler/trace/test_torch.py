@@ -472,6 +472,23 @@ def test_trace_chunk_rejects_dynamic_chunked_extent():
         _handle_chunk(graph, fx_node, {"x": source_id})
 
 
+def test_trace_rejects_unmapped_multi_output_op():
+    """Multi-output aten ops without a tracer mapping (e.g. ``aten.topk``) raise
+    instead of being silently dropped into an arity-broken graph."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class TopK(nn.Module):
+        def forward(self, x):
+            values, _ = torch.topk(x, 2, dim=-1)
+            return values * 2.0
+
+    with pytest.raises(NotImplementedError, match="topk"):
+        trace_module(TopK(), (torch.randn(2, 8),))
+
+
 def test_trace_chunk_rejects_invalid_tuple_index():
     """Invalid tuple getitem indices name the tuple arity in the error."""
     from types import SimpleNamespace

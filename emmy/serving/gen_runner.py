@@ -143,6 +143,24 @@ class _Program:
             return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
 
 
+def combine_routed_experts(xn, gated, run_expert):
+    """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
+    parity tests so both always exercise the same math. ``gated`` is the HF router module's
+    return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``; each HIT expert
+    gets one ``run_expert(e, rows)`` call on its routed rows and the partials weighted-scatter
+    into a fresh ``[T, H]``. Scores cast to the activation dtype — some HF routers (Mixtral)
+    return fp32 scores, and ``index_add_`` requires matching dtypes."""
+    import torch
+
+    scores, indices = gated[-2], gated[-1]
+    scores = scores.to(xn.dtype)
+    out = torch.zeros_like(xn)
+    for e in indices.unique().tolist():
+        tok, pos = torch.where(indices == e)
+        out.index_add_(0, tok, run_expert(e, xn[tok]) * scores[tok, pos, None])
+    return out
+
+
 def _pad_rows(arr, bucket):
     """Pad axis 0 from ``t`` up to ``bucket`` with zeros. The decode programs are static at
     M=bucket; padding rows are computed then sliced away — safe because pre/post are
@@ -239,7 +257,12 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
 
     build_args = example_args
     if capacity is not None and argnames:
-        build_args = [torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) for a in example_args]
+        # Only the args whose axis 0 IS the symbolic token axis get resized to capacity — a
+        # non-symbolic arg (an expert program's weight slice) keeps its true shape.
+        build_args = [
+            torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) if n in argnames else a
+            for n, a in zip(plan.inputs, example_args, strict=True)
+        ]
     feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(plan.inputs, build_args, strict=True)}
     with gpu_lock():
         const_feed = _bind_plan_constants(plan, sources, dev_consts)
@@ -269,6 +292,8 @@ class EmmyGenRunner:
         pre_prefill=None,
         post_prefill=None,
         prefill_bucket=0,
+        moe=None,
+        expert_sym=None,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
@@ -284,6 +309,10 @@ class EmmyGenRunner:
         self._post_prefill = post_prefill
         self._prefill_bucket = prefill_bucket
         self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
+        # MoE third seam: per-layer dict (router module + the 3-D expert weight tensors) or None
+        # for dense layers; one shared expert program serves every layer (weights are inputs).
+        self._moe = moe
+        self._expert_sym = expert_sym
         # Layer-0 convenience scalars — correct for homogeneous models (Qwen3 / Llama). Gemma-4's
         # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
         self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta[0]
@@ -383,7 +412,7 @@ class EmmyGenRunner:
         import numpy as np
         import torch
 
-        from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+        from emmy.compiler.trace.huggingface import build_attention_split_wrapper, build_moe_split_wrapper, moe_block_parts
 
         dtype = getattr(torch, dtype_str)
         np_dtype = np.dtype(dtype_str)
@@ -483,12 +512,53 @@ class EmmyGenRunner:
         # all layers' activation buffers + scratch slabs share one layer's worth of
         # device memory instead of scaling with num_layers.
         arena = BufferArena()
+        moe_meta: list = []  # per-layer: None (dense) or the router + 3-D expert weight tensors
+        expert_sym = None  # ONE symbolic expert program shared by every MoE layer (weights are inputs)
         for i, block in enumerate(layers):
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
             logger.info("[gen_runner] compiling layer %d/%d (pre + post%s)...", i + 1, len(layers), " + decode" if decode_ok else "")
-            pre_w, post_w = build_attention_split_wrapper(block)
+            moe_parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
+            if moe_parts is not None:
+                import copy
+
+                gate, experts = moe_parts
+                pre_w, post_w, expert_w = build_moe_split_wrapper(block)
+                moe_meta.append(
+                    {
+                        "gate": copy.deepcopy(gate).to(dtype),
+                        "gate_up": experts.gate_up_proj.detach().to(dtype),
+                        "down": experts.down_proj.detach().to(dtype),
+                    }
+                )
+                # ONE expert program serves every MoE layer, so the expert shape and activation
+                # must be uniform across layers — verify, don't assume.
+                shape_key = (tuple(experts.gate_up_proj.shape[1:]), tuple(experts.down_proj.shape[1:]), type(experts.act_fn).__name__)
+                if expert_sym is None:
+                    expert_shape_key = shape_key
+                    with torch.device("cpu"):
+                        expert_sym = build(
+                            "moe.expert.sym",
+                            expert_w,
+                            [
+                                torch.zeros(8, hidden, dtype=dtype),
+                                torch.zeros(*experts.gate_up_proj.shape[1:], dtype=dtype),
+                                torch.zeros(*experts.down_proj.shape[1:], dtype=dtype),
+                            ],
+                            ["x"],
+                            np_dtype,
+                            arena=arena,
+                            capacity=max_tokens,
+                        )
+                elif shape_key != expert_shape_key:
+                    raise NotImplementedError(
+                        f"MoE layers disagree on expert shape/activation (layer {i}: {shape_key} vs {expert_shape_key}) — "
+                        f"the shared expert program assumes uniform experts across layers"
+                    )
+            else:
+                pre_w, post_w = build_attention_split_wrapper(block)
+                moe_meta.append(None)
             # Per-wrapper device-constant caches: the symbolic program and its static
             # decode-bucket twin bind the SAME weights — share one upload, not two.
             pre_consts: dict = {}
@@ -620,10 +690,15 @@ class EmmyGenRunner:
         # protective copy and stays), and the decode/symbolic paths never interleave within one
         # step (the runner routes on T). Rewiring happens before any run or capture, so both the
         # per-program graphs and vLLM's outer whole-step capture bake the chained pointers.
+        # MoE post programs are EXCLUDED from every chaining block below (the two-output guard):
+        # their layer output is a fresh torch tensor (h + expert combine), so a rewire buys no
+        # skip — and h must survive the torch interlude, not sit on the next pre's input backing.
         if decode_ok and pre_decode and post_decode:
             pre_in = pre_decode[0].input_names[0]
             shared_in = pre_decode[0].program.arrays[pre_in]
             for prog in post_decode:
+                if len(prog.output_names) != 1:
+                    continue
                 out_name = prog.output_names[0]
                 if prog.program.arrays[out_name].nbytes == shared_in.nbytes:
                     prog.program.arrays[out_name] = shared_in
@@ -637,6 +712,8 @@ class EmmyGenRunner:
             m1_in = pre_m1[0].input_names[0]
             m1_shared = pre_m1[0].program.arrays[m1_in]
             for prog in post_m1:
+                if len(prog.output_names) != 1:
+                    continue
                 out_name = prog.output_names[0]
                 cur = prog.program.arrays[out_name]
                 if cur.shape == m1_shared.shape and cur.dtype == m1_shared.dtype:
@@ -657,6 +734,8 @@ class EmmyGenRunner:
             sym_in = pre_programs[0].input_names[0]
             sym_shared = pre_programs[0].program.arrays[sym_in]
             for prog in post_programs:
+                if len(prog.output_names) != 1:
+                    continue
                 out_name = prog.output_names[0]
                 if prog.program.arrays[out_name].nbytes == sym_shared.nbytes:
                     prog.program.arrays[out_name] = sym_shared
@@ -664,6 +743,8 @@ class EmmyGenRunner:
             pf_in = pre_prefill[0].input_names[0]
             pf_shared = pre_prefill[0].program.arrays[pf_in]
             for prog in post_prefill:
+                if len(prog.output_names) != 1:
+                    continue
                 out_name = prog.output_names[0]
                 if prog.program.arrays[out_name].nbytes == pf_shared.nbytes:
                     prog.program.arrays[out_name] = pf_shared
@@ -711,9 +792,11 @@ class EmmyGenRunner:
             pre_prefill=pre_prefill if use_prefill else None,
             post_prefill=post_prefill if use_prefill else None,
             prefill_bucket=prefill_bucket,
+            moe=moe_meta if any(m is not None for m in moe_meta) else None,
+            expert_sym=expert_sym,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
-        if runner.has_device_decode:
+        if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is
             # ~1.9 GiB for gemma-4-12B) lands on memory the KV cache already claimed
@@ -768,6 +851,11 @@ class EmmyGenRunner:
     def forward_layer_post(self, layer, attn_out, residual):
         """``(attn_out[T,Hq·D], residual[T,H])`` numpy → ``layer_out[T, H]`` numpy. Decode-bucketed
         like ``forward_layer_pre``."""
+        if self._moe is not None and self._moe[layer] is not None:
+            raise NotImplementedError(
+                "MoE layers run device-resident only — the routed expert dispatch has no host numpy path; "
+                "serve within the compiled programs' token capacity"
+            )
         a = attn_out.astype(self._np_dtype, copy=False)
         r = residual.astype(self._np_dtype, copy=False)
         t = a.shape[0]
@@ -805,6 +893,18 @@ class EmmyGenRunner:
         if getattr(self, "_embed_weight_dev", None) is None:
             self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
         self._norm_dev = copy.deepcopy(self._norm).to("cuda")
+        if self._moe is not None:
+            # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
+            # vLLM's profiled footprint (same contract as the embed table above). The expert
+            # tensors ARE the model's dominant weights; per-expert launches feed dim-0 slices
+            # of them as program inputs (the launch upload still copies each slice — the decode
+            # perf lane retires that).
+            for m in self._moe:
+                if m is None:
+                    continue
+                m["gate"] = m["gate"].to("cuda")
+                m["gate_up"] = m["gate_up"].cuda()
+                m["down"] = m["down"].cuda()
         self._dev_ready = True
 
     def adopt_embed_table(self, weight, *, scale=1.0):
@@ -885,25 +985,52 @@ class EmmyGenRunner:
     def forward_layer_post_device(self, layer, attn_out, residual):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]``
         CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
-        :meth:`forward_layer_pre_device`."""
+        :meth:`forward_layer_pre_device`. A MoE layer's post program returns ``(h, xn)``; the
+        routed expert dispatch + weighted combine run here in torch (the third seam) and the
+        layer output is ``h + combine``."""
+        outs = self._route_post_device(layer, attn_out, residual)
+        moe = self._moe[layer] if self._moe is not None else None
+        if moe is None:
+            return outs[0]
+        h, xn = outs
+        return h + self._moe_combine(moe, xn)
+
+    def _route_post_device(self, layer, attn_out, residual):
+        """Tier-route one post program launch; returns the full output list (1 output for a
+        dense layer's post, 2 — ``h, xn`` — for a MoE layer's post_attn)."""
         t = attn_out.shape[0]
         if t == 1 and self._post_m1 is not None:
-            return self._post_m1[layer].run_device([attn_out, residual])[0]
+            return self._post_m1[layer].run_device([attn_out, residual])
         if self._post_decode is not None and t <= self._decode_bucket:
-            return self._post_decode[layer].run_device([attn_out, residual])[0]
+            return self._post_decode[layer].run_device([attn_out, residual])
         if self._post_prefill is not None and t == self._prefill_bucket:
-            return self._post_prefill[layer].run_device([attn_out, residual])[0]
+            return self._post_prefill[layer].run_device([attn_out, residual])
         if 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: same slice-bound joint destination as the pre path. The residual reads are
             # ordered before the overwrites: each half's upload copies its residual slice into
             # the program's own buffer before that half's kernels run, and the NEXT layer's
             # post uploads its residual (this dest) before its own halves overwrite it.
             pb = self._prefill_bucket
-            dest = self._rider_dest("hidden", t, residual.shape[1], residual)
-            self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[dest[:pb]])
-            self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[dest[pb:]])
-            return dest
-        return self._post[layer].run_device_sym([attn_out, residual])[0]
+            names = ("hidden",) if len(self._post_prefill[layer].output_names) == 1 else ("hidden", "moe_xn")
+            dests = [self._rider_dest(nm, t, residual.shape[1], residual) for nm in names]
+            self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[d[:pb] for d in dests])
+            self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[d[pb:] for d in dests])
+            return dests
+        return self._post[layer].run_device_sym([attn_out, residual])
+
+    def _moe_combine(self, moe, xn):
+        """The torch half of the MoE third seam: route via the HF router module (linear +
+        softmax + top-k — ops the tracer cannot map), launch the shared expert program once per
+        HIT expert on that expert's routed rows (per-expert dim-0 slices of the 3-D weight
+        tensors passed as program inputs — the launch upload D2D-copies each slice into the
+        program's input buffer; retiring that copy is the decode perf lane's work), and
+        weighted-scatter the partials. ``xn[T, H]`` → combined expert output ``[T, H]``."""
+        self._ensure_device()
+        return combine_routed_experts(
+            xn,
+            moe["gate"](xn),
+            lambda e, rows: self._expert_sym.run_device_sym([rows, moe["gate_up"][e], moe["down"][e]])[0],
+        )
 
     def post_attn_backing(self, layer: int, rows: int):
         """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post

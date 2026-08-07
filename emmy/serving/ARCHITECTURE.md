@@ -138,6 +138,22 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   pointers and the two-phase discipline).
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
+  **MoE third seam (token-choice top-k, e.g. OLMoE):** a layer whose `mlp` exposes the transformers-v5 experts
+  interface (`moe_block_parts` — a `gate` router beside 3-D `gate_up_proj (E, 2·I, H)` / `down_proj (E, H, I)`
+  parameters) is carved by `build_moe_split_wrapper` instead: its post program (`post_attn`) computes o_proj +
+  residual + post-attention norm and returns BOTH `h` and the normed `xn` (the norm output must materialize at the
+  seam — it is shared across the k routed experts, so the norm→gate⊗up fused form is out of reach by design), and the
+  layer output is assembled in torch (`_moe_combine`): the HF router module (linear + softmax + top-k — ops the
+  tracer cannot map) runs on `xn`, each HIT expert launches ONE shared expert program
+  (`moe.expert.sym`: `expert(x, w_gate_up, w_down)` with the weights as forward args → graph INPUTS, fed per-expert
+  dim-0 slices of the 3-D tensors, which live on device beside the routers via `_ensure_device`), and the partials
+  weighted-`index_add_` into `h`. Program count is 2/layer + ONE expert program total — not `E`/layer. MoE layers are
+  device-resident only (`forward_layer_post` raises on the host path), are excluded from post→pre chaining (two
+  outputs; the layer output is a fresh torch tensor), and serve eager only — the routed dispatch host-syncs, which a
+  whole-step decode capture cannot record: `_is_moe_model` in `emmy/commands/serve.py` auto-adds `--enforce-eager`
+  (local-config probe, UX only) and `EmmyGenModel.__init__` authoritatively rejects an MoE boot with capture enabled.
+  The expert-slice launch upload still D2D-copies each slice into the program's input buffer; retiring that copy
+  (and the symbolic-tier cost at decode widths) is the decode perf lane's work.
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does

@@ -77,6 +77,16 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   no seam for the `hidden * per_layer_input` multiply and would silently drop it
   (`tests/compiler/trace/test_huggingface.py`).
 
+- `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
+  (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a `gate` router module
+  beside 3-D `gate_up_proj (E, 2·I, H)` / `down_proj (E, H, I)` expert parameters). `pre` is the shared q/k/v carve
+  (which also handles OLMoE's FLAT q/k norm placement — norm width == projection width, applied before the head
+  reshape — and rejects `clip_qkv` loudly); `post_attn(attn_out, residual) → (h, xn)` stops at the post-attention
+  norm (the router and experts consume `xn` outside the graph); `expert(x, w_gate_up, w_down)` takes the weights as
+  FORWARD ARGUMENTS so they trace as graph inputs — one compiled program serves every expert via per-expert dim-0
+  slices at launch. The router (topk — untraceable) and the weighted combine stay in torch, in the serving runner.
+  Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+
 - `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
   a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at
   every seq), and a whole-model trace materializes the banded mask as an opaque additive tensor. The stamp sets

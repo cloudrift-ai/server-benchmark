@@ -33,6 +33,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   manages this memory in fixed-size pieces.
 - **Hugging Face** — An ecosystem for publishing and loading models, datasets, and related tools. Emmy can trace
   compatible models loaded through Hugging Face libraries.
+- **Mixture of experts (MoE)** — A transformer variant whose feed-forward block holds many independent "expert"
+  networks; a small router picks a few experts per token (token-choice top-k) and their outputs are combined by the
+  router's weights. Only the chosen experts run, so compute per token is a fraction of the weight count.
+- **MoE third seam** — How Emmy serves an MoE layer: the compiled post-attention program stops at the post-attention
+  norm, the router and the weighted combine run in plain torch, and each chosen expert runs one shared compiled
+  expert program that receives that expert's weight slices as inputs. "Third" because the generative serving loop
+  already alternates compiled programs with torch at two places (RoPE and paged attention).
 
 ## Compiler concepts
 

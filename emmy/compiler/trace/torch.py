@@ -563,6 +563,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # ``_op_shape`` when a downstream reshape / view references them via
     # ``args``; making them graph nodes would only confuse the matcher.
     val = fx_node.meta.get("val")
+    if isinstance(val, (list, tuple)):
+        raise NotImplementedError(f"no tracer mapping for multi-output op aten.{op_name or fx_node.target} ({len(val)} outputs)")
     if val is not None and not hasattr(val, "shape"):
         return
     name = fx_node.name

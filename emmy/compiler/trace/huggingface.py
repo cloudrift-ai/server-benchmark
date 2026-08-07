@@ -269,15 +269,80 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
+def _build_pre_wrapper(block):
+    """The shared q/k/v carve of one HF decoder layer: ``pre(hidden[T, H]) -> (q, k, v)`` runs
+    ``input_layernorm`` → separate projections → reshape-into-heads → q/k(/v) norm, returning
+    **un-rotated** q,k,v in the 2-D seam ABI. Used by both the dense and the MoE split builders;
+    carries the structural probes (PLE / clip_qkv rejects, norm placement, ``attention_k_eq_v``)."""
+    import torch.nn as nn
+
+    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if ple_dim:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: block carries Per-Layer Embeddings "
+            f"(hidden_size_per_layer_input={ple_dim}, Gemma-nano E2B/E4B) — the attention-split carve "
+            f"would silently drop the per_layer_input multiply; this model is not servable via the split path"
+        )
+
+    attn = block.self_attn
+    clip_qkv = getattr(getattr(attn, "config", None), "clip_qkv", None)
+    if clip_qkv is not None:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: clip_qkv={clip_qkv} (OLMo-style q/k/v clamping) has no seam in the "
+            f"attention-split carve — the pre wrapper would silently skip the clamp, corrupting outputs"
+        )
+    head_dim = attn.head_dim
+    num_heads = attn.q_proj.out_features // head_dim
+    num_kv_heads = attn.k_proj.out_features // head_dim
+    q_norm = getattr(attn, "q_norm", None)
+    k_norm = getattr(attn, "k_norm", None)
+    v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
+    # Two q/k-norm placements exist: Qwen3 / Gemma-3/4 normalize PER HEAD over head_dim (after the
+    # head reshape); OLMoE normalizes the FLAT projection (before the reshape) with a norm sized
+    # over the whole projection width. Distinguish them by the norm's own width.
+    flat_qk_norm = q_norm is not None and q_norm.weight.numel() != head_dim
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_layernorm = block.input_layernorm
+            self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, attn.v_proj
+            self.q_norm, self.k_norm, self.v_norm = q_norm, k_norm, v_norm
+
+        def forward(self, hidden):
+            h = self.input_layernorm(hidden)  # [T, H]
+            t = h.shape[0]
+            if flat_qk_norm:  # OLMoE: RMSNorm over the flat projection, before the head reshape
+                q = self.q_norm(self.q_proj(h)).view(t, num_heads, head_dim)
+                k = self.k_norm(self.k_proj(h)).view(t, num_kv_heads, head_dim)
+                v = self.v_proj(h).view(t, num_kv_heads, head_dim)
+                return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
+            q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
+            kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
+            # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
+            # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
+            v = self.v_proj(h).view(t, num_kv_heads, head_dim) if self.v_proj is not None else kp
+            k = kp
+            if self.q_norm is not None:
+                q = self.q_norm(q)  # per-head RMSNorm over D
+                k = self.k_norm(kp)
+            if self.v_norm is not None:
+                v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
+            return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
+
+    return Pre()
+
+
 def build_attention_split_wrapper(block):
     """Carve SDPA out of one HF decoder layer (Phase 1). Returns ``(pre, post)`` ``nn.Module``s over
     the flattened **``[num_tokens, H]``** per-token layout:
 
     - ``pre(hidden[T, H]) -> (q, k, v)`` runs ``input_layernorm`` → separate
       ``q_proj`` / ``k_proj`` / ``v_proj`` → reshape-into-heads → per-head ``q_norm`` /
-      ``k_norm`` (Qwen3 only), and returns **un-rotated** q,k,v in the 2-D seam ABI
-      ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what vLLM's ``Attention.forward`` consumes.
-      RoPE is applied downstream (by vLLM, or by the test/oracle reference).
+      ``k_norm`` (Qwen3 only; OLMoE's FLAT pre-reshape placement is handled), and returns
+      **un-rotated** q,k,v in the 2-D seam ABI ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what
+      vLLM's ``Attention.forward`` consumes. RoPE is applied downstream (by vLLM, or by the
+      test/oracle reference).
     - ``post(attn_out[T, Hq·D], residual[T, H]) -> layer_out[T, H]`` runs ``o_proj`` →
       ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual. **Gemma-3/4** is
       instead a 4-norm layer: ``o_proj(attn)`` and ``mlp(...)`` each get wrapped in their OWN
@@ -293,48 +358,13 @@ def build_attention_split_wrapper(block):
     Qwen3 / Gemma-3/4 (q/k norm) and Llama (no q/k norm) all share the ``pre``; the ``post``
     is the Llama/Qwen 2-norm form or the Gemma 4-norm form above.
 
-    Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``): the carve has no seam for
-    the ``hidden * per_layer_input`` multiply and would silently drop it, corrupting outputs."""
+    Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``
+    (in :func:`_build_pre_wrapper`): the carve has no seam for either and would silently drop
+    them, corrupting outputs."""
     import torch.nn as nn
 
-    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
-    if ple_dim:
-        raise NotImplementedError(
-            f"build_attention_split_wrapper: block carries Per-Layer Embeddings "
-            f"(hidden_size_per_layer_input={ple_dim}, Gemma-nano E2B/E4B) — the attention-split carve "
-            f"would silently drop the per_layer_input multiply; this model is not servable via the split path"
-        )
-
+    pre = _build_pre_wrapper(block)  # carries the PLE / clip_qkv rejects — before any attribute reads
     attn = block.self_attn
-    head_dim = attn.head_dim
-    num_heads = attn.q_proj.out_features // head_dim
-    num_kv_heads = attn.k_proj.out_features // head_dim
-    q_norm = getattr(attn, "q_norm", None)
-    k_norm = getattr(attn, "k_norm", None)
-    v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
-
-    class Pre(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.input_layernorm = block.input_layernorm
-            self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, attn.v_proj
-            self.q_norm, self.k_norm, self.v_norm = q_norm, k_norm, v_norm
-
-        def forward(self, hidden):
-            h = self.input_layernorm(hidden)  # [T, H]
-            t = h.shape[0]
-            q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
-            kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
-            # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
-            # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
-            v = self.v_proj(h).view(t, num_kv_heads, head_dim) if self.v_proj is not None else kp
-            k = kp
-            if self.q_norm is not None:
-                q = self.q_norm(q)  # per-head RMSNorm over D
-                k = self.k_norm(kp)
-            if self.v_norm is not None:
-                v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
-            return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
 
     class Post(nn.Module):
         def __init__(self) -> None:
@@ -361,7 +391,84 @@ def build_attention_split_wrapper(block):
             h = residual + self.o_proj(attn_out)  # Llama/Qwen: residual1 + o_proj(SDPA)
             return h + self.mlp(self.post_attention_layernorm(h))  # residual2 + MLP
 
-    return Pre(), Post()
+    return pre, Post()
+
+
+def moe_block_parts(mlp):
+    """The ``(router, experts)`` pair of a token-choice MoE block, or ``None`` for a dense MLP.
+
+    Matches the transformers-v5 experts interface: a ``gate`` router module beside an ``experts``
+    module holding the per-expert weights as 3-D ``nn.Parameter``s (``gate_up_proj (E, 2·I, H)``,
+    ``down_proj (E, H, I)``). That storage layout is what lets serving pass per-expert dim-0
+    slices as program inputs."""
+    import torch
+
+    gate = getattr(mlp, "gate", None)
+    experts = getattr(mlp, "experts", None)
+    if gate is None or experts is None:
+        return None
+    gate_up = getattr(experts, "gate_up_proj", None)
+    down = getattr(experts, "down_proj", None)
+    if not (isinstance(gate_up, torch.Tensor) and gate_up.dim() == 3 and isinstance(down, torch.Tensor) and down.dim() == 3):
+        return None
+    return gate, experts
+
+
+def build_moe_split_wrapper(block):
+    """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
+
+    - ``pre`` — the same q/k/v carve as :func:`build_attention_split_wrapper`.
+    - ``post_attn(attn_out[T, Hq·D], residual[T, H]) -> (h[T, H], xn[T, H])`` — o_proj + residual,
+      then the post-attention norm. BOTH come out: the router and the expert programs consume the
+      normed ``xn``, and the layer output is ``h + combine(expert outputs)`` — the norm output must
+      materialize at the seam because it is shared across the k routed experts.
+    - ``expert(x[T_e, H], w_gate_up[2·I, H], w_down[H, I]) -> y[T_e, H]`` — one expert's gated MLP
+      with the weights as FORWARD ARGUMENTS (they trace as graph inputs, not constants), so ONE
+      compiled program serves every expert of every same-shaped layer; the caller passes per-expert
+      slices of the 3-D expert tensors at launch.
+
+    The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
+    torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
+    block layout and NO always-on shared expert only; the Gemma 4-norm MoE form and DeepSeek-style
+    ``shared_experts`` blocks are rejected loudly until a model needs them — a silent pass would
+    drop the shared-experts term from every layer's output."""
+    import torch.nn as nn
+
+    parts = moe_block_parts(block.mlp)
+    if parts is None:
+        raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (gate, experts) MoE interface")
+    _, experts = parts
+    for shared_attr in ("shared_experts", "shared_expert"):
+        if getattr(block.mlp, shared_attr, None) is not None:
+            raise NotImplementedError(
+                f"build_moe_split_wrapper: block.mlp carries an always-on `{shared_attr}` module (DeepSeek/Qwen-MoE "
+                f"lineage) — the carve has no seam for it yet and would silently drop its contribution"
+            )
+    if getattr(block, "pre_feedforward_layernorm", None) is not None:
+        raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
+    pre = _build_pre_wrapper(block)
+    attn = block.self_attn
+
+    class PostAttn(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.o_proj = attn.o_proj
+            self.post_attention_layernorm = block.post_attention_layernorm
+
+        def forward(self, attn_out, residual):
+            h = residual + self.o_proj(attn_out)
+            return h, self.post_attention_layernorm(h)
+
+    class ExpertFFN(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.act_fn = experts.act_fn
+
+        def forward(self, x, w_gate_up, w_down):
+            gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+            return nn.functional.linear(self.act_fn(gate) * up, w_down)
+
+    return pre, PostAttn(), ExpertFFN()
 
 
 def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> None:

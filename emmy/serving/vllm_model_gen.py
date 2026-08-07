@@ -222,6 +222,19 @@ class EmmyGenModel(nn.Module):
             )
         n_layers = self.runner.num_layers
 
+        # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
+        # only): the routed expert dispatch host-syncs per layer, which a whole-step decode
+        # stream capture cannot record — an MoE model must boot eager. Failing here with the
+        # real reason beats the cryptic CUDA 'operation not permitted during stream capture'
+        # crash vLLM's capture pass would hit later.
+        if self.runner._moe is not None and not mc.enforce_eager:
+            cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+            if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
+                raise ValueError(
+                    "MoE models serve eager — whole-step decode capture cannot record the routed expert "
+                    "dispatch; serve with --enforce-eager"
+                )
+
         sliding_window = getattr(config, "sliding_window", None)
 
         def _layer_window(i):

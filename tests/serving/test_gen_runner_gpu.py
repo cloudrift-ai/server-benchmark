@@ -238,6 +238,68 @@ def test_gen_runner_device_path_matches_host():
     np.testing.assert_array_equal(fn_np, runner.final_norm(h_np))
 
 
+def test_gen_runner_moe_stitch_matches_eager():
+    """MoE third seam (OLMoE): the device stitch — emmy ``pre`` → reference SDPA → emmy
+    ``post_attn`` + torch router + shared expert program + weighted combine — must match eager
+    logits. Also pins the program-count contract: ONE expert program serves every layer
+    (weights are inputs), so program count does not scale with num_experts."""
+    pytest.importorskip("cupy")
+    import torch
+    import torch.nn.functional as F
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM, apply_rotary_pos_emb
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner._moe is not None and runner._expert_sym is not None
+    assert runner._expert_sym.input_names == ["x", "w_gate_up", "w_down"]
+
+    t = 7
+    ids = torch.arange(1, t + 1, dtype=torch.long)
+    pos = torch.arange(t).unsqueeze(0)
+    cos, sin = model.model.rotary_emb(torch.zeros(1, t, config.hidden_size), pos)
+    cos_d, sin_d = cos.cuda(), sin.cuda()
+    mask = torch.triu(torch.full((t, t), float("-inf")), diagonal=1)[None, None].cuda()
+    hd, nh, nkv = runner.head_dim, runner.num_heads, runner.num_kv_heads
+
+    hidden = runner.embed_device(ids.cuda())
+    for layer in range(runner.num_layers):
+        residual = hidden
+        q2, k2, v2 = runner.forward_layer_pre_device(layer, hidden)
+        q = q2.view(t, nh, hd).transpose(0, 1)[None]
+        k = k2.view(t, nkv, hd).transpose(0, 1)[None]
+        v = v2.view(t, nkv, hd).transpose(0, 1)[None]
+        q, k = apply_rotary_pos_emb(q, k, cos_d, sin_d)
+        ao = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=runner.scaling)
+        ao = ao.transpose(1, 2).reshape(t, nh * hd).contiguous()
+        hidden = runner.forward_layer_post_device(layer, ao, residual)
+    got = runner.final_norm_device(hidden)
+    with torch.no_grad():
+        logits = model.lm_head(got.cpu()).numpy()
+        eager = model(ids.unsqueeze(0)).logits[0].numpy()
+    np.testing.assert_allclose(logits, eager, rtol=2e-3, atol=2e-3)
+    assert int(np.argmax(logits[-1])) == int(np.argmax(eager[-1]))
+
+
 def test_decode_twin_shares_weight_buffers():
     """The static decode-bucket twin must NOT hold a second on-GPU copy of the layer's
     weights: every non-trivial constant buffer in a decode program shares its device

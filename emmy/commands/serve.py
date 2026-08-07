@@ -153,7 +153,30 @@ def _spec_query_len(vllm_args: list[str]) -> int:
     return int(cfg.get("num_speculative_tokens", 0) or 0) + 1
 
 
-def _gen_graph_args(vllm_args: list[str]) -> list[str]:
+def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
+    """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
+    probe — ``local_files_only`` keeps command construction hermetic (no hub round-trip: offline
+    test doubles and uncached models resolve to False in milliseconds), and ``--trust-remote-code``
+    / ``--revision`` forward so custom-code checkpoints still probe. The probe is UX only: the
+    authoritative guard is in ``EmmyGenModel.__init__``, which rejects an MoE boot with capture
+    enabled — a probe miss here degrades to that clear boot error, never to a capture crash."""
+    try:
+        from transformers import AutoConfig  # noqa: PLC0415
+
+        kwargs = {"local_files_only": True}
+        if _has_flag(vllm_args, "--trust-remote-code"):
+            kwargs["trust_remote_code"] = True
+        revision = _flag_value(vllm_args, "--revision", "")
+        if revision:
+            kwargs["revision"] = revision
+        cfg = AutoConfig.from_pretrained(model, **kwargs)
+        cfg = getattr(cfg, "text_config", cfg)
+        return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
+    except Exception:  # noqa: BLE001 — any probe failure: let the serve proceed un-special-cased
+        return False
+
+
+def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
@@ -169,6 +192,21 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     see the comment on the flooring below."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
+    if model is not None and _is_moe_model(model, vllm_args):
+        # The MoE third seam's routed dispatch (top-k / nonzero / per-expert launches) syncs with
+        # the host, which a decode-step stream capture cannot record — MoE serves eager (the
+        # capture-recovery options are an open milestone decision). Checked BEFORE the
+        # caller-decided early return: a caller-supplied capture config would crash at boot with
+        # a cryptic stream-capture error, so reject it with the real reason instead.
+        if _has_flag(vllm_args, "--compilation-config"):
+            raise ValueError(
+                "MoE models serve eager — whole-step decode capture cannot record the routed expert "
+                "dispatch; drop --compilation-config (or pass --enforce-eager)"
+            )
+        if _has_flag(vllm_args, "--enforce-eager"):
+            return []
+        logger.info("MoE model — whole-step decode capture is not recordable over routed expert dispatch; serving eager")
+        return ["--enforce-eager"]
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
         return []  # the caller decided; forward theirs untouched
     bucket = emmy_config.gen_decode_bucket()
@@ -220,7 +258,7 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
 
     cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
     if not stock and generate:
-        cmd += _gen_graph_args(vllm_args)
+        cmd += _gen_graph_args(vllm_args, model=model)
         cmd += ["--hf-overrides", '{"architectures": ["EmmyGenModel"]}']
         # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
         # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.

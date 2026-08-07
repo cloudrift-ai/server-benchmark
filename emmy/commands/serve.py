@@ -158,8 +158,9 @@ def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     probe — ``local_files_only`` keeps command construction hermetic (no hub round-trip: offline
     test doubles and uncached models resolve to False in milliseconds), and ``--trust-remote-code``
     / ``--revision`` forward so custom-code checkpoints still probe. The probe is UX only: the
-    authoritative guard is in ``EmmyGenModel.__init__``, which rejects an MoE boot with capture
-    enabled — a probe miss here degrades to that clear boot error, never to a capture crash."""
+    authoritative guard is in ``EmmyGenModel.__init__``, which validates an MoE capture boot
+    against the runner (fixed-slot tier present, capture sizes capped at 1) — a probe miss here
+    degrades to that clear boot error, never to a capture crash."""
     try:
         from transformers import AutoConfig  # noqa: PLC0415
 
@@ -193,20 +194,22 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if model is not None and _is_moe_model(model, vllm_args):
-        # The MoE third seam's routed dispatch (top-k / nonzero / per-expert launches) syncs with
-        # the host, which a decode-step stream capture cannot record — MoE serves eager (the
-        # capture-recovery options are an open milestone decision). Checked BEFORE the
-        # caller-decided early return: a caller-supplied capture config would crash at boot with
-        # a cryptic stream-capture error, so reject it with the real reason instead.
-        if _has_flag(vllm_args, "--compilation-config"):
-            raise ValueError(
-                "MoE models serve eager — whole-step decode capture cannot record the routed expert "
-                "dispatch; drop --compilation-config (or pass --enforce-eager)"
-            )
-        if _has_flag(vllm_args, "--enforce-eager"):
-            return []
-        logger.info("MoE model — whole-step decode capture is not recordable over routed expert dispatch; serving eager")
-        return ["--enforce-eager"]
+        # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
+        # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
+        # keep the routed dispatch, which host-syncs and stays eager. The ladder is therefore
+        # capped at capture size 1. Whether the fixed-slot tier actually built is unknowable
+        # pre-boot — the AUTHORITATIVE guard is in ``EmmyGenModel.__init__``, which inspects
+        # the runner and rejects an MoE capture boot loudly when the tier is missing (serve
+        # with --enforce-eager then). A caller-supplied config forwards untouched and faces
+        # the same boot guard.
+        if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
+            return []  # the caller decided; the boot guard validates capture against the runner
+        bucket = emmy_config.gen_decode_bucket()
+        if bucket <= 0:
+            logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
+            return ["--enforce-eager"]
+        cfg = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
+        return ["--compilation-config", cfg]
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
         return []  # the caller decided; forward theirs untouched
     bucket = emmy_config.gen_decode_bucket()

@@ -133,6 +133,76 @@ def test_run_device_aliased_input_backing_replays_live():
     assert torch.allclose(out, ref2, rtol=1e-2, atol=1e-2)
 
 
+def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live():
+    """The fixed-slot MoE decode step (post_attn twin → router → index_select staging → k slot
+    launches → score matmul) under an outer torch CUDA-graph capture — what vLLM's whole-step
+    FULL_DECODE_ONLY capture at size 1 records for an MoE model. Captured once, replayed twice:
+    new values in the same input tensors must flow through the ROUTING too (the top-k indices
+    and the staged expert weights are data-dependent VALUES inside the graph), checked against
+    the eager routed path on fresh inputs."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner.has_moe_fixed_slot
+
+    attn_width = runner.num_heads * runner.head_dim
+    torch.manual_seed(1)
+    attn = torch.randn(1, attn_width, device="cuda")
+    residual = torch.randn(1, config.hidden_size, device="cuda")
+
+    def eager_ref(a, r):
+        """The routed path on the same twin outputs — the parity oracle for the captured step."""
+        h, xn = runner._route_post_device(0, a, r)
+        return (h + runner._moe_combine(runner._moe[0], xn)).clone()
+
+    # Warmup (mints the twin + slot program graphs and the staging pair), then the baseline.
+    warm = runner.forward_layer_post_device(0, attn, residual)
+    ref0 = eager_ref(attn, residual)
+    torch.testing.assert_close(warm, ref0, rtol=1e-4, atol=1e-5)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = runner.forward_layer_post_device(0, attn, residual)
+    g.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, ref0, rtol=1e-4, atol=1e-5)
+
+    # Replay must be LIVE through the routing: new inputs select a different expert set.
+    for seed in (2, 3):
+        torch.manual_seed(seed)
+        a2 = torch.randn(1, attn_width, device="cuda")
+        r2 = torch.randn(1, config.hidden_size, device="cuda")
+        ref2 = eager_ref(a2, r2)
+        attn.copy_(a2)
+        residual.copy_(r2)
+        g.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out, ref2, rtol=1e-4, atol=1e-5)
+
+
 def test_run_device_sym_aliased_input_backing_replays_live():
     """The A2 chained-seam primitive on the SYMBOLIC path: the caller writes INTO the sym
     program's own input backing (what the previous layer's chained post output is, after A2),

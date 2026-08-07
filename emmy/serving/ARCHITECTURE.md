@@ -148,10 +148,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`moe.expert.sym`: `expert(x, w_gate_up, w_down)` with the weights as forward args → graph INPUTS, fed per-expert
   dim-0 slices of the 3-D tensors, which live on device beside the routers via `_ensure_device`), and the partials
   weighted-`index_add_` into `h`. Program count is 2/layer + ONE expert program total — not `E`/layer. MoE layers are
-  device-resident only (`forward_layer_post` raises on the host path), are excluded from post→pre chaining (two
-  outputs; the layer output is a fresh torch tensor), and serve eager only — the routed dispatch host-syncs, which a
-  whole-step decode capture cannot record: `_is_moe_model` in `emmy/commands/serve.py` auto-adds `--enforce-eager`
-  (local-config probe, UX only) and `EmmyGenModel.__init__` authoritatively rejects an MoE boot with capture enabled.
+  device-resident only (`forward_layer_post` raises on the host path) and are excluded from post→pre chaining (two
+  outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`),
+  which a whole-step decode capture cannot record — but single-token decode is capture-legal through the fixed-slot
+  tier below, so `_is_moe_model` in `emmy/commands/serve.py` (local-config probe, UX only) has `_gen_graph_args`
+  emit a FULL_DECODE_ONLY compilation-config with the capture ladder capped at size 1 instead of forcing
+  `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture boot
+  is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
+  `--enforce-eager` then).
   **Expert tiers (decode perf lane):** the expert program comes in three tiers mirroring the main ladder — static
   M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), and the symbolic
   fallback — routed per HIT expert by its routed row count. Per-launch framing, not weight bytes, was the measured
@@ -160,6 +164,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `run_once` calls; the per-expert cupy weight views are minted once at `_ensure_device`. A tier whose schedule
   stages no operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by
   POINTER SWAP into `program.arrays` — no D2D weight copy; descriptor-bearing tiers upload the slices normally.
+  **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the M=1 expert program are built at boot
+  from the same stored plan (`_compile_split(plan=...)` — fresh buffers, NO shared arena, so slots never alias),
+  and each slot's `w_gate_up`/`w_down`/output arrays are rewired ONCE onto cupy views of its slice of one
+  persistent staging pair `[k, 2I, H]` + `[k, H, I]` plus a `[k, H]` partials tensor (allocated in
+  `_ensure_device`, shared across layers — layers are stream-ordered). `_moe_combine_slots` then runs the router,
+  `index_select`s the k HIT experts' weights into the staging pair, replays the k slots on the row, and combines
+  the partials with one score matmul — fixed shapes, a fixed launch set, no `unique()`/`.tolist()`/host sync, so
+  vLLM's whole-step decode graph records it (under the outer capture each slot issues its raw launch sequence,
+  mirroring `run_device`). The boot rewire is only sound descriptor-free — asserted at boot; a descriptor-bearing
+  M=1 schedule logs a warning and keeps the routed path (single-token decode then serves eager). Wider decode
+  steps and prefill always ride the routed dispatch; `combine_routed_experts` stays the parity oracle
+  (`test_gen_runner_gpu` fixed-slot-vs-routed, `test_gen_capture_gpu` captured-step live-replay).
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does

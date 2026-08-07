@@ -296,6 +296,7 @@ class EmmyGenRunner:
         expert_sym=None,
         expert_decode=None,
         expert_m1=None,
+        expert_slots=None,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
@@ -311,17 +312,21 @@ class EmmyGenRunner:
         self._post_prefill = post_prefill
         self._prefill_bucket = prefill_bucket
         self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
-        # MoE third seam: per-layer dict (router module + the 3-D expert weight tensors) or None
-        # for dense layers; one shared expert program PER TIER serves every layer (weights are
-        # inputs): static M=decode_bucket and M=1 twins for the decode hot path, the symbolic
-        # program as the any-width fallback. A tier whose schedule stages no operand through a
-        # TMA descriptor (descriptors bake pointers at build) launches with POINTER-SWAPPED
-        # per-expert weight slices — no D2D weight copy; descriptor-bearing tiers fall back to
-        # the upload copy, still correct.
+        # MoE third seam: per-layer dict (router module + the 3-D expert weight tensors +
+        # ``top_k``) or None for dense layers; one shared expert program PER TIER serves every
+        # layer (weights are inputs): static M=decode_bucket and M=1 twins for the decode hot
+        # path, the symbolic program as the any-width fallback. A tier whose schedule stages no
+        # operand through a TMA descriptor (descriptors bake pointers at build) launches with
+        # POINTER-SWAPPED per-expert weight slices — no D2D weight copy; descriptor-bearing
+        # tiers fall back to the upload copy, still correct. ``expert_slots`` (or None) is the
+        # FIXED-SLOT decode tier: k slot instances of the M=1 expert program (fresh buffers, no
+        # shared arena) whose weight arrays are rewired at boot onto the persistent staging
+        # pair — the capture-legal T=1 dispatch (see ``_moe_combine_slots``).
         self._moe = moe
         self._expert_sym = expert_sym
         self._expert_decode = expert_decode
         self._expert_m1 = expert_m1
+        self._expert_slots = expert_slots
         self._expert_swap_safe = {
             id(prog): not any("_desc" in a for launch in prog.program.compiled.launches for a in launch.arg_names)
             for prog in (expert_sym, expert_decode, expert_m1)
@@ -377,6 +382,13 @@ class EmmyGenRunner:
         """True when the static decode-bucket programs exist → the device-resident decode path
         (``embed_device`` / ``forward_layer_*_device`` / ``final_norm_device``) is available."""
         return self._pre_decode is not None
+
+    @property
+    def has_moe_fixed_slot(self) -> bool:
+        """True when the fixed-slot MoE decode tier exists → a single-token decode step is
+        capture-legal (``_moe_combine_slots``: no host sync, fixed launch set). The boot guard
+        in ``EmmyGenModel`` keys the MoE capture decision on this."""
+        return self._moe is not None and self._expert_slots is not None
 
     @property
     def prefill_capacity(self) -> int:
@@ -549,6 +561,8 @@ class EmmyGenRunner:
                         "gate": copy.deepcopy(gate).to(dtype),
                         "gate_up": experts.gate_up_proj.detach().to(dtype),
                         "down": experts.down_proj.detach().to(dtype),
+                        # k routed experts per token — the fixed-slot tier's slot count.
+                        "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
                     }
                 )
                 # ONE expert program serves every MoE layer, so the expert shape and activation
@@ -728,6 +742,32 @@ class EmmyGenRunner:
                         logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
                         prefill_ok = False
 
+        # FIXED-SLOT decode tier (MoE): k slot instances of the M=1 expert program built from
+        # the SAME stored plan (`_compile_split(plan=...)` — kernels load by cubin key, no
+        # re-trace/re-compile) with FRESH buffers and NO shared arena, so the slots never alias
+        # each other or the routed tiers. Their `w_gate_up`/`w_down` arrays are rewired ONCE at
+        # boot onto per-slot slices of the persistent staging pair (`_ensure_device`) — sound
+        # only when the schedule stages no operand through a TMA descriptor (descriptors bake
+        # pointers at build), so a descriptor-bearing schedule falls back LOUDLY to the routed
+        # path (single-token decode then stays eager; the boot capture guard sees the tier gone).
+        expert_slots = None
+        moe_top_k = next((m["top_k"] for m in moe_meta if m is not None), 0)
+        if expert_m1 is not None and moe_top_k > 0:
+            if any("_desc" in a for launch in expert_m1.program.compiled.launches for a in launch.arg_names):
+                logger.warning(
+                    "[gen_runner] M=1 expert schedule stages operands through TMA descriptors — the fixed-slot "
+                    "boot rewire would bake stale weight pointers; single-token decode keeps the routed expert "
+                    "path (eager, no whole-step capture)"
+                )
+            else:
+                with torch.device("cpu"):
+                    expert_slots = [
+                        _compile_split(
+                            expert_w, [torch.zeros(1, hidden, dtype=dtype), *example_w], None, np_dtype, plan=plans["moe.expert.one"]
+                        )[0]
+                        for _ in range(moe_top_k)
+                    ]
+
         # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
         # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
         # The next layer's pre "upload" then sees its own buffer as the source and self-copy-skips
@@ -843,6 +883,7 @@ class EmmyGenRunner:
             expert_sym=expert_sym,
             expert_decode=expert_decode,
             expert_m1=expert_m1,
+            expert_slots=expert_slots,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
@@ -966,6 +1007,32 @@ class EmmyGenRunner:
                     m["down"] = m["down"].cuda()
                     m["gate_up_cp"] = [cp.from_dlpack(w) for w in m["gate_up"]]
                     m["down_cp"] = [cp.from_dlpack(w) for w in m["down"]]
+                if self._expert_slots is not None:
+                    # Fixed-slot staging: ONE persistent [k, 2I, H] + [k, H, I] pair shared by
+                    # every MoE layer (layers are stream-ordered, so a layer's slot replays
+                    # finish reading the staging before the next layer's index_select rewrites
+                    # it) plus a [k, H] partials tensor the slot OUTPUTS land in. Slot i's
+                    # weight and output arrays are rewired here ONCE onto cupy views of slice i
+                    # — after this, per-step "uploads" of the weights would be self-copies, so
+                    # the slots run with zero weight-arg traffic and the pointers a captured
+                    # graph bakes stay valid forever (the staging never re-allocates).
+                    first = next(m for m in self._moe if m is not None)
+                    k = len(self._expert_slots)
+                    _, two_i, h = first["gate_up"].shape
+                    i_dim = first["down"].shape[2]
+                    tdtype = first["gate_up"].dtype
+                    self._stage_gate_up = torch.empty(k, two_i, h, dtype=tdtype, device="cuda")
+                    self._stage_down = torch.empty(k, h, i_dim, dtype=tdtype, device="cuda")
+                    self._slot_partials = torch.empty(k, h, dtype=tdtype, device="cuda")
+                    for j, slot in enumerate(self._expert_slots):
+                        p = slot.program
+                        p.arrays["w_gate_up"] = cp.from_dlpack(self._stage_gate_up[j])
+                        p.arrays["w_down"] = cp.from_dlpack(self._stage_down[j])
+                        p.arrays[slot.output_names[0]] = cp.from_dlpack(self._slot_partials[j : j + 1])
+                    # The rewire orphaned each slot's own weight/output allocations (~one
+                    # expert's weights per slot) — release them to the driver so vLLM's
+                    # KV-cache profiling sees the memory.
+                    cp.get_default_memory_pool().free_all_blocks()
         self._dev_ready = True
 
     def adopt_embed_table(self, weight, *, scale=1.0):
@@ -1054,6 +1121,11 @@ class EmmyGenRunner:
         if moe is None:
             return outs[0]
         h, xn = outs
+        # Single-token decode rides the FIXED-SLOT combine (capture-legal — no host sync, a
+        # fixed launch set); every wider step keeps the routed dispatch, whose launch set
+        # varies with the routing (eager only).
+        if self._expert_slots is not None and xn.shape[0] == 1:
+            return h + self._moe_combine_slots(moe, xn)
         return h + self._moe_combine(moe, xn)
 
     def _route_post_device(self, layer, attn_out, residual):
@@ -1096,6 +1168,42 @@ class EmmyGenRunner:
         gated = moe["gate"](xn)
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             return combine_routed_experts(xn, gated, lambda e, rows: self._launch_expert(moe, e, rows))
+
+    def _moe_combine_slots(self, moe, xn):
+        """Fixed-slot combine for single-token decode (``T == 1``) — the capture-legal twin of
+        :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: the router's
+        top-k indices gather the k hit experts' weight slices into the persistent staging pair
+        (one ``index_select`` per weight tensor — fixed shapes, no ``unique()``, no
+        ``.tolist()``, no host sync), the k slot instances of the M=1 expert program run over
+        their boot-rewired staging views (the weight "upload" is gone — the kernels read the
+        staging slices directly), and the partials combine through one score matmul. Every op
+        is fixed-shape with a fixed launch set, so a whole-step decode CUDA graph records it;
+        under an outer capture each slot issues its raw launch sequence, mirroring
+        :meth:`_Program.run_device` (nested graph machinery is illegal in a capturing stream).
+        ``combine_routed_experts`` (the routed path) stays the parity oracle."""
+        import cupy as cp
+        import torch
+
+        from emmy.compiler.backend.gpu_lock import gpu_lock
+
+        self._ensure_device()
+        gated = moe["gate"](xn)
+        scores, indices = gated[-2], gated[-1]  # [1, k] each
+        scores = scores.to(xn.dtype)
+        torch.index_select(moe["gate_up"], 0, indices.reshape(-1), out=self._stage_gate_up)
+        torch.index_select(moe["down"], 0, indices.reshape(-1), out=self._stage_down)
+        capturing = torch.cuda.is_current_stream_capturing()
+        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            x_cp = cp.from_dlpack(xn.detach().contiguous())
+            for slot in self._expert_slots:
+                p = slot.program
+                p.upload_prefix_device({"x": x_cp})
+                if capturing:
+                    p.run_once()
+                else:
+                    p.capture_program_graph()  # static program → one cached graph per slot
+                    p.replay_program_graph()
+        return scores @ self._slot_partials  # [1, k] @ [k, H] — the fixed-shape weighted combine
 
     def _launch_expert(self, moe, e, rows):
         """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock + the

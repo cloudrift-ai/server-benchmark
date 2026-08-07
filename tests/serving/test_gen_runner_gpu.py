@@ -300,6 +300,52 @@ def test_gen_runner_moe_stitch_matches_eager():
     assert int(np.argmax(logits[-1])) == int(np.argmax(eager[-1]))
 
 
+def test_moe_fixed_slot_combine_matches_routed_oracle():
+    """The fixed-slot combine (``_moe_combine_slots`` — index_select staging → k slot replays →
+    score matmul) must match ``combine_routed_experts`` (the routed parity oracle) on random
+    routings: random ``xn`` rows route to different top-k expert sets, so the staging gather,
+    the boot-rewired slot weights, and the score combine are all exercised across routings.
+    fp32 allclose — the two paths sum the k partials in different orders."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner.has_moe_fixed_slot, "the fixed-slot tier must build for the plain OLMoE expert shape"
+    assert len(runner._expert_slots) == config.num_experts_per_tok
+
+    torch.manual_seed(1)
+    for layer in (0, 1):
+        moe = runner._moe[layer]
+        for _ in range(4):
+            xn = torch.randn(1, config.hidden_size, device="cuda")
+            got = runner._moe_combine_slots(moe, xn)
+            ref = runner._moe_combine(moe, xn)
+            assert got.shape == ref.shape == xn.shape
+            torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
+
+
 def test_decode_twin_shares_weight_buffers():
     """The static decode-bucket twin must NOT hold a second on-GPU copy of the layer's
     weights: every non-trivial constant buffer in a decode program shares its device

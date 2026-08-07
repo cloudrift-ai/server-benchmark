@@ -231,6 +231,47 @@ def test_serve_cmd_generate_bucket_off_forces_eager(monkeypatch):
     assert "--compilation-config" not in cmd
 
 
+def _force_moe_probe(monkeypatch):
+    monkeypatch.setattr("emmy.commands.serve._is_moe_model", lambda model, vllm_args: True)
+
+
+def test_serve_cmd_generate_moe_captures_at_size_one(monkeypatch):
+    """MoE decode capture is fixed-slot: FULL_DECODE_ONLY with the ladder capped at capture
+    size 1 (single-token steps ride the fixed-slot expert path; wider decode steps stay eager
+    routed dispatch) — not --enforce-eager. The boot guard in EmmyGenModel validates
+    authoritatively against the runner."""
+    _force_moe_probe(monkeypatch)
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert "--enforce-eager" not in cmd
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
+    assert '"cudagraph_capture_sizes": [1]' in cfg
+
+
+def test_serve_cmd_generate_moe_enforce_eager_forwards(monkeypatch):
+    _force_moe_probe(monkeypatch)
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--enforce-eager"], generate=True)
+    assert cmd.count("--enforce-eager") == 1
+    assert "--compilation-config" not in cmd
+
+
+def test_serve_cmd_generate_moe_user_compilation_config_forwards(monkeypatch):
+    # A caller-supplied config forwards untouched; the EmmyGenModel boot guard validates it
+    # against the runner (fixed-slot tier present, sizes capped at 1).
+    _force_moe_probe(monkeypatch)
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--compilation-config", "{}"], generate=True)
+    assert cmd.count("--compilation-config") == 1
+    assert "--enforce-eager" not in cmd
+
+
+def test_serve_cmd_generate_moe_bucket_off_forces_eager(monkeypatch):
+    _force_moe_probe(monkeypatch)
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "0")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert "--enforce-eager" in cmd
+    assert "--compilation-config" not in cmd
+
+
 def test_serve_cmd_generate_rejects_incompatible_dtype():
     with pytest.raises(ValueError, match="fp16"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--dtype", "bfloat16"], generate=True)

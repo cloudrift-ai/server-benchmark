@@ -264,7 +264,10 @@ applied for both engines unless overridden, so `--stock` is an apples-to-apples 
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
-`EMMY_GEN_DECODE_BUCKET=0`). Under `--speculative-config` the ladder is derived from the resulting
+`EMMY_GEN_DECODE_BUCKET=0`, and for MoE models — the routed expert dispatch host-syncs, which a whole-step capture
+cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an
+MoE model is rejected with the reason, and `EmmyGenModel.__init__` carries the authoritative boot guard for probe
+misses). Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults

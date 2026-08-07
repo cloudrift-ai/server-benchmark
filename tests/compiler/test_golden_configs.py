@@ -212,12 +212,15 @@ def test_goldens_speak_native_codecs_and_featurize():
         ReducePlan.parse(g.knobs.get("REDUCE"), work)
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
-        # A gemv-class M=1 row (``TILE: ''`` + a coop block-reduce) is scalar BY DESIGN — a
-        # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
-        # empty featurization is the correct one, not an accident. Exempt exactly that shape.
+        # A row with NO ``TILE`` and a cooperative reduce is scalar BY DESIGN — one output element
+        # per cooperating thread group, no tile geometry at all — so the empty featurization is the
+        # correct one, not an accident. The canonical case is the gemv-class M=1 decode matvec; the
+        # same form is also the only tier reachable for a contraction whose warp lowering is
+        # refused upstream (gpt-oss's fp8 expert ``down``, whose computed-A cone declines the
+        # staged transports at every M). Exempt the FORM, not a width.
         if isinstance(g, MatmulGoldenConfig):
-            if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse(g.knobs.get("REDUCE"), work).coop > 1:
-                continue  # gemv-class row (coop / g<w>k/coop-t): scalar by design, no tile geometry
+            if not g.knobs.get("TILE") and ReducePlan.parse(g.knobs.get("REDUCE"), work).coop > 1:
+                continue  # scalar coop row (coop / g<w>k/coop-t): no tile geometry to featurize
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 

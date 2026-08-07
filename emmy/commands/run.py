@@ -1900,9 +1900,16 @@ def _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None
         raise RuntimeError(f"Input arity mismatch: graph has {len(input_ids)} inputs, code provided {len(flat_inputs)}")
 
     input_data: dict[str, np.ndarray] = {}
+    torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
     for nid, tensor in zip(input_ids, flat_inputs, strict=True):
         np_dtype = compiled.nodes[nid].output.dtype.np
-        input_data[nid] = tensor.detach().cpu().numpy().astype(np_dtype, copy=False)
+        tensor = tensor.detach().cpu()
+        # An fp8 activation/weight INPUT binds the raw bit pattern on its uint8 carrier —
+        # numpy has no fp8 scalar type, and a value cast would decode the bits (the same
+        # rule the constant side and the serving expert feed already follow).
+        if tensor.dtype in torch_f8:
+            tensor = tensor.view(torch.uint8)
+        input_data[nid] = tensor.numpy().astype(np_dtype, copy=False)
 
     # ``remove_duplicate=False`` so tied weights (e.g. a model whose lm_head
     # shares the embedding matrix) are surfaced under *every* name, including

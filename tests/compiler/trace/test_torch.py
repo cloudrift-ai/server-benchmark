@@ -472,6 +472,23 @@ def test_trace_chunk_rejects_dynamic_chunked_extent():
         _handle_chunk(graph, fx_node, {"x": source_id})
 
 
+def test_trace_rejects_unmapped_multi_output_op():
+    """Multi-output aten ops without a tracer mapping (e.g. ``aten.topk``) raise
+    instead of being silently dropped into an arity-broken graph."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class TopK(nn.Module):
+        def forward(self, x):
+            values, _ = torch.topk(x, 2, dim=-1)
+            return values * 2.0
+
+    with pytest.raises(NotImplementedError, match="topk"):
+        trace_module(TopK(), (torch.randn(2, 8),))
+
+
 def test_trace_chunk_rejects_invalid_tuple_index():
     """Invalid tuple getitem indices name the tuple arity in the error."""
     from types import SimpleNamespace
@@ -641,3 +658,87 @@ def test_sdpa_forward_honors_scale():
         got = SdpaOp(scale=scale).forward(q.numpy(), k.numpy(), v.numpy())
         want = F.scaled_dot_product_attention(q, k, v, scale=scale).numpy()
         np.testing.assert_allclose(got, want, atol=1e-12)
+
+
+def test_trace_elementwise_maximum_not_reduce():
+    """``torch.maximum`` (binary elementwise) maps to ElementwiseOp('maximum'), never to a
+    ReduceOp — the reduce spelling of max is ``amax`` and stays a ReduceOp (see
+    test_trace_max_reduction)."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class MinMax(nn.Module):
+        def forward(self, x, y):
+            return torch.maximum(x, y) + torch.minimum(x, y)
+
+    x, y = torch.randn(4, 8), torch.randn(4, 8)
+    g = trace_module(MinMax(), (x, y))
+    assert not [n for n in g.nodes.values() if isinstance(n.op, ReduceOp)]
+    fns = {n.op.name for n in g.nodes.values() if isinstance(n.op, ElementwiseOp)}
+    assert {"maximum", "minimum"} <= fns
+    maxi = next(n for n in g.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.name == "maximum")
+    assert len(maxi.inputs) == 2, "binary maximum must keep both operands"
+
+
+def test_trace_clamp_decomposes_to_min_max_chain():
+    """``clamp(min, max)`` decomposes to maximum-then-minimum with the bound constants;
+    one-sided ``clamp(max=)`` / ``clamp_min`` / ``clamp_max`` skip the absent side."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.trace.torch import trace_module
+
+    def _fns(module, n_in=1):
+        g = trace_module(module, tuple(torch.randn(3, 4) for _ in range(n_in)))
+        return g, [n.op.name for n in g.nodes.values() if isinstance(n.op, ElementwiseOp)]
+
+    class Both(nn.Module):
+        def forward(self, x):
+            return x.clamp(-7.0, 7.0)
+
+    class MaxOnly(nn.Module):
+        def forward(self, x):
+            return x.clamp(max=7.0)
+
+    class MinOnly(nn.Module):
+        def forward(self, x):
+            return x.clamp_min(-1.5)
+
+    g, fns = _fns(Both())
+    assert fns == ["maximum", "minimum"]
+    _, fns = _fns(MaxOnly())
+    assert fns == ["minimum"]
+    _, fns = _fns(MinOnly())
+    assert fns == ["maximum"]
+
+
+def test_trace_clamp_matches_torch_eager():
+    """End-to-end: the traced clamp chain (the gpt-oss clamped-SwiGLU shape) interprets to
+    torch's own values through the numpy reference backend."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class ClampedSwiglu(nn.Module):
+        def forward(self, gate, up):
+            gate = gate.clamp(max=7.0)
+            up = up.clamp(-7.0, 7.0)
+            glu = gate * torch.sigmoid(gate * 1.702)
+            return (up + 1) * glu
+
+    torch.manual_seed(0)
+    gate, up = torch.randn(4, 16) * 5, torch.randn(4, 16) * 5
+    m = ClampedSwiglu()
+    g = trace_module(m, (gate, up))
+    backend = NumpyBackend()
+    outs = backend.run(backend.compile(g), input_data={"gate": gate.numpy(), "up": up.numpy()})[0].outputs
+    with torch.no_grad():
+        want = m(gate, up).numpy()
+    np.testing.assert_allclose(next(iter(outs.values())), want, rtol=1e-5, atol=1e-6)

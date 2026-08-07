@@ -81,7 +81,20 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # ``int <name>`` runtime arg to the signature, threaded through to the CudaOp.
     runtime_args = _symbolic_runtime_args(kernel)
     tensors = {**kernel.inputs, **kernel.outputs}
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args)
+    # Indirect operands (graph-level hint, set by the caller before compile — the serving MoE
+    # fixed-slot dispatch): the marked graph INPUT buffers this kernel reads swap their base
+    # pointer for a table + selector + slot triple (see ``render_kernelop``). ABI-level only:
+    # the hint is invisible to the schedule search, so schedules and goldens are untouched.
+    indirect = tuple(n for n in match.graph.hints.get("cuda.indirect_inputs", ()) if n in kernel.inputs)
+    tma_descs = _tma_descriptors(kernel)
+    if indirect:
+        staged = [d.src_buf for d in tma_descs if d.src_buf in indirect]
+        if staged:
+            raise NotImplementedError(
+                f"indirect operand(s) {staged} are staged through TMA descriptors (descriptors bake the base "
+                f"address at encode) — an indirect build requires a descriptor-free schedule for these operands"
+            )
+    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
@@ -99,8 +112,9 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     block = ((cells + tile.aux_threads,), (1,), (1,))
     # Signature / arg order: buffers, then the TMA descriptor params (bound to the
     # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args
-    # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout.
-    tma_descs = _tma_descriptors(kernel)
+    # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout. An
+    # indirect operand keeps its plain name in ``arg_order``; the launcher expands it in
+    # place to (table, sel, slot) via ``indirect_args``.
     arg_order = (*kernel.inputs, *kernel.outputs, *(d.name for d in tma_descs))
     return CudaOp(
         kernel_source=source,
@@ -117,4 +131,5 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zero_outputs=tuple(b for b in _atomic_outputs(kernel) if b not in kernel.zero_delegated),
         zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
         tma_descriptors=tma_descs,
+        indirect_args=tuple((n, f"{n}__table", f"{n}__sel", 0) for n in indirect),
     )

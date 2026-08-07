@@ -69,6 +69,12 @@ class CudaOp(Op):
     comment: str = ""
     tma_descriptors: tuple[TmaDescMeta, ...] = field(default_factory=tuple)
     runtime_args: tuple[str, ...] = ()
+    # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input. The kernel
+    # signature replaces ``const T* <arg>`` with ``const T* const* <table>, const int* <sel>,
+    # int <slot>`` and resolves the base pointer in a body preamble; ``arg_order`` keeps the
+    # plain operand name and the launcher expands it in place (``program._launch``). ``slot``
+    # is 0 at compile — the serving runner stamps per-instance slot literals onto plan copies.
+    indirect_args: tuple[tuple[str, str, str, int], ...] = ()
 
     def pretty_body(self) -> str:
         return self.kernel_source

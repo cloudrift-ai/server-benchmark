@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.base import ConstantOp
+from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants
+from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 from emmy.compiler.pipeline import Pipeline
 
@@ -331,6 +331,28 @@ def test_spell_honors_regex_ignore(tmp_path):
     assert spell_quantized_constants(_weight_graph(), str(tmp_path)) == 0
 
 
+def test_spell_pairs_non_weight_leaf_scale(tmp_path):
+    """The general ``<key>_scale`` pairing on a non-``.weight`` leaf — the gpt-oss 3-D expert
+    param convention (``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``): the
+    constant is spelled with the scale constant reading the ``_scale`` key."""
+    qc = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 8, "strategy": "channel"}}},
+        "ignore": ["re:.*router"],
+    }
+    key = "model.layers.0.mlp.experts.gate_up_proj"
+    bits = _finite_bits((2, 4, 6))  # (E, in, out)
+    scale = torch.rand(2, 1, 6, dtype=torch.float32) + 0.5  # per-out-channel, per expert
+    _write_checkpoint(tmp_path, {key: _fp8_tensor(bits), key + "_scale": scale}, qc)
+    g = _weight_graph(shape=(2, 4, 6), source_path=key)
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    consts = _constants(g)
+    w = next(op for op in consts.values() if op.source_path == key)
+    assert w.source_dtype == "f8e4m3"
+    s = next(op for op in consts.values() if op.source_path == key + "_scale")
+    assert s.source_shape == (2, 1, 6)
+
+
 # ===================================================================
 # Loader: spell → fold → bind vs the torch dequant reference (the pre-migration
 # M1 bind-time dequant's recorded expectation — bit-for-bit, same LUT, same f32
@@ -454,6 +476,97 @@ def test_source_graph_structural_key_is_deterministic(tmp_path):
 
 
 # ===================================================================
+# Input-sourced fp8: spell_quantized_inputs (the MoE serving seam's expert
+# programs — weights are forward-argument InputOps, not constants)
+# ===================================================================
+
+
+def _input_graph(w_shape=(8, 16), dtype="f32"):
+    """``y = x * w`` over two graph inputs — the smallest consumer of a weight input."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", w_shape, dtype), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("w", w_shape, dtype), node_id="w")
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=["x", "w"], output=Tensor("y", w_shape, dtype), node_id="y")
+    g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def test_spell_inputs_rewrites_input_to_bits_plus_scale(tmp_path):
+    g = _input_graph()
+    m = spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "bf16")})
+    assert m == {"w": "w_scale"}
+    g.validate()
+    # The bits input keeps its id and its graph.inputs slot; the scale input is appended.
+    assert g.inputs == ["x", "w", "w_scale"]
+    assert g.nodes["w"].output.dtype.name == "f8e4m3"
+    assert isinstance(g.nodes["w"].op, InputOp) and isinstance(g.nodes["w_scale"].op, InputOp)
+    # bf16-stored scale declares f32 graph values (the loader convention).
+    assert g.nodes["w_scale"].output.dtype.name == "f32"
+    assert tuple(d.as_static() for d in g.nodes["w_scale"].output.shape) == (1, 16)
+    # The decode cast is the bits input's only consumer; the original consumer reads the cone.
+    casts = [n for n in _ops_by_type(g, ElementwiseOp) if n.op.op.name == "from_f8e4m3"]
+    assert len(casts) == 1
+    assert g.users("w") == {casts[0].id}
+    assert "w" not in g.nodes["y"].inputs
+
+
+def _run_numpy(g, input_data):
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(g)
+    res, _ = backend.run(compiled, input_data=input_data)
+    return res.outputs[compiled.outputs[0]]
+
+
+def test_spell_inputs_values_per_channel():
+    g = _input_graph()
+    bits = _finite_bits((8, 16))
+    scale = (np.abs(rng.standard_normal((1, 16))) + 0.5).astype(np.float32)
+    x = rng.standard_normal((8, 16)).astype(np.float32)
+    spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "f32")})
+    out = _run_numpy(g, {"x": x, "w": bits, "w_scale": scale})
+    np.testing.assert_allclose(out, x * (decode_f8(bits, "f8e4m3") * scale), rtol=1e-6)
+
+
+def test_spell_inputs_values_2d_block():
+    """A genuine 2-D block scale spells the interleaved reshape pair; the scale input binds at
+    the interleaved ``(grid, 1)`` layout, so the feed reshapes the stored ``(2, 4)`` to it."""
+    g = _input_graph()
+    bits = _finite_bits((8, 16))
+    scale = (np.abs(rng.standard_normal((2, 4))) + 0.5).astype(np.float32)  # derived block (4, 4)
+    x = rng.standard_normal((8, 16)).astype(np.float32)
+    spell_quantized_inputs(g, {"w": ("f8e4m3", (2, 4), "f32")})
+    assert tuple(d.as_static() for d in g.nodes["w_scale"].output.shape) == (2, 1, 4, 1)
+    out = _run_numpy(g, {"x": x, "w": bits, "w_scale": scale.reshape(2, 1, 4, 1)})
+    ref = x * (decode_f8(bits, "f8e4m3") * np.repeat(np.repeat(scale, 4, axis=0), 4, axis=1))
+    np.testing.assert_allclose(out, ref, rtol=1e-6)
+
+
+def test_spell_inputs_inverse_divides():
+    g = _input_graph()
+    bits = _finite_bits((8, 16))
+    scale = np.full((1, 16), 2.0, dtype=np.float32)
+    x = rng.standard_normal((8, 16)).astype(np.float32)
+    spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "f32")}, inverse=True)
+    out = _run_numpy(g, {"x": x, "w": bits, "w_scale": scale})
+    np.testing.assert_allclose(out, x * (decode_f8(bits, "f8e4m3") / scale), rtol=1e-6)
+
+
+def test_spell_inputs_rejects_bad_specs():
+    with pytest.raises(ValueError, match="not a graph input"):
+        spell_quantized_inputs(_input_graph(), {"y": ("f8e4m3", (1, 16), "f32")})
+    with pytest.raises(ValueError, match="does not tile"):
+        spell_quantized_inputs(_input_graph(), {"w": ("f8e4m3", (3, 1), "f32")})
+    with pytest.raises(ValueError, match="unknown fp8 storage format"):
+        spell_quantized_inputs(_input_graph(), {"w": ("int4", (1, 16), "f32")})
+    g = _input_graph()
+    spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "f32")})
+    with pytest.raises(ValueError, match="already carries the f8 storage dtype"):
+        spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "f32")})
+
+
+# ===================================================================
 # Dequantized state dict + quantized-checkpoint detection (the eager twin)
 # ===================================================================
 
@@ -475,6 +588,36 @@ def test_load_dequantized_state_dict(tmp_path):
     np.testing.assert_array_equal(sd["norm.weight"], np.full(16, 2.0, dtype=np.float32))
     np.testing.assert_array_equal(sd["other.weight"], np.full((4, 16), 3.0, dtype=np.float32))
     assert "layer.weight_scale" not in sd  # consumed by the pairing
+
+
+def test_load_dequantized_state_dict_expert_param_pairing(tmp_path):
+    """The general pairing on gpt-oss's 3-D expert params: ``…experts.gate_up_proj`` (fp8,
+    (E, in, out)) + ``…experts.gate_up_proj_scale`` (bf16, (E, 1, out)) dequantizes and the
+    scale is consumed; the sibling ``_bias`` passes through as values."""
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    qc = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 8, "strategy": "channel"}}},
+        "ignore": ["re:.*router"],
+    }
+    key = "model.layers.0.mlp.experts.gate_up_proj"
+    bits = _finite_bits((2, 4, 6))
+    scale_np = (rng.random((2, 1, 6)).astype(np.float32) + 0.5).astype(np.float32)
+    tensors = {
+        key: _fp8_tensor(bits),
+        key + "_scale": torch.from_numpy(scale_np).to(torch.bfloat16),
+        key + "_bias": torch.full((2, 6), 3.0, dtype=torch.bfloat16),
+        "model.layers.0.mlp.router.weight": _fp8_tensor(_finite_bits((4, 4))),  # ignored: loads as plain values
+    }
+    _write_checkpoint(tmp_path, tensors, qc)
+    sd = load_dequantized_state_dict(tmp_path)
+    scale_f32 = torch.from_numpy(scale_np).to(torch.bfloat16).float().numpy()  # the bf16-stored values
+    ref = torch.from_numpy(bits).view(_TORCH_F8["f8e4m3"]).float().numpy() * scale_f32
+    np.testing.assert_array_equal(sd[key], ref)
+    assert key + "_scale" not in sd
+    np.testing.assert_array_equal(sd[key + "_bias"], np.full((2, 6), 3.0, dtype=np.float32))
+    assert sd["model.layers.0.mlp.router.weight"].shape == (4, 4)  # ignored module: loads as plain values
 
 
 def test_load_dequantized_state_dict_unquantized_passthrough(tmp_path):

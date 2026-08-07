@@ -153,7 +153,31 @@ def _spec_query_len(vllm_args: list[str]) -> int:
     return int(cfg.get("num_speculative_tokens", 0) or 0) + 1
 
 
-def _gen_graph_args(vllm_args: list[str]) -> list[str]:
+def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
+    """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
+    probe — ``local_files_only`` keeps command construction hermetic (no hub round-trip: offline
+    test doubles and uncached models resolve to False in milliseconds), and ``--trust-remote-code``
+    / ``--revision`` forward so custom-code checkpoints still probe. The probe is UX only: the
+    authoritative guard is in ``EmmyGenModel.__init__``, which validates an MoE capture boot
+    against the runner (fixed-slot tier present, capture sizes capped at 1) — a probe miss here
+    degrades to that clear boot error, never to a capture crash."""
+    try:
+        from transformers import AutoConfig  # noqa: PLC0415
+
+        kwargs = {"local_files_only": True}
+        if _has_flag(vllm_args, "--trust-remote-code"):
+            kwargs["trust_remote_code"] = True
+        revision = _flag_value(vllm_args, "--revision", "")
+        if revision:
+            kwargs["revision"] = revision
+        cfg = AutoConfig.from_pretrained(model, **kwargs)
+        cfg = getattr(cfg, "text_config", cfg)
+        return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
+    except Exception:  # noqa: BLE001 — any probe failure: let the serve proceed un-special-cased
+        return False
+
+
+def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
@@ -169,6 +193,23 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     see the comment on the flooring below."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
+    if model is not None and _is_moe_model(model, vllm_args):
+        # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
+        # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
+        # keep the routed dispatch, which host-syncs and stays eager. The ladder is therefore
+        # capped at capture size 1. Whether the fixed-slot tier actually built is unknowable
+        # pre-boot — the AUTHORITATIVE guard is in ``EmmyGenModel.__init__``, which inspects
+        # the runner and rejects an MoE capture boot loudly when the tier is missing (serve
+        # with --enforce-eager then). A caller-supplied config forwards untouched and faces
+        # the same boot guard.
+        if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
+            return []  # the caller decided; the boot guard validates capture against the runner
+        bucket = emmy_config.gen_decode_bucket()
+        if bucket <= 0:
+            logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
+            return ["--enforce-eager"]
+        cfg = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
+        return ["--compilation-config", cfg]
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
         return []  # the caller decided; forward theirs untouched
     bucket = emmy_config.gen_decode_bucket()
@@ -220,7 +261,7 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
 
     cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
     if not stock and generate:
-        cmd += _gen_graph_args(vllm_args)
+        cmd += _gen_graph_args(vllm_args, model=model)
         cmd += ["--hf-overrides", '{"architectures": ["EmmyGenModel"]}']
         # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
         # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.

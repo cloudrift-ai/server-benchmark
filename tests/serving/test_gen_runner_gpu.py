@@ -238,6 +238,223 @@ def test_gen_runner_device_path_matches_host():
     np.testing.assert_array_equal(fn_np, runner.final_norm(h_np))
 
 
+def test_gen_runner_moe_stitch_matches_eager():
+    """MoE third seam (OLMoE): the device stitch — emmy ``pre`` → reference SDPA → emmy
+    ``post_attn`` + torch router + shared expert program + weighted combine — must match eager
+    logits. Also pins the program-count contract: ONE expert program serves every layer
+    (weights are inputs), so program count does not scale with num_experts."""
+    pytest.importorskip("cupy")
+    import torch
+    import torch.nn.functional as F
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM, apply_rotary_pos_emb
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner._moe is not None and runner._expert_sym is not None
+    assert runner._expert_sym.input_names == ["x", "w_gate_up", "w_down"]
+
+    t = 7
+    ids = torch.arange(1, t + 1, dtype=torch.long)
+    pos = torch.arange(t).unsqueeze(0)
+    cos, sin = model.model.rotary_emb(torch.zeros(1, t, config.hidden_size), pos)
+    cos_d, sin_d = cos.cuda(), sin.cuda()
+    mask = torch.triu(torch.full((t, t), float("-inf")), diagonal=1)[None, None].cuda()
+    hd, nh, nkv = runner.head_dim, runner.num_heads, runner.num_kv_heads
+
+    hidden = runner.embed_device(ids.cuda())
+    for layer in range(runner.num_layers):
+        residual = hidden
+        q2, k2, v2 = runner.forward_layer_pre_device(layer, hidden)
+        q = q2.view(t, nh, hd).transpose(0, 1)[None]
+        k = k2.view(t, nkv, hd).transpose(0, 1)[None]
+        v = v2.view(t, nkv, hd).transpose(0, 1)[None]
+        q, k = apply_rotary_pos_emb(q, k, cos_d, sin_d)
+        ao = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=runner.scaling)
+        ao = ao.transpose(1, 2).reshape(t, nh * hd).contiguous()
+        hidden = runner.forward_layer_post_device(layer, ao, residual)
+    got = runner.final_norm_device(hidden)
+    with torch.no_grad():
+        logits = model.lm_head(got.cpu()).numpy()
+        eager = model(ids.unsqueeze(0)).logits[0].numpy()
+    np.testing.assert_allclose(logits, eager, rtol=2e-3, atol=2e-3)
+    assert int(np.argmax(logits[-1])) == int(np.argmax(eager[-1]))
+
+
+def test_moe_fixed_slot_combine_matches_routed_oracle():
+    """The fixed-slot combine (``_moe_combine_slots`` — selector write → k indirect slot
+    replays → score matmul) must match ``combine_routed_experts`` (the routed parity oracle)
+    on random routings: random ``xn`` rows route to different top-k expert sets, so the
+    selector write, the in-kernel table reads, and the score combine are all exercised across
+    routings. fp32 allclose — the two paths sum the k partials in different orders."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner.has_moe_fixed_slot, "the fixed-slot tier must build for the plain OLMoE expert shape"
+    assert len(runner._expert_slots) == config.num_experts_per_tok
+
+    torch.manual_seed(1)
+    for layer in (0, 1):
+        moe = runner._moe[layer]
+        for _ in range(4):
+            xn = torch.randn(1, config.hidden_size, device="cuda")
+            got = runner._moe_combine_slots(moe, xn)
+            ref = runner._moe_combine(moe, xn)
+            assert got.shape == ref.shape == xn.shape
+            torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
+
+
+def test_moe_indirect_slot_matches_direct_expert_bit_exact():
+    """The indirect expert program (weight base pointers resolved in-kernel from the device
+    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program BIT-EXACT on every
+    expert of every MoE layer: the indirection is ABI-level, so both programs run the same
+    schedule and the same kernels modulo where the base pointer comes from. Runs each expert's
+    weights through both paths on the same row and compares raw bytes."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner.has_moe_fixed_slot
+    runner._ensure_device()
+
+    slot0 = runner._expert_slots[0]
+    # The slot plan must actually carry the indirect encoding for both weights.
+    marked = {a for lc in slot0.program.compiled.launches for a, _, _, _ in lc.indirect_args}
+    assert marked == {"w_gate_up", "w_down"}
+
+    torch.manual_seed(2)
+    for moe in runner._moe:
+        for e in range(config.num_experts):
+            x = torch.randn(1, config.hidden_size, device="cuda")
+            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                direct = runner._launch_expert(moe, e, x).clone()  # the direct M=1 twin (pointer swap)
+                runner._slot_sel[0] = moe["sel_off"] + e  # steer slot 0's table read at this expert
+                p = slot0.program
+                p.upload_prefix_device({"x": cp.from_dlpack(x.detach().contiguous())})
+                p.run_once()
+            torch.cuda.synchronize()
+            got = runner._slot_partials[0:1]
+            assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
+
+
+def test_moe_expert_m256_twin_matches_eager_across_experts():
+    """The static M=256 prefill expert twin (captured whole-program replay, weights by
+    UPLOAD) must match the eager expert wrapper on an over-bucket row set — and stay
+    correct ACROSS experts: the captured graph bakes the twin's own buffer pointers, so a
+    pointer-swap regression would freeze the first expert's weights into every later
+    replay. ``_launch_expert`` routes row sets in (decode_bucket, 256] here."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, max_tokens=64)
+    assert runner._expert_m256 is not None, "the M=256 prefill twin must build for the plain OLMoE expert shape"
+    runner._ensure_device()
+
+    moe = runner._moe[0]
+    torch.manual_seed(3)
+    for t in (10, 5):  # both over-bucket widths must reuse the one cached graph (prefix upload pads)
+        for e in (0, 3, 7):
+            x = torch.randn(t, config.hidden_size, device="cuda")
+            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                got = runner._launch_expert(moe, e, x).clone()
+            torch.cuda.synchronize()
+            gate, up = torch.nn.functional.linear(x, moe["inputs"]["w_gate_up"][e]).chunk(2, dim=-1)
+            ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, moe["inputs"]["w_down"][e])
+            assert got.shape == (t, config.hidden_size)
+            torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
+    assert runner._expert_m256.program._e2e_graph is not None, "the m256 tier must serve via the captured program graph"
+
+
 def test_decode_twin_shares_weight_buffers():
     """The static decode-bucket twin must NOT hold a second on-GPU copy of the layer's
     weights: every non-trivial constant buffer in a decode program shares its device
@@ -413,3 +630,299 @@ def test_layers_share_activation_arena():
         assert pa.keys() == pb.keys(), f"{kind}: layer programs disagree on buffer names"
         for key in pa:
             assert pa[key] == pb[key], f"{kind}: activation buffer {key} not shared across layers"
+
+
+def test_expert_program_fp8_inputs_match_reference():
+    """Input-sourced fp8 (MoE M3): the expert program compiled with its weight INPUTS spelled
+    as fp8 bits + scale inputs (``spell_quantized_inputs``) must match the eager expert on the
+    dequantized weights, and stay within the fp8 quantization bound of the eager expert on the
+    ORIGINAL fp16 weights. Weights quantize per-out-channel and apply as ``x @ W`` (the
+    gpt-oss (in, out) orientation). Runs the M=16 and M=1 static twins; the build goes
+    through ``_compile_split``'s plan path, so the per-input feed binding (fp8 bits on the
+    uint8 carrier from a torch fp8 tensor, f32 scales) is exercised too."""
+    pytest.importorskip("cupy")
+    import torch
+    import torch.nn as nn
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.loader.quant import spell_quantized_inputs
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down):
+            gate, up = (x @ w_gate_up).chunk(2, dim=-1)
+            return (nn.functional.silu(gate) * up) @ w_down
+
+    h, inter = 64, 32
+    torch.manual_seed(4)
+    w_gu = torch.randn(h, 2 * inter, dtype=torch.float32) * 0.05
+    w_dn = torch.randn(inter, h, dtype=torch.float32) * 0.05
+
+    def quantize_per_out_channel(w):
+        scale = (w.abs().amax(dim=0, keepdim=True).clamp(min=1e-8) / 448.0).float()
+        bits = (w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        return bits, scale
+
+    gu_bits, gu_scale = quantize_per_out_channel(w_gu)
+    dn_bits, dn_scale = quantize_per_out_channel(w_dn)
+    gu_dq = gu_bits.float() * gu_scale
+    dn_dq = dn_bits.float() * dn_scale
+
+    for m in (16, 1):
+        x = torch.randn(m, h, dtype=torch.float16)
+        graph = trace_split(
+            Expert(),
+            (x, w_gu.to(torch.float16), w_dn.to(torch.float16)),
+            None,
+        )
+        spell_quantized_inputs(graph, {"w_gate_up": ("f8e4m3", (1, 2 * inter), "f32"), "w_down": ("f8e4m3", (1, h), "f32")})
+        graph.validate()
+        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+        assert plan.inputs == ["x", "w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"]
+        prog, _ = _compile_split(
+            Expert(),
+            [x, gu_bits, dn_bits, gu_scale, dn_scale],  # torch fp8 tensors: the feed must view bits
+            None,
+            np.dtype("float16"),
+            plan=plan,
+        )
+        (out,) = prog.run(
+            [
+                x.numpy(),
+                gu_bits.view(torch.uint8).numpy(),
+                dn_bits.view(torch.uint8).numpy(),
+                gu_scale.numpy(),
+                dn_scale.numpy(),
+            ]
+        )
+        with torch.no_grad():
+            ref_dq = Expert()(x.float(), gu_dq, dn_dq).numpy()
+            ref_orig = Expert()(x.float(), w_gu, w_dn).numpy()
+        got = np.asarray(out, dtype=np.float32).reshape(ref_dq.shape)
+        rms = float(np.sqrt((ref_dq**2).mean()))
+        assert rms > 1e-3, "reference suspiciously small; tolerance would be trivial"
+        # vs the dequantized reference: only f16 kernel arithmetic separates the two.
+        assert float(np.abs(got - ref_dq).max()) / rms < 2e-2, f"M={m}: kernel path deviates from the dequantized reference"
+        # vs the original weights: the fp8 quantization error bound — RMS-relative, since the
+        # per-element error of two chained quantized matmuls compounds past the single-cone
+        # ~5% max while the aggregate stays a few percent.
+        rms_orig = float(np.sqrt((ref_orig**2).mean()))
+        assert float(np.sqrt(((got - ref_orig) ** 2).mean())) / max(rms_orig, 1e-6) < 5e-2, (
+            f"M={m}: fp8 error exceeds the quantization bound"
+        )
+
+
+def test_expert_program_fp8_indirect_compose():
+    """Indirect operands (the M2 fixed-slot dispatch) compose with input-sourced fp8: BOTH the
+    bits input and its scale input compile as indirect operands, and the kernel resolves each
+    expert's bits + scale slices from the device tables (``table[sel[slot]]``) — per-expert
+    outputs match the direct dequantized matmul."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import torch.nn as nn
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.loader.quant import spell_quantized_inputs
+    from emmy.serving.gen_runner import _compile_split, _indirect_covered, trace_split
+
+    class XW(nn.Module):
+        def forward(self, x, w):
+            return x @ w
+
+    h, n, n_experts = 64, 32, 3
+    torch.manual_seed(5)
+    graph = trace_split(XW(), (torch.zeros(1, h, dtype=torch.float16), torch.zeros(h, n, dtype=torch.float16)), None)
+    spell_quantized_inputs(graph, {"w": ("f8e4m3", (1, n), "f32")})
+    graph.hints.set("cuda.indirect_inputs", ("w", "w_scale"))
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+    assert _indirect_covered(plan, ("w", "w_scale")), "an fp8 bits/scale input arg lacks the indirect encoding"
+
+    x = torch.randn(1, h, dtype=torch.float16)
+    w_e = [torch.randn(h, n, dtype=torch.float32) * 0.05 for _ in range(n_experts)]
+    bits_e, scale_e = [], []
+    for w in w_e:
+        scale = (w.abs().amax(dim=0, keepdim=True).clamp(min=1e-8) / 448.0).float()
+        bits_e.append((w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).cuda())
+        scale_e.append(scale.cuda())
+
+    prog, _ = _compile_split(XW(), [x, bits_e[0], scale_e[0]], None, np.dtype("float16"), plan=plan)
+    p = prog.program
+    table_w = torch.tensor([t.data_ptr() for t in bits_e], dtype=torch.int64, device="cuda")
+    table_s = torch.tensor([t.data_ptr() for t in scale_e], dtype=torch.int64, device="cuda")
+    sel = torch.zeros(1, dtype=torch.int32, device="cuda")
+    with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        p.arrays["w__table"] = cp.from_dlpack(table_w)
+        p.arrays["w__sel"] = cp.from_dlpack(sel)
+        p.arrays["w_scale__table"] = cp.from_dlpack(table_s)
+        p.arrays["w_scale__sel"] = cp.from_dlpack(sel)
+    for e in range(n_experts):
+        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            sel[0] = e
+            p.upload_prefix_device({"x": cp.from_dlpack(x.cuda())})
+            p.run_once()
+            outs = p.output_prefix_device()
+            got = torch.from_dlpack(outs[prog.output_names[0]]).clone()
+        torch.cuda.synchronize()
+        ref = (x.float() @ (bits_e[e].float().cpu() * scale_e[e].cpu())).to(torch.float16)
+        torch.testing.assert_close(got.cpu().reshape(ref.shape), ref, rtol=2e-2, atol=2e-2)
+
+
+def _write_tiny_gptoss_fp8_checkpoint(tmp_path, torch, transformers):
+    """A tiny gpt-oss checkpoint in the emmy fp8 layout: fp8 attention weights with
+    ``.weight_scale`` partners, fp8 3-D expert weights with ``<param>_scale`` partners
+    (per-out-channel, INTERLEAVED gate/up as shipped), everything else value-dtype.
+    Returns ``(checkpoint_dir, reference_model)`` where the reference carries the
+    DEQUANTIZED weights (the quantization-rounded values the kernels should reproduce)."""
+    import json
+
+    from safetensors.torch import save_file
+
+    cfg = transformers.GptOssConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        sliding_window=8,
+    )
+    torch.manual_seed(0)
+    model = transformers.GptOssForCausalLM(cfg).eval()
+    for p in model.parameters():
+        torch.nn.init.normal_(p, std=0.2)
+
+    def quant_out_channel(w, out_axis):
+        # per-out-channel fp8: scale shape = w.shape with every non-out axis collapsed to 1
+        red = [a for a in range(w.dim()) if a != 0 and a != out_axis] if w.dim() == 3 else [a for a in range(w.dim()) if a != out_axis]
+        scale = w.detach().float().abs().amax(dim=red, keepdim=True).clamp(min=1e-8) / 448.0
+        bits = (w.detach().float() / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        return bits, scale
+
+    state: dict = {}
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            t = p.detach()
+            if ".self_attn." in name and name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight")):
+                bits, scale = quant_out_channel(t, out_axis=0)  # (out, in) → (out, 1)
+                state[name] = bits
+                state[name + "_scale"] = scale.to(torch.bfloat16)
+                p.copy_(bits.float() * scale)  # reference = dequantized values
+            elif ".mlp.experts." in name and name.endswith(("gate_up_proj", "down_proj")):
+                bits, scale = quant_out_channel(t, out_axis=2)  # (E, in, out) → (E, 1, out)
+                state[name] = bits
+                state[name + "_scale"] = scale.to(torch.bfloat16)
+                p.copy_(bits.float() * scale)
+            else:
+                state[name] = t.clone()
+
+    ckpt = tmp_path / "tiny-gptoss-fp8"
+    ckpt.mkdir()
+    cfg.save_pretrained(ckpt)
+    cfg_dict = json.loads((ckpt / "config.json").read_text())
+    cfg_dict["quantization_config"] = {
+        "quant_method": "compressed-tensors",
+        "format": "float-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear", "GptOssExperts"],
+                "weights": {"type": "float", "num_bits": 8, "strategy": "channel", "dynamic": False},
+            }
+        },
+        "ignore": ["lm_head", "model.embed_tokens", "model.norm", "re:.*router", "re:.*layernorm", "re:.*sinks"],
+    }
+    (ckpt / "config.json").write_text(json.dumps(cfg_dict))
+    save_file(state, str(ckpt / "model.safetensors"))
+    return ckpt, model
+
+
+def test_gen_runner_gptoss_fp8_create_matches_dequantized_reference(tmp_path):
+    """The full quantized-checkpoint serving load (M3b): ``EmmyGenRunner.create`` on a tiny
+    gpt-oss fp8 checkpoint — meta twin + shard-streamed dense dequant + fp8 expert store +
+    ``spell_quantized_inputs``-spelled expert programs — must reproduce the dequantized
+    reference: embed, the biased pre projections, and the full post_attn + router +
+    clamped-SwiGLU fp8 expert combine."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner, combine_routed_experts
+
+    ckpt, ref = _write_tiny_gptoss_fp8_checkpoint(tmp_path, torch, transformers)
+    runner = EmmyGenRunner.create(str(ckpt), dtype_str="float16", decode_bucket=4, max_tokens=32)
+    assert runner._moe is not None and runner._expert_sym is not None
+    assert runner._expert_sym.input_names == [
+        "x",
+        "w_gate_up",
+        "w_down",
+        "b_gate_up",
+        "b_down",
+        "w_gate_up_scale",
+        "w_down_scale",
+    ], "the fp8 expert program must carry bits + bias + scale inputs"
+    # The fixed-slot decode tier must build for the fp8+bias expert (all six per-expert
+    # inputs — bits, biases, scales — table-resolved); the MoE serve default of capture
+    # size 1 depends on it.
+    assert runner.has_moe_fixed_slot
+
+    cfg = ref.config
+    t = 4
+    ids = torch.arange(1, t + 1, dtype=torch.long)
+    hidden = runner.embed_device(ids.cuda())
+    ref_hidden = ref.model.embed_tokens(ids).float()
+    torch.testing.assert_close(hidden.cpu().float(), ref_hidden, rtol=2e-3, atol=2e-3)
+
+    block = ref.model.layers[0]
+    with torch.no_grad():
+        # pre: biased q/k/v projections off the input norm
+        q, k, v = runner.forward_layer_pre_device(0, hidden)
+        hn = block.input_layernorm(ref_hidden)
+        for got, proj in ((q, block.self_attn.q_proj), (k, block.self_attn.k_proj), (v, block.self_attn.v_proj)):
+            want = proj(hn)
+            rms = want.pow(2).mean().sqrt()
+            assert (got.cpu().float() - want).abs().max() / rms < 2e-2
+
+        # post_attn + router + fp8 expert combine vs the dequantized eager tail
+        attn_out = (0.1 * torch.randn(t, cfg.num_attention_heads * cfg.head_dim)).to(torch.float16)
+        residual = (0.1 * torch.randn(t, cfg.hidden_size)).to(torch.float16)
+        got_out = runner.forward_layer_post_device(0, attn_out.cuda(), residual.cuda())
+
+        h_ref = residual.float() + block.self_attn.o_proj(attn_out.float())
+        xn_ref = block.post_attention_layernorm(h_ref)
+        mlp_out = block.mlp(xn_ref.unsqueeze(0))[0].squeeze(0)
+        want_out = h_ref + mlp_out
+        rms = want_out.pow(2).mean().sqrt()
+        assert (got_out.cpu().float() - want_out).abs().max() / rms < 3e-2
+
+        # the routed-combine oracle on the CPU reference reproduces the same tail (sanity
+        # that the seam math itself, not just the kernels, matches HF)
+        from emmy.compiler.trace.huggingface import build_moe_split_wrapper, deinterleave_gate_up
+
+        _, _, expert = build_moe_split_wrapper(block)
+        experts = block.mlp.experts
+        w_gu = deinterleave_gate_up(experts.gate_up_proj.detach())
+        b_gu = deinterleave_gate_up(experts.gate_up_proj_bias.detach())
+        combined = combine_routed_experts(
+            xn_ref,
+            block.mlp.router(xn_ref),
+            lambda e, rows: expert(rows, w_gu[e], experts.down_proj[e], b_gu[e], experts.down_proj_bias[e]),
+        )
+        torch.testing.assert_close(h_ref + combined, want_out, rtol=1e-4, atol=1e-5)

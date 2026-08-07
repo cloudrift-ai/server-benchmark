@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.backend.plan import (
+    PLAN_FORMAT_INDIRECT,
     PLAN_FORMAT_VERSION,
     WeightSpec,
     _encode_load_ops,
@@ -99,9 +100,48 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = PLAN_FORMAT_VERSION + 1
+    d["format"] = PLAN_FORMAT_INDIRECT + 1  # past every format the runtime speaks
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
+
+
+def _indirect_graph() -> Graph:
+    """One launch whose weight input is an indirect operand (table + selector + slot)."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1, 64)), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("w", (128, 64)), node_id="w")
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_ind() {}",
+            kernel_name="k_ind",
+            arg_order=("x", "w", "y"),
+            grid=((1,), (1,), (1,)),
+            block=((128,), (1,), (1,)),
+            indirect_args=(("w", "w__table", "w__sel", 0),),
+        ),
+        inputs=["x", "w"],
+        output=Tensor("y", (1, 128)),
+        node_id="y",
+    )
+    g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def test_plan_indirect_operand_projection_and_round_trip():
+    """An indirect operand projects off the CudaOp, serializes the plan as
+    ``PLAN_FORMAT_INDIRECT`` (a runtime ignoring the field would pass the wrong arg pack —
+    old readers must reject and fall back to the full compile), and survives the JSON round
+    trip; a plan without the field keeps format ``PLAN_FORMAT_VERSION`` byte-compatibly."""
+    plan = plan_from_graph(_indirect_graph())
+    (launch,) = plan.launches
+    assert launch.indirect_args == (("w", "w__table", "w__sel", 0),)
+    d = plan_to_dict(plan)
+    assert d["format"] == PLAN_FORMAT_INDIRECT
+    restored = plan_from_dict(json.loads(json.dumps(d)))
+    assert restored == plan
+    # A plan with no indirect operands stays on the original format — existing packs and
+    # readers are untouched.
+    assert plan_to_dict(plan_from_graph(_sample_graph()))["format"] == PLAN_FORMAT_VERSION
 
 
 def test_grid_expr_survives_round_trip():

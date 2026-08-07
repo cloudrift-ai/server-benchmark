@@ -254,6 +254,89 @@ Mirrors the validated gemma-4-12B flow (the article's benchmark plan + `docker/v
 4. **GSM8K sanity check.** lm-eval (`local-completions`) subset against each serving endpoint, fixed seed/config;
    emmy's score within noise of stock vLLM's (same weights ⇒ any gap is a serving bug).
 
+#### M4 step-1 findings — golden seeding (2026-08-07, RTX 5090, `~/checkpoints/gptoss20b-fp8-emmy`)
+
+`emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gptoss20b.yaml`: 17 entries from manual pinned exploration
+(no tuner) over the SERVING programs themselves. Method note: the isolated golden-snippet form is **not** a faithful
+A/B unit for this model — the expert program's fork tree differs from the snippet's (below) — so every row was
+explored by pinning `EMMY_KNOBS` on the actual `_compile_split` program and reading per-launch medians
+(`benchmark_program`), then re-verified deploying FROM the tier with no pin.
+
+Per-shape results (greedy = the cold pick through the offline prior; `emmy_us` = the deployed in-model kernel time,
+split pairs summed):
+
+| shape | tier | greedy µs | recorded knobs | deployed µs | delta | rec |
+| --- | --- | --- | --- | --- | --- | --- |
+| expert gate_up (1, 5760, 2880) fp8 | m1 | 80.5 | `t128` / `g8k/coop-t` | 13.5 | 6.0× | y |
+| expert down (1, 2880, 2880) fp8 | m1 | 228.3 | `t256` / `g16k/coop-t` | 15.6 | 14.7× | y |
+| expert gate_up (16, 5760, 2880) fp8 | m16 | 38.9 | `w1x4` / `f1x1/k4` / `d4/tma` | 16.4 | 2.4× | y |
+| expert down (16, 2880, 2880) fp8 | m16 | 1515.5 | `t128` / `g8k/coop-t` | 129.5 | 11.7× | y |
+| expert gate_up (256, 5760, 2880) fp8 | m256 | 96.7 | `w2x4` / `f2x2/k4` / `d2/tma` | 86.8 | 1.11× | y |
+| expert down (256, 2880, 2880) fp8 | m256 | 23310.1 | `t128` / `coop-t` | 1905.3 | 12.2× | y |
+| expert gate_up (512, 5760, 2880) fp8 | .dynM | 218.3 | `w2x4` / `f2x2/k4` / `d2/tma` | 123.7 | 1.76× | y |
+| expert down (512, 2880, 2880) fp8 | .dynM | 3950.2 | — | 3611.3 | 1.06× | **n** |
+| q_proj (1, 4096, 2880) | m1 | 60.8 | `t128` / `g8k/coop-t` | 11.5 | 5.3× | y |
+| k/v_proj (1, 512, 2880) | m1 | 57.6 | `t128` / `g8k/coop-t` | 7.4 | 7.8× | y |
+| o_proj (1, 2880, 4096) | m1 | 84.6 | `t128` / `g8k/coop-t` | 11.5 | 7.4× | y |
+| q_proj (16, 4096, 2880) | m16 | 23.8 | `w1x4` / `f1x1/k4` / `d4/tma` | 12.4 | 1.93× | y |
+| k/v_proj (16, 512, 2880) | m16 | 17.6 | `w1x4` / `f1x1/k4` / `d2/tma` | 10.3 | 1.71× | y |
+| o_proj (16, 2880, 4096) | m16 | 21.8 | `w1x4` / `f1x1/k4` / `d2/tma` | 14.4 | 1.51× | y |
+| q_proj (512, 4096, 2880) | .dynM | 93.1 | `w2x4` / `f2x2/k4` / `d2/tma` | 81.9 | 1.14× | y |
+| k/v_proj (512, 512, 2880) | .dynM | 202.8 | `w2x4` / `f2x2/k4` / `d2/tma` | 24.7 | 8.2× | y |
+| o_proj (512, 2880, 4096) | .dynM | 113.8 | `w2x4` / `f2x2/k4` / `d2/tma` | 89.8 | 1.27× | y |
+| rms_norm k2880 | m1 / m16 / .dynM | 6.2 / 8.2 / 6.2 | — | — | — | **n** |
+
+Per-program totals, deployed from the tier: expert 310.6 → **31.1** µs (m1), 1561.8 → **148.6** (m16), 23607 →
+**1972** (m256), 4257 → **4055** (.dynM); dense `pre` 185.5 → **34.0** / `post` 95.3 → **19.7** µs (m1), 66.9 →
+**43.9** / 31.9 → **25.7** (m16), 516.2 → **150.5** / 126.0 → **101.0** (.dynM).
+
+- **Every M=1 shape deployed the KNOB-LESS SCALAR form cold** — one thread per output element, no cooperative
+  reduce, 57–228 µs each. The transposed block coop under a grid split-K (`g<n>k/coop-t`) puts all of them at the
+  weight-streaming floor. This is the same class OLMoE M2 hit, and it is the whole c=1 story: 24 layers × (4 dense
+  projections + 4 expert slots × 2 matmuls) per step.
+- **The boot roofline audit cannot see the expert programs.** Its floor is `const_bytes / dram_bw`, and expert
+  weights are program INPUTS, not constants — so `const_bytes` is 0, the floor is 0, and every expert twin is
+  skipped by the `MIN_FLOOR_US` gate. M3b's "roofline clean" boot was serving a 310 µs M=1 expert program. A
+  weight floor that counted the bound INPUT slabs for the MoE tiers would have surfaced it at boot.
+- **The expert `down` matmul cannot reach the warp mma tier at any width** — the binding residual. Its A operand is
+  the clamped-SwiGLU cone that loop fusion pulls out of `gate_up`'s epilogue, and that computed-A cone over the
+  strided `chunk(2)` halves declines the staged transports, so `TILE`/`WORK`/`STAGE` realize `off` on that node
+  under any pin and the fork falls back to the scalar family. Measured cost of the lockout: a plain-A twin of the
+  same extents runs 15.8 µs at M=16 against the fused form's 129.5, and at M=256 the fused form is 1905 µs against
+  a 45 µs cuBLAS HGEMM. The routing (`PLACE`) lever does not reach it either — the recognized tree exposes exactly
+  one cuttable seam (the bias accumulator), not the A cone.
+- **The isolated snippet is not a faithful A/B unit here.** At M=16 the fp8 snippet's own fork tree offers only the
+  scalar tier while the in-model `gate_up` reaches the warp tier, and the in-model `down` is computed-A while an
+  isolated `y @ w + b` is not. Both directions of error are large (2750 vs 44 µs, 27.8 vs 1515 µs), so the whole
+  sweep ran on the serving programs.
+Serve A/B after seeding (pack deleted, cold boot ~5 min for 149 plans, roofline audit clean, KV 114,161 tokens,
+whole-step decode capture at size 1, greedy completions fluent and factually right — 512 in / 128 out,
+`vllm bench serve`, medians of 3 warm runs on fresh prompts; stock re-measured the same day on the native MXFP4
+checkpoint):
+
+| metric | M3b (cold) | seeded | stock vLLM | remaining gap |
+| --- | --- | --- | --- | --- |
+| c=1 TPOT | 61.4 ms | **5.90 ms** (10.4×) | 3.51 ms | 1.68× |
+| TTFT, 512-token prompt | 5.9 s | **0.79 s** (7.5×) | 33.5 ms | 23.6× |
+| c=8 TPOT | 356 ms | **62.8 ms** (5.7×) | 6.27 ms | 10.0× |
+| c=8 output throughput | — | 83 tok/s | 1060 tok/s | 12.8× |
+
+Where the residual sits: **kernel quality, not dispatch structure — and one specific kernel.** c=1 is now within
+1.7× of stock with the whole emmy-side GPU budget at ~4.3 ms/step (expert 31.1 µs × 96 launches = 3.0 ms + dense
+53.7 µs × 24 = 1.3 ms), so the per-expert Python launch chain is no longer the binding constraint at T=1 — the
+fixed-slot tier's captured step absorbed it. Every remaining gap is the expert `down` matmul's warp-tier lockout:
+at c=8 the multi-row experts route to the m16 twin whose `down` is 129.5 µs against a 15.8 µs plain-A twin, and at
+prefill the m256 `down` is 1905 µs against a 45 µs HGEMM — 24 layers × ~32 experts of that IS the 0.79 s TTFT.
+**Verdict for M4 sequencing: the sorted grouped-GEMM pass should NOT come first.** Grouped GEMM re-shapes dispatch,
+which c=1 no longer needs, and it would inherit the same computed-A cone; fixing the fusion legality so the
+expert `down` reaches the warp tier is the higher-value and strictly prior work.
+
+- Enabling work landed alongside (uncommitted with the goldens): `matmul_snippet` spells the fp8 W8A16 form (fp8
+  storage input + in-graph dequant cone) so an `dtype: fp8` golden has a real reproducer; `run._bind_inputs` binds
+  an fp8 torch input through its uint8 carrier (it raised `unsupported ScalarType Float8_e4m3fn`, which blocked
+  every fp8 `run --bench`); and the golden featurization gate now exempts the scalar-coop FORM at any M, not only
+  M=1 (the expert `down` rows are legitimately tile-geometry-free).
+
 ### M5 — article
 
 New post in the `cloudrift-landing` repo alongside the gemma-4 article: directory

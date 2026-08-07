@@ -158,6 +158,13 @@ softmax-then-P@V offer site) — a fusion-band decision upstream of the tile bin
 `EMMY_FP8_EXPAND` path, not an input-sourced limitation. Indirect operands compose: bits and scale inputs both
 compile as table-resolved operands for the fixed-slot dispatch.
 
+**Trellis-coded checkpoints (EXL3).** `loader/exl3.py` holds the pure numpy decode for the EXL3 (QTIP-class
+trellis-coded) weight format: per-16x16-tile bit-window extraction from the tail-biting code stream, the 3INST
+computed codebook (bit-exact against exllamav3's CUDA kernels), the mma-fragment tile ordering, and the
+128-block Hadamard/sign fold that restores the original basis from the `suh`/`svh` sibling vectors.
+`decode_exl3_linear` reconstructs one linear's fp16 weight from its sibling tensors; the graph-spelling and
+bind-path wiring for these checkpoints is not built yet — today the module is the reference decode plus its tests.
+
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph
 algebra; they may NEVER know checkpoint formats, scheme names, scale pairing, or quantization metadata. The frontend

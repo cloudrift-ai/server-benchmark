@@ -273,6 +273,20 @@ mma chains off the ONE ldmatrix'd A fragment
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
 store's `RegEpilogue` (`extra_accs`).
 
+**Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
+sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
+16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
+(`LdmatrixLoad(byte_slab=True)`): the gmem fragment loaders' lane→element map pointed at the slab — under a 16-bit
+atom (W8A16, the fp8-B mul-hoist form) converting per element, with the transposed-B slab's contiguous (k, k+1)
+pair loading as ONE fp8x2 and converting with one hardware `cvt.rn.f16x2.e4m3x2` (`emmy_mma_load_b_smem_trans_f8_f16`);
+under the fp8 k32 atoms (W8A8) repacking raw bytes, contiguous-K lanes as single u32 loads (`_smem_b8v`). Staged is
+BIT-identical to gmem-direct (same converts, same K order). Byte slabs are NONE-swizzle by construction (the
+ldmatrix XOR is b16-indexed); the cp.async byte slab instead pads each row by `_stage.BYTE_SLAB_PAD` (16 B — keeps
+every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-way per the lane→bank oracle), and a
+TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
+(`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
+the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
+
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two
 warp bands instead of software-pipelining them in-warp (`_stage._wspec_kloop` — the workers arm of `staged_kloop`,

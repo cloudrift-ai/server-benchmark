@@ -187,6 +187,11 @@ def _serialize_field(v):
     # ``json.dumps(default=str)`` (which ``_deserialize_field`` couldn't reverse).
     if isinstance(v, IndexSource):
         return repr(v)
+    # ``ConstantOp.source_graph`` — a nested mini-graph field round-trips
+    # through the graph's own dict form, tagged so ``_deserialize_field`` can
+    # tell it from an ordinary dict-valued op field.
+    if isinstance(v, Graph):
+        return {"__graph__": v.to_dict()}
     if isinstance(v, (list, tuple)) and v and all(isinstance(x, IndexSource) for x in v):
         return [repr(x) for x in v]
     if isinstance(v, ElementwiseImpl):
@@ -234,6 +239,8 @@ def _deserialize_field(k, v):
         return tuple(_eval_stmt(e) for e in v)
     if k == "sources" and isinstance(v, list) and v and all(isinstance(e, str) and e.startswith("IndexSource(") for e in v):
         return tuple(_eval_stmt(e) for e in v)
+    if isinstance(v, dict) and "__graph__" in v:
+        return Graph.from_dict(v["__graph__"])
     if isinstance(v, dict) and "__op__" in v:
         op_cls = _lookup_op_class(v["__op__"])
         if op_cls is None:
@@ -831,11 +838,12 @@ class Graph:
     def loadable_constants(self) -> Iterator[tuple[str, ConstantOp]]:
         """Yield ``(node_id, op)`` for the constants an executor must *load* — non-static
         (``value is None``) constants that name an external ``source_path`` (or a
-        ``source_parts`` concat of several). Scalar, ``context_value``, and synthetic
-        (source-less) constants are skipped: the backend materializes those itself. The
-        single entry point shared by the safetensors and live-module loaders."""
+        ``source_parts`` concat of several, or a ``source_graph`` bind record whose leaves
+        name the external sources). Scalar, ``context_value``, and synthetic (source-less)
+        constants are skipped: the backend materializes those itself. The single entry
+        point shared by the safetensors and live-module loaders."""
         for nid, op in self.constant_ops():
-            if op.value is None and (op.source_path is not None or op.source_parts):
+            if op.value is None and (op.source_path is not None or op.source_parts or op.source_graph is not None):
                 yield nid, op
 
     def node_role(self, node_id: str) -> str:
@@ -992,10 +1000,16 @@ class Graph:
 
                 def _field_key(o: object, name: str) -> str:
                     # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
-                    # the bottom-up term key); every other field keeps its repr.
+                    # the bottom-up term key); a nested ``Graph`` field
+                    # (``ConstantOp.source_graph``) digests by its own structural key
+                    # (its default repr carries the object address); every other field
+                    # keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
                         return o.structural_key()
-                    return repr(_unwrap_dims(getattr(o, name)))
+                    val = getattr(o, name)
+                    if isinstance(val, Graph):
+                        return val.structural_key()
+                    return repr(_unwrap_dims(val))
 
                 attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)
                 op_payload = ("attrs", attrs)

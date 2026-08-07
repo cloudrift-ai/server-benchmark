@@ -367,7 +367,7 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
 
     monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
     monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
-    monkeypatch.setattr(run_mod, "_bind_inputs", lambda g, m, a, k: {"x": [0.0]})
+    monkeypatch.setattr(run_mod, "_bind_inputs", lambda g, m, a, k, checkpoint=None: {"x": [0.0]})
     monkeypatch.setattr(run_mod, "_eager_output", lambda m, a, k: "EAGER")
     monkeypatch.setattr(run_mod, "bench_full_model_real", _fake_full_model)
 

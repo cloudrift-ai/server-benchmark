@@ -92,8 +92,11 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
     a, b = _node(frag, a), _node(frag, b)
     dtype = dtype or a.output.dtype
     a_unsq, b_unsq, mul_shape, k_axis = matmul_unsqueeze(a.output.shape, b.output.shape)
-    a_uid = frag.add_node(op=a_unsq, inputs=[a], output=Tensor(f"{name}_a_unsq", a_unsq.out_shape, dtype))
-    b_uid = frag.add_node(op=b_unsq, inputs=[b], output=Tensor(f"{name}_b_unsq", b_unsq.out_shape, dtype))
+    # Layout nodes (unsqueeze, and ``broadcast_to`` below) inherit their own
+    # operand's dtype — branch-local propagation; only the computing nodes
+    # (multiply, reduce) take the result ``dtype``.
+    a_uid = frag.add_node(op=a_unsq, inputs=[a], output=Tensor(f"{name}_a_unsq", a_unsq.out_shape, a.output.dtype))
+    b_uid = frag.add_node(op=b_unsq, inputs=[b], output=Tensor(f"{name}_b_unsq", b_unsq.out_shape, b.output.dtype))
     a_bc = broadcast_to(frag, a_uid, mul_shape)
     b_bc = broadcast_to(frag, b_uid, mul_shape)
     ew = frag.add_node(

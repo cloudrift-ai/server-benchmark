@@ -160,7 +160,7 @@ async def _run_job(req: dict) -> dict:
                 # reference (bounded: pinned rows only exist for --code inputs).
                 from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output
 
-                input_data = _bind_inputs(req["graph"], module, args_t, kwargs)
+                input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 eager_out = _eager_output(module, args_t, kwargs)
                 accuracy_error = _check_accuracy(run_result.outputs, eager_out)

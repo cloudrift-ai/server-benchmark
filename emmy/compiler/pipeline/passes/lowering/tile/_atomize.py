@@ -102,6 +102,105 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     return Fold.projection(body=Body(tuple(rest)), operands=src)
 
 
+def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
+    """Bind a computed operand (either side — or BOTH, the W8A8 shape) whose cone is a storage
+    decode times k-invariant multiplicative factors — the mul-hoist. Each lift argument must be
+    the operand ``Load`` itself, or factor as ``(storage decode of that side's load) ⊗ k-invariant
+    factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT along the reduce
+    axis commutes out of the fold (``Σ_k a·(s·w) = s·Σ_k a·w`` — the same reassociation category as
+    split-K), so the factors move onto the accumulator in the EPILOGUE, and the decode is ABSORBED
+    by the load's own storage dtype (every consumer converts a bits-carrier element by dtype: the
+    render's promote on the scalar tier, the per-element convert — or the fp8 atoms' raw byte
+    gather — of the gmem-direct fragment load on the warp tier). B-side factors are the M2b
+    scale; A-side factors are the W8A8 activation scale, and both hoist into ONE epilogue
+    chain (the two scale factors composed on the f32 accumulator).
+
+    The chain's leaf is recognized by TRAIT, never by op name: ``ElementwiseImpl.decodes`` names
+    the storage dtype an op is the decode cast for (the fp8 family today) — a new storage format
+    registers its decode op there and this arm covers it without change. The arm's boundary is the
+    ALGEBRA, not the format list: a k-varying (2-D block) scale is k-indexed, so its factor does
+    not commute and the arm declines (the term derives PLANAR); an ADDITIVE zero-point makes the
+    cone affine, and a codebook decode is a gather, not an elementwise cast — both are
+    mathematically outside the multiplicative form and are deliberately not bound here.
+
+    Returns ``(a_leaf, b_leaf, raw_acc, epilogue')`` — the channel accumulator renamed to
+    ``<acc>__mh`` so the epilogue's factor chain can DEFINE ``acc`` and every downstream reader of
+    the fold's output (the projection stmts, the root ``Write``, the bare-case store glue) sees the
+    scaled value without a rename walk — or ``None`` (not this shape)."""
+    if a_leaf is None or b_leaf is None:
+        return None
+    defs = {s.name: s for s in body if isinstance(s, Assign)}
+
+    def cone_names(name: str) -> set[str] | None:
+        cone = map_cone(body, name)
+        return None if cone is None else {n for st in cone for n in st.defines()}
+
+    def k_free(name: str) -> bool:
+        cone = map_cone(body, name)
+        return cone is not None and not any(refs_axis(st, k_name) for st in cone)
+
+    factors: list[tuple[str, str]] = []  # (op, ssa) applied to the accumulator, outer chain first
+    for arg in lift.args:
+        if arg in (a_leaf.names[0], b_leaf.names[0]):
+            continue  # a directly-named operand — nothing to decode or hoist on this side
+        names = cone_names(arg)
+        if names is None:
+            return None
+        in_a, in_b = a_leaf.names[0] in names, b_leaf.names[0] in names
+        if in_a == in_b:
+            return None  # both leaves in one cone / neither — not the decode-times-factors chain
+        leaf = a_leaf if in_a else b_leaf
+        bits = leaf.names[0]
+        cur = arg
+        while True:
+            st = defs.get(cur)
+            if st is None:
+                return None
+            if st.op.name in ("multiply", "divide") and len(st.args) == 2:
+                x, y = st.args
+                xs, ys = cone_names(x), cone_names(y)
+                if xs is None or ys is None or (bits in xs) == (bits in ys):
+                    return None  # the operand on both sides / neither — not the decode-times-factors chain
+                w_side, s_side = (x, y) if bits in xs else (y, x)
+                if st.op.name == "divide" and bits not in xs:
+                    return None  # ``s / w`` — the divide does not commute out of the fold
+                if not k_free(s_side):
+                    return None  # a k-varying factor (2-D block scale) stays in the fold — decline
+                factors.append((st.op.name, s_side))
+                cur = w_side
+                continue
+            storage = st.op.decodes
+            if storage is not None and st.args == (bits,) and (leaf.dtype is None or leaf.dtype.name == storage):
+                # The chain's leaf IS the registered decode for the load's storage dtype (the
+                # dtype is unstamped at recognize time — the kernel-IR stamp pass runs later — so
+                # an absent dtype defers to the trait alone). Absorbed by the load's dtype.
+                break
+            return None
+    # Full coverage: every body stmt is the lift, the fold, an operand leaf, or a member of a
+    # bound cone — an unaccounted stmt is a shape this binding does not understand.
+    bound: set[int] = {id(st) for st in map_cone(body, lift.args[0]) or ()}
+    bound |= {id(st) for st in map_cone(body, lift.args[1]) or ()}
+    if any(isinstance(s, (Load, Assign)) and id(s) not in bound and s is not lift for s in body):
+        return None
+    if not factors:  # bare decode(s) — the operands bind as the raw storage-dtype loads, nothing to hoist
+        return a_leaf, b_leaf, acc, epilogue
+    hoisted: list[Stmt] = []
+    seen: set[int] = set()
+    for _opn, nm in factors:
+        for st in map_cone(body, nm) or ():
+            if id(st) not in seen:
+                seen.add(id(st))
+                hoisted.append(st)
+    raw = f"{acc}__mh"
+    chain: list[Stmt] = []
+    cur_val = raw
+    for i, (opn, nm) in enumerate(factors):
+        out_nm = acc if i == len(factors) - 1 else f"{raw}{i}"
+        chain.append(Assign(name=out_nm, op=opn, args=(cur_val, nm)))
+        cur_val = out_nm
+    return a_leaf, b_leaf, raw, Body((*hoisted, *chain, *epilogue))
+
+
 def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load, str, Body]:
     """Resolve the ``(a_load, b_load, acc, epilogue)`` operand→role facts for a ``CONTRACTION``
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
@@ -141,19 +240,39 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     # (the clean gmem-direct contraction) or a computed cone (which rides the sync compute-fill,
     # exactly like the norm→linear cone, just with no statistic prologue).
     lift = next((s for s in body if isinstance(s, Assign) and s.name == fold.value), None)
-    if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None and b_leaf.names[0] in lift.args:
-        a_arg = next(a for a in lift.args if a != b_leaf.names[0])
-        if a_leaf is not None and a_arg == a_leaf.names[0]:
-            return a_leaf, b_leaf, acc, epilogue
-        cone = map_cone(body, a_arg)
-        if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
-            return cone, b_leaf, acc, epilogue
-        # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
-        # n-indexed load riding it) — falling through to the positional (m, k) rule below would
-        # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
-        # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
-        # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
-        raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
+    if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None:
+        if b_leaf.names[0] in lift.args:
+            a_arg = next(a for a in lift.args if a != b_leaf.names[0])
+            if a_leaf is not None and a_arg == a_leaf.names[0]:
+                return a_leaf, b_leaf, acc, epilogue
+            # A rides a computed cone. A storage decode times k-invariant multiplicative factors
+            # binds through the mul-hoist FIRST (the raw storage-dtype A load — the W8A8
+            # activation side; the fp8 warp tier needs the materialized bits, and the scalar
+            # tier's per-element promote converts them identically); any other pure MAP cone is
+            # the computed-A form and rides the sync compute-fill.
+            hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+            if hoist is not None:
+                return hoist
+            cone = map_cone(body, a_arg)
+            if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
+                return cone, b_leaf, acc, epilogue
+            # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
+            # n-indexed load riding it) — falling through to the positional (m, k) rule below would
+            # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
+            # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
+            # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
+            raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
+        # B is NOT directly named by the lift — it rides a computed cone (and A may too: the
+        # W8A8 double-cone). A storage decode
+        # times k-invariant multiplicative factors binds through the mul-hoist (decode absorbed
+        # by the storage dtype, factors to the epilogue); anything else raises for the same
+        # reason as the computed-A decline above — the positional rule would bind the
+        # cone-INTERNAL load as B and silently drop the cone (measured on the M2b probe: the
+        # scale multiply vanished from the kernel).
+        hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+        if hoist is not None:
+            return hoist
+        raise LoweringError("warp tier: the ⊗ lift's B operand is a computed cone that does not bind")
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
     return a_leaf, b_leaf, acc, epilogue

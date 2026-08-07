@@ -14,7 +14,18 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 
 from __future__ import annotations
 
-_TYPE_NAME: dict[str, str] = {"f32": "float", "f16": "__half", "f16x2": "__half2"}
+_TYPE_NAME: dict[str, str] = {
+    "f32": "float",
+    "f16": "__half",
+    "f16x2": "__half2",
+    "f8e4m3": "__nv_fp8_e4m3",
+    "f8e5m2": "__nv_fp8_e5m2",
+}
+
+# fp8 storage dtypes (M2/M3 of the FP8 plan). A kernel never computes ON fp8 —
+# the only legal uses of an fp8 SSA value are the decode conversion out of it
+# and the encode conversion into it, both spelled below in ``convert``.
+_F8_DTYPES = ("f8e4m3", "f8e5m2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expr`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
@@ -115,6 +126,17 @@ class CudaRenderTarget:
     def convert(self, value: str, src_dt: str, dst_dt: str) -> str:
         if src_dt == dst_dt:
             return value
+        if src_dt in _F8_DTYPES and dst_dt in ("f32", "f16"):
+            # fp8 decode — the ``from_f8*`` cast's device spelling. The functional
+            # cast invokes ``<cuda_fp8.h>``'s explicit conversion operator, which
+            # compiles on every arch the header supports (hardware ``cvt`` on
+            # sm_89+, C++ emulation below) — no sm gate needed.
+            return f"{_TYPE_NAME[dst_dt]}({value})"
+        if dst_dt in _F8_DTYPES and src_dt in ("f32", "f16"):
+            # fp8 encode — the ``to_f8*`` cast's device spelling: the <cuda_fp8.h>
+            # explicit constructor (round-to-nearest-even, saturate-to-finite), the
+            # decode's twin. Same no-sm-gate story as above.
+            return f"{_TYPE_NAME[dst_dt]}({value})"
         if dst_dt == "f16" and src_dt == "f32":
             return f"__float2half({value})"
         if dst_dt == "f32" and src_dt == "f16":

@@ -104,7 +104,9 @@ The compiler commands (`compile`, `run`, and `tune`) share a model-adapter selec
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs.
+and Emmy always rebuild the same module and example inputs. A quantized checkpoint (config.json
+`quantization_config`, e.g. an FP8 release) resolves to its bf16 architecture twin for tracing; the loader
+dequantizes the real weights at bind time (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
 
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU

@@ -127,6 +127,27 @@ autotuning cache doesn't bust on cosmetic edits.
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on
   CPU — fusion correctness can be checked without a GPU.
 
+## Quantized checkpoints (FP8)
+
+A quantized checkpoint never reaches the trace: the trace runs over the bf16 architecture twin built from config
+(quantization is a property of the checkpoint, not the architecture). Immediately post-trace,
+`loader.quant.spell_quantized_constants` rewrites each fp8-stored weight into in-graph algebra — a bits constant
+(f8 dtype, the weight's source path) + a scale constant + the dequant cone (decode-cast, broadcast-multiply, a
+reshape pair for 2-D block scales) — so from birth a quantized weight is just constants + algebra, with no metadata
+on any shared IR type. The generic `032_fold_constant_subgraphs` decomposition rule then dissolves the algebra as
+early as possible (default): the cone collapses into ONE `ConstantOp` whose `source_graph` bind record the loader
+evaluates through the NumPy backend at bind time (leaf f8 sources read as raw bits, LUT decode, f32 scale multiply,
+one cast into the compute dtype), and every later pass sees a plain constant. `EMMY_FP8_EXPAND` skips the fold: the
+cone stays in-graph and rides the B-operand cone into the kernel (fp8 bits in device memory, decode absorbed by the
+storage dtype at the fragment load, scale hoisted to the epilogue).
+
+**Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
+search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph
+algebra; they may NEVER know checkpoint formats, scheme names, scale pairing, or quantization metadata. The frontend
+band (the birth-time speller + the fold pass + the loader) is the only place quantization-as-a-concept exists; a
+mechanical gate test (`tests/compiler/loader/test_quant.py`) greps `emmy/` for concept leaks against a frontend-band
+allowlist.
+
 ## Op provenance
 
 `provenance.py` threads a single `Node.hints["prov"]` map —

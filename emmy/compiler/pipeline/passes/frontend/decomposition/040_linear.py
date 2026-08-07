@@ -23,7 +23,7 @@ def rewrite(match: Match, inp_x: Node, inp_w: Node, inp_b: Node | None, out: Ten
     wt_id = frag.add_node(
         op=TransposeOp(axes=(-2, -1)),
         inputs=[inp_w],
-        output=Tensor(f"{out.name}_wt", wt_shape, out.dtype),
+        output=Tensor(f"{out.name}_wt", wt_shape, inp_w.output.dtype),
     )
 
     matmul_name = f"{out.name}_mm" if inp_b else out.name

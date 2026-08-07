@@ -9,6 +9,22 @@ walk; the derived `Fold.role` for the loop annotation the materializer reads), n
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
+## Quantization is not a concept past the decomposition band
+
+A quantized checkpoint is spelled as in-graph algebra at BIRTH (`loader.quant.spell_quantized_constants`, immediately
+post-trace) and dissolved as early as possible: the generic `frontend/decomposition/032_fold_constant_subgraphs` rule
+collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
+(its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
+only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
+`load_ops`. `EMMY_FP8_EXPAND` skips the fold, leaving the cone in-graph for the kernel path. Either way, downstream
+layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`), decode-trait
+elementwise ops (`ElementwiseImpl.decodes`), and graph algebra. They may NEVER know checkpoint formats, scheme names,
+scale pairing, or any quantization metadata — there is none: no shared IR type carries a quant field. The frontend
+band (the birth-time speller + the fold rule + the loader) is the only place quantization-as-a-concept exists, and a
+mechanical gate (`tests/compiler/loader/test_quant.py`) greps the tree for concept leaks. `032`'s decode-trait scope
+is the conservative first instantiation of a general constant-subgraph fold — widening it (folding decode-free
+constant cones that exist in today's models) is gated on kernel-source digest evidence.
+
 ## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its
@@ -192,7 +208,7 @@ How to comply:
   `bind_prologue_contraction` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
   bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
-  nobody designed for (a weight-side dequant cone) is covered for free.
+  nobody designed for (a weight-side decode cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
@@ -264,7 +280,26 @@ failing several passes later:
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
-  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The same rule holds on the **B side**:
+  a lift whose B operand is a computed cone never falls through to the positional rule (that binding dropped the fp8
+  decode cone's scale from the kernel). A **storage decode times k-invariant multiplicative factors** chain — a
+  decode of the (n, k) load ⊗ factors constant along the reduce axis — binds through the **mul-hoist**
+  (`_atomize._hoist_k_invariant_factors`):
+  the factors commute out of the fold onto the accumulator in the epilogue (`Σ_k a·(s·w) = s·Σ_k a·w`, the split-K
+  reassociation category) and the decode is ABSORBED by the B load's own storage dtype — every consumer converts a
+  bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element
+  convert on the warp tier, `emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>`). The chain's leaf is recognized by TRAIT —
+  `ElementwiseImpl.decodes` names the storage dtype an op is the decode cast for (the fp8 family today), so a new
+  storage format registers one decode op and never touches the binding arm. The warp staged transports carry a
+  storage-dtype operand as a RAW BYTE SLAB (each operand slab sized at its OWN element width; ldmatrix is b16-only
+  below sm_100a, so the byte slab drains through a cooperative per-lane gather — the gmem fragment loaders' lane map
+  pointed at smem, converting to 16-bit fragments under a k16 atom / repacking raw bytes under the fp8 k32 atoms —
+  bit-identical to gmem-direct; `resolve_warp_stage`'s byte-slab arm states the 16-divisibility legality, and the
+  cp.async byte slab pads its rows by `_stage.BYTE_SLAB_PAD` for the drain's bank spread). The scalar resolver still
+  declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
+  the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
+  codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
+  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**

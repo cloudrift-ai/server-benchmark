@@ -127,11 +127,10 @@ per-layer graphs. Decide on M2 measurements, not up front.
 
 ## 3. Target model: gpt-oss-20b (FP8) — and why
 
-- **Fit**: 21 GB at fp8 leaves ~8–10 GB for KV on the 5090 — the only high-demand MoE with real headroom. bf16
+- **Fit**: 22.7 GB at fp8 leaves ~8 GB for KV on the 5090 — the only high-demand MoE with real headroom. bf16
   (42 GB) does not fit, so delivery depends on FP8 M2/M4 (`plans/fp8-support.md`) — already in flight on this
-  branch. Ready-made checkpoints exist (`RedHatAI/gpt-oss-20b-FP8-Dynamic` — `compressed-tensors`, the fp8
-  plan's target format #2), so no quantization work lands on this plan's critical path. The native MXFP4→bf16
-  upcast is exact, so fp8-from-upcast loses nothing vs the shipped weights.
+  branch. No usable ready-made checkpoint exists, so the delivery checkpoint is built here:
+  **`riftstack/gpt-oss-20b-FP8-Dynamic`** (§3.1), which is BIT-EXACT to the released weights.
 - **Demand**: still a default local model in every 2026 roundup; baselines abound.
 - **Architecture cost is mostly vLLM's, not emmy's**: attention sinks and the alternating dense/SWA-128 pattern
   live in the attention layer — which emmy's generative plugin delegates to vLLM's paged attention. Emmy-side
@@ -143,6 +142,45 @@ per-layer graphs. Decide on M2 measurements, not up front.
   expert + E=128 regime the flagships need. ERNIE-4.5-21B-A3B is the conventional-architecture fallback.
 - **Named future targets** (needs sub-byte from the VQ plan): Qwen3.6-35B-A3B, then GLM-4.5-Air / Laguna S 2.1.
 
+### 3.1 The delivery checkpoint: `riftstack/gpt-oss-20b-FP8-Dynamic` (2026-08-07)
+
+**Why one had to be built.** `RedHatAI/gpt-oss-20b-FP8-Dynamic`, the checkpoint this plan originally assumed, does
+not exist (404). The community `gpt-oss-20b-FP8-Dynamic` checkpoints that do exist are 41.2 GB and quantize only
+the attention Linears: their safetensors headers report 20,277,798,144 f16 parameters against 637,009,920 fp8 —
+and 637,009,920 is exactly the 24×(q,k,v,o) projection count. The 19.1 B expert parameters, which are 91% of the
+model, stay f16. Q8_0 GGUF conversions of the release are 12.1 GB, below the 20.9 GB floor any genuine 8-bit
+encoding of 20.9 B parameters would have, so their expert tensors are still MXFP4. Neither fits the 5090.
+
+**The finding that makes fp8 defensible for an MXFP4-native model: the MXFP4→fp8 fold is LOSSLESS.** MXFP4's 16
+E2M1 codes are `0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6` — each needs at most two significant mantissa bits, and e4m3
+carries three — and the E8M0 block scale is a pure power of two, so applying it only shifts the exponent. An fp8
+re-encode is therefore exact whenever ONE per-output-channel power-of-two scale brings a whole channel inside
+e4m3's normal range `[2^-6, 448]`: 14.8 binades of budget against the fp4 code range of 12× (3.6 binades) plus the
+channel's block-exponent spread. Measured over all 6,635,520 expert output channels of the release, that spread is
+mean 1.62 / p50 2 / p99 3 / max 10 binades, against a guarantee bound of 11 (`12·2^11 = 24576 ≤ 448·2^6 = 28672`).
+Every channel fits with room to spare, and no value lands in the fp8 subnormal range.
+
+The scale must be a power of two *per output channel*, not per MXFP4 block, for a compiler reason: a k-varying
+block scale would decline the W8A16 mul-hoist binding. Folding the E8M0 exponents into the fp8 values leaves the
+stored scale k-INVARIANT (shape `(E, 1, out)` against a weight `(E, in, out)` — `_scale_layout` reports
+`block=(1, 2880, 1)`, degenerate), so the mul-hoist binds exactly as it does for an ordinary per-channel fp8
+checkpoint. Losslessness and kernel-tier reachability come from the same choice.
+
+**What was built and measured.** Experts upcast with transformers 5.13's own `convert_moe_packed_tensors`, then
+re-encoded at `scale = 2^c`, `c = frexp(absmax).exponent - 9` (the smallest power of two putting the channel
+absmax under 448, which maximizes headroom at the bottom). Attention stays bf16 — it is natively bf16, so fp8
+there would be the one lossy step in the artifact, and 0.6 GB is cheap for removing the last caveat. Result:
+48/48 expert tensors bit-exact through emmy's own `dequantize(decode_f8(bits), scale)` lane (`np.array_equal`,
+max abs error 0.0), 0 inexact channels, 0 subnormal fp8 values, and every non-expert tensor byte-identical to the
+release. 22.73 GB, 459 tensors, 6 shards. This is an EXPERTS-ONLY fp8 quantization — precisely the inverse of the
+community checkpoints. Build and verification scripts ship in the repo (`scripts/`).
+
+**Naming consequence, and it is a real cost.** The 3-D expert params use the compressed-tensors generic
+`<param>` + `<param>_scale` pairing (`…experts.gate_up_proj` + `…experts.gate_up_proj_scale`), which is what
+emmy's fp8 ingestion reads. Stock vLLM's compressed-tensors loader does not accept that spelling for
+`GptOssExperts`, so **the checkpoint is emmy-only** and M4 can no longer run both contenders on one shared
+checkpoint (see M4 step 3).
+
 ## 4. Milestones
 
 ### M0 — bring-up on OLMoE (bf16, no quantization dependency)
@@ -153,7 +191,7 @@ per-layer graphs. Decide on M2 measurements, not up front.
 3. Serve OLMoE end to end on the 5090: correctness vs HF eager (logits + short-generation parity), all tiers on
    the symbolic/pad paths — no perf work yet.
 4. Scoping spikes for M3: verify vLLM-side attention sinks + SWA-128 delegation for gpt-oss in the plugin;
-   verify the RedHatAI fp8 checkpoint parses through the fp8 ingestion lane.
+   verify a compressed-tensors fp8 gpt-oss checkpoint parses through the fp8 ingestion lane.
 
 Exit: OLMoE generates correctly through `emmy serve --generate`; program count = 3/layer/tier (post_attn,
 expert, shared-none), not E/layer.
@@ -198,12 +236,22 @@ expert, shared-none), not E/layer.
 
 Depends on: FP8 M2 (fp8 storage through the kernel) + M4 (serving) from `plans/fp8-support.md`.
 
-1. Ingest `RedHatAI/gpt-oss-20b-FP8-Dynamic` (compressed-tensors fp8) through the fp8 lane; clamped-SwiGLU
+1. Ingest `riftstack/gpt-oss-20b-FP8-Dynamic` (compressed-tensors fp8, §3.1) through the fp8 lane; clamped-SwiGLU
    elementwise; router-with-softmax-over-selected-k in the torch seam.
 2. Serve on the 5090; accuracy gate vs the bf16 HF reference; smoke A/B vs stock vLLM to confirm the perf story
    holds before investing in M4's formal validation.
 
 #### M3 findings (2026-08-07, RTX 5090, `~/checkpoints/gptoss20b-fp8-emmy` — self-quantized 22.1 GB fp8)
+
+> Checkpoint SUPERSEDED by the lossless `riftstack/gpt-oss-20b-FP8-Dynamic` (§3.1). Two carry-over notes:
+>
+> - The EXPERT tensors are unchanged in shape, dtype and scale layout, so the M4 expert goldens carry over
+>   untouched — only the values changed. The ATTENTION projections did change, fp8 → bf16 (§3.1), and `ShapeKey`
+>   has no weight-dtype field, so the seeded q/k/v/o rows still MATCH by key but were explored against an
+>   fp8-storage B operand with an in-graph dequant cone, where B is now plain f16. Re-verify those 8 rows.
+> - The correctness gate's "DIFFERENT WEIGHTS" explanation for greedy divergence against stock is gone: the
+>   expert weights are now bit-identical to the ones stock serves. Re-run that gate; any residual divergence is
+>   kernel accumulation order, and a large one is a bug.
 
 - Landed (M3b, on top of M3a's compiler gates): tracer `maximum` mis-route fixed + `clamp` decomposition
   (elementwise min/max chain; the clamped-SwiGLU needs it); the gpt-oss expert wrapper (`x @ W + b`, chunk-half
@@ -245,12 +293,25 @@ Mirrors the validated gemma-4-12B flow (the article's benchmark plan + `docker/v
 3. **TTFT + TPOT on the standard input sizes, from the image.** The gemma-4 article grid: input-size sweep
    (512 → the measured max context), 4k-in/4k-out headline, concurrency 1/4/8, 3× repeats with mean ± stddev,
    power + peak-VRAM sampling; the same `vllm bench serve` client (greedy, `--ignore-eos`, seeded) driving every
-   contender. Contenders, all at 8-bit weights — identical decode weight bytes, no handicapped lanes:
-   **vLLM+emmy (standard + FAST_MATH lanes) vs stock vLLM on the SAME `RedHatAI/gpt-oss-20b-FP8-Dynamic`
-   checkpoint** (vLLM serves compressed-tensors fp8 on sm_120 natively) **vs llama.cpp with the Q8_0 GGUF**
-   (~8-bit analog). The remaining asymmetry — stock vLLM computes W8A8-dynamic where emmy computes W8A16 — is a
-   legitimate engine difference, reported. The native MXFP4 path is out of scope for the benchmark matrix; the
-   article's methodology notes it exists (~4.25-bit weights) without benching it.
+   contender. Contenders: **vLLM+emmy (standard + FAST_MATH lanes) on `riftstack/gpt-oss-20b-FP8-Dynamic` vs
+   stock vLLM on the native MXFP4 `openai/gpt-oss-20b` vs llama.cpp with a Q8_0 GGUF.**
+
+   The one-shared-checkpoint plan is no longer available (§3.1: the naming convention is emmy-only), so the
+   symmetry the grid rests on changes — and mostly for the better. Because the fp8 experts are bit-exact
+   re-encodings, **emmy and stock compute on numerically IDENTICAL weights**, which is stronger than the old
+   plan's "same checkpoint" and makes the GSM8K gate in step 4 a clean serving-correctness test: any accuracy gap
+   is a bug, not a quantization difference. The asymmetry moves to STORAGE — stock reads ~4.25-bit expert weights
+   where emmy reads 8-bit, so stock has roughly half the decode weight traffic on the dominant tensors. That
+   favors stock and must be reported as such; it is the cost of not having native FP4 kernels, not a measurement
+   artifact. Stock vLLM computes W8A8-dynamic where emmy computes W8A16 — also reported.
+
+   For llama.cpp, pick the Q8_0 variant deliberately: the 12.1 GB GGUFs converted from the release keep the
+   expert tensors at MXFP4 (arithmetic in §3.1), so only a ~22.3 GB Q8_0-from-bf16 conversion is a genuine 8-bit
+   contender — and that one is lossy where ours is not.
+
+   Optional, if a shared-checkpoint arm is wanted back: re-emit under whatever tensor spelling vLLM's
+   `GptOssExperts` compressed-tensors path accepts. Unverified that such a spelling exists; not on the critical
+   path.
 4. **GSM8K sanity check.** lm-eval (`local-completions`) subset against each serving endpoint, fixed seed/config;
    emmy's score within noise of stock vLLM's (same weights ⇒ any gap is a serving bug).
 
@@ -337,6 +398,92 @@ expert `down` reaches the warp tier is the higher-value and strictly prior work.
   every fp8 `run --bench`); and the golden featurization gate now exempts the scalar-coop FORM at any M, not only
   M=1 (the expert `down` rows are legitimately tile-geometry-free).
 
+#### M4 step-2 findings — the expert `down` cone legality (2026-08-07, RTX 5090)
+
+The binding residual M4 step 1 named is CLOSED. Root cause, and what it was NOT: the strided `chunk(2)` halves are a
+red herring — `_atomize.map_cone` accepts a `Load` at any index, and the wrapper spelling never mattered. Two stacked
+defects, both in loop fusion:
+
+1. **The clamped-SwiGLU cone was inlined into the down matmul's K loop.** Every guard in
+   `loop/fusion/010_merge_loop_ops` missed it. The transcendental brake never fired because `sigmoid` is not in
+   `_EXPENSIVE_OPS` (it is in the `sfu_trans` cluster of `ir/elementwise._OP_CLUSTERS`, the classification's real
+   home — the fusion list is a second, diverged copy), and because `_has_peer_activation_input` exempts a gated
+   activation anyway. The aggregate ratios could not see it either: the contraction's own operand traffic dominates
+   every sum, and the cone arrives one small pointwise hop at a time (each merge grew `_total_work` by ~25% against a
+   factor of 8). Cost of the inlining alone, same knobs: 127.7 → 47.7 µs at M=16.
+2. **The inlined term stopped binding as a contraction.** `bind_contraction` has an arm for a computed-A map cone with
+   a plain B, and an arm for the mul-hoist (a storage decode times k-invariant factors) on either side — but nothing
+   COMPOSES them. The fp8 down has both: a general map cone on A and a decode cone on B, so it raised, the recognizer
+   demoted the cell to `PLANAR`, and the scalar tier was all that was left. That is why `TILE`/`WORK`/`STAGE` realized
+   `off` under every warp pin. Cost of the tier lockout: another 47.7 → 11.2 µs at M=16. (This is the same gap M3a
+   recorded, not a second one; `_sum_contracts_exp_producer` is NOT involved — gpt-oss's `sigmoid` never decomposes to
+   `exp`, so the flash-consumer protection never fires on this cone. It would fire on OLMoE at fp8, whose SiLU does,
+   and that remains an open false positive.)
+
+**The fix — one structural guard in `010_merge_loop_ops`** (`_replicated_load_site` × `_reads_more_than_it_writes`; see
+`passes/ARCHITECTURE.md`): a producer whose load site sits under an enclosing loop its index does not use is
+re-evaluated once per step of that loop, which is a win only while the cone reads no more than it writes. A gated
+activation reads both halves of the packed gate/up buffer — twice the volume it produces — so it stays materialized.
+The rule reads VOLUME, so it holds for the option-(a) wrapper spelling (two separate gate/up buffers) as well; no
+serving-side change was needed and OLMoE's path is byte-unchanged (its SiLU already materialized, via the `exp`
+brake). Option (c) was not needed: the term binds plainly once the cone is out.
+
+Per-kernel, gpt-oss expert program, fp8, 5090 (`benchmark_program` per-launch medians; before = the M4 step-1 goldens):
+
+| width | down before | down after | gate_up before | gate_up after | expert program before → after |
+| --- | --- | --- | --- | --- | --- |
+| m1 | 15.6 | **6.6** | 13.5 | 13.5 | 31.1 → **18.9** µs |
+| m16 | 129.5 | **10.1** | 16.4 | 14.0 | 148.6 → **26.6** µs |
+| m256 | 1905.3 | **44.8** | 86.8 | **76.2** | 1972 → **124.7** µs |
+| .dynM (512 rows) | 3611.3 | **129.9** | 123.7 | 141.1 | 4055 → **277.1** µs |
+
+The m256 `down` now runs UNDER the 16-bit cuBLAS baseline at the same extents (44.8 vs 45.3). Goldens re-seeded in
+`rtx5090_sm120_gptoss20b.yaml`: `expert_down.m16` and `.m256` replaced (the recorded scalar rows were the fused-cone
+era's best and are unreachable now — a stale match, not a miss: they still keyed the new kernel and pinned it to the
+scalar family, which is why the fix looked like only a 2.7x until they were replaced); `expert_gate_up.m256` moved
+TMA → cp.async (76.2 vs 87.6, reproduced twice at <1% spread); `expert_down.m1` keeps its knobs (every coop-t variant
+ties within 2%) with `emmy_us` refreshed. The symbolic `down` needs no entry — greedy reaches 129.9 µs unaided.
+
+Serve A/B (5090, same protocol as M4 step 1 — 512 in / 128 out, `vllm bench serve`, pack deleted, cold boot 5.5 min,
+149 plans, roofline audit clean, KV 114,592 tokens, whole-step decode capture at size 1, greedy completions fluent):
+
+| metric | M4 step-1 goldens | after | stock vLLM | remaining gap |
+| --- | --- | --- | --- | --- |
+| c=1 TPOT | 5.90 ms | 6.05 ms | 3.51 ms | 1.72× |
+| TTFT, 512-token prompt | 0.79 s | **0.133 s** (5.9×) | 33.5 ms | 4.0× |
+| c=8 TPOT | 62.8 ms | **43.2 ms** (1.45×) | 6.27 ms | 6.9× |
+| c=8 output throughput | 83 tok/s | **172 tok/s** (2.1×) | 1060 tok/s | 6.2× |
+
+TTFT is where the m256 / `.dynM` `down` lived, and it moved 5.9×. **c=1 TPOT did NOT move** even though its expert
+program went 31.1 → 18.9 µs (96 launches/step = 1.2 ms of GPU time removed). The launch COUNT is the reason: the
+materialized activation adds 3 launches per expert program (the `_pending_contraction_half` over-fire above), so the
+captured decode step gained ~290 graph nodes — enough to eat the kernel-time win at T=1. Collapsing the activation to
+one kernel is therefore the next decode lever, and it is a fusion-guard fix, not a knob.
+
+**Grouped-GEMM verdict, updated.** Still not first, and now for a second reason. c>1 improved 1.45× from kernel
+quality alone with dispatch untouched, and prefill improved 5.9×, so neither is dispatch-bound at the margin. The one
+place dispatch now binds is c=1, where the constraint is the per-step LAUNCH COUNT inside the captured graph — which a
+grouped pass would help only by also merging the activation, i.e. the cheap fusion fix does it first.
+
+Cross-model effect: none. gemma-4's serving twins are byte-unchanged (the drift gate passes on both cards with no
+baseline edits), because its GeGLU cone already materialized through the transcendental brake. An earlier revision of
+the volume test counted a per-channel norm weight as a row stream — at M=1 it has exactly the output's element count —
+and refused the decode-width norm→linear edge on gemma; the rank-and-per-axis-width form fixed that, and it is the
+reason the test reads shape rather than numel. `scripts/digest_kernels.py` is byte-identical. OLMoE's expert kernels
+are byte-identical too (`k_linear_reduce_27d8c2` / `k_linear_pointwise_ed2f1f` / `k_linear_34e1f8` before and after);
+its c=1 TPOT re-measured 3.13 ms against a 2.84 ms record, which is config/pack drift rather than this change.
+
+Two residuals recorded rather than fixed:
+
+- **`_pending_contraction_half` over-fires.** It defers any compute producer whose single consumer is an add-`Accum`
+  kernel reading its buffer — including a fully ASSEMBLED contraction, which is not "a half waiting to merge". The
+  consequence is that the expert activation deploys as THREE kernels (two chunk-half cones + the combine, ~2.4 µs at
+  M=1) instead of one. Narrowing the test to `_is_reduce_partner_merge`'s direct `acc += load(product)` form fixes
+  that and collapses it to one kernel, but de-certifies the normed-GQA flash unit
+  (`test_normed_gqa_sdpa_certifies_flash`) — so it is left alone.
+- **`_EXPENSIVE_OPS` is a second copy of the `sfu_trans` cluster** and is missing `sigmoid`. Deriving it from
+  `_OP_CLUSTERS` would also import that table's deliberate `relu` inaccuracy, so it needs its own decision.
+
 ### M5 — article
 
 New post in the `cloudrift-landing` repo alongside the gemma-4 article: directory
@@ -366,3 +513,33 @@ gemma attention stack; short-context demo acceptable.
 - **Router numerics**: routers are fp32-sensitive (sigmoid+bias-correction variants especially); the torch seam
   keeps them in torch at fp32 — no emmy numerics risk, but the seam's extra device↔device roundtrips need a
   latency check at M1.
+
+## 6. Where this stopped (2026-08-07)
+
+Scope was cut to **the stack only**: the MoE serving seam, the dispatch mechanisms, and fp8 weights as program
+inputs. No model-benchmark deliverables — M4's grid, the release image, and the M5 article are dropped, and the
+gpt-oss golden file was removed with them (it was explored against an fp8 attention B operand that the lossless
+checkpoint no longer has; see the §M3 carry-over note). The OLMoE golden file stays: it was measured against a
+real bf16 model and its expert/dense shapes are the ones the seam actually deploys.
+
+**Why the gpt-oss delivery target does not close.** The model ships MXFP4 and there is no higher-precision source
+— OpenAI's own reference copy (`original/dtypes.json`) carries 48 FP4 expert tensors + 48 UE8 block scales
+against 267 bf16 tensors, so the 4-bit values ARE the trained weights. An fp8 re-encode is therefore exactly
+information-preserving and exactly 1.85× the bytes: 22.7 GB against the release's 12.1 GB, for identical
+numerics. Decode is weight-bandwidth-bound, so a head-to-head against an engine reading the native format is lost
+before any kernel runs, and no kernel work changes that. The compatibility argument for an fp8 build is also
+weak: vLLM's MXFP4 support declares `get_min_capability() = 80`, so Ampere and newer all serve the release
+directly, and llama.cpp and transformers read it too. The only consumer that needs 8-bit here is emmy itself,
+which has fp8 kernels and no fp4 path.
+
+**What would make gpt-oss servable on its own terms**: an MXFP4 weight path. The decode is cheap — 16 code
+points through a lookup, and a power-of-two block scale — and the fp8 landing already built the carriers
+(uint8 bits, byte-slab staging, dtype-gated warp tiers) plus this branch's indirect operands. The one new
+mechanism is applying the scale at k-block boundaries in the f32 accumulator, which is tractable because the
+MXFP4 block is 32 elements along K and aligns with the mma k-step. That is the natural sequel, and it overlaps
+with `plans/vq-weight-compression.md`.
+
+**Unfinished, deliberately left**: the expert down-projection cone still cannot reach the warp mma tier (its A
+operand is the clamped-SwiGLU cone fusion pulls out of the gate_up epilogue); the boot roofline audit is blind to
+expert programs (`const_bytes = 0` when weights are inputs); and the gpt-oss greedy-parity gate needs re-running
+now that the lossless checkpoint removes the "different weights" explanation for the divergence M3b measured.

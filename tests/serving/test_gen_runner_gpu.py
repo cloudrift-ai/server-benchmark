@@ -630,3 +630,150 @@ def test_layers_share_activation_arena():
         assert pa.keys() == pb.keys(), f"{kind}: layer programs disagree on buffer names"
         for key in pa:
             assert pa[key] == pb[key], f"{kind}: activation buffer {key} not shared across layers"
+
+
+def test_expert_program_fp8_inputs_match_reference():
+    """Input-sourced fp8 (MoE M3): the expert program compiled with its weight INPUTS spelled
+    as fp8 bits + scale inputs (``spell_quantized_inputs``) must match the eager expert on the
+    dequantized weights, and stay within the fp8 quantization bound of the eager expert on the
+    ORIGINAL fp16 weights. Weights quantize per-out-channel and apply as ``x @ W`` (the
+    gpt-oss (in, out) orientation). Runs the M=16 and M=1 static twins; the build goes
+    through ``_compile_split``'s plan path, so the per-input feed binding (fp8 bits on the
+    uint8 carrier from a torch fp8 tensor, f32 scales) is exercised too."""
+    pytest.importorskip("cupy")
+    import torch
+    import torch.nn as nn
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.loader.quant import spell_quantized_inputs
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down):
+            gate, up = (x @ w_gate_up).chunk(2, dim=-1)
+            return (nn.functional.silu(gate) * up) @ w_down
+
+    h, inter = 64, 32
+    torch.manual_seed(4)
+    w_gu = torch.randn(h, 2 * inter, dtype=torch.float32) * 0.05
+    w_dn = torch.randn(inter, h, dtype=torch.float32) * 0.05
+
+    def quantize_per_out_channel(w):
+        scale = (w.abs().amax(dim=0, keepdim=True).clamp(min=1e-8) / 448.0).float()
+        bits = (w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        return bits, scale
+
+    gu_bits, gu_scale = quantize_per_out_channel(w_gu)
+    dn_bits, dn_scale = quantize_per_out_channel(w_dn)
+    gu_dq = gu_bits.float() * gu_scale
+    dn_dq = dn_bits.float() * dn_scale
+
+    for m in (16, 1):
+        x = torch.randn(m, h, dtype=torch.float16)
+        graph = trace_split(
+            Expert(),
+            (x, w_gu.to(torch.float16), w_dn.to(torch.float16)),
+            None,
+        )
+        spell_quantized_inputs(graph, {"w_gate_up": ("f8e4m3", (1, 2 * inter), "f32"), "w_down": ("f8e4m3", (1, h), "f32")})
+        graph.validate()
+        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+        assert plan.inputs == ["x", "w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"]
+        prog, _ = _compile_split(
+            Expert(),
+            [x, gu_bits, dn_bits, gu_scale, dn_scale],  # torch fp8 tensors: the feed must view bits
+            None,
+            np.dtype("float16"),
+            plan=plan,
+        )
+        (out,) = prog.run(
+            [
+                x.numpy(),
+                gu_bits.view(torch.uint8).numpy(),
+                dn_bits.view(torch.uint8).numpy(),
+                gu_scale.numpy(),
+                dn_scale.numpy(),
+            ]
+        )
+        with torch.no_grad():
+            ref_dq = Expert()(x.float(), gu_dq, dn_dq).numpy()
+            ref_orig = Expert()(x.float(), w_gu, w_dn).numpy()
+        got = np.asarray(out, dtype=np.float32).reshape(ref_dq.shape)
+        rms = float(np.sqrt((ref_dq**2).mean()))
+        assert rms > 1e-3, "reference suspiciously small; tolerance would be trivial"
+        # vs the dequantized reference: only f16 kernel arithmetic separates the two.
+        assert float(np.abs(got - ref_dq).max()) / rms < 2e-2, f"M={m}: kernel path deviates from the dequantized reference"
+        # vs the original weights: the fp8 quantization error bound — RMS-relative, since the
+        # per-element error of two chained quantized matmuls compounds past the single-cone
+        # ~5% max while the aggregate stays a few percent.
+        rms_orig = float(np.sqrt((ref_orig**2).mean()))
+        assert float(np.sqrt(((got - ref_orig) ** 2).mean())) / max(rms_orig, 1e-6) < 5e-2, (
+            f"M={m}: fp8 error exceeds the quantization bound"
+        )
+
+
+def test_expert_program_fp8_indirect_compose():
+    """Indirect operands (the M2 fixed-slot dispatch) compose with input-sourced fp8: BOTH the
+    bits input and its scale input compile as indirect operands, and the kernel resolves each
+    expert's bits + scale slices from the device tables (``table[sel[slot]]``) — per-expert
+    outputs match the direct dequantized matmul."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import torch.nn as nn
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.loader.quant import spell_quantized_inputs
+    from emmy.serving.gen_runner import _compile_split, _indirect_covered, trace_split
+
+    class XW(nn.Module):
+        def forward(self, x, w):
+            return x @ w
+
+    h, n, n_experts = 64, 32, 3
+    torch.manual_seed(5)
+    graph = trace_split(XW(), (torch.zeros(1, h, dtype=torch.float16), torch.zeros(h, n, dtype=torch.float16)), None)
+    spell_quantized_inputs(graph, {"w": ("f8e4m3", (1, n), "f32")})
+    graph.hints.set("cuda.indirect_inputs", ("w", "w_scale"))
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+    assert _indirect_covered(plan, ("w", "w_scale")), "an fp8 bits/scale input arg lacks the indirect encoding"
+
+    x = torch.randn(1, h, dtype=torch.float16)
+    w_e = [torch.randn(h, n, dtype=torch.float32) * 0.05 for _ in range(n_experts)]
+    bits_e, scale_e = [], []
+    for w in w_e:
+        scale = (w.abs().amax(dim=0, keepdim=True).clamp(min=1e-8) / 448.0).float()
+        bits_e.append((w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).cuda())
+        scale_e.append(scale.cuda())
+
+    prog, _ = _compile_split(XW(), [x, bits_e[0], scale_e[0]], None, np.dtype("float16"), plan=plan)
+    p = prog.program
+    table_w = torch.tensor([t.data_ptr() for t in bits_e], dtype=torch.int64, device="cuda")
+    table_s = torch.tensor([t.data_ptr() for t in scale_e], dtype=torch.int64, device="cuda")
+    sel = torch.zeros(1, dtype=torch.int32, device="cuda")
+    with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        p.arrays["w__table"] = cp.from_dlpack(table_w)
+        p.arrays["w__sel"] = cp.from_dlpack(sel)
+        p.arrays["w_scale__table"] = cp.from_dlpack(table_s)
+        p.arrays["w_scale__sel"] = cp.from_dlpack(sel)
+    for e in range(n_experts):
+        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            sel[0] = e
+            p.upload_prefix_device({"x": cp.from_dlpack(x.cuda())})
+            p.run_once()
+            outs = p.output_prefix_device()
+            got = torch.from_dlpack(outs[prog.output_names[0]]).clone()
+        torch.cuda.synchronize()
+        ref = (x.float() @ (bits_e[e].float().cpu() * scale_e[e].cpu())).to(torch.float16)
+        torch.testing.assert_close(got.cpu().reshape(ref.shape), ref, rtol=2e-2, atol=2e-2)

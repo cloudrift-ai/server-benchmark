@@ -139,7 +139,24 @@ early as possible (default): the cone collapses into ONE `ConstantOp` whose `sou
 evaluates through the NumPy backend at bind time (leaf f8 sources read as raw bits, LUT decode, f32 scale multiply,
 one cast into the compute dtype), and every later pass sees a plain constant. `EMMY_FP8_EXPAND` skips the fold: the
 cone stays in-graph and rides the B-operand cone into the kernel (fp8 bits in device memory, decode absorbed by the
-storage dtype at the fragment load, scale hoisted to the epilogue).
+storage dtype at the fragment load, scale hoisted to the epilogue). Scale pairing is the general `<key>_scale` /
+`<key>_scale_inv` rule — it subsumes the `.weight` → `.weight_scale` convention and covers non-`.weight` leaves
+(gpt-oss's 3-D expert params, `…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
+
+**Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
+expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never
+fire; `loader.quant.spell_quantized_inputs(graph, specs)` is the post-trace twin. Each named input keeps its node id
+and `graph.inputs` slot but its dtype becomes the f8 storage dtype — the feed binds the raw bit pattern on the uint8
+fp8 bits carrier, the same rule as the constant side (`emmy/serving/gen_runner.py`'s `_compile_split` binds every plan
+input at its own traced dtype for this reason) — and a new `<name>_scale` input is appended, with the same decode-cast
+/ broadcast-multiply cone re-creating the value the trace promised. An input-rooted cone is not a constant subgraph,
+so it stays in-graph unconditionally (no `EMMY_FP8_EXPAND` analog) and the same W8A16 mul-hoist binding absorbs it:
+at gpt-oss expert shapes the gate_up matmul streams fp8 bytes with the scale on the accumulator epilogue at both the
+mma and the M=1 coop-reduce tiers. The down matmul's cone instead stays materialized by loop fusion's flash-consumer
+protection (the down projection sum-contracts the exp-bearing SwiGLU activation, which reads as a future
+softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant
+`EMMY_FP8_EXPAND` path, not an input-sourced limitation. Indirect operands compose: bits and scale inputs both
+compile as table-resolved operands for the fixed-slot dispatch.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph

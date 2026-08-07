@@ -272,12 +272,32 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     build_args = example_args
     if capacity is not None and argnames:
         # Only the args whose axis 0 IS the symbolic token axis get resized to capacity — a
-        # non-symbolic arg (an expert program's weight slice) keeps its true shape.
+        # non-symbolic arg (an expert program's weight slice) keeps its true shape AND its
+        # example dtype (an fp8 bits slice stays fp8; the per-input feed below binds it).
         build_args = [
             torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) if n in argnames else a
             for n, a in zip(plan.inputs, example_args, strict=True)
         ]
-    feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(plan.inputs, build_args, strict=True)}
+
+    # Each plan input binds at its own traced dtype, not one blanket model dtype: an
+    # f8-dtype input (an input-sourced fp8 expert weight) binds the raw bit pattern on the
+    # uint8 carrier — the same rule as the constant side in ``loader/safetensors.py`` — and
+    # a scale input keeps its traced f32. A torch fp8 example tensor reinterprets via
+    # ``.view``; a value cast would decode it.
+    import numpy as np  # noqa: PLC0415
+
+    input_dtypes = {b.name: b.dtype for b in plan.buffers}
+    torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
+
+    def _np_in(n, a):
+        dt = input_dtypes.get(n)
+        if dt is not None and dt.name in ("f8e4m3", "f8e5m2"):
+            if a.dtype in torch_f8:
+                a = a.view(torch.uint8)
+            return a.detach().cpu().numpy().astype(np.uint8, copy=False)
+        return a.detach().cpu().to(torch.float32).numpy().astype(dt.np if dt is not None else np_dtype, copy=False)
+
+    feed = {n: _np_in(n, a) for n, a in zip(plan.inputs, build_args, strict=True)}
     with gpu_lock():
         const_feed = _bind_plan_constants(plan, sources, dev_consts)
         program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)

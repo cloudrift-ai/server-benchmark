@@ -188,6 +188,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Wider decode steps and prefill always ride the routed dispatch; `combine_routed_experts` stays the parity
   oracle (`test_gen_runner_gpu` fixed-slot-vs-routed + the direct-vs-indirect bit-exactness pin,
   `test_gen_capture_gpu` captured-step live-replay).
+  **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
+  model dtype — an f8-dtype input binds the raw bit pattern on the uint8 fp8 bits carrier (a torch fp8 example tensor
+  reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
+  (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
+  expert programs; indirect operands compose (bits + scale slices both table-resolved).
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does

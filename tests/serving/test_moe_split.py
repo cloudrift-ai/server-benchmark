@@ -171,3 +171,104 @@ def test_flat_qk_norm_pre_matches_eager_projection():
     assert torch.allclose(q2, q_ref, atol=1e-6)
     assert torch.allclose(k2, k_ref, atol=1e-6)
     assert q2.shape == (t, nh * hd)
+
+
+def _tiny_gptoss_block(transformers, torch):
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssDecoderLayer
+
+    cfg = transformers.GptOssConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        sliding_window=8,
+    )
+    torch.manual_seed(0)
+    block = GptOssDecoderLayer(cfg, layer_idx=0).eval()
+    for p in block.parameters():
+        torch.nn.init.normal_(p, std=0.2)
+    return cfg, block
+
+
+def test_gptoss_expert_layout_detected_from_interface_not_shapes():
+    """gpt-oss layout comes off the transformers experts-interface attributes (is_transposed /
+    is_concatenated / has_bias), never shape sniffing — its down_proj is square, so shapes
+    cannot disambiguate the orientation."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import moe_block_parts, moe_expert_layout
+
+    cfg, block = _tiny_gptoss_block(transformers, torch)
+    parts = moe_block_parts(block.mlp)
+    assert parts is not None, "the mlp.router (gpt-oss) spelling must be accepted beside mlp.gate"
+    router, experts = parts
+    assert router is block.mlp.router
+    assert moe_expert_layout(experts) == (True, True, True)  # (transposed, interleaved, has_bias)
+
+
+def test_gptoss_moe_split_matches_eager_block_tail():
+    """The gpt-oss carve — clamped-SwiGLU + interleaved gate/up (de-interleaved at load) +
+    per-expert biases + the ``router`` module — reproduces the eager MoE block tail."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper, deinterleave_gate_up, moe_block_parts
+    from emmy.serving.gen_runner import combine_routed_experts
+
+    cfg, block = _tiny_gptoss_block(transformers, torch)
+    pre, post_attn, expert = build_moe_split_wrapper(block)
+    router, experts = moe_block_parts(block.mlp)
+    assert len(list(expert.parameters())) == 0, "expert wrapper must carry NO parameters (weights are inputs)"
+
+    # The load-time de-interleave: gate/up columns to chunk halves (weights AND biases).
+    w_gu = deinterleave_gate_up(experts.gate_up_proj.detach())
+    b_gu = deinterleave_gate_up(experts.gate_up_proj_bias.detach())
+
+    t = 5
+    attn_width = cfg.num_attention_heads * cfg.head_dim
+    attn_out = torch.randn(t, attn_width)
+    residual = torch.randn(t, cfg.hidden_size)
+    with torch.no_grad():
+        h, xn = post_attn(attn_out, residual)
+        combined = combine_routed_experts(
+            xn,
+            router(xn),
+            lambda e, rows: expert(rows, w_gu[e], experts.down_proj[e], b_gu[e], experts.down_proj_bias[e]),
+        )
+        got = h + combined
+        h_ref = residual + block.self_attn.o_proj(attn_out)
+        ref = h_ref + block.mlp(block.post_attention_layernorm(h_ref).unsqueeze(0))[0].squeeze(0)
+    assert torch.allclose(ref, got, atol=1e-5), f"max diff {(ref - got).abs().max()}"
+
+
+def test_gptoss_pre_carries_attention_biases():
+    """gpt-oss attention projections are biased (attention_bias=True); the pre carve must
+    reproduce the biased projections at head_dim 64-style explicit dims."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
+
+    cfg, block = _tiny_gptoss_block(transformers, torch)
+    assert block.self_attn.q_proj.bias is not None
+    pre, _, _ = build_moe_split_wrapper(block)
+
+    t = 5
+    hidden = torch.randn(t, cfg.hidden_size)
+    with torch.no_grad():
+        q, k, v = pre(hidden)
+        hn = block.input_layernorm(hidden)
+        q_ref = block.self_attn.q_proj(hn)
+        k_ref = block.self_attn.k_proj(hn)
+        v_ref = block.self_attn.v_proj(hn)
+    assert torch.allclose(q, q_ref, atol=1e-6)
+    assert torch.allclose(k, k_ref, atol=1e-6)
+    assert torch.allclose(v, v_ref, atol=1e-6)
+    assert q.shape == (t, cfg.num_attention_heads * cfg.head_dim)

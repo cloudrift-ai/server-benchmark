@@ -259,9 +259,23 @@ class EmmyGenModel(nn.Module):
                 return sliding_window
             return None
 
+        # Attention sinks (gpt-oss): a per-layer ``sinks`` weight, shape [num_heads], that the
+        # attention softmax treats as one extra always-present logit column. The config carries
+        # no flag — sinks exist purely as checkpoint weights — so key on the architecture.
+        # Passing ``sinks=`` into ``Attention`` makes vLLM's backend selection sinks-aware
+        # (on sm_120 it lands on TRITON_ATTN; FA2 and FlashInfer both reject sinks there); the
+        # params are the second vLLM-owned weight beside ``lm_head`` (``load_weights`` claims
+        # ``*.self_attn.sinks``).
+        self.sinks = None
+        if getattr(config, "model_type", None) == "gpt_oss":
+            self.sinks = nn.ParameterList(
+                [nn.Parameter(torch.empty(self.runner.layer_meta(i)[1], dtype=mc.dtype), requires_grad=False) for i in range(n_layers)]
+            )
+
         # One real vLLM Attention per layer — unique prefix (vLLM keys static_forward_context /
-        # cache-spec discovery by it and rejects duplicates). No weights. per_layer_sliding_window
-        # makes vLLM's paged attention window that layer (and size its KV-cache spec accordingly).
+        # cache-spec discovery by it and rejects duplicates). No weights (except sinks, above).
+        # per_layer_sliding_window makes vLLM's paged attention window that layer (and size its
+        # KV-cache spec accordingly).
         # Dims come from the runner PER LAYER: Gemma-4's global layers use a larger head_dim than
         # its sliding ones, so a single (num_heads, head_dim) would misshape the global layers.
         attn = []
@@ -277,6 +291,7 @@ class EmmyGenModel(nn.Module):
                     quant_config=vllm_config.quant_config,
                     per_layer_sliding_window=_layer_window(i),
                     prefix=f"{prefix}.layers.{i}.self_attn.attn",
+                    **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
                 )
             )
         self.attn = nn.ModuleList(attn)
@@ -425,6 +440,12 @@ class EmmyGenModel(nn.Module):
             elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                 loader(param, w)
                 loaded.add("lm_head.weight")
+            elif self.sinks is not None and name.endswith(".self_attn.sinks"):
+                # gpt-oss attention sinks — the per-layer [num_heads] weight beside lm_head
+                # (see __init__). Single GPU: the full copy (stock's tp narrow at tp=1).
+                layer = int(name.split(".layers.")[1].split(".")[0])
+                self.sinks[layer].data.copy_(w)
+                loaded.add(name)
         # Tied checkpoints: the loaded head IS the raw embed table — hand it to the runner and drop
         # the runner's own ~2 GiB folded device copy (uploaded eagerly at construction for the
         # profiling-order contract). empty_cache + the cupy pool trim actually RELEASE the freed

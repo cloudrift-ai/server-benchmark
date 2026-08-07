@@ -138,16 +138,19 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   pointers and the two-phase discipline).
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
-  **MoE third seam (token-choice top-k, e.g. OLMoE):** a layer whose `mlp` exposes the transformers-v5 experts
-  interface (`moe_block_parts` — a `gate` router beside 3-D `gate_up_proj (E, 2·I, H)` / `down_proj (E, H, I)`
-  parameters) is carved by `build_moe_split_wrapper` instead: its post program (`post_attn`) computes o_proj +
-  residual + post-attention norm and returns BOTH `h` and the normed `xn` (the norm output must materialize at the
-  seam — it is shared across the k routed experts, so the norm→gate⊗up fused form is out of reach by design), and the
-  layer output is assembled in torch (`_moe_combine`): the HF router module (linear + softmax + top-k — ops the
-  tracer cannot map) runs on `xn`, each HIT expert launches ONE shared expert program
-  (`moe.expert.sym`: `expert(x, w_gate_up, w_down)` with the weights as forward args → graph INPUTS, fed per-expert
-  dim-0 slices of the 3-D tensors, which live on device beside the routers via `_ensure_device`), and the partials
-  weighted-`index_add_` into `h`. Program count is 2/layer + ONE expert program total — not `E`/layer. MoE layers are
+  **MoE third seam (token-choice top-k, e.g. OLMoE / gpt-oss):** a layer whose `mlp` exposes the transformers-v5
+  experts interface (`moe_block_parts` — a router module named `gate` or `router` beside 3-D `gate_up_proj` /
+  `down_proj` parameters) is carved by `build_moe_split_wrapper` instead: its post program (`post_attn`) computes
+  o_proj + residual + post-attention norm and returns BOTH `h` and the normed `xn` (the norm output must materialize
+  at the seam — it is shared across the k routed experts, so the norm→gate⊗up fused form is out of reach by design),
+  and the layer output is assembled in torch (`_moe_combine`): the HF router module (linear + softmax + top-k — ops
+  the tracer cannot map) runs on `xn`, each HIT expert launches ONE shared expert program (`moe.expert.sym`:
+  `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
+  forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
+  the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
+  `h`. The expert layout (orientation / interleave / bias — gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
+  the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
+  named inputs. Program count is 2/layer + ONE expert program total — not `E`/layer. MoE layers are
   device-resident only (`forward_layer_post` raises on the host path) and are excluded from post→pre chaining (two
   outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`),
   which a whole-step decode capture cannot record — but single-token decode is capture-legal through the fixed-slot
@@ -193,6 +196,26 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
   (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
   expert programs; indirect operands compose (bits + scale slices both table-resolved).
+  **Quantized-checkpoint serving load (gpt-oss fp8, MoE M3):** `EmmyGenRunner.create` detects a quantized checkpoint
+  (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
+  dense trunk shard-streamed in as real values, expert tensors kept fp8 as a per-layer store of program-input-named
+  tensors (bits on the uint8 carrier + f32 scales + `dtype` biases, gate/up de-interleaved). `from_model` then
+  compiles the expert programs with `quant_specs` — `_compile_split` traces the wrapper at value dtypes (the trace
+  is quantization-blind), applies `spell_quantized_inputs` post-trace (bits input + appended scale inputs + the
+  in-graph decode/scale algebra the W8A16 binding absorbs), and the caller's example list carries the scale
+  examples as its last entries. Every per-expert input — weights, biases, scales — is a per-launch slice of the
+  store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
+  T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
+  card, the rest is vLLM's KV budget.
+  **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
+  `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
+  `sinks=` into each `Attention`, which makes vLLM's backend selection sinks-aware (sm_120 lands on TRITON_ATTN;
+  FA2/FlashInfer reject sinks there); `load_weights` claims `*.self_attn.sinks` beside `lm_head.weight` (untied
+  embeddings — no embed adoption; the runner owns the embed table from the checkpoint). The alternating
+  sliding/full pattern rides the existing `_layer_window` (`layer_types`), and YaRN flows through the flat
+  `config.rope_parameters` into `_build_rotary`/`get_rope` unchanged — one nuance: stock vLLM builds the gpt-oss
+  rope at fp32 while the plugin's rotary follows the model dtype (fp16); q/k re-cast to the trunk dtype either
+  way, a known small numeric drift.
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does

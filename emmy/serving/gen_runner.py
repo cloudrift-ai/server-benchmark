@@ -228,7 +228,9 @@ def trace_split(wrapper, example_args, argnames):
     return trace_module(wrapper, tuple(example_args), dynamic_shapes=dynamic_shapes)
 
 
-def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None, plan=None, indirect_inputs=None):
+def _compile_split(
+    wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None, plan=None, indirect_inputs=None, quant_specs=None
+):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
     **prefill** program (one program, any width). ``argnames=None`` traces a **fully static**
@@ -248,7 +250,11 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     pointer resolved in-kernel from a device table — the MoE fixed-slot dispatch): set as a
     graph-level hint before compile, so the schedule search is untouched and only the final
     kernel lowering changes the ABI. Ignored when ``plan`` is supplied (the stored plan already
-    carries — or lacks — the indirect encoding; callers validate coverage)."""
+    carries — or lacks — the indirect encoding; callers validate coverage). ``quant_specs``
+    (the fp8 expert path) feeds ``spell_quantized_inputs`` post-trace: the named weight inputs
+    become fp8 bits inputs with appended scale inputs; ``example_args`` then carries the scale
+    EXAMPLES as its LAST ``len(quant_specs)`` entries (matching the speller's append order),
+    while only the leading entries are the wrapper's forward args for the trace."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -258,7 +264,12 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.plan import plan_from_graph
 
-        graph = trace_split(wrapper, example_args, argnames)
+        n_fwd = len(example_args) - (len(quant_specs) if quant_specs else 0)
+        graph = trace_split(wrapper, example_args[:n_fwd], argnames)
+        if quant_specs:
+            from emmy.compiler.loader.quant import spell_quantized_inputs
+
+            spell_quantized_inputs(graph, quant_specs)
         if indirect_inputs:
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
         plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
@@ -372,7 +383,8 @@ class EmmyGenRunner:
         self._post_prefill = post_prefill
         self._prefill_bucket = prefill_bucket
         self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
-        # MoE third seam: per-layer dict (router module + the 3-D expert weight tensors +
+        # MoE third seam: per-layer dict (router module + the E-stacked expert INPUT tensors
+        # under ``inputs`` — weights, and for gpt-oss biases + fp8 bits/scales — plus
         # ``top_k``) or None for dense layers; one shared expert program PER TIER serves every
         # layer (weights are inputs): static M=decode_bucket and M=1 twins for the decode hot
         # path, a static M=256 twin for prefill-width routed row sets (captured replay — see
@@ -489,6 +501,26 @@ class EmmyGenRunner:
         import torch
         from transformers import AutoModelForCausalLM
 
+        from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+        # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
+        # engage its own fp8 machinery); build the twin from config and stream the shards —
+        # dense trunk loaded as real values, expert tensors kept fp8 (``load_quantized_split``).
+        qdir = quantized_checkpoint_dir(model_id)
+        if qdir is not None:
+            from emmy.compiler.trace.huggingface import load_quantized_split
+
+            logger.info("[gen_runner] loading %s (%s, quantized checkpoint: dense trunk as values, experts fp8)...", model_id, dtype_str)
+            model, expert_store = load_quantized_split(qdir, getattr(torch, dtype_str))
+            with torch.device("cpu"):
+                return cls.from_model(
+                    model,
+                    dtype_str=dtype_str,
+                    decode_bucket=decode_bucket,
+                    max_tokens=max_tokens,
+                    prefill_bucket=prefill_bucket,
+                    expert_store=expert_store,
+                )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         with torch.device("cpu"):
             model = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype_str)).eval()
@@ -497,13 +529,23 @@ class EmmyGenRunner:
             )
 
     @classmethod
-    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
+    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0, expert_store=None):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
-        must be on CPU for the trace."""
+        must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
+        ``load_quantized_split`` result) supplies the per-layer expert input tensors —
+        fp8 bits + scales + biases — in place of the twin's expert params (which stay meta
+        on the quantized path); the expert programs are then compiled with the decode + scale
+        algebra spelled in-graph (``spell_quantized_inputs`` via ``_compile_split``)."""
         import numpy as np
         import torch
 
-        from emmy.compiler.trace.huggingface import build_attention_split_wrapper, build_moe_split_wrapper, moe_block_parts
+        from emmy.compiler.trace.huggingface import (
+            build_attention_split_wrapper,
+            build_moe_split_wrapper,
+            deinterleave_gate_up,
+            moe_block_parts,
+            moe_expert_layout,
+        )
 
         dtype = getattr(torch, dtype_str)
         np_dtype = np.dtype(dtype_str)
@@ -622,24 +664,61 @@ class EmmyGenRunner:
 
                 gate, experts = moe_parts
                 pre_w, post_w, expert_w = build_moe_split_wrapper(block)
+                transposed, interleaved, has_bias = moe_expert_layout(experts)
+                # The per-layer expert INPUT tensors, keyed by the expert program's input
+                # names. A quantized checkpoint supplies them from the shard stream (fp8 bits
+                # + f32 scales + dtype biases — the twin's expert params stay meta); otherwise
+                # they come off the twin, de-interleaved here when the layout needs it so the
+                # wrapper's chunk-half gate/up split holds.
+                einputs = (expert_store or {}).get("layers", {}).get(i)
+                if einputs is None:
+                    einputs = {"w_gate_up": experts.gate_up_proj.detach().to(dtype), "w_down": experts.down_proj.detach().to(dtype)}
+                    if has_bias:
+                        einputs["b_gate_up"] = experts.gate_up_proj_bias.detach().to(dtype)
+                        einputs["b_down"] = experts.down_proj_bias.detach().to(dtype)
+                    if interleaved:
+                        for nm in ("w_gate_up", "b_gate_up"):
+                            if nm in einputs:
+                                einputs[nm] = deinterleave_gate_up(einputs[nm])
                 moe_meta.append(
                     {
                         "gate": copy.deepcopy(gate).to(dtype),
-                        "gate_up": experts.gate_up_proj.detach().to(dtype),
-                        "down": experts.down_proj.detach().to(dtype),
+                        "inputs": einputs,
                         # k routed experts per token — the fixed-slot tier's slot count.
                         "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
                     }
                 )
                 # ONE expert program serves every MoE layer, so the expert shape and activation
                 # must be uniform across layers — verify, don't assume.
-                shape_key = (tuple(experts.gate_up_proj.shape[1:]), tuple(experts.down_proj.shape[1:]), type(experts.act_fn).__name__)
+                act_fn = getattr(experts, "act_fn", None)
+                act_tag = (
+                    type(act_fn).__name__
+                    if act_fn is not None
+                    else f"clamped_swiglu[{getattr(experts, 'alpha', None)},{getattr(experts, 'limit', None)}]"
+                )
+                shape_key = (
+                    tuple(einputs["w_gate_up"].shape[1:]),
+                    tuple(einputs["w_down"].shape[1:]),
+                    act_tag,
+                    transposed,
+                    has_bias,
+                )
                 if expert_sym is None:
                     expert_shape_key = shape_key
-                    example_w = [
-                        torch.zeros(*experts.gate_up_proj.shape[1:], dtype=dtype),
-                        torch.zeros(*experts.down_proj.shape[1:], dtype=dtype),
-                    ]
+                    # Forward-arg examples in wrapper-signature order (weights, then biases) at
+                    # the VALUE dtype — the trace is quantization-blind; fp8 bits keep the same
+                    # logical shape. Quantized experts append the scale examples (the speller
+                    # appends the scale inputs after the forward args, in spec order).
+                    w_names = ["w_gate_up", "w_down"] + (["b_gate_up", "b_down"] if has_bias else [])
+                    example_w = [torch.zeros(*einputs[n].shape[1:], dtype=dtype) for n in w_names]
+                    quant_specs = None
+                    fmt = (expert_store or {}).get("fmt")
+                    if fmt is not None and einputs["w_gate_up"].dtype == torch.uint8:
+                        quant_specs = {
+                            "w_gate_up": (fmt, tuple(einputs["w_gate_up_scale"].shape[1:]), "f32"),
+                            "w_down": (fmt, tuple(einputs["w_down_scale"].shape[1:]), "f32"),
+                        }
+                        example_w += [torch.zeros(*einputs[f"{n}_scale"].shape[1:], dtype=torch.float32) for n in ("w_gate_up", "w_down")]
                     with torch.device("cpu"):
                         expert_sym = build(
                             "moe.expert.sym",
@@ -649,6 +728,7 @@ class EmmyGenRunner:
                             np_dtype,
                             arena=arena,
                             capacity=max_tokens,
+                            quant_specs=quant_specs,
                         )
                         # Static expert twins — the decode hot path. Same failure contract as
                         # the per-layer twins: a compile failure drops the tier, the symbolic
@@ -664,6 +744,7 @@ class EmmyGenRunner:
                                     None,
                                     np_dtype,
                                     arena=arena,
+                                    quant_specs=quant_specs,
                                 )
                             except Exception as ex:  # noqa: BLE001 — any compile failure → symbolic fallback
                                 logger.warning("[gen_runner] expert bucket-twin compile failed (%s); experts ride the symbolic program", ex)
@@ -675,6 +756,7 @@ class EmmyGenRunner:
                                 None,
                                 np_dtype,
                                 arena=arena,
+                                quant_specs=quant_specs,
                             )
                         except Exception as ex:  # noqa: BLE001 — any compile failure → bucket/symbolic fallback
                             logger.warning("[gen_runner] expert M=1 twin compile failed (%s); single-row experts ride the bucket twin", ex)
@@ -690,6 +772,7 @@ class EmmyGenRunner:
                                     None,
                                     np_dtype,
                                     arena=arena,
+                                    quant_specs=quant_specs,
                                 )
                             except Exception as ex:  # noqa: BLE001 — any compile failure → symbolic fallback
                                 logger.warning(
@@ -839,7 +922,10 @@ class EmmyGenRunner:
         expert_slots = None
         moe_top_k = next((m["top_k"] for m in moe_meta if m is not None), 0)
         if expert_m1 is not None and moe_top_k > 0:
-            ind_names = ("w_gate_up", "w_down")
+            # EVERY per-expert input resolves through the device tables: weights and biases,
+            # plus the fp8 scale inputs on the quantized path (bits and scale both
+            # table-resolved — the proven fp8×indirect composition).
+            ind_names = tuple(w_names) + (tuple(f"{n}_scale" for n in quant_specs) if quant_specs else ())
             stored_ind = stored("moe.expert.one.ind")
             if stored_ind is not None and not _indirect_covered(stored_ind, ind_names):
                 logger.warning("[gen_runner] stored moe.expert.one.ind plan lacks the indirect-operand encoding (stale pack) — recompiling")
@@ -847,7 +933,9 @@ class EmmyGenRunner:
             try:
                 with torch.device("cpu"):
                     slot_example = [torch.zeros(1, hidden, dtype=dtype), *example_w]
-                    slot0, ind_plan = _compile_split(expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names)
+                    slot0, ind_plan = _compile_split(
+                        expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names, quant_specs=quant_specs
+                    )
                     if not _indirect_covered(ind_plan, ind_names):
                         raise RuntimeError(
                             "indirect twin compile left a weight arg unmarked (the kernel consumes it under a derived buffer name)"
@@ -1101,54 +1189,52 @@ class EmmyGenRunner:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
-                    m["gate_up"] = m["gate_up"].cuda()
-                    m["down"] = m["down"].cuda()
-                    m["gate_up_cp"] = [cp.from_dlpack(w) for w in m["gate_up"]]
-                    m["down_cp"] = [cp.from_dlpack(w) for w in m["down"]]
+                    m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
+                    m["inputs_cp"] = {n: [cp.from_dlpack(w) for w in t] for n, t in m["inputs"].items()}
                 if self._expert_slots is not None:
                     # Fixed-slot indirect tables: ONE flat [n_moe_layers * E] int64 pointer
-                    # table per weight kind (entry = the device address of one expert's slice
-                    # of a layer's 3-D tensor), a [k] int32 SELECTOR the router rewrites per
-                    # layer per step (top-k indices + the layer's table offset), and a [k, H]
-                    # partials tensor the slot OUTPUTS land in. The table is layer-invariant —
-                    # the layer offset rides in the selector VALUES, which are device data —
-                    # so per-slot cached graphs and vLLM's whole-step capture both bake one
-                    # fixed table/selector pointer and the slot kernels read the E-tensors
-                    # directly (no per-step weight staging; the ~100 MB stage-1 staging pair
-                    # is gone, returned to vLLM's KV-cache budget). Slot i's table/selector/
-                    # output arrays are bound here ONCE.
+                    # table per expert-input kind (weights, biases, and — on the fp8 path —
+                    # the scale tensors; entry = the device address of one expert's slice
+                    # of a layer's E-stacked tensor), a [k] int32 SELECTOR the router rewrites
+                    # per layer per step (top-k indices + the layer's table offset), and a
+                    # [k, H] partials tensor the slot OUTPUTS land in. The table is
+                    # layer-invariant — the layer offset rides in the selector VALUES, which
+                    # are device data — so per-slot cached graphs and vLLM's whole-step
+                    # capture both bake one fixed table/selector pointer and the slot kernels
+                    # read the E-tensors directly (no per-step weight staging; the ~100 MB
+                    # stage-1 staging pair is gone, returned to vLLM's KV-cache budget). Slot
+                    # i's table/selector/output arrays are bound here ONCE.
+                    import numpy as np  # noqa: PLC0415
+
                     first = next(m for m in self._moe if m is not None)
                     k = len(self._expert_slots)
-                    h = first["gate_up"].shape[2]
-                    num_e = first["gate_up"].shape[0]
-                    gu_ptrs: list[int] = []
-                    dn_ptrs: list[int] = []
+                    h = self._embed_weight.shape[1]
+                    num_e = first["inputs"]["w_gate_up"].shape[0]
+                    tables: dict[str, list[int]] = {n: [] for n in first["inputs"]}
                     for m in self._moe:
                         if m is None:
                             continue
-                        m["sel_off"] = len(gu_ptrs)
-                        for name, ptrs in (("gate_up", gu_ptrs), ("down", dn_ptrs)):
-                            w = m[name]
+                        m["sel_off"] = len(next(iter(tables.values())))
+                        for name, ptrs in tables.items():
+                            w = m["inputs"][name]
                             ptrs.extend(w.data_ptr() + e * w.stride(0) * w.element_size() for e in range(num_e))
-                    self._table_gate_up = torch.tensor(gu_ptrs, dtype=torch.int64, device="cuda")
-                    self._table_down = torch.tensor(dn_ptrs, dtype=torch.int64, device="cuda")
+                    self._slot_tables = {n: torch.tensor(p, dtype=torch.int64, device="cuda") for n, p in tables.items()}
                     self._slot_sel = torch.zeros(k, dtype=torch.int32, device="cuda")
-                    self._slot_partials = torch.empty(k, h, dtype=first["gate_up"].dtype, device="cuda")
+                    act_dtype = torch.from_numpy(np.empty(0, dtype=self._np_dtype)).dtype
+                    self._slot_partials = torch.empty(k, h, dtype=act_dtype, device="cuda")
                     sel_cp = cp.from_dlpack(self._slot_sel)
-                    gu_cp = cp.from_dlpack(self._table_gate_up)
-                    dn_cp = cp.from_dlpack(self._table_down)
+                    table_cps = {n: cp.from_dlpack(t) for n, t in self._slot_tables.items()}
                     for j, slot in enumerate(self._expert_slots):
                         p = slot.program
-                        p.arrays["w_gate_up__table"] = gu_cp
-                        p.arrays["w_gate_up__sel"] = sel_cp
-                        p.arrays["w_down__table"] = dn_cp
-                        p.arrays["w_down__sel"] = sel_cp
+                        for name, tcp in table_cps.items():
+                            p.arrays[f"{name}__table"] = tcp
+                            p.arrays[f"{name}__sel"] = sel_cp
                         p.arrays[slot.output_names[0]] = cp.from_dlpack(self._slot_partials[j : j + 1])
-                        # The build allocated the (never-read) direct weight input buffers —
-                        # drop them (~two experts' weights per slot) so vLLM's KV-cache
-                        # profiling sees the memory.
-                        p.arrays["w_gate_up"] = cp.empty(0, dtype=p.arrays["w_gate_up"].dtype)
-                        p.arrays["w_down"] = cp.empty(0, dtype=p.arrays["w_down"].dtype)
+                        # The build allocated the (never-read) direct per-expert input
+                        # buffers — drop them (~two experts' weights per slot) so vLLM's
+                        # KV-cache profiling sees the memory.
+                        for name in table_cps:
+                            p.arrays[name] = cp.empty(0, dtype=p.arrays[name].dtype)
                     cp.get_default_memory_pool().free_all_blocks()
         self._dev_ready = True
 
@@ -1340,11 +1426,11 @@ class EmmyGenRunner:
         import torch
 
         t = rows.shape[0]
-        w_gu, w_dn = moe["gate_up_cp"][e], moe["down_cp"][e]
+        per_e = {name: views[e] for name, views in moe["inputs_cp"].items()}
         if self._expert_m256 is not None and self._decode_bucket < t <= _EXPERT_PREFILL_M:
             prog = self._expert_m256
             p = prog.program
-            p.upload_prefix_device({"x": cp.from_dlpack(rows.detach().contiguous()), "w_gate_up": w_gu, "w_down": w_dn})
+            p.upload_prefix_device({"x": cp.from_dlpack(rows.detach().contiguous()), **per_e})
             p.capture_program_graph()  # static program → one cached graph, replayed per expert
             p.replay_program_graph()
             outs = p.output_prefix_device()
@@ -1358,11 +1444,10 @@ class EmmyGenRunner:
         p = prog.program
         feed = {"x": cp.from_dlpack(rows.detach().contiguous())}
         if self._expert_swap_safe[id(prog)]:
-            p.arrays["w_gate_up"] = w_gu
-            p.arrays["w_down"] = w_dn
+            for name, view in per_e.items():
+                p.arrays[name] = view
         else:
-            feed["w_gate_up"] = w_gu
-            feed["w_down"] = w_dn
+            feed.update(per_e)
         if sym:
             p.set_sym_values({"num_tokens": t})
         p.upload_prefix_device(feed)

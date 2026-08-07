@@ -397,21 +397,54 @@ def build_attention_split_wrapper(block):
 def moe_block_parts(mlp):
     """The ``(router, experts)`` pair of a token-choice MoE block, or ``None`` for a dense MLP.
 
-    Matches the transformers-v5 experts interface: a ``gate`` router module beside an ``experts``
-    module holding the per-expert weights as 3-D ``nn.Parameter``s (``gate_up_proj (E, 2·I, H)``,
-    ``down_proj (E, H, I)``). That storage layout is what lets serving pass per-expert dim-0
-    slices as program inputs."""
+    Matches the transformers-v5 experts interface: a router module (named ``gate`` in the
+    OLMoE/Qwen lineage, ``router`` in gpt-oss) beside an ``experts`` module holding the
+    per-expert weights as 3-D ``nn.Parameter``s (``gate_up_proj``, ``down_proj``). That storage
+    layout is what lets serving pass per-expert dim-0 slices as program inputs."""
     import torch
 
-    gate = getattr(mlp, "gate", None)
+    router = getattr(mlp, "gate", None) or getattr(mlp, "router", None)
     experts = getattr(mlp, "experts", None)
-    if gate is None or experts is None:
+    if router is None or experts is None:
         return None
     gate_up = getattr(experts, "gate_up_proj", None)
     down = getattr(experts, "down_proj", None)
     if not (isinstance(gate_up, torch.Tensor) and gate_up.dim() == 3 and isinstance(down, torch.Tensor) and down.dim() == 3):
         return None
-    return gate, experts
+    return router, experts
+
+
+def moe_expert_layout(experts):
+    """The experts module's weight-layout contract, read off the attributes transformers'
+    ``@use_experts_implementation`` decorator stamps on every v5 experts class — NOT off the
+    tensor shapes (gpt-oss ``down_proj`` is square ``(E, 2880, 2880)``, so shape sniffing
+    cannot tell the orientations apart). Returns ``(transposed, interleaved, has_bias)``:
+
+    - ``transposed`` — weights stored ``(E, in, out)`` and applied as ``x @ W`` (gpt-oss);
+      ``False`` is the ``F.linear`` ``(E, out, in)`` orientation (OLMoE).
+    - ``interleaved`` — gate/up live in the gate-up projection's OUT axis as even/odd
+      columns (gpt-oss) rather than concatenated halves; the serving load de-interleaves
+      once so the wrapper's ``chunk(2)`` split holds for both (see
+      :func:`deinterleave_gate_up`).
+    - ``has_bias`` — per-expert ``gate_up_proj_bias`` / ``down_proj_bias`` exist and become
+      two more expert-program inputs."""
+    return (
+        bool(getattr(experts, "is_transposed", False)),
+        not bool(getattr(experts, "is_concatenated", True)),
+        bool(getattr(experts, "has_bias", False)),
+    )
+
+
+def deinterleave_gate_up(t):
+    """De-interleave a gate-up tensor's LAST axis from even/odd gate/up columns into
+    concatenated ``[gate | up]`` halves — a one-time exact column permutation applied at
+    LOAD (weight bits, scale and bias alike), which restores the ``chunk(2, dim=-1)``
+    algebra so ONE expert-wrapper spelling serves both the OLMoE and the gpt-oss layouts.
+    The alternative — strided ``::2`` slices spelled in-graph — would make every gate/up
+    read a stride-2 column access, which the staged tile transports do not lower well."""
+    import torch
+
+    return torch.cat([t[..., 0::2], t[..., 1::2]], dim=-1).contiguous()
 
 
 def build_moe_split_wrapper(block):
@@ -422,21 +455,29 @@ def build_moe_split_wrapper(block):
       then the post-attention norm. BOTH come out: the router and the expert programs consume the
       normed ``xn``, and the layer output is ``h + combine(expert outputs)`` — the norm output must
       materialize at the seam because it is shared across the k routed experts.
-    - ``expert(x[T_e, H], w_gate_up[2·I, H], w_down[H, I]) -> y[T_e, H]`` — one expert's gated MLP
-      with the weights as FORWARD ARGUMENTS (they trace as graph inputs, not constants), so ONE
-      compiled program serves every expert of every same-shaped layer; the caller passes per-expert
-      slices of the 3-D expert tensors at launch.
+    - ``expert(x[T_e, H], w_gate_up, w_down [, b_gate_up, b_down]) -> y[T_e, H]`` — one expert's
+      gated MLP with the weights as FORWARD ARGUMENTS (they trace as graph inputs, not constants),
+      so ONE compiled program serves every expert of every same-shaped layer; the caller passes
+      per-expert slices of the 3-D expert tensors at launch. Two layouts, selected by
+      :func:`moe_expert_layout`: the OLMoE ``F.linear`` form (``(out, in)`` weights, ``act_fn``,
+      no bias) and the gpt-oss ``x @ W`` form (``(in, out)`` weights, per-expert biases as two
+      more forward args, and the clamped-SwiGLU activation — ``gate.clamp(max=limit)``,
+      ``up.clamp(±limit)``, ``glu = gate·σ(α·gate)``, ``out = (up + 1)·glu`` with the module's
+      ``alpha``/``limit``). Both spell the gate/up split as ``chunk(2, dim=-1)``: an interleaved
+      checkpoint (gpt-oss) is de-interleaved once at load (:func:`deinterleave_gate_up`), never
+      strided in-graph.
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
     block layout and NO always-on shared expert only; the Gemma 4-norm MoE form and DeepSeek-style
     ``shared_experts`` blocks are rejected loudly until a model needs them — a silent pass would
     drop the shared-experts term from every layer's output."""
+    import torch
     import torch.nn as nn
 
     parts = moe_block_parts(block.mlp)
     if parts is None:
-        raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (gate, experts) MoE interface")
+        raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
     _, experts = parts
     for shared_attr in ("shared_experts", "shared_expert"):
         if getattr(block.mlp, shared_attr, None) is not None:
@@ -459,14 +500,46 @@ def build_moe_split_wrapper(block):
             h = residual + self.o_proj(attn_out)
             return h, self.post_attention_layernorm(h)
 
-    class ExpertFFN(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.act_fn = experts.act_fn
+    transposed, _interleaved, has_bias = moe_expert_layout(experts)
+    act_fn = getattr(experts, "act_fn", None)
+    clamped = act_fn is None and getattr(experts, "alpha", None) is not None and getattr(experts, "limit", None) is not None
+    if act_fn is None and not clamped:
+        raise NotImplementedError(
+            "build_moe_split_wrapper: experts module has neither an act_fn nor the gpt-oss clamped-SwiGLU "
+            "(alpha/limit) contract — the expert activation cannot be spelled"
+        )
 
-        def forward(self, x, w_gate_up, w_down):
-            gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
-            return nn.functional.linear(self.act_fn(gate) * up, w_down)
+    if transposed and has_bias and clamped:
+        alpha, limit = float(experts.alpha), float(experts.limit)
+
+        class ExpertFFN(nn.Module):
+            # gpt-oss: (in, out) weights applied as ``x @ W + b``; gate/up as chunk halves
+            # (the load de-interleaved the checkpoint's even/odd columns); clamped-SwiGLU.
+            def forward(self, x, w_gate_up, w_down, b_gate_up, b_down):
+                gate, up = (x @ w_gate_up + b_gate_up).chunk(2, dim=-1)
+                gate = gate.clamp(max=limit)
+                up = up.clamp(min=-limit, max=limit)
+                glu = gate * torch.sigmoid(gate * alpha)
+                return ((up + 1) * glu) @ w_down + b_down
+
+    elif not transposed and not has_bias and act_fn is not None:
+
+        class ExpertFFN(nn.Module):
+            # OLMoE: (out, in) weights applied via F.linear; plain gated activation.
+            def __init__(self) -> None:
+                super().__init__()
+                self.act_fn = act_fn
+
+            def forward(self, x, w_gate_up, w_down):
+                gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+                return nn.functional.linear(self.act_fn(gate) * up, w_down)
+
+    else:
+        raise NotImplementedError(
+            f"build_moe_split_wrapper: unsupported experts layout (transposed={transposed}, "
+            f"has_bias={has_bias}, clamped={clamped}) — only the OLMoE (F.linear, biasless, act_fn) "
+            f"and gpt-oss (x @ W, biased, clamped-SwiGLU) forms are spelled"
+        )
 
     return pre, PostAttn(), ExpertFFN()
 
@@ -558,6 +631,145 @@ def quantized_checkpoint_dir(model_id_or_path: str):
     from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
     return _resolve_model_dir(model_id_or_path)
+
+
+# Expert-tensor leaves of a transformers-v5 experts module → the expert program's INPUT names
+# (the contract between the streaming loader below and the serving runner's expert launches).
+_EXPERT_LEAVES = {
+    "gate_up_proj": "w_gate_up",
+    "down_proj": "w_down",
+    "gate_up_proj_scale": "w_gate_up_scale",
+    "down_proj_scale": "w_down_scale",
+    "gate_up_proj_bias": "b_gate_up",
+    "down_proj_bias": "b_down",
+}
+
+
+def _expert_slot(key: str):
+    """``(layer_index, program_input_name)`` when ``key`` is a per-expert tensor of a MoE
+    layer's experts module, else ``None``."""
+    if ".experts." not in key:
+        return None
+    name = _EXPERT_LEAVES.get(key.rsplit(".", 1)[1])
+    if name is None or ".layers." not in key:
+        return None
+    return int(key.split(".layers.")[1].split(".")[0]), name
+
+
+def load_quantized_split(model_dir, dtype):
+    """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
+
+    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss):
+    never materializes the whole dequantized dict (a 20B checkpoint dequantizes to ~42 GB of
+    host values — the whole-dict ``load_dequantized_state_dict`` OOMs a 60 GB box). Instead:
+
+    - The twin is built from config alone on the META device (weights never read at trace;
+      the experts' would-be random init never materializes).
+    - The DENSE trunk (attention projections + biases, norms, router, embeddings, lm_head)
+      streams per shard: fp8 weights dequantize by their ``<key>_scale`` partner, everything
+      casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
+      3-D expert params are skipped — they stay meta on the twin.
+    - The EXPERT tensors are collected into a per-layer store keyed by the expert program's
+      INPUT names: fp8 weights as RAW BITS on the uint8 carrier plus their f32 scale
+      tensors (the runner spells the dequant in-graph via ``spell_quantized_inputs`` and
+      uploads 1-byte weights — the whole point of the fp8 checkpoint), biases (and any
+      unquantized expert weights) as ``dtype`` value tensors. An interleaved gate/up layout
+      de-interleaves here — bits, scale and bias alike (:func:`deinterleave_gate_up`).
+
+    Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | None,
+    "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized).
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+    from safetensors import safe_open  # noqa: PLC0415
+    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import _fp8_quant_config, _is_skipped, dequantize  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
+
+    model_dir = Path(model_dir)
+    config = AutoConfig.from_pretrained(model_dir)
+    if getattr(config, "quantization_config", None) is not None:
+        delattr(config, "quantization_config")
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config)
+
+    qc = _fp8_quant_config(model_dir) or {}
+    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    index = _build_index(model_dir)
+    by_shard: dict[str, list[str]] = {}
+    for key, shard in index.items():
+        by_shard.setdefault(str(shard), []).append(key)
+
+    torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
+    state: dict = {}
+    layers_store: dict[int, dict] = {}
+    fmt: str | None = None
+    from contextlib import ExitStack  # noqa: PLC0415
+
+    with ExitStack() as stack:
+        handles: dict[str, object] = {}
+
+        def _open(path: str):
+            h = handles.get(path)
+            if h is None:
+                h = handles[path] = stack.enter_context(safe_open(path, framework="pt"))
+            return h
+
+        for shard_path in sorted(by_shard):
+            f = _open(shard_path)
+            for k in sorted(by_shard[shard_path]):
+                slot = _expert_slot(k)
+                if slot is not None:
+                    layer, name = slot
+                    t = f.get_tensor(k)
+                    if t.dtype in torch_f8:
+                        fmt = "f8e4m3" if t.dtype == torch.float8_e4m3fn else "f8e5m2"
+                        t = t.view(torch.uint8)
+                    elif name.endswith("_scale"):
+                        t = t.float()  # bf16-stored scales read as f32 values (the loader convention)
+                    else:
+                        t = t.to(dtype)
+                    layers_store.setdefault(layer, {})[name] = t
+                    continue
+                if k.endswith(("_scale", "_scale_inv")) and k[: k.rfind("_scale")] in index:
+                    continue  # consumed by its base weight's dequant
+                t = f.get_tensor(k)
+                if t.dtype in torch_f8:
+                    scale_key = next((c for c in (k + "_scale", k + "_scale_inv") if c in index), None)
+                    if scale_key is not None and not _is_skipped(k, patterns):
+                        s = _open(str(index[scale_key])).get_tensor(scale_key)
+                        vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_key.endswith("_inv"))
+                        state[k] = torch.from_numpy(vals).to(dtype)
+                        continue
+                    t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
+                state[k] = t.to(dtype) if t.is_floating_point() else t
+
+    # De-interleave the gate/up family once, so the wrapper's chunk-half split holds.
+    trunk = getattr(model, "model", model)
+    trunk = getattr(trunk, "language_model", trunk)
+    interleaved = False
+    for block in trunk.layers:
+        parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
+        if parts is not None:
+            _, interleaved, _ = moe_expert_layout(parts[1])
+            break
+    if interleaved:
+        for store in layers_store.values():
+            for name in ("w_gate_up", "w_gate_up_scale", "b_gate_up"):
+                if name in store:
+                    store[name] = deinterleave_gate_up(store[name])
+
+    missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+    if unexpected:
+        logger.warning("quantized split load: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
+    missing_dense = [m for m in missing if _expert_slot(m) is None]
+    if missing_dense:
+        logger.info("quantized split load: %d module tensors not in checkpoint (e.g. %s)", len(missing_dense), missing_dense[0])
+    model.tie_weights()
+    model.eval()
+    return model, {"fmt": fmt, "layers": layers_store}
 
 
 def load_quantized_twin(model_dir, dtype):

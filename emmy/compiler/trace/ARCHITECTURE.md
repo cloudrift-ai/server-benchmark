@@ -78,14 +78,32 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   (`tests/compiler/trace/test_huggingface.py`).
 
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
-  (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a `gate` router module
-  beside 3-D `gate_up_proj (E, 2·I, H)` / `down_proj (E, H, I)` expert parameters). `pre` is the shared q/k/v carve
-  (which also handles OLMoE's FLAT q/k norm placement — norm width == projection width, applied before the head
-  reshape — and rejects `clip_qkv` loudly); `post_attn(attn_out, residual) → (h, xn)` stops at the post-attention
-  norm (the router and experts consume `xn` outside the graph); `expert(x, w_gate_up, w_down)` takes the weights as
-  FORWARD ARGUMENTS so they trace as graph inputs — one compiled program serves every expert via per-expert dim-0
-  slices at launch. The router (topk — untraceable) and the weighted combine stay in torch, in the serving runner.
+  (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named
+  `gate` (OLMoE/Qwen lineage) or `router` (gpt-oss) beside 3-D `gate_up_proj` / `down_proj` expert parameters).
+  `pre` is the shared q/k/v carve (which also handles OLMoE's FLAT q/k norm placement — norm width == projection
+  width, applied before the head reshape — biased projections like gpt-oss's `attention_bias=True`, and rejects
+  `clip_qkv` loudly); `post_attn(attn_out, residual) → (h, xn)` stops at the post-attention norm (the router and
+  experts consume `xn` outside the graph); `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` takes the weights
+  as FORWARD ARGUMENTS so they trace as graph inputs — one compiled program serves every expert via per-expert
+  dim-0 slices at launch. Two expert layouts, selected by `moe_expert_layout` off the attributes transformers'
+  `@use_experts_implementation` decorator stamps (`is_transposed` / `is_concatenated` / `has_bias` — never shape
+  sniffing: gpt-oss `down_proj` is square, so shapes cannot disambiguate the orientation): the OLMoE form
+  (`F.linear` on `(E, out, in)` weights, `act_fn`, no bias) and the gpt-oss form (`x @ W + b` on `(E, in, out)`
+  weights, per-expert biases as two more forward args, clamped-SwiGLU — `gate.clamp(max=limit)`,
+  `up.clamp(±limit)`, `glu = gate·σ(α·gate)`, `(up + 1)·glu` with the module's `alpha`/`limit`). Both spell the
+  gate/up split as `chunk(2, dim=-1)`: gpt-oss's interleaved even/odd gate/up columns are de-interleaved ONCE at
+  load (`deinterleave_gate_up` — an exact column permutation of weight bits, scale and bias alike), never strided
+  in-graph. The router (topk — untraceable) and the weighted combine stay in torch, in the serving runner.
   Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+
+- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
+  quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
+  trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
+  (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
+  and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
+  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. Never the whole dict at
+  once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
+  whole-dict eager/accuracy twin for models small enough to hold.
 
 - `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
   a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at

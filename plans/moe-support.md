@@ -203,6 +203,33 @@ Depends on: FP8 M2 (fp8 storage through the kernel) + M4 (serving) from `plans/f
 2. Serve on the 5090; accuracy gate vs the bf16 HF reference; smoke A/B vs stock vLLM to confirm the perf story
    holds before investing in M4's formal validation.
 
+#### M3 findings (2026-08-07, RTX 5090, `~/checkpoints/gptoss20b-fp8-emmy` — self-quantized 22.1 GB fp8)
+
+- Landed (M3b, on top of M3a's compiler gates): tracer `maximum` mis-route fixed + `clamp` decomposition
+  (elementwise min/max chain; the clamped-SwiGLU needs it); the gpt-oss expert wrapper (`x @ W + b`, chunk-half
+  gate/up restored by de-interleave-at-load, clamped-SwiGLU from the module's `alpha`/`limit`; layout read off the
+  transformers experts-interface attributes, never shapes — `down_proj` is square); `load_quantized_split`
+  (config-built META twin + shard-streamed dense values + per-layer fp8 expert store — never the 42 GB whole
+  dict); `from_model(expert_store=…)` compiling the expert programs through `spell_quantized_inputs`
+  (`quant_specs` in `_compile_split`), every per-expert input — bits, biases, scales — sliced from E-stacked
+  device tensors; fixed-slot tier generalized to one pointer table per input kind (six indirect inputs, fp8 ×
+  indirect × bias compose); sinks as per-layer vLLM `Attention(sinks=…)` params (TRITON_ATTN auto-selects on
+  sm_120), `load_weights` claims `*.self_attn.sinks`; YaRN rides the flat `rope_parameters` unchanged.
+- Serve boot: cold ~8 min (149 program plans compiled + packed), roofline audit clean, model 20.1 GiB VRAM,
+  KV cache 114k tokens at util 0.90, whole-step decode capture at size 1 through the fixed-slot tier.
+- Correctness gate (greedy 24-token completions, emmy fp8 vs stock vLLM serving the native MXFP4 checkpoint —
+  the bf16 HF reference is a 42 GB CPU load, infeasible on the 60 GB box): 1/3 exact, 15/24-token prefix on a
+  second, immediate flip on the third — every continuation fluent and factually right. Divergence class:
+  DIFFERENT WEIGHTS (self-quantized fp8-from-upcast vs native mxfp4) flipping greedy near-ties, not corruption;
+  kernel-level parity is separately pinned hermetically (tiny fp8 checkpoint through `create` vs its dequantized
+  reference — `test_gen_runner_gptoss_fp8_create_matches_dequantized_reference`, max err < 3% of ref RMS through
+  a full layer incl. router + combine).
+- Smoke perf A/B (512 in / 128 out, `vllm bench serve`, same card): emmy c=1 TPOT 61.4 ms / TTFT 5.9 s, c=8
+  TPOT 356 ms; stock (mxfp4, fused MoE, full ladder) c=1 TPOT 3.5 ms / TTFT 33 ms, c=8 TPOT 6.4 ms. Expected at
+  bring-up: every gpt-oss shape is unseeded (cold greedy through the offline prior), decode above T=1 rides the
+  routed eager dispatch, prefill rides cold symbolic programs. The perf story is M4's (goldens + tiers), same
+  sequence as OLMoE M0→M1.
+
 ### M4 — validation & release (the gemma-4 article workflow, 5090 only)
 
 Mirrors the validated gemma-4-12B flow (the article's benchmark plan + `docker/vllm-emmy-serve/ARCHITECTURE.md`):

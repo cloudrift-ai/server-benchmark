@@ -448,8 +448,8 @@ def test_moe_expert_m256_twin_matches_eager_across_experts():
             with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
                 got = runner._launch_expert(moe, e, x).clone()
             torch.cuda.synchronize()
-            gate, up = torch.nn.functional.linear(x, moe["gate_up"][e]).chunk(2, dim=-1)
-            ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, moe["down"][e])
+            gate, up = torch.nn.functional.linear(x, moe["inputs"]["w_gate_up"][e]).chunk(2, dim=-1)
+            ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, moe["inputs"]["w_down"][e])
             assert got.shape == (t, config.hidden_size)
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
     assert runner._expert_m256.program._e2e_graph is not None, "the m256 tier must serve via the captured program graph"
@@ -777,3 +777,152 @@ def test_expert_program_fp8_indirect_compose():
         torch.cuda.synchronize()
         ref = (x.float() @ (bits_e[e].float().cpu() * scale_e[e].cpu())).to(torch.float16)
         torch.testing.assert_close(got.cpu().reshape(ref.shape), ref, rtol=2e-2, atol=2e-2)
+
+
+def _write_tiny_gptoss_fp8_checkpoint(tmp_path, torch, transformers):
+    """A tiny gpt-oss checkpoint in the emmy fp8 layout: fp8 attention weights with
+    ``.weight_scale`` partners, fp8 3-D expert weights with ``<param>_scale`` partners
+    (per-out-channel, INTERLEAVED gate/up as shipped), everything else value-dtype.
+    Returns ``(checkpoint_dir, reference_model)`` where the reference carries the
+    DEQUANTIZED weights (the quantization-rounded values the kernels should reproduce)."""
+    import json
+
+    from safetensors.torch import save_file
+
+    cfg = transformers.GptOssConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        sliding_window=8,
+    )
+    torch.manual_seed(0)
+    model = transformers.GptOssForCausalLM(cfg).eval()
+    for p in model.parameters():
+        torch.nn.init.normal_(p, std=0.2)
+
+    def quant_out_channel(w, out_axis):
+        # per-out-channel fp8: scale shape = w.shape with every non-out axis collapsed to 1
+        red = [a for a in range(w.dim()) if a != 0 and a != out_axis] if w.dim() == 3 else [a for a in range(w.dim()) if a != out_axis]
+        scale = w.detach().float().abs().amax(dim=red, keepdim=True).clamp(min=1e-8) / 448.0
+        bits = (w.detach().float() / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        return bits, scale
+
+    state: dict = {}
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            t = p.detach()
+            if ".self_attn." in name and name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight")):
+                bits, scale = quant_out_channel(t, out_axis=0)  # (out, in) → (out, 1)
+                state[name] = bits
+                state[name + "_scale"] = scale.to(torch.bfloat16)
+                p.copy_(bits.float() * scale)  # reference = dequantized values
+            elif ".mlp.experts." in name and name.endswith(("gate_up_proj", "down_proj")):
+                bits, scale = quant_out_channel(t, out_axis=2)  # (E, in, out) → (E, 1, out)
+                state[name] = bits
+                state[name + "_scale"] = scale.to(torch.bfloat16)
+                p.copy_(bits.float() * scale)
+            else:
+                state[name] = t.clone()
+
+    ckpt = tmp_path / "tiny-gptoss-fp8"
+    ckpt.mkdir()
+    cfg.save_pretrained(ckpt)
+    cfg_dict = json.loads((ckpt / "config.json").read_text())
+    cfg_dict["quantization_config"] = {
+        "quant_method": "compressed-tensors",
+        "format": "float-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear", "GptOssExperts"],
+                "weights": {"type": "float", "num_bits": 8, "strategy": "channel", "dynamic": False},
+            }
+        },
+        "ignore": ["lm_head", "model.embed_tokens", "model.norm", "re:.*router", "re:.*layernorm", "re:.*sinks"],
+    }
+    (ckpt / "config.json").write_text(json.dumps(cfg_dict))
+    save_file(state, str(ckpt / "model.safetensors"))
+    return ckpt, model
+
+
+def test_gen_runner_gptoss_fp8_create_matches_dequantized_reference(tmp_path):
+    """The full quantized-checkpoint serving load (M3b): ``EmmyGenRunner.create`` on a tiny
+    gpt-oss fp8 checkpoint — meta twin + shard-streamed dense dequant + fp8 expert store +
+    ``spell_quantized_inputs``-spelled expert programs — must reproduce the dequantized
+    reference: embed, the biased pre projections, and the full post_attn + router +
+    clamped-SwiGLU fp8 expert combine."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner, combine_routed_experts
+
+    ckpt, ref = _write_tiny_gptoss_fp8_checkpoint(tmp_path, torch, transformers)
+    runner = EmmyGenRunner.create(str(ckpt), dtype_str="float16", decode_bucket=4, max_tokens=32)
+    assert runner._moe is not None and runner._expert_sym is not None
+    assert runner._expert_sym.input_names == [
+        "x",
+        "w_gate_up",
+        "w_down",
+        "b_gate_up",
+        "b_down",
+        "w_gate_up_scale",
+        "w_down_scale",
+    ], "the fp8 expert program must carry bits + bias + scale inputs"
+    # The fixed-slot decode tier must build for the fp8+bias expert (all six per-expert
+    # inputs — bits, biases, scales — table-resolved); the MoE serve default of capture
+    # size 1 depends on it.
+    assert runner.has_moe_fixed_slot
+
+    cfg = ref.config
+    t = 4
+    ids = torch.arange(1, t + 1, dtype=torch.long)
+    hidden = runner.embed_device(ids.cuda())
+    ref_hidden = ref.model.embed_tokens(ids).float()
+    torch.testing.assert_close(hidden.cpu().float(), ref_hidden, rtol=2e-3, atol=2e-3)
+
+    block = ref.model.layers[0]
+    with torch.no_grad():
+        # pre: biased q/k/v projections off the input norm
+        q, k, v = runner.forward_layer_pre_device(0, hidden)
+        hn = block.input_layernorm(ref_hidden)
+        for got, proj in ((q, block.self_attn.q_proj), (k, block.self_attn.k_proj), (v, block.self_attn.v_proj)):
+            want = proj(hn)
+            rms = want.pow(2).mean().sqrt()
+            assert (got.cpu().float() - want).abs().max() / rms < 2e-2
+
+        # post_attn + router + fp8 expert combine vs the dequantized eager tail
+        attn_out = (0.1 * torch.randn(t, cfg.num_attention_heads * cfg.head_dim)).to(torch.float16)
+        residual = (0.1 * torch.randn(t, cfg.hidden_size)).to(torch.float16)
+        got_out = runner.forward_layer_post_device(0, attn_out.cuda(), residual.cuda())
+
+        h_ref = residual.float() + block.self_attn.o_proj(attn_out.float())
+        xn_ref = block.post_attention_layernorm(h_ref)
+        mlp_out = block.mlp(xn_ref.unsqueeze(0))[0].squeeze(0)
+        want_out = h_ref + mlp_out
+        rms = want_out.pow(2).mean().sqrt()
+        assert (got_out.cpu().float() - want_out).abs().max() / rms < 3e-2
+
+        # the routed-combine oracle on the CPU reference reproduces the same tail (sanity
+        # that the seam math itself, not just the kernels, matches HF)
+        from emmy.compiler.trace.huggingface import build_moe_split_wrapper, deinterleave_gate_up
+
+        _, _, expert = build_moe_split_wrapper(block)
+        experts = block.mlp.experts
+        w_gu = deinterleave_gate_up(experts.gate_up_proj.detach())
+        b_gu = deinterleave_gate_up(experts.gate_up_proj_bias.detach())
+        combined = combine_routed_experts(
+            xn_ref,
+            block.mlp.router(xn_ref),
+            lambda e, rows: expert(rows, w_gu[e], experts.down_proj[e], b_gu[e], experts.down_proj_bias[e]),
+        )
+        torch.testing.assert_close(h_ref + combined, want_out, rtol=1e-4, atol=1e-5)

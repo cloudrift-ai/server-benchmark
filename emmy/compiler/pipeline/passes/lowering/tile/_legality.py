@@ -38,7 +38,7 @@ from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
-from emmy.compiler.pipeline.passes.lowering.kernel._stage import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -305,7 +305,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     (W8A16), and the fp8 (k32) atoms stage both operands as byte slabs drained by the byte repack.
     Any other mismatch DECLINES and keeps the warp tier gmem-direct, whose fragment load converts
     per element (the same rule flash's ``stageable`` flag states). A byte slab's fill runs 16 B
-    chunks and its cp.async row pad is 16 B (``_stage.BYTE_SLAB_PAD``), so its inner span — and,
+    chunks and its cp.async row pad is 16 B (``_addr.BYTE_SLAB_PAD``), so its inner span — and,
     canonical-B, the gmem row stride N — must be 16-divisible."""
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut

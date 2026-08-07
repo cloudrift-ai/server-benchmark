@@ -122,6 +122,8 @@ Quick test models / scripts (for local iteration):
 - `make setup` — create venv and install dependencies (includes ruff)
 - `make test` — run `pytest` using the venv (skips `perf`-marked tests; see `tests/perf/ARCHITECTURE.md`). Compiles
   kernels at `-Xcicc -O1` for ~3× faster nvcc (correctness lane; perf tests use `-O3` via `make bench-kernels`)
+- `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
+  xdist workers on (see `tests/ARCHITECTURE.md`); commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`
 - `make format` — auto-format code and fix lint violations
 - `make bench` — run benchmarks (`emmy bench recipes/*`)

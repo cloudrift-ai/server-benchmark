@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile import Channel, Fold
-from emmy.compiler.pipeline.passes.lowering.kernel._stage import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
 from emmy.compiler.pipeline.search.space import stage_moves
 

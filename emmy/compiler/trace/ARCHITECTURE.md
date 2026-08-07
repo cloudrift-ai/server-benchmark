@@ -93,8 +93,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `up.clamp(±limit)`, `glu = gate·σ(α·gate)`, `(up + 1)·glu` with the module's `alpha`/`limit`). Both spell the
   gate/up split as `chunk(2, dim=-1)`: gpt-oss's interleaved even/odd gate/up columns are de-interleaved ONCE at
   load (`deinterleave_gate_up` — an exact column permutation of weight bits, scale and bias alike), never strided
-  in-graph. The router (topk — untraceable) and the weighted combine stay in torch, in the serving runner.
-  Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+  in-graph. The router (topk — untraceable) and the weighted combine stay in torch, in the serving runner; the
+  runner's combine reads the router return's LAST two entries as `(scores, indices)`, which covers plain-logit
+  routers and 3-tuple ones (Glm4Moe's `Glm4MoeTopkRouter`) alike. A DeepSeek/GLM always-on `shared_experts`
+  module (a plain dense MLP over the same normed `xn`) folds INTO `post_attn`'s returned `h`, so the combine
+  stays `h + Σ w_e · expert_e(xn)` with no runner change; Qwen-MoE's GATED shared expert (`shared_expert_gate`)
+  and Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
@@ -103,7 +107,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
   as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. Never the whole dict at
   once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
-  whole-dict eager/accuracy twin for models small enough to hold.
+  whole-dict eager/accuracy twin for models small enough to hold (fp8 and EXL3 checkpoints alike); on the way in
+  it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
+  round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
+  the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).
 
 - `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
   a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at

@@ -162,8 +162,19 @@ compile as table-resolved operands for the fixed-slot dispatch.
 trellis-coded) weight format: per-16x16-tile bit-window extraction from the tail-biting code stream, the 3INST
 computed codebook (bit-exact against exllamav3's CUDA kernels), the mma-fragment tile ordering, and the
 128-block Hadamard/sign fold that restores the original basis from the `suh`/`svh` sibling vectors.
-`decode_exl3_linear` reconstructs one linear's fp16 weight from its sibling tensors; the graph-spelling and
-bind-path wiring for these checkpoints is not built yet — today the module is the reference decode plus its tests.
+`decode_exl3_linear` reconstructs one linear's fp16 weight from its sibling tensors. Ingestion follows the fp8
+design exactly: `config.json` declares `quant_method: "exl3"` (detected by `quantized_checkpoint_dir` alongside
+fp8), the twin carries decoded real weights (`load_dequantized_state_dict` decodes trellis siblings to `.weight`
+values; per-expert checkpoint modules pack into the v5 3-D expert params, encode padding — both dims rounded up
+to 128, e.g. GLM-4.5-Air's `intermediate_size` 10944 → 11008 — trimmed back to the declared shapes), and
+`spell_trellis_constants` (the sibling of `spell_quantized_constants`) rewrites each coded `<module>.weight`
+constant at birth into three leaf constants (int16 codes on the `i16` carrier + the f16 channel vectors) joined
+by a `TrellisDecodeOp` (frontend IR; `cb` records the `mcg`/`mul1` marker presence, `out_features`/`in_features`
+slice the encode padding — the reference math, since exllamav3 zero-pads activations in and slices outputs).
+`032_fold_constant_subgraphs` collapses the cone into a bind-time `source_graph` record — this is the
+correctness lane: full value footprint in memory, bind-time decode bit-exact against the direct decode. Not
+every linear is coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0
+`o_proj`), and those load as ordinary tensors. In-kernel decode (computed-B) is later work.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph

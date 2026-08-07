@@ -21,6 +21,8 @@ from emmy.compiler.loader.exl3 import (
     trellis_windows,
 )
 
+from ..conftest import requires_cuda
+
 rng = np.random.default_rng(7)
 
 
@@ -318,3 +320,373 @@ def test_real_tensor_decode_statistics():
     assert 0.001 < rms(w) < 0.1
     assert rms(suh) < 0.1  # magnitude side
     assert 0.5 < rms(svh) < 2.0  # ~ pure signs
+
+
+# ===================================================================
+# Checkpoint ingestion: spell → fold → bind (the Phase-2 correctness lane).
+# The speller lives in ``loader.quant`` (the one quantization-concept module);
+# its tests sit here because the fixtures and the decode reference are EXL3's.
+# ===================================================================
+
+_FOLD_RULE = "032_fold_constant_subgraphs"
+
+
+def _exl3_linear_tensors(base: str, n: int, k: int, K: int = 2, cb: int = 0):
+    """Mint one EXL3-coded linear: random windows packed into real trellis words, fp16
+    ``suh``/``svh`` at the encoder's padded extents (roundup to 128), plus the marker sibling
+    for ``cb``. Returns ``(tensors, ref)`` with ``ref`` the LOGICAL ``(n, k)`` fp16 weight
+    (decode → transpose → slice — the reference math for encode padding)."""
+    torch = pytest.importorskip("torch")
+
+    n_pad, k_pad = -(-n // 128) * 128, -(-k // 128) * 128
+    wins = rng.integers(0, 1 << 16, (k_pad // 16, n_pad // 16, 256)).astype(np.uint16)
+    tr = pack_trellis(wins, K)
+    suh = (rng.standard_normal(k_pad) * 0.01).astype(np.float16)
+    svh = rng.choice([-1.0, 1.0], n_pad).astype(np.float16)
+    tensors = {
+        f"{base}.trellis": torch.from_numpy(tr),
+        f"{base}.suh": torch.from_numpy(suh),
+        f"{base}.svh": torch.from_numpy(svh),
+    }
+    if cb == 1:
+        tensors[f"{base}.mcg"] = torch.tensor(0x7BAC1FED, dtype=torch.int32)  # value never read
+    elif cb == 2:
+        tensors[f"{base}.mul1"] = torch.tensor(0, dtype=torch.int32)
+    ref = fold_hadamard(decode_trellis(tr, cb), suh, svh).T[:n, :k]
+    return tensors, ref
+
+
+_EXL3_QC = {"quant_method": "exl3", "version": "0.0.5", "bits": 2.0, "head_bits": 6}
+
+
+def _write_exl3_checkpoint(dirpath, tensors, quant_config=_EXL3_QC):
+    """Single-shard safetensors dir + config.json declaring the EXL3 scheme."""
+    import json as _json
+
+    from safetensors.torch import save_file
+
+    save_file({k: v.clone() for k, v in tensors.items()}, str(dirpath / "model.safetensors"))
+    cfg = {"model_type": "test"}
+    if quant_config is not None:
+        cfg["quantization_config"] = quant_config
+    (dirpath / "config.json").write_text(_json.dumps(cfg))
+
+
+def _weight_graph(shape, dtype="f32", source_path="layer.weight"):
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp
+
+    g = Graph()
+    g.add_node(
+        op=ConstantOp(name="p_w", source_path=source_path, source_shape=shape, source_dtype=dtype),
+        inputs=[],
+        output=Tensor("p_w", shape, dtype),
+        node_id="p_w",
+    )
+    g.inputs, g.outputs = [], ["p_w"]
+    return g
+
+
+def _spelled_exl3(tmp_path, *, n=256, k=128, K=2, cb=0, dtype="f32"):
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    tensors, ref = _exl3_linear_tensors("layer", n, k, K=K, cb=cb)
+    _write_exl3_checkpoint(tmp_path, tensors)
+    g = _weight_graph((n, k), dtype=dtype)
+    assert spell_trellis_constants(g, str(tmp_path)) == 1
+    return g, ref
+
+
+def _fold(graph):
+    from emmy.compiler.pipeline import Pipeline
+
+    return Pipeline.build(["frontend/decomposition"], select=[_FOLD_RULE]).run(graph)
+
+
+def test_spell_trellis_builds_decode_cone(tmp_path):
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+
+    g, _ref = _spelled_exl3(tmp_path)
+    consts = {nn.op.source_path: nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp)}
+    assert set(consts) == {"layer.trellis", "layer.suh", "layer.svh"}
+    assert consts["layer.trellis"].output.dtype.name == "i16" and consts["layer.trellis"].op.source_dtype == "i16"
+    assert consts["layer.suh"].output.dtype.name == "f16"
+    decs = [nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
+    assert len(decs) == 1
+    assert decs[0].op.cb == 0 and decs[0].op.out_features == 256 and decs[0].op.in_features == 128
+    # Interface invariance: the cone's output is exactly what the trace promised.
+    out = g.nodes[g.outputs[0]].output
+    assert out.dtype.name == "f32" and tuple(d.as_static() for d in out.shape) == (256, 128)
+    assert g.outputs == ["p_w"]
+
+
+@pytest.mark.parametrize("cb", [1, 2])
+def test_spell_trellis_marker_selects_codebook(tmp_path, cb):
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+
+    g, _ref = _spelled_exl3(tmp_path, cb=cb)
+    dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
+    assert dec.op.cb == cb
+
+
+def test_spell_trellis_is_idempotent(tmp_path):
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    g, _ref = _spelled_exl3(tmp_path)
+    nodes_after_first = set(g.nodes)
+    assert spell_trellis_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == nodes_after_first
+
+
+def test_spell_trellis_noop_without_exl3_config(tmp_path):
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    _write_exl3_checkpoint(tmp_path, tensors, quant_config=None)
+    g = _weight_graph((256, 128))
+    assert spell_trellis_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
+
+
+def test_spell_trellis_leaves_plain_weight_alone(tmp_path):
+    """A sensitivity-kept fp16 linear (real precedent: GLM-4.5-Air layer 0 ``o_proj``) has a
+    plain ``.weight`` and no trellis sibling — it must load as an ordinary tensor."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    tensors["other.weight"] = torch.ones(8, 16, dtype=torch.float16)
+    _write_exl3_checkpoint(tmp_path, tensors)
+    g = _weight_graph((8, 16), source_path="other.weight")
+    assert spell_trellis_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
+
+
+def test_spell_trellis_skips_legacy_packed_signs(tmp_path):
+    """Old checkpoints store packed ``su``/``sv`` sign words instead of ``suh``/``svh`` —
+    unsupported; the constant stays un-spelled with a warning, never a compile error."""
+    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    del tensors["layer.suh"], tensors["layer.svh"]
+    _write_exl3_checkpoint(tmp_path, tensors)
+    g = _weight_graph((256, 128))
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    assert spell_trellis_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
+
+
+def test_spell_trellis_shape_mismatch_left_alone(tmp_path):
+    """Sibling extents must be exactly the traced dims' roundups to 128."""
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    _write_exl3_checkpoint(tmp_path, tensors)
+    g = _weight_graph((512, 128))  # traced n does not round up to the stored 256
+    assert spell_trellis_constants(g, str(tmp_path)) == 0
+    assert set(g.nodes) == {"p_w"}
+
+
+def test_fold_collapses_trellis_cone(tmp_path):
+    g, _ref = _spelled_exl3(tmp_path)
+    folded = _fold(g)
+    assert set(folded.nodes) == {"p_w"}
+    assert folded.nodes["p_w"].op.source_graph is not None
+
+
+def test_fold_collapses_trellis_cone_under_fp8_expand(tmp_path, monkeypatch):
+    """``EMMY_FP8_EXPAND`` keeps fp8 cones in-graph for the kernel path; a trellis cone has
+    no in-kernel realization, so it must fold regardless."""
+    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+    g, _ref = _spelled_exl3(tmp_path)
+    folded = _fold(g)
+    assert set(folded.nodes) == {"p_w"}
+    assert folded.nodes["p_w"].op.source_graph is not None
+
+
+@pytest.mark.parametrize(("n", "k", "K", "cb"), [(256, 128, 2, 0), (192, 128, 3, 1), (128, 128, 6, 2)])
+def test_loader_binds_folded_trellis_weight_exact(tmp_path, n, k, K, cb):
+    """spell → fold → bind reproduces the direct decode exactly (the fp16 decode cast to the
+    traced f32 — one widening, bit-preserving). ``n=192`` exercises the encode padding slice;
+    ``K=6`` is the lm_head rung."""
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    g, ref = _spelled_exl3(tmp_path, n=n, k=k, K=K, cb=cb)
+    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
+    assert out["p_w"].dtype == np.float32 and out["p_w"].shape == (n, k)
+    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32))
+
+
+def test_loader_binds_f16_graph_dtype_bit_exact(tmp_path):
+    """At a traced f16 dtype the bound weight is bit-identical to the direct decode."""
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    g, ref = _spelled_exl3(tmp_path, dtype="f16")
+    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
+    assert out["p_w"].dtype == np.float16
+    np.testing.assert_array_equal(out["p_w"].view(np.uint16), ref.view(np.uint16))
+
+
+def test_loader_applies_trailing_load_ops_after_the_record(tmp_path):
+    """A layout chain folded onto the constant AFTER the record (what ``050``/``060`` append)
+    runs on the EVALUATED result."""
+    from dataclasses import replace
+
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.frontend.ir import TransposeOp
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    g, ref = _spelled_exl3(tmp_path)
+    folded = _fold(g)
+    node = folded.nodes["p_w"]
+    node.op = replace(node.op, load_ops=(TransposeOp(axes=(1, 0)),))
+    node.outputs = (Tensor("p_w", (128, 256), "f32"),)
+    out = load_constants_from_safetensors(folded, str(tmp_path))
+    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32).T)
+
+
+def test_trellis_source_graph_survives_json_roundtrip(tmp_path):
+    import json as _json
+
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    g, ref = _spelled_exl3(tmp_path)
+    folded = _fold(g)
+    g2 = Graph.from_dict(_json.loads(_json.dumps(folded.to_dict())))
+    record = g2.nodes["p_w"].op.source_graph
+    assert record is not None and record.structural_key() == folded.nodes["p_w"].op.source_graph.structural_key()
+    out = load_constants_from_safetensors(g2, str(tmp_path))
+    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32))
+
+
+def test_load_dequantized_state_dict_exl3(tmp_path):
+    """The eager twin's state dict: sibling tensors decode to ``<module>.weight`` fp16 values
+    in the HF ``(out, in)`` orientation (still padded — the twin loader trims); the consumed
+    siblings drop; plain tensors pass through."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    tensors, ref = _exl3_linear_tensors("layer", 192, 128)  # padded to (256, 128)
+    tensors["norm.weight"] = torch.ones(16, dtype=torch.float16) * 2
+    _write_exl3_checkpoint(tmp_path, tensors)
+    sd = load_dequantized_state_dict(tmp_path)
+    assert set(sd) == {"layer.weight", "norm.weight"}
+    assert sd["layer.weight"].dtype == np.float16 and sd["layer.weight"].shape == (256, 128)
+    np.testing.assert_array_equal(sd["layer.weight"][:192].view(np.uint16), ref.view(np.uint16))
+
+
+def test_quantized_checkpoint_dir_detects_exl3(tmp_path):
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    tensors, _ref = _exl3_linear_tensors("layer", 128, 128)
+    quantized = tmp_path / "exl3"
+    plain = tmp_path / "plain"
+    quantized.mkdir()
+    plain.mkdir()
+    _write_exl3_checkpoint(quantized, tensors)
+    _write_exl3_checkpoint(plain, tensors, quant_config=None)
+    assert quantized_checkpoint_dir(str(quantized)) == quantized
+    assert quantized_checkpoint_dir(str(plain)) is None
+
+
+@requires_glm_exl3
+def test_real_tensor_bind_time_decode_matches_direct():
+    """D.1 pin on the real checkpoint: spell → fold → bind of a real expert linear equals the
+    direct Phase-1 decode bit-exactly (uint16 view of the fp16 values)."""
+    from emmy.compiler.loader.quant import spell_trellis_constants
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    name = "model.layers.5.mlp.experts.0.down_proj"
+    tr, suh, svh = (_load_real(name + s) for s in (".trellis", ".suh", ".svh"))
+    ref = decode_exl3_linear(tr, suh, svh).T
+    g = _weight_graph(ref.shape, dtype="f16", source_path=name + ".weight")
+    assert spell_trellis_constants(g, str(_SNAPSHOT)) == 1
+    out = load_constants_from_safetensors(_fold(g), str(_SNAPSHOT))
+    np.testing.assert_array_equal(out["p_w"].view(np.uint16), ref.view(np.uint16))
+
+
+# ===================================================================
+# emmy compile / run wiring: whole-model trace of an EXL3 checkpoint on CUDA
+# (mirrors test_quant's fp8 e2e; the EXL3 twin carries the decoded real weights)
+# ===================================================================
+
+
+def _tiny_exl3_checkpoint(dirpath):
+    """Tiny Llama-architecture EXL3 checkpoint: every decoder-layer projection trellis-coded
+    (the k/v projections at out=64 exercise the encode padding), embeddings / norms / lm_head
+    fp16. Returns ``(config, ref_sd)`` with the decoded torch f32 reference state dict."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    config = transformers.LlamaConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+    )
+    torch.manual_seed(0)
+    model = transformers.AutoModelForCausalLM.from_config(config).to(torch.float16).eval()
+    tensors: dict = {}
+    ref_sd: dict = {}
+    for name, t in model.state_dict().items():
+        t = t.detach().cpu()
+        if name.endswith(".weight") and t.ndim == 2 and ".layers." in name:  # the linear projections
+            base = name[: -len(".weight")]
+            n, k = t.shape
+            coded, ref = _exl3_linear_tensors(base, n, k)
+            tensors.update(coded)
+            ref_sd[name] = torch.from_numpy(ref.astype(np.float32))
+        else:
+            tensors[name] = t.to(torch.float16) if t.is_floating_point() else t
+            ref_sd[name] = t.float() if t.is_floating_point() else t
+    _write_exl3_checkpoint(dirpath, tensors)
+    import json as _json
+
+    cfg = config.to_dict()
+    cfg["quantization_config"] = dict(_EXL3_QC)
+    (dirpath / "config.json").write_text(_json.dumps(cfg))
+    return config, ref_sd
+
+
+def test_exl3_twin_carries_decoded_weights(tmp_path):
+    """The compile/run seam: the traced twin's parameters equal the decode reference (padding
+    trimmed), and the trellis cones are spelled on exactly the coded projections."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.commands.compile import _trace_model
+    from emmy.compiler.ir.base import ConstantOp
+
+    _config, ref_sd = _tiny_exl3_checkpoint(tmp_path)
+    graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
+    records = [op for _nid, op in graph.loadable_constants() if isinstance(op, ConstantOp) and op.source_graph is not None]
+    assert not records  # spelled, not yet folded — the fold runs inside the pipeline
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+
+    decs = [nn for nn in graph.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
+    assert len(decs) == 7  # q,k,v,o + gate,up,down
+    params = dict(wrapper.named_parameters())
+    for name, ref in ref_sd.items():
+        got = params["model." + name]  # the trace wrapper nests the CausalLM under .model
+        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+
+@requires_cuda
+def test_exl3_checkpoint_e2e_cuda(tmp_path):
+    """Whole tiny EXL3 model through the same seam ``emmy compile`` / ``emmy run`` use, compiled
+    on the CUDA backend with the default fold: every trellis cone dissolves at 032 (bind-time
+    decode), and the output matches the decoded eager reference."""
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+
+    from .test_quant import _assert_e2e_gate, _run_e2e
+
+    config, ref_sd = _tiny_exl3_checkpoint(tmp_path)
+    emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
+    assert not any(isinstance(nn.op, TrellisDecodeOp) for nn in compiled.nodes.values()), "a trellis op survived the fold"
+    _assert_e2e_gate(emmy_logits, ref_logits, "exl3 fold mode")

@@ -16,9 +16,11 @@ post-trace) and dissolved as early as possible: the generic `frontend/decomposit
 collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
 (its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
 only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
-`load_ops`. `EMMY_FP8_EXPAND` skips the fold, leaving the cone in-graph for the kernel path. Either way, downstream
+`load_ops`. `EMMY_FP8_EXPAND` skips the fold for fp8 cones, leaving them in-graph for the kernel path; a
+trellis-coded (EXL3) cone — three constant leaves under a `TrellisDecodeOp`, spelled by `spell_trellis_constants` —
+folds unconditionally, since no lowering rule knows the op. Either way, downstream
 layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`), decode-trait
-elementwise ops (`ElementwiseImpl.decodes`), and graph algebra. They may NEVER know checkpoint formats, scheme names,
+ops (`ElementwiseImpl.decodes`, the `TrellisDecodeOp` class), and graph algebra. They may NEVER know checkpoint formats, scheme names,
 scale pairing, or any quantization metadata — there is none: no shared IR type carries a quant field. The frontend
 band (the birth-time speller + the fold rule + the loader) is the only place quantization-as-a-concept exists, and a
 mechanical gate (`tests/compiler/loader/test_quant.py`) greps the tree for concept leaks. `032`'s decode-trait scope

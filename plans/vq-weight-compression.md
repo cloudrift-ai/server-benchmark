@@ -220,6 +220,20 @@ and a tolerance-based decode makes the Phase 6 quality gate meaningless.
 
 **Hardware**: 5090 helpful, not required. **Depends on**: Phase 1.
 
+**STATUS: DONE (2026-08-07).** No `QuantSpec` revival (retired by the dissolve-early migration): the EXL3 cone is
+in-graph algebra from birth — `spell_trellis_constants` (loader/quant.py) rewrites each coded `.weight` constant into
+int16-codes + f16 `suh`/`svh` leaves under a `TrellisDecodeOp` (frontend IR; `cb` from marker presence,
+`out_features`/`in_features` slice the 128-multiple encode padding), folded by `032_fold_constant_subgraphs` into a
+bind-time `source_graph` record. Twin: `quantized_checkpoint_dir` detects `quant_method: "exl3"`;
+`load_dequantized_state_dict` decodes siblings; `load_quantized_twin` trims encode padding and packs per-expert
+weights into the v5 3-D expert params; `build_moe_split_wrapper` folds GLM's `shared_experts` into `post_attn`.
+Verified (full-model expansion infeasible on the 60 GB box — ~212 GB): per-tensor bind == direct decode bit-exact
+(incl. lm_head K=6); `emmy run --layer 0` and a config-truncated dense+lm_head model end-to-end vs eager on the 5090;
+the expert program with real decoded layer-1 expert weights on CUDA. Whole-model MoE traces still stop at the router
+(`aten.topk` — pre-existing, all MoE archs; serving uses the third seam). Greedy-match vs exllamav3 deferred to
+Phase 3 (needs weights kept compressed). Format finding: the quantizer keeps sensitivity-selected linears at plain
+fp16 (GLM-4.5-Air layer 0 `o_proj`), and `intermediate_size` 10944 is stored padded to 11008.
+
 1. `QuantSpec` generalization for codes/codebooks/scales; `ConstantOp.quant` pairing; stamp at the constant birth
    site. Extend `loader/safetensors.py` for EXL3's sibling-tensor layout.
 2. Clear the `.float()`/np-dtype casts in the bind paths (raw-bits carrier, bf16 precedent).

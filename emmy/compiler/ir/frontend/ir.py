@@ -6,13 +6,17 @@ rewrites it into ``ir.tensor.ir`` primitives (elementwise + reduce + indexmap
 + constants). After the decomposition pass completes, none of these ops
 should remain in the graph.
 
-Two groups:
+Three groups:
 
 1. **Layout-only ops** — ``TransposeOp``, ``ReshapeOp``, ``SliceOp``,
    ``CatOp``, ``UnsqueezeOp``. Rewritten to a single ``IndexMapOp`` each.
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
    ``MeanOp``. Rewritten to elementwise/reduce chains (sometimes with
    inserted ``IndexMapOp`` unsqueezes so the broadcast contraction works).
+3. **Storage-decode ops** — ``TrellisDecodeOp``. Not decomposed: it only ever
+   appears inside a constant-only cone that ``032_fold_constant_subgraphs``
+   collapses into a bind-time ``source_graph`` record, where its numpy
+   ``forward`` runs through the reference NumPy backend.
 """
 
 from __future__ import annotations
@@ -380,3 +384,51 @@ class SoftmaxOp(Op):
         m = np.max(x, axis=self.axis, keepdims=True)
         e = np.exp(x - m)
         return e / np.sum(e, axis=self.axis, keepdims=True)
+
+
+# ---------------------------------------------------------------------------
+# Storage-decode ops (bind-time only — folded by 032_fold_constant_subgraphs)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TrellisDecodeOp(Op):
+    """Decode one EXL3 trellis-coded linear's weight, in the traced ``(out, in)`` orientation.
+
+    Inputs, in order: the packed codes (int16 ``(in/16, out/16, 16*K)``, one tail-biting
+    trellis walk per 16x16 tile), ``suh`` (f16 ``(in,)``) and ``svh`` (f16 ``(out,)``) — the
+    per-channel multipliers whose 128-block Hadamard fold restores the original basis. ``cb``
+    selects the computed codebook (resolved at spell time from the ``mcg``/``mul1`` marker
+    siblings' PRESENCE in the checkpoint index). The decode math lives in
+    ``emmy/compiler/loader/exl3.py`` (imported lazily at evaluation time — this op is a
+    bind-time construct, not a lowered kernel).
+
+    ``out_features`` / ``in_features`` are the LOGICAL weight dims: EXL3 pads both dims to
+    multiples of 128 at encode time, and slicing the decoded padded weight back down is
+    exactly the reference math (exllamav3 zero-pads the input activations and slices the
+    output, which reads only that submatrix). ``None`` keeps the full padded extent.
+
+    The op only ever appears inside a constant-only cone spelled at birth
+    (``loader.quant.spell_trellis_constants``); ``032_fold_constant_subgraphs`` collapses
+    that cone into a bind-time ``ConstantOp(source_graph=record)``, and ``forward`` is the
+    record's evaluation through the reference NumPy backend. No decomposition or lowering
+    rule exists for it — it must never survive the fold into the pipeline.
+    """
+
+    cb: int = 0
+    out_features: int | None = None
+    in_features: int | None = None
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        # (n, k) — the HF ``nn.Linear`` weight orientation the trace promised;
+        # sized by the suh/svh channel vectors (inputs 1 and 2) minus the encode padding.
+        return (self.out_features or input_shapes[2][0], self.in_features or input_shapes[1][0])
+
+    def forward(self, *inputs):
+        from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard
+
+        trellis, suh, svh = inputs
+        # fp16 is the decode's canonical precision (the checkpoint's own storage dtype and
+        # exllamav3's reconstruction surface); the interpreter casts to the graph dtype after.
+        w = fold_hadamard(decode_trellis(np.asarray(trellis), self.cb), suh, svh).T
+        return w[: self.out_features, : self.in_features]

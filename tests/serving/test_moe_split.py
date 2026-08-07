@@ -87,10 +87,10 @@ def test_moe_expert_shares_one_shape_across_experts():
     assert not torch.allclose(y0, y1), "different experts' weights must produce different outputs"
 
 
-def test_moe_split_rejects_shared_experts_block():
-    """DeepSeek/Qwen-MoE lineage blocks carry an always-on shared expert beside the routed ones;
-    the carve has no seam for it, so it must reject LOUDLY — a silent pass drops the
-    shared-experts term from every layer's output."""
+def test_moe_split_folds_shared_experts_into_post_attn():
+    """DeepSeek/GLM lineage blocks carry an always-on ``shared_experts`` MLP beside the routed
+    ones; the carve folds it into ``post_attn``'s returned ``h`` (over the same normed ``xn``),
+    so the runner's route-and-combine half needs no seam change."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     from transformers.models.olmoe.modeling_olmoe import OlmoeDecoderLayer
@@ -100,8 +100,88 @@ def test_moe_split_rejects_shared_experts_block():
     torch.manual_seed(0)
     block = OlmoeDecoderLayer(_tiny_olmoe_config(transformers), layer_idx=0).eval()
     block.mlp.shared_experts = torch.nn.Linear(64, 64)
-    with pytest.raises(NotImplementedError, match="shared_experts"):
+    _, post_attn, _ = build_moe_split_wrapper(block)
+    attn_out = torch.randn(5, 64)
+    residual = torch.randn(5, 64)
+    with torch.no_grad():
+        h, xn = post_attn(attn_out, residual)
+        h_ref = residual + block.self_attn.o_proj(attn_out)
+        xn_ref = block.post_attention_layernorm(h_ref)
+    assert torch.allclose(xn, xn_ref, atol=1e-6)
+    assert torch.allclose(h, h_ref + block.mlp.shared_experts(xn_ref), atol=1e-6)
+
+
+def test_moe_split_rejects_gated_shared_expert():
+    """Qwen-MoE's shared expert is GATED (``shared_expert_gate``); the ungated fold would
+    silently drop the gate, so it must reject LOUDLY."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.olmoe.modeling_olmoe import OlmoeDecoderLayer
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
+
+    torch.manual_seed(0)
+    block = OlmoeDecoderLayer(_tiny_olmoe_config(transformers), layer_idx=0).eval()
+    block.mlp.shared_expert = torch.nn.Linear(64, 64)
+    block.mlp.shared_expert_gate = torch.nn.Linear(64, 1)
+    with pytest.raises(NotImplementedError, match="shared_expert_gate"):
         build_moe_split_wrapper(block)
+
+
+def _tiny_glm4_moe_config(transformers):
+    return transformers.Glm4MoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        num_hidden_layers=2,
+        first_k_dense_replace=1,
+        n_routed_experts=4,
+        n_shared_experts=1,
+        num_experts_per_tok=2,
+        n_group=1,
+        topk_group=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        use_qk_norm=False,
+        partial_rotary_factor=0.5,
+        norm_topk_prob=True,
+        routed_scaling_factor=1.0,
+    )
+
+
+def test_glm4_moe_split_matches_eager_block_tail():
+    """GLM-4.5-Air's block layout (Glm4Moe: 3-tuple router, packed v5 experts, always-on
+    shared expert) through the carve: ``post_attn`` (shared experts folded in) + the runner's
+    route-and-combine reproduces the eager MoE block tail."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeDecoderLayer
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper, moe_block_parts
+
+    torch.manual_seed(0)
+    cfg = _tiny_glm4_moe_config(transformers)
+    block = Glm4MoeDecoderLayer(cfg, layer_idx=1).eval()  # layer 1 = the MoE form
+    for p in block.parameters():
+        torch.nn.init.normal_(p, std=0.2)
+
+    _, post_attn, expert = build_moe_split_wrapper(block)
+    gate, experts = moe_block_parts(block.mlp)
+    assert gate is block.mlp.gate  # the 3-tuple Glm4MoeTopkRouter; combine reads its LAST two entries
+
+    t = 5
+    attn_width = cfg.num_attention_heads * cfg.head_dim
+    attn_out = torch.randn(t, attn_width)
+    residual = torch.randn(t, cfg.hidden_size)
+    with torch.no_grad():
+        h, xn = post_attn(attn_out, residual)
+        got = h + _combine(gate, experts, expert, xn)
+        h_ref = residual + block.self_attn.o_proj(attn_out)
+        ref = h_ref + block.mlp(block.post_attention_layernorm(h_ref).unsqueeze(0)).squeeze(0)
+    assert torch.allclose(ref, got, atol=1e-5)
 
 
 def test_combine_casts_fp32_router_scores():

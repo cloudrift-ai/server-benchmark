@@ -15,8 +15,9 @@ Matching rule — the cone rooted at a node ``r``:
 - every transitive input of ``r`` bottoms out in a source-backed ``ConstantOp`` (a checkpoint
   ``source_path`` / ``source_parts`` / nested ``source_graph`` leaf — scalar and synthetic
   constants decline the fold);
-- every interior op is a numpy-evaluable layout/elementwise op with static shapes;
-- the cone contains at least one storage-decode op (``ElementwiseImpl.decodes`` non-``None``);
+- every interior op is a numpy-evaluable layout/elementwise/storage-decode op with static shapes;
+- the cone contains at least one storage-decode op (``ElementwiseImpl.decodes`` non-``None``,
+  or a ``TrellisDecodeOp`` — the EXL3 speller's cone);
 - ``r`` is MAXIMAL: no consumer of ``r`` would itself extend the constant-only cone (otherwise
   the fold waits and fires at that consumer, so one constant absorbs the whole cone);
 - interior nodes are owned by the cone (no external consumer reads a mid-cone value).
@@ -27,9 +28,10 @@ anything else (e.g. an existing model's constant mask-math cone) is deliberately
 widening the scope is gated on kernel-source digest evidence (``scripts/digest_kernels.py``),
 because those cones' kernels exist today and must not change bytes silently.
 
-Gate: the fold is DEFAULT ON. ``EMMY_FP8_EXPAND`` (``config.fp8_expand``) SKIPS it — the decode
-cone then stays in-graph and rides the operand cone into the kernel (fp8 bits in device memory,
-the decode absorbed by the storage dtype at the warp tier — see ``lowering/tile/_atomize``).
+Gate: the fold is DEFAULT ON. ``EMMY_FP8_EXPAND`` (``config.fp8_expand``) SKIPS it for fp8
+cones — the decode cone then stays in-graph and rides the operand cone into the kernel (fp8
+bits in device memory, the decode absorbed by the storage dtype at the warp tier — see
+``lowering/tile/_atomize``). Trellis cones fold regardless: no lowering rule knows the op.
 
 Numbered 032 — after the arithmetic normalizations (``010``–``030``), BEFORE the sibling merge
 (``035``) and the layout folds (``050``/``060``), so those passes only ever see the collapsed
@@ -43,17 +45,21 @@ import copy
 from emmy import config
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
+from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp, TrellisDecodeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
-# A cone root is always a compute node; ReshapeOp covers the 2-D-block form's reshape-back root.
-PATTERN = [Pattern("root", (ElementwiseOp, ReshapeOp))]
+# A cone root is always a compute node; ReshapeOp covers the 2-D-block form's reshape-back
+# root, and TrellisDecodeOp is its own root — the EXL3 speller's cone is exactly the decode
+# op over three constant leaves.
+PATTERN = [Pattern("root", (ElementwiseOp, ReshapeOp, TrellisDecodeOp))]
 
-# Interior ops the fold evaluates at bind time — the vocabulary the birth-time speller emits
-# (decode cast, broadcast, scale multiply, block reshapes) plus the plain layout ops. All have
-# working numpy ``forward``s; anything else declines the fold.
-_FOLDABLE = (ElementwiseOp, ReshapeOp, TransposeOp, IndexMapOp)
+# Interior ops the fold evaluates at bind time — the vocabulary the birth-time spellers emit
+# (decode cast, broadcast, scale multiply, block reshapes, the trellis decode) plus the plain
+# layout ops. All have working numpy ``forward``s; anything else declines the fold. Adding
+# ``TrellisDecodeOp`` widens no existing model's fold scope: the op exists only in cones the
+# EXL3 speller mints, so every pre-existing kernel is byte-identical (digest-gate verified).
+_FOLDABLE = (ElementwiseOp, ReshapeOp, TransposeOp, IndexMapOp, TrellisDecodeOp)
 
 
 def _is_source_leaf(op: ConstantOp) -> bool:
@@ -83,7 +89,7 @@ def _collect_cone(graph: Graph, root_id: str) -> tuple[set[str], bool] | None:
             continue
         if not isinstance(op, _FOLDABLE) or any(not d.is_static for d in node.output.shape):
             return None
-        if isinstance(op, ElementwiseOp) and op.op.decodes is not None:
+        if (isinstance(op, ElementwiseOp) and op.op.decodes is not None) or isinstance(op, TrellisDecodeOp):
             has_decode = True
         ids.add(nid)
         for inp in node.inputs:
@@ -115,8 +121,6 @@ def _extends_cone(graph: Graph, consumer_id: str, cone: set[str]) -> bool:
 
 
 def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
-    if config.fp8_expand():
-        raise RuleSkipped("EMMY_FP8_EXPAND on — the decode cone stays in-graph for the kernel path")
     collected = _collect_cone(match.graph, root.id)
     if collected is None:
         raise RuleSkipped("not a constant-only cone")
@@ -124,6 +128,11 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
     if not has_decode:
         # Digest-safety scope: only cones carrying a storage decode fold — see module docstring.
         raise RuleSkipped("constant cone carries no storage-decode op — outside the fold's scope")
+    # EMMY_FP8_EXPAND keeps fp8 decode cones in-graph for the kernel path; a trellis cone has
+    # no in-kernel realization yet, so it folds unconditionally — leaving it in-graph would
+    # hand the pipeline an op no lowering rule knows.
+    if config.fp8_expand() and not any(isinstance(match.graph.nodes[nid].op, TrellisDecodeOp) for nid in cone):
+        raise RuleSkipped("EMMY_FP8_EXPAND on — the decode cone stays in-graph for the kernel path")
     for nid in cone:
         if nid != root.id and (nid in match.graph.outputs or not match.graph.users(nid) <= cone):
             raise RuleSkipped(f"cone-interior node {nid!r} has consumers outside the cone")

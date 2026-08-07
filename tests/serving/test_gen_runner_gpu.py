@@ -403,6 +403,58 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact():
             assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
 
 
+def test_moe_expert_m256_twin_matches_eager_across_experts():
+    """The static M=256 prefill expert twin (captured whole-program replay, weights by
+    UPLOAD) must match the eager expert wrapper on an over-bucket row set — and stay
+    correct ACROSS experts: the captured graph bakes the twin's own buffer pointers, so a
+    pointer-swap regression would freeze the first expert's weights into every later
+    replay. ``_launch_expert`` routes row sets in (decode_bucket, 256] here."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, max_tokens=64)
+    assert runner._expert_m256 is not None, "the M=256 prefill twin must build for the plain OLMoE expert shape"
+    runner._ensure_device()
+
+    moe = runner._moe[0]
+    torch.manual_seed(3)
+    for t in (10, 5):  # both over-bucket widths must reuse the one cached graph (prefix upload pads)
+        for e in (0, 3, 7):
+            x = torch.randn(t, config.hidden_size, device="cuda")
+            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                got = runner._launch_expert(moe, e, x).clone()
+            torch.cuda.synchronize()
+            gate, up = torch.nn.functional.linear(x, moe["gate_up"][e]).chunk(2, dim=-1)
+            ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, moe["down"][e])
+            assert got.shape == (t, config.hidden_size)
+            torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
+    assert runner._expert_m256.program._e2e_graph is not None, "the m256 tier must serve via the captured program graph"
+
+
 def test_decode_twin_shares_weight_buffers():
     """The static decode-bucket twin must NOT hold a second on-GPU copy of the layer's
     weights: every non-trivial constant buffer in a decode program shares its device

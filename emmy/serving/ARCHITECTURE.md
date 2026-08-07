@@ -156,14 +156,19 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture boot
   is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
   `--enforce-eager` then).
-  **Expert tiers (decode perf lane):** the expert program comes in three tiers mirroring the main ladder — static
-  M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), and the symbolic
-  fallback — routed per HIT expert by its routed row count. Per-launch framing, not weight bytes, was the measured
-  decode wall (~0.23 ms/launch through the per-call symbolic path), so `_moe_combine` hoists the GPU lock + the
-  cupy stream bind around the whole per-expert loop and `_launch_expert` issues bare `upload_prefix_device` +
-  `run_once` calls; the per-expert cupy weight views are minted once at `_ensure_device`. A tier whose schedule
-  stages no operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by
-  POINTER SWAP into `program.arrays` — no D2D weight copy; descriptor-bearing tiers upload the slices normally.
+  **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
+  static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
+  (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
+  (bucket, 256]), and the symbolic fallback for anything wider — routed per HIT expert by its routed row count.
+  Per-launch framing, not weight bytes, was the measured decode wall (~0.23 ms/launch through the per-call symbolic
+  path), so `_moe_combine` hoists the GPU lock + the cupy stream bind around the whole per-expert loop and
+  `_launch_expert` issues bare `upload_prefix_device` + `run_once` calls; the per-expert cupy weight views are
+  minted once at `_ensure_device`. A tier whose schedule stages no operand through a TMA descriptor (descriptors
+  bake pointers at build) takes the weight slices by POINTER SWAP into `program.arrays` — no D2D weight copy;
+  descriptor-bearing tiers upload the slices normally. The M=256 twin instead replays its captured whole-program
+  graph per expert (`capture_program_graph` — one host call instead of per-kernel Python framing; prefill FFN was
+  launch-bound at ~3×), which bakes the twin's own buffer pointers — so its weights always arrive by UPLOAD, never
+  by pointer swap (a swap would freeze the first expert's slices into every later replay).
   **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the INDIRECT M=1 expert twin
   (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
   **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI

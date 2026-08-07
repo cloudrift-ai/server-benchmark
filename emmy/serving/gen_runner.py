@@ -175,6 +175,13 @@ def _pad_rows(arr, bucket):
     return out
 
 
+# The static prefill expert twin's row count: the mean per-expert width of a full 2048-token
+# chunk (T·k/E — OLMoE 2048·8/64 = 256, gpt-oss 2048·4/32 = 256). Routed rows in
+# (decode_bucket, 256] ride this twin via the prefix upload (pad-up; per-token-independent),
+# wider row sets fall to the symbolic program.
+_EXPERT_PREFILL_M = 256
+
+
 def _bind_plan_constants(plan, sources, cache):
     """Build the constant feed from the plan's weight specs (works identically whether the
     plan came from a fresh compile or a pack). With a ``cache`` (per-wrapper), each distinct
@@ -328,6 +335,7 @@ class EmmyGenRunner:
         expert_sym=None,
         expert_decode=None,
         expert_m1=None,
+        expert_m256=None,
         expert_slots=None,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
@@ -347,7 +355,8 @@ class EmmyGenRunner:
         # MoE third seam: per-layer dict (router module + the 3-D expert weight tensors +
         # ``top_k``) or None for dense layers; one shared expert program PER TIER serves every
         # layer (weights are inputs): static M=decode_bucket and M=1 twins for the decode hot
-        # path, the symbolic program as the any-width fallback. A tier whose schedule stages no
+        # path, a static M=256 twin for prefill-width routed row sets (captured replay — see
+        # ``_launch_expert``), the symbolic program as the any-width fallback. A tier whose schedule stages no
         # operand through a TMA descriptor (descriptors bake pointers at build) launches with
         # POINTER-SWAPPED per-expert weight slices — no D2D weight copy; descriptor-bearing
         # tiers fall back to the upload copy, still correct. ``expert_slots`` (or None) is the
@@ -359,6 +368,9 @@ class EmmyGenRunner:
         self._expert_sym = expert_sym
         self._expert_decode = expert_decode
         self._expert_m1 = expert_m1
+        # The static M=256 prefill expert twin (or None): routed row sets in
+        # (decode_bucket, 256] ride it via per-program captured replay — see ``_launch_expert``.
+        self._expert_m256 = expert_m256
         self._expert_slots = expert_slots
         self._expert_swap_safe = {
             id(prog): not any("_desc" in a for launch in prog.program.compiled.launches for a in launch.arg_names)
@@ -578,6 +590,7 @@ class EmmyGenRunner:
         expert_sym = None
         expert_decode = None
         expert_m1 = None
+        expert_m256 = None
         for i, block in enumerate(layers):
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
@@ -645,6 +658,23 @@ class EmmyGenRunner:
                             )
                         except Exception as ex:  # noqa: BLE001 — any compile failure → bucket/symbolic fallback
                             logger.warning("[gen_runner] expert M=1 twin compile failed (%s); single-row experts ride the bucket twin", ex)
+                        # Static M=256 prefill twin — the mean per-expert chunk width (§4 of the
+                        # dispatch design). Same failure contract; only pays above the decode
+                        # bucket (an equal-or-larger bucket fully shadows it).
+                        if _EXPERT_PREFILL_M > max(decode_bucket or 0, 0):
+                            try:
+                                expert_m256 = build(
+                                    "moe.expert.m256",
+                                    expert_w,
+                                    [torch.zeros(_EXPERT_PREFILL_M, hidden, dtype=dtype), *example_w],
+                                    None,
+                                    np_dtype,
+                                    arena=arena,
+                                )
+                            except Exception as ex:  # noqa: BLE001 — any compile failure → symbolic fallback
+                                logger.warning(
+                                    "[gen_runner] expert M=256 twin compile failed (%s); prefill experts ride the symbolic program", ex
+                                )
                 elif shape_key != expert_shape_key:
                     raise NotImplementedError(
                         f"MoE layers disagree on expert shape/activation (layer {i}: {shape_key} vs {expert_shape_key}) — "
@@ -930,6 +960,7 @@ class EmmyGenRunner:
             expert_sym=expert_sym,
             expert_decode=expert_decode,
             expert_m1=expert_m1,
+            expert_m256=expert_m256,
             expert_slots=expert_slots,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
@@ -966,7 +997,7 @@ class EmmyGenRunner:
         ]
         named += [
             (f"moe.expert.{tag}", prog)
-            for tag, prog in ((f"bucket.m{decode_bucket}", expert_decode), ("one.m1", expert_m1))
+            for tag, prog in ((f"bucket.m{decode_bucket}", expert_decode), ("one.m1", expert_m1), ("m256", expert_m256))
             if prog is not None
         ]
         audit_boot_programs(named)
@@ -1274,15 +1305,30 @@ class EmmyGenRunner:
         """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock + the
         external-stream bind). Tier routing mirrors the main programs: M=1 twin, then the
         decode-bucket twin (pad → run → slice; stale prefix rows are per-token-independent),
-        then the symbolic program. A swap-safe tier (no TMA descriptors — descriptors bake
-        pointers at build) takes the per-expert weight slices by POINTER SWAP into
-        ``program.arrays`` — no D2D weight copy; otherwise the slices upload normally. Eager
-        only — ``run_once`` on torch's current stream, never under an outer capture (MoE
-        serves eager; see the boot guard)."""
+        then the static M=256 prefill twin for row sets up to ``_EXPERT_PREFILL_M`` (same
+        pad-up contract), then the symbolic program. A swap-safe tier (no TMA descriptors —
+        descriptors bake pointers at build) takes the per-expert weight slices by POINTER SWAP
+        into ``program.arrays`` — no D2D weight copy; otherwise the slices upload normally.
+        The M=256 twin instead replays its captured whole-program graph
+        (``capture_program_graph`` — one host call per expert instead of per-kernel Python
+        framing; at ~64 expert launches per chunk the framing was ~3× the GPU work). The
+        capture bakes the twin's own buffer pointers, so its weights always arrive by UPLOAD
+        (a pointer swap would freeze the first expert's slices into every later replay).
+        Eager only — on torch's current stream, never under an outer capture (MoE
+        serves eager above T=1; see the boot guard)."""
         import cupy as cp
         import torch
 
         t = rows.shape[0]
+        w_gu, w_dn = moe["gate_up_cp"][e], moe["down_cp"][e]
+        if self._expert_m256 is not None and self._decode_bucket < t <= _EXPERT_PREFILL_M:
+            prog = self._expert_m256
+            p = prog.program
+            p.upload_prefix_device({"x": cp.from_dlpack(rows.detach().contiguous()), "w_gate_up": w_gu, "w_down": w_dn})
+            p.capture_program_graph()  # static program → one cached graph, replayed per expert
+            p.replay_program_graph()
+            outs = p.output_prefix_device()
+            return torch.from_dlpack(outs[prog.output_names[0]])[:t]
         if t == 1 and self._expert_m1 is not None:
             prog, sym = self._expert_m1, False
         elif self._expert_decode is not None and t <= self._decode_bucket:
@@ -1291,7 +1337,6 @@ class EmmyGenRunner:
             prog, sym = self._expert_sym, True
         p = prog.program
         feed = {"x": cp.from_dlpack(rows.detach().contiguous())}
-        w_gu, w_dn = moe["gate_up_cp"][e], moe["down_cp"][e]
         if self._expert_swap_safe[id(prog)]:
             p.arrays["w_gate_up"] = w_gu
             p.arrays["w_down"] = w_dn

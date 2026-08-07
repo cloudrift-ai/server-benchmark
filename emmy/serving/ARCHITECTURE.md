@@ -164,18 +164,25 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `run_once` calls; the per-expert cupy weight views are minted once at `_ensure_device`. A tier whose schedule
   stages no operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by
   POINTER SWAP into `program.arrays` — no D2D weight copy; descriptor-bearing tiers upload the slices normally.
-  **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the M=1 expert program are built at boot
-  from the same stored plan (`_compile_split(plan=...)` — fresh buffers, NO shared arena, so slots never alias),
-  and each slot's `w_gate_up`/`w_down`/output arrays are rewired ONCE onto cupy views of its slice of one
-  persistent staging pair `[k, 2I, H]` + `[k, H, I]` plus a `[k, H]` partials tensor (allocated in
-  `_ensure_device`, shared across layers — layers are stream-ordered). `_moe_combine_slots` then runs the router,
-  `index_select`s the k HIT experts' weights into the staging pair, replays the k slots on the row, and combines
-  the partials with one score matmul — fixed shapes, a fixed launch set, no `unique()`/`.tolist()`/host sync, so
-  vLLM's whole-step decode graph records it (under the outer capture each slot issues its raw launch sequence,
-  mirroring `run_device`). The boot rewire is only sound descriptor-free — asserted at boot; a descriptor-bearing
-  M=1 schedule logs a warning and keeps the routed path (single-token decode then serves eager). Wider decode
-  steps and prefill always ride the routed dispatch; `combine_routed_experts` stays the parity oracle
-  (`test_gen_runner_gpu` fixed-slot-vs-routed, `test_gen_capture_gpu` captured-step live-replay).
+  **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the INDIRECT M=1 expert twin
+  (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
+  **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI
+  change is invisible to the schedule search, see the plan section of `emmy/compiler/backend/ARCHITECTURE.md`).
+  Each kernel resolves its weight base pointer in-kernel as `table[sel[slot]]`: `_ensure_device` builds one flat
+  `[n_moe_layers · E]` int64 pointer table per weight kind (entry = the device address of one expert's slice of a
+  layer's 3-D tensor) plus a persistent `[k]` int32 selector and a `[k, H]` partials tensor; slot `j`'s plan
+  stamps `slot=j` (`_plan_with_slot`), and its table/selector/output arrays bind once at boot. The table is
+  layer-invariant — the layer offset rides in the selector VALUES — so per-slot cached graphs and the whole-step
+  capture both bake fixed pointers. `_moe_combine_slots` then runs the router, writes `indices + sel_off` into
+  the selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging;
+  the kernels read the E-tensors directly), replays the k slots on the row, and combines the partials with one
+  score matmul, so vLLM's whole-step decode graph records it (under the outer capture each slot issues its raw
+  launch sequence, mirroring `run_device`). A schedule that stages an indirect operand through a TMA descriptor
+  fails the compile loudly (descriptors bake the base address at encode) and single-token decode keeps the routed
+  path (eager); a stale pre-indirect pack plan fails the `_indirect_covered` check and recompiles — no half-hit.
+  Wider decode steps and prefill always ride the routed dispatch; `combine_routed_experts` stays the parity
+  oracle (`test_gen_runner_gpu` fixed-slot-vs-routed + the direct-vs-indirect bit-exactness pin,
+  `test_gen_capture_gpu` captured-step live-replay).
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does

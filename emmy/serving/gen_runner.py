@@ -221,7 +221,7 @@ def trace_split(wrapper, example_args, argnames):
     return trace_module(wrapper, tuple(example_args), dynamic_shapes=dynamic_shapes)
 
 
-def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None, plan=None):
+def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None, plan=None, indirect_inputs=None):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
     **prefill** program (one program, any width). ``argnames=None`` traces a **fully static**
@@ -236,7 +236,12 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     (``set_sym_values`` never re-allocates); without it the build feed is the example (the
     host ``rebind`` path re-sizes per call). ``plan`` (a pack-loaded ``ExecutionPlan``) skips
     the trace + compile entirely and builds from the stored plan — kernels load by cubin key,
-    weights rebind from the live wrapper through the same shared-upload cache."""
+    weights rebind from the live wrapper through the same shared-upload cache.
+    ``indirect_inputs`` names graph INPUT buffers to compile as indirect operands (the base
+    pointer resolved in-kernel from a device table — the MoE fixed-slot dispatch): set as a
+    graph-level hint before compile, so the schedule search is untouched and only the final
+    kernel lowering changes the ABI. Ignored when ``plan`` is supplied (the stored plan already
+    carries — or lacks — the indirect encoding; callers validate coverage)."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -247,6 +252,8 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
         from emmy.compiler.backend.plan import plan_from_graph
 
         graph = trace_split(wrapper, example_args, argnames)
+        if indirect_inputs:
+            graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
         plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
 
     sources = {}
@@ -271,6 +278,31 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     # one physical read stream, and the shared-upload cache aliases arrays across nids.
     const_bytes = sum(a.nbytes for a in {id(a): a for a in const_feed.values()}.values())
     return _Program(program, list(plan.inputs), list(plan.outputs), const_bytes=const_bytes), plan
+
+
+def _indirect_covered(plan, names):
+    """True iff every launch that takes one of ``names`` as an arg carries its indirect-operand
+    encoding — the validity check for both a fresh compile (a kernel could consume the weight
+    under a derived buffer name, which the hint would miss) and a stored pack plan (a stale
+    pre-indirect pack must not half-hit the fixed-slot tier)."""
+    for lc in plan.launches:
+        marked = {a for a, _, _, _ in lc.indirect_args}
+        if any(a in names and a not in marked for a in lc.arg_names):
+            return False
+    return True
+
+
+def _plan_with_slot(plan, slot):
+    """A shallow plan copy whose indirect operands read table entry ``sel[slot]`` — the per-slot
+    stamp for the fixed-slot instances (slot ``i`` of k passes ``slot=i`` as a plain int arg;
+    buffers/kernels/weights are shared read-only with the source plan)."""
+    import dataclasses
+
+    launches = [
+        dataclasses.replace(lc, indirect_args=tuple((a, t, s, slot) for a, t, s, _ in lc.indirect_args)) if lc.indirect_args else lc
+        for lc in plan.launches
+    ]
+    return dataclasses.replace(plan, launches=launches)
 
 
 class EmmyGenRunner:
@@ -319,9 +351,10 @@ class EmmyGenRunner:
         # operand through a TMA descriptor (descriptors bake pointers at build) launches with
         # POINTER-SWAPPED per-expert weight slices — no D2D weight copy; descriptor-bearing
         # tiers fall back to the upload copy, still correct. ``expert_slots`` (or None) is the
-        # FIXED-SLOT decode tier: k slot instances of the M=1 expert program (fresh buffers, no
-        # shared arena) whose weight arrays are rewired at boot onto the persistent staging
-        # pair — the capture-legal T=1 dispatch (see ``_moe_combine_slots``).
+        # FIXED-SLOT decode tier: k slot instances of the INDIRECT M=1 expert twin (fresh
+        # buffers, no shared arena) whose kernels resolve their weight base pointers from the
+        # device tables built in ``_ensure_device`` — the capture-legal T=1 dispatch (see
+        # ``_moe_combine_slots``).
         self._moe = moe
         self._expert_sym = expert_sym
         self._expert_decode = expert_decode
@@ -742,31 +775,45 @@ class EmmyGenRunner:
                         logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
                         prefill_ok = False
 
-        # FIXED-SLOT decode tier (MoE): k slot instances of the M=1 expert program built from
-        # the SAME stored plan (`_compile_split(plan=...)` — kernels load by cubin key, no
-        # re-trace/re-compile) with FRESH buffers and NO shared arena, so the slots never alias
-        # each other or the routed tiers. Their `w_gate_up`/`w_down` arrays are rewired ONCE at
-        # boot onto per-slot slices of the persistent staging pair (`_ensure_device`) — sound
-        # only when the schedule stages no operand through a TMA descriptor (descriptors bake
-        # pointers at build), so a descriptor-bearing schedule falls back LOUDLY to the routed
-        # path (single-token decode then stays eager; the boot capture guard sees the tier gone).
+        # FIXED-SLOT decode tier (MoE): k slot instances of the INDIRECT twin of the M=1 expert
+        # program (`moe.expert.one.ind`). The twin compiles the same graph with `w_gate_up` /
+        # `w_down` marked as indirect operands — each kernel fetches its weight base pointer
+        # from a device table indexed by the router's indices tensor (`table[sel[slot]]`), so
+        # the slots read the 3-D expert tensors DIRECTLY with no per-step weight staging. Slot
+        # instances build with FRESH buffers and NO shared arena (they never alias each other
+        # or the routed tiers); slot `j`'s plan stamps `slot=j` (`_plan_with_slot`). A schedule
+        # that stages an indirect operand through a TMA descriptor fails the compile LOUDLY
+        # (descriptors bake the base address at encode) and single-token decode keeps the
+        # routed path (eager; the boot capture guard sees the tier gone). A stale pre-indirect
+        # pack plan fails `_indirect_covered` and recompiles — no half-hit.
         expert_slots = None
         moe_top_k = next((m["top_k"] for m in moe_meta if m is not None), 0)
         if expert_m1 is not None and moe_top_k > 0:
-            if any("_desc" in a for launch in expert_m1.program.compiled.launches for a in launch.arg_names):
-                logger.warning(
-                    "[gen_runner] M=1 expert schedule stages operands through TMA descriptors — the fixed-slot "
-                    "boot rewire would bake stale weight pointers; single-token decode keeps the routed expert "
-                    "path (eager, no whole-step capture)"
-                )
-            else:
+            ind_names = ("w_gate_up", "w_down")
+            stored_ind = stored("moe.expert.one.ind")
+            if stored_ind is not None and not _indirect_covered(stored_ind, ind_names):
+                logger.warning("[gen_runner] stored moe.expert.one.ind plan lacks the indirect-operand encoding (stale pack) — recompiling")
+                stored_ind = None
+            try:
                 with torch.device("cpu"):
-                    expert_slots = [
-                        _compile_split(
-                            expert_w, [torch.zeros(1, hidden, dtype=dtype), *example_w], None, np_dtype, plan=plans["moe.expert.one"]
-                        )[0]
-                        for _ in range(moe_top_k)
+                    slot_example = [torch.zeros(1, hidden, dtype=dtype), *example_w]
+                    slot0, ind_plan = _compile_split(expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names)
+                    if not _indirect_covered(ind_plan, ind_names):
+                        raise RuntimeError(
+                            "indirect twin compile left a weight arg unmarked (the kernel consumes it under a derived buffer name)"
+                        )
+                    expert_slots = [slot0] + [
+                        _compile_split(expert_w, slot_example, None, np_dtype, plan=_plan_with_slot(ind_plan, j))[0]
+                        for j in range(1, moe_top_k)
                     ]
+                    plans["moe.expert.one.ind"] = ind_plan
+            except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
+                logger.warning(
+                    "[gen_runner] indirect expert twin build failed (%s); single-token decode keeps the routed "
+                    "expert path (eager, no whole-step capture)",
+                    ex,
+                )
+                expert_slots = None
 
         # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
         # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
@@ -1008,30 +1055,49 @@ class EmmyGenRunner:
                     m["gate_up_cp"] = [cp.from_dlpack(w) for w in m["gate_up"]]
                     m["down_cp"] = [cp.from_dlpack(w) for w in m["down"]]
                 if self._expert_slots is not None:
-                    # Fixed-slot staging: ONE persistent [k, 2I, H] + [k, H, I] pair shared by
-                    # every MoE layer (layers are stream-ordered, so a layer's slot replays
-                    # finish reading the staging before the next layer's index_select rewrites
-                    # it) plus a [k, H] partials tensor the slot OUTPUTS land in. Slot i's
-                    # weight and output arrays are rewired here ONCE onto cupy views of slice i
-                    # — after this, per-step "uploads" of the weights would be self-copies, so
-                    # the slots run with zero weight-arg traffic and the pointers a captured
-                    # graph bakes stay valid forever (the staging never re-allocates).
+                    # Fixed-slot indirect tables: ONE flat [n_moe_layers * E] int64 pointer
+                    # table per weight kind (entry = the device address of one expert's slice
+                    # of a layer's 3-D tensor), a [k] int32 SELECTOR the router rewrites per
+                    # layer per step (top-k indices + the layer's table offset), and a [k, H]
+                    # partials tensor the slot OUTPUTS land in. The table is layer-invariant —
+                    # the layer offset rides in the selector VALUES, which are device data —
+                    # so per-slot cached graphs and vLLM's whole-step capture both bake one
+                    # fixed table/selector pointer and the slot kernels read the E-tensors
+                    # directly (no per-step weight staging; the ~100 MB stage-1 staging pair
+                    # is gone, returned to vLLM's KV-cache budget). Slot i's table/selector/
+                    # output arrays are bound here ONCE.
                     first = next(m for m in self._moe if m is not None)
                     k = len(self._expert_slots)
-                    _, two_i, h = first["gate_up"].shape
-                    i_dim = first["down"].shape[2]
-                    tdtype = first["gate_up"].dtype
-                    self._stage_gate_up = torch.empty(k, two_i, h, dtype=tdtype, device="cuda")
-                    self._stage_down = torch.empty(k, h, i_dim, dtype=tdtype, device="cuda")
-                    self._slot_partials = torch.empty(k, h, dtype=tdtype, device="cuda")
+                    h = first["gate_up"].shape[2]
+                    num_e = first["gate_up"].shape[0]
+                    gu_ptrs: list[int] = []
+                    dn_ptrs: list[int] = []
+                    for m in self._moe:
+                        if m is None:
+                            continue
+                        m["sel_off"] = len(gu_ptrs)
+                        for name, ptrs in (("gate_up", gu_ptrs), ("down", dn_ptrs)):
+                            w = m[name]
+                            ptrs.extend(w.data_ptr() + e * w.stride(0) * w.element_size() for e in range(num_e))
+                    self._table_gate_up = torch.tensor(gu_ptrs, dtype=torch.int64, device="cuda")
+                    self._table_down = torch.tensor(dn_ptrs, dtype=torch.int64, device="cuda")
+                    self._slot_sel = torch.zeros(k, dtype=torch.int32, device="cuda")
+                    self._slot_partials = torch.empty(k, h, dtype=first["gate_up"].dtype, device="cuda")
+                    sel_cp = cp.from_dlpack(self._slot_sel)
+                    gu_cp = cp.from_dlpack(self._table_gate_up)
+                    dn_cp = cp.from_dlpack(self._table_down)
                     for j, slot in enumerate(self._expert_slots):
                         p = slot.program
-                        p.arrays["w_gate_up"] = cp.from_dlpack(self._stage_gate_up[j])
-                        p.arrays["w_down"] = cp.from_dlpack(self._stage_down[j])
+                        p.arrays["w_gate_up__table"] = gu_cp
+                        p.arrays["w_gate_up__sel"] = sel_cp
+                        p.arrays["w_down__table"] = dn_cp
+                        p.arrays["w_down__sel"] = sel_cp
                         p.arrays[slot.output_names[0]] = cp.from_dlpack(self._slot_partials[j : j + 1])
-                    # The rewire orphaned each slot's own weight/output allocations (~one
-                    # expert's weights per slot) — release them to the driver so vLLM's
-                    # KV-cache profiling sees the memory.
+                        # The build allocated the (never-read) direct weight input buffers —
+                        # drop them (~two experts' weights per slot) so vLLM's KV-cache
+                        # profiling sees the memory.
+                        p.arrays["w_gate_up"] = cp.empty(0, dtype=p.arrays["w_gate_up"].dtype)
+                        p.arrays["w_down"] = cp.empty(0, dtype=p.arrays["w_down"].dtype)
                     cp.get_default_memory_pool().free_all_blocks()
         self._dev_ready = True
 
@@ -1171,14 +1237,14 @@ class EmmyGenRunner:
 
     def _moe_combine_slots(self, moe, xn):
         """Fixed-slot combine for single-token decode (``T == 1``) — the capture-legal twin of
-        :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: the router's
-        top-k indices gather the k hit experts' weight slices into the persistent staging pair
-        (one ``index_select`` per weight tensor — fixed shapes, no ``unique()``, no
-        ``.tolist()``, no host sync), the k slot instances of the M=1 expert program run over
-        their boot-rewired staging views (the weight "upload" is gone — the kernels read the
-        staging slices directly), and the partials combine through one score matmul. Every op
-        is fixed-shape with a fixed launch set, so a whole-step decode CUDA graph records it;
-        under an outer capture each slot issues its raw launch sequence, mirroring
+        :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: one fixed-shape
+        write puts the router's top-k indices (plus this layer's table offset, cast to the
+        kernel's int32) into the persistent selector — no ``unique()``, no ``.tolist()``, no
+        host sync — and the k slot instances of the indirect M=1 expert program resolve their
+        weight base pointers in-kernel from the device tables (``table[sel[slot]]``), reading
+        the 3-D expert tensors directly; the partials combine through one score matmul. Every
+        op is fixed-shape with a fixed launch set, so a whole-step decode CUDA graph records
+        it; under an outer capture each slot issues its raw launch sequence, mirroring
         :meth:`_Program.run_device` (nested graph machinery is illegal in a capturing stream).
         ``combine_routed_experts`` (the routed path) stays the parity oracle."""
         import cupy as cp
@@ -1190,8 +1256,7 @@ class EmmyGenRunner:
         gated = moe["gate"](xn)
         scores, indices = gated[-2], gated[-1]  # [1, k] each
         scores = scores.to(xn.dtype)
-        torch.index_select(moe["gate_up"], 0, indices.reshape(-1), out=self._stage_gate_up)
-        torch.index_select(moe["down"], 0, indices.reshape(-1), out=self._stage_down)
+        self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
         capturing = torch.cuda.is_current_stream_capturing()
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             x_cp = cp.from_dlpack(xn.detach().contiguous())

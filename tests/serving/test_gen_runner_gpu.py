@@ -301,11 +301,11 @@ def test_gen_runner_moe_stitch_matches_eager():
 
 
 def test_moe_fixed_slot_combine_matches_routed_oracle():
-    """The fixed-slot combine (``_moe_combine_slots`` — index_select staging → k slot replays →
-    score matmul) must match ``combine_routed_experts`` (the routed parity oracle) on random
-    routings: random ``xn`` rows route to different top-k expert sets, so the staging gather,
-    the boot-rewired slot weights, and the score combine are all exercised across routings.
-    fp32 allclose — the two paths sum the k partials in different orders."""
+    """The fixed-slot combine (``_moe_combine_slots`` — selector write → k indirect slot
+    replays → score matmul) must match ``combine_routed_experts`` (the routed parity oracle)
+    on random routings: random ``xn`` rows route to different top-k expert sets, so the
+    selector write, the in-kernel table reads, and the score combine are all exercised across
+    routings. fp32 allclose — the two paths sum the k partials in different orders."""
     pytest.importorskip("cupy")
     import torch
     import transformers
@@ -344,6 +344,63 @@ def test_moe_fixed_slot_combine_matches_routed_oracle():
             ref = runner._moe_combine(moe, xn)
             assert got.shape == ref.shape == xn.shape
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
+
+
+def test_moe_indirect_slot_matches_direct_expert_bit_exact():
+    """The indirect expert program (weight base pointers resolved in-kernel from the device
+    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program BIT-EXACT on every
+    expert of every MoE layer: the indirection is ABI-level, so both programs run the same
+    schedule and the same kernels modulo where the base pointer comes from. Runs each expert's
+    weights through both paths on the same row and compares raw bytes."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=64,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    assert runner.has_moe_fixed_slot
+    runner._ensure_device()
+
+    slot0 = runner._expert_slots[0]
+    # The slot plan must actually carry the indirect encoding for both weights.
+    marked = {a for lc in slot0.program.compiled.launches for a, _, _, _ in lc.indirect_args}
+    assert marked == {"w_gate_up", "w_down"}
+
+    torch.manual_seed(2)
+    for moe in runner._moe:
+        for e in range(config.num_experts):
+            x = torch.randn(1, config.hidden_size, device="cuda")
+            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                direct = runner._launch_expert(moe, e, x).clone()  # the direct M=1 twin (pointer swap)
+                runner._slot_sel[0] = moe["sel_off"] + e  # steer slot 0's table read at this expert
+                p = slot0.program
+                p.upload_prefix_device({"x": cp.from_dlpack(x.detach().contiguous())})
+                p.run_once()
+            torch.cuda.synchronize()
+            got = runner._slot_partials[0:1]
+            assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
 
 
 def test_decode_twin_shares_weight_buffers():

@@ -17,6 +17,31 @@ Final deliverables (all four are required for done):
 3. Recipes + experiment grids benchmarking emmy against exllamav3 on the identical checkpoint.
 4. An article in `cloudrift-landing`, alongside `optimizing-gemma-4-12b-rtx`.
 
+## Phase 0 outcome (2026-08-07) — RETARGET to the 2.25-optimized rung, quantized KV required
+
+Phase 0 measured the quality gate directly against the bf16 reference (exllamav3 `model_diff` streams one layer at
+a time, so no reference substitution was needed) — full numbers in `plans/vq-phase0-findings.md`. The gate FAILED
+on every target this plan named: Air 2.00 bpw at KL 0.409 / ΔPPL +1.97 (both arms), the REAP-82B fallback at
+KL 0.394 / ΔPPL +3.96 on a weak pruned base (wiki2 PPL 12.3) that also crashes exllamav3 1.4.0 generation. The
+sparsity hypothesis is REFUTED: Air (12B active) matches the 4×-sparser Qwen3-Coder-Next's KL at 2.0 bpw almost
+exactly (0.409 vs 0.411) — density is not the lever, and the article must not claim denser MoEs quantize better.
+
+Decision (Dmitry, 2026-08-07): proceed on **Air 2.25-optimized** — KL 0.272 passes the KL arm, ΔPPL +1.21 is
+marginally over a line that was always a judgment call, and the mixed Hessian-driven allocation is EXL3's real
+advantage — with the quality cost reported honestly, including the 2.00 bpw numbers and the refuted hypothesis as
+findings. Consequences for the phases below:
+
+- **Pinned target**: `turboderp/GLM-4.5-Air-exl3` branch `2.25bpw`, commit `6a309ed6…` (cached locally, 29.4 GiB).
+  The 2.00 rung (`2.0bpw` @ `a1adde54…`) stays cached as a measured comparison point, not a serving target.
+- **Quantized KV is mandatory scope**, not a stretch: at ~29.8 GB weights the card fits only ~4K tokens of fp16 KV
+  (exllamav3 measured; ~325 KiB/token marginal). The emmy serving stack needs a quantized KV cache (q4-class) for
+  any credible admission capacity. This is new work the original plan did not scope.
+- Phases 1–3 are unaffected (the decode is rung-independent; K just varies per tensor under the optimized
+  allocation, which the decoder already handles). Phase 4+ seeds goldens and benches on the 2.25 checkpoint;
+  Phase 6 must re-measure the exllamav3 baselines on 2.25 with the recorded client invocation.
+- Expected VRAM arithmetic for Phase 5's headroom sweep: ~29.8 GB weights + activations + KV inside 32 GB — the
+  `max_num_batched_tokens` answer will be small; measure, don't assume.
+
 ## 1. The checkpoint
 
 **Source: [`turboderp/GLM-4.5-Air-exl3`](https://huggingface.co/turboderp/GLM-4.5-Air-exl3)** — the format author's

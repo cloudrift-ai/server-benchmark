@@ -116,12 +116,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   per-token-independent; since A3 both halves copy once into slices of one persistent shared joint destination
   (`_rider_dest`, cached per column width for gemma-4's heterogeneous layers) instead of clone + `torch.cat`,
   halving the rider seam bytes and removing the per-layer allocation churn — the caller must consume rider
-  outputs before its next rider call (attention does, within the layer) — which is what lets `--max-num-batched-tokens` default to `DYNAMIC_DIM_MAX + bucket`: a full
+  outputs before its next rider call (attention does, within the layer) — which is what lets
+  `--max-num-batched-tokens` default to `capacity + bucket`: a full
   chunk step keeps carrying its decode riders and the previous prompt's 1-token BOS tail instead of freezing every
   decoding request for the whole chunk and deferring first-token sampling (the measured c=4/c=8 TTFT structure), and
   every other width rides the SYMBOLIC programs' `run_device_sym`
-  (`num_tokens ≤ prefill_capacity`, capacity = `min(max_num_batched_tokens, DYNAMIC_DIM_MAX)`, passed as `max_tokens`
-  at runner build) — grids sized per step via
+  (`num_tokens ≤ prefill_capacity`, capacity = `DYNAMIC_DIM_MAX` unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower,
+  passed as `max_tokens` at runner build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
   (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
   `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its
@@ -319,11 +320,21 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
   generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
   decode to empty output). The trunk compute (embed + per-layer
-  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head` (`load_weights` claims `lm_head.weight`, or the
-  tied embed alias). On a tied checkpoint `load_weights` then hands the loaded head to the runner
+  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head`, and `load_weights` sources it from one of
+  three places: `lm_head.weight` in the stream, the tied embed alias, or — on an **EXL3 checkpoint, which has no
+  `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint and decoded in
+  out-feature blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
+  Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
+  expert codes this model owns none of. **An unsourced head raises**: vLLM's own strict weight-tracking check waives
+  any parameter whose quant method defines `process_weights_after_loading`, which `ParallelLMHead`'s does, so nothing
+  downstream would notice a head left at its construction garbage and the server would answer with noise while
+  looking healthy.
+  On a tied checkpoint `load_weights` then hands the loaded head to the runner
   (`adopt_embed_table`) so the runner drops its own ~2 GiB folded device copy and gathers from the SHARED raw table
-  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled), and releases the freed
-  torch/cupy blocks to the driver **before vLLM's KV-cache profiling** — the reclaimed memory becomes KV blocks
+  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled). Either way it ends by
+  releasing both allocators' free blocks to the driver (`reclaim_device_memory` — torch's `empty_cache` plus cupy's
+  `free_all_blocks`) **before vLLM's KV-cache profiling**: vLLM budgets `util × total − currently-used` off the
+  driver's accounting and cannot see that a cached block is free. The reclaimed memory becomes KV blocks
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
@@ -531,6 +542,13 @@ intermediate is already hundreds of MB. **A lane that only ever schedules `prefi
 still pays for `max_tokens`-row buffers** — so the first place to look when reclaiming footprint is
 `BufferArena` occupancy measured against the widths a deployment can actually reach.
 
+`capacity` defaults to the dynamic-dim cap and is deliberately NOT derived from
+`max_num_batched_tokens` — the pack key carries it, so tying it to a scheduler knob recompiles the whole
+program set every time a lane is retuned. **`EMMY_GEN_PREFILL_CAPACITY` pins it instead**, and
+`emmy serve --generate` moves its `--max-num-batched-tokens` default (`capacity + decode_bucket`, the
+rider headroom) to match. Reach for it when the arena is competing with the KV cache rather than with
+nothing: a model that fills the card with weights pays for every token of capacity it never serves.
+
 ### Reclaiming footprint re-opens the capture-ladder question
 
 These two knobs are coupled, and the coupling is a trap for whoever does the footprint work.
@@ -558,6 +576,9 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/serving/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
   contract vLLM's MTP drafter shares off the target, that it gathers RAW rows from the shared tied weight, and that an
   untied target raises. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
+- `tests/serving/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the three sources
+  (`lm_head.weight`, the tied embed alias, an EXL3-coded head decoded off a synthetic checkpoint) and the loud failure
+  when none applies. Also pins that the coded path does NOT walk vLLM's weight stream.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.

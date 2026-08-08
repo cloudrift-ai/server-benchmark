@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -223,6 +224,47 @@ def fold_hadamard(w_hat: np.ndarray, suh: np.ndarray, svh: np.ndarray) -> np.nda
     return w.astype(np.float16)
 
 
+def _codebook_id(mcg, mul1) -> int:
+    """The codebook id a module's optional marker siblings select (presence only, values unread)."""
+    if mcg is not None and mul1 is not None:
+        raise ValueError("mcg and mul1 codebook markers are mutually exclusive")
+    return 1 if mcg is not None else 2 if mul1 is not None else 0
+
+
+def decode_exl3_blocks(
+    trellis: np.ndarray,
+    suh: np.ndarray,
+    svh: np.ndarray,
+    *,
+    mcg: np.ndarray | None = None,
+    mul1: np.ndarray | None = None,
+    cols: int = 4096,
+) -> Iterator[tuple[int, int, np.ndarray]]:
+    """:func:`decode_exl3_linear` in OUT-FEATURE blocks — yields ``(lo, hi, W[:, lo:hi])``.
+
+    The point is peak memory: the fold runs in float64, so a vocab-sized head (``lm_head``,
+    4096x151552) costs ~5 GiB decoded whole and one block's worth this way. ``cols`` is rounded
+    down to a whole number of 128-blocks.
+
+    Blocking is exact where the format is exact — tiles are independent walks, the trailing
+    ``H128`` acts per 128-column block and ``svh`` is per column, so the HAT-BASIS decode
+    (:func:`decode_trellis`, the bit-exact surface) is bit-identical to the whole-tensor result.
+    The fold's fp16 rounding is not: a block's float64 GEMM has its own reduction order, which
+    lands ~0.01 % of entries one ULP off the whole-tensor fold. That is the same
+    implementation-defined rounding :func:`fold_hadamard` already documents, orders of magnitude
+    inside exllamav3's own fused-vs-reference tolerance.
+    """
+    cb = _codebook_id(mcg, mul1)
+    _check_trellis(trellis)
+    n = trellis.shape[1] * 16
+    step = max(HAD_BLOCK, (int(cols) // HAD_BLOCK) * HAD_BLOCK)
+    svh = np.asarray(svh)
+    for lo in range(0, n, step):
+        hi = min(lo + step, n)
+        w_hat = decode_trellis(trellis[:, lo // 16 : hi // 16], cb)
+        yield lo, hi, fold_hadamard(w_hat, suh, svh[lo:hi])
+
+
 def decode_exl3_linear(
     trellis: np.ndarray,
     suh: np.ndarray,
@@ -238,10 +280,7 @@ def decode_exl3_linear(
     the trellis shape. The optional ``bias`` sibling is a plain fp16 tensor with nothing to
     decode, so it is not an argument here; the module computes ``y = x @ W (+ bias)``.
     """
-    if mcg is not None and mul1 is not None:
-        raise ValueError("mcg and mul1 codebook markers are mutually exclusive")
-    cb = 1 if mcg is not None else 2 if mul1 is not None else 0
-    return fold_hadamard(decode_trellis(trellis, cb), suh, svh)
+    return fold_hadamard(decode_trellis(trellis, _codebook_id(mcg, mul1)), suh, svh)
 
 
 def coded_tensor_storage(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> dict:

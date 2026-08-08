@@ -535,19 +535,96 @@ weights arrive as program inputs.
 
 **Hardware**: 5090 (the release pipeline runs on the target GPU). **Depends on**: Phase 4.
 
-Run the documented release workflow in `docker/vllm-emmy-serve/ARCHITECTURE.md` end to end — it is the authority;
-do not improvise. `make serve-config → serve-goldens → serve-warm → serve-image → serve-verify → serve-push`.
+**STATUS: IT SERVES, AND THE CARD IS FULL (2026-08-07).** `emmy serve --generate` boots GLM-4.5-Air 2.25bpw on one
+5090, answers chat requests coherently, and has **864 tokens of KV cache**. Three boot blockers were closed getting
+there; the fourth finding is that there is no room left, which is what Phase 5 must now solve before it can bake
+anything.
 
-### GATE — the `lm_head` decision, before anything else
+1. **`lm_head` had no source, silently.** An EXL3 checkpoint carries no `lm_head.weight` — the head is coded like
+   any other linear (K=6, 0.434 GiB coded / 1.156 GiB decoded) — so `EmmyGenModel.load_weights` matched nothing.
+   vLLM's own strict weight-tracking check waives any parameter whose quant method defines
+   `process_weights_after_loading`, which `ParallelLMHead`'s does, so the server would have answered with noise
+   while looking healthy. `load_weights` now decodes the head straight from the checkpoint
+   (`decode_exl3_blocks` — out-feature blocks, because the float64 fold is ~5 GiB whole; **26 s** measured on the
+   real head) and RAISES when no source applies. Reading the checkpoint directly also skips a second full pass
+   over the shards, which here is ~29 GiB of expert codes the model owns none of.
+   **DECIDED: decode it, and the decision was forced, not preferred.** vLLM's `ParallelLMHead` allocates the fp16
+   head in `__init__` regardless of who fills it, so serving the head coded is not a load-time tweak — it means
+   not constructing `ParallelLMHead` at all and replacing vLLM's logits path with an emmy coded matmul at
+   4096x151552, K=6: a new program family with its own dynamic-M tiers and goldens. The measured price of decoding
+   is **0.722 GiB**, which at this point is most of the remaining budget (see the wall below) — so the coded head
+   is now the single highest-value item on the Phase 5 list, on measurement rather than taste.
+2. **vLLM refuses an EXL3 config outright** ("Unknown quantization method: exl3") — nothing to do with weights, it
+   is `_verify_quantization` rejecting the scheme name. The checkpoint is presented as unquantized through
+   `--hf-overrides`, which for the engine's purposes it is (`loader/quant.py::engine_config_overrides`; the
+   command layer must not name a checkpoint format — the frontend-band guard enforces that).
+3. **Headroom.** `load_weights` now reclaims both allocators' free blocks unconditionally (the tied-embed path was
+   the only one that did) and logs it in the driver's units; and `EMMY_GEN_PREFILL_CAPACITY` pins the symbolic
+   programs' activation arena at the width a deployment actually serves instead of at the dynamic-dim cap, with
+   `emmy serve`'s `--max-num-batched-tokens` default following it down. Measured on this model: the reclaim
+   returns **0.125 GiB**, and at capacity 512 the whole non-weight overhead (context + arena + allocators) is
+   **1.10 GiB** against 1.72 GiB at the Phase 3.4 runner-only boot.
 
-**The KV budget does not close without it, so this is a gate and not a bullet.** `lm_head` is vLLM-owned and has no
-`.weight` in an EXL3 checkpoint (only `lm_head.trellis`), so `EmmyGenModel.load_weights` finds nothing to load and
-something has to decide what the head becomes. The arithmetic, all measured (Phase 3.4 above): the card is
-31.843 GiB and emmy-owned resident is 28.888 GiB. A decoded fp16 head adds 1.156 GiB — **30.044 GiB total, which
-leaves no usable KV pool at all** once the CUDA context and emmy's activation arena are paid, and vLLM refuses to
-boot when `max-model-len` exceeds the pool. The coded head is 0.434 GiB, and KV costs 0.090 MiB/token at
-`fp8_e4m3`. So the head is worth roughly 8,000 KV tokens, which is the whole context budget this release has.
-Settle it before the sweep: the sweep measures whatever the head already is.
+**The wall, measured.** Card total as the driver reports it is 31.324 GiB, of which the CUDA context takes 0.67
+before anything loads. After the runner and the decoded head: **0.184 GiB free**. That is the whole budget for
+vLLM's attention workspace, its profiling peak, the CUDA-graph pool and the KV cache. Consequences, all measured:
+
+- At the shipped default (`--gpu-memory-utilization 0.97`, FlashInfer) available KV is **−0.21 GiB** — the boot
+  fails. vLLM's own default FlashInfer workspace is a permanent **394 MiB** allocation and OOMs on its own.
+- Whole-step decode capture does not fit either; the boot that works is `--enforce-eager`.
+- The configuration that boots: `VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=16777216`, `--enforce-eager`,
+  `--kv-cache-dtype fp8_e4m3`, `--max-model-len 512`, `--max-num-batched-tokens 512`, util **0.9755**,
+  `EMMY_GEN_PREFILL_CAPACITY=512`, `EMMY_GEN_DECODE_BUCKET=8`, `EMMY_GEN_M1_TIER=0` → **864 KV tokens**, maximum
+  concurrency 1.69x. Utilization is bounded above at 0.978 by `free_at_init`, and 0.9782 allocates 1,824 tokens
+  and then OOMs 4 MiB later — the usable band is a few tenths of a percent wide.
+- **fp8 KV is load-bearing, exactly 2x**: the identical config with fp16 KV yields 432 tokens and vLLM refuses the
+  boot ("estimated maximum model length is 432"). Same result as the `3a79ac6e` smoke-model measurement, now on
+  the real model.
+
+**First end-to-end serving numbers** (batch 1, ~20-token prompt, 64 output tokens, three runs): TTFT **1128–1185
+ms**, TPOT **102.5 ms** (spread 0.04 %). Generation is coherent and correct on every chat probe (it is a thinking
+model, so the visible output is `<think>` reasoning). Concurrency 2 gives no throughput gain — 7.84 tok/s against
+9.76 at c=1 — which is the 864-token pool, not the kernels. Boot time: cold **1067 s** (204 program plans written),
+**pack hit 104 s** (85 s of it the checkpoint read), a 10.3x saving. For context the Phase 0 exllamav3 baseline on
+the *2.00* rung was TTFT 499 ms / TPOT 11.9 ms, so this first configuration is ~2.3x behind on TTFT and ~8.6x on
+TPOT — with the whole of Phase 4's golden sweep still owed (the boot's own roofline audit flags
+`L0.post.decode.m8` at 17x its weight-streaming floor), CUDA graphs off, and the M=1 decode tier off.
+
+**What Phase 5 must do before it bakes an image**, in measured-value order:
+
+1. **Reclaim vocab-table bytes.** The two vocab-sized fp16 tables are the budget: emmy's embed table (1.156 GiB,
+   and GLM-4.5-Air is untied so it is *not* shared with the head) and the decoded `lm_head` (1.156 GiB). Serving
+   the head coded returns 0.722 GiB; sourcing the embedding gather from host-mapped memory would return 1.156
+   more. Either one alone multiplies the KV pool several times over; both together would put it near 18k fp8
+   tokens. Note the embed route has to survive whole-step CUDA-graph capture, which rules out a host round trip
+   inside `embed_device`.
+2. Re-measure headroom once (1) lands, then pin `models/<slug>.env`.
+3. Finish Phase 4's sweep — TPOT is ~40x the model's own decode memory floor, and the goldens are the lever.
+
+Only then run the documented release workflow in `docker/vllm-emmy-serve/ARCHITECTURE.md` end to end — it is the
+authority; do not improvise.
+`make serve-config → serve-goldens → serve-warm → serve-image → serve-verify → serve-push`.
+
+**Two image-pipeline fields the config keys below do not yet cover**, both cache-key relevant (so Makefile,
+Dockerfile, `warm.sh` and `verify.sh` move together): the activation-arena width
+(`EMMY_GEN_PREFILL_CAPACITY`) and the attention workspace size, which on this model is the difference between
+booting and not. The snapshot also ships as four `COPY warm/hf_parts/pN` layers sized for a ~24 GiB model; at
+29.3 GiB that split needs revisiting.
+
+### GATE — the `lm_head` decision: RESOLVED, and it did not close the budget
+
+`lm_head` is vLLM-owned and has no `.weight` in an EXL3 checkpoint (only `lm_head.trellis`), so
+`EmmyGenModel.load_weights` found nothing to load. **It now decodes the head at load** — see the status block
+above for why that was forced rather than chosen: vLLM's `ParallelLMHead` allocates the fp16 head in `__init__`
+whoever fills it, so a coded head means replacing the engine's logits path, not changing a loader.
+
+**The gate's own arithmetic held, and then some.** A decoded fp16 head does leave no usable KV pool: measured, the
+card yields **0.184 GiB free** after the runner and the head, against a 394 MiB FlashInfer workspace and a
+profiling peak that both come out of it. The booting configuration gets **864 fp8 KV tokens** by shrinking the
+workspace, going eager and sitting at util 0.9755 in a band a few tenths of a percent wide. So the coded head is
+still owed — it is worth 0.722 GiB, about 8,000 fp8 KV tokens — and it is no longer the only candidate: the
+untied embed table is 1.156 GiB of the same kind of money. Settle both before the sweep; the sweep measures
+whatever the vocab tables already are.
 
 ### Prerequisites for the config
 
@@ -569,11 +646,14 @@ support is in `serve.sh` / `warm.sh` / `verify.sh`, so what is owed here is sett
 
 - Create `models/<slug>.env` with the pinned serving config, the four keys above included. **The config seals the
   cache key and cannot change after warming.**
-- Memory headroom is the delicate step here. Measured budget on the 31.843 GiB card: emmy-owned weights are
-  28.888 GiB (see the Phase 3.4 arithmetic above), leaving ~2.95 GiB for vLLM's `lm_head`, the CUDA context,
-  emmy's activation arena and the KV cache. KV costs 0.180 MiB/token at fp16 and 0.090 MiB/token at
-  `fp8_e4m3` — so the fp8 KV cache is what makes the context budget non-trivial, and the answer is small.
-  Sweep and pin the largest passing `max_num_batched_tokens` / bucket configuration.
+- Memory headroom is the delicate step here, and the status block above has the measured budget rather than the
+  arithmetic: on the 31.324 GiB the driver reports, the CUDA context takes 0.67 before anything loads and the
+  runner plus the decoded head leave **0.184 GiB** for vLLM's attention workspace, its profiling peak, the
+  CUDA-graph pool and the KV cache. KV costs 0.180 MiB/token at fp16 and 0.090 at `fp8_e4m3`, and fp8 is what
+  makes the pool exist at all (measured: 864 tokens vs 432, and vLLM refuses the fp16 boot). Sweep and pin the
+  largest passing `max_num_batched_tokens` / bucket configuration — but expect the sweep to be worth re-running
+  once the vocab tables shrink, because today the band that boots is a few tenths of a percent of utilization
+  wide.
 - Clear every gate: golden coverage, HF-parity validation, offline zero-recompile verify.
 - **Pause for human approval before `serve-push`.**
 

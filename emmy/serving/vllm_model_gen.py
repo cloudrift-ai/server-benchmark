@@ -93,6 +93,57 @@ def _build_rotaries(config, runner, n_layers, max_position):
     return [_build_rotary(config, runner.layer_meta(0)[0], max_position)] * n_layers
 
 
+#: The ``lm_head`` sibling leaves an EXL3 checkpoint stores in place of a plain ``.weight``.
+_CODED_HEAD_LEAVES = ("trellis", "suh", "svh", "mcg", "mul1")
+
+
+def _coded_lm_head_source(model_id: str) -> dict | None:
+    """The EXL3 head's sibling tensors as numpy, or ``None`` when this checkpoint has a plain
+    ``lm_head.weight`` for the ordinary weight stream to load.
+
+    An EXL3 checkpoint quantizes the output head like any other linear (GLM-4.5-Air:
+    ``head_bits`` 6, 0.434 GiB coded), so ``lm_head.weight`` does not exist and vLLM's weight
+    iterator has nothing the model can match. Reading the three leaves straight from the
+    checkpoint also skips a second full pass over the shards — on a 2-bit MoE that stream is
+    ~29 GiB of expert codes, none of which this model owns."""
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    qdir = quantized_checkpoint_dir(model_id)
+    if qdir is None:
+        return None
+    from emmy.compiler.loader.safetensors import load_sources_by_path
+
+    src = load_sources_by_path(str(qdir), [f"lm_head.{leaf}" for leaf in _CODED_HEAD_LEAVES])
+    return src if "lm_head.trellis" in src else None
+
+
+def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
+    """Decode the EXL3 head into vLLM's ``lm_head.weight`` (``[vocab, hidden]``), block by block.
+
+    The loader's orientation is ``(in, out)``, so each block transposes on the way in. Blocked
+    because the Hadamard fold runs in float64: decoded whole, a vocab-sized head costs ~5 GiB of
+    host memory at the moment the expert store is already resident. Padding rows (EXL3 rounds the
+    out extent to 128, vLLM's ``ParallelLMHead`` to 64) stay zero — the logits processor slices
+    the logical vocab off the front either way."""
+    from emmy.compiler.loader.exl3 import decode_exl3_blocks
+
+    if getattr(head, "tp_size", 1) != 1:
+        raise NotImplementedError("EmmyGenModel: a coded lm_head writes whole rows, so it is single-GPU only")
+    param = head.weight
+    trellis, suh, svh = src["lm_head.trellis"], src["lm_head.suh"], src["lm_head.svh"]
+    hidden = trellis.shape[0] * 16
+    if param.shape[1] != hidden:
+        raise ValueError(f"coded lm_head has in_features {hidden}, but vLLM's head parameter is {tuple(param.shape)}")
+    param.data.zero_()
+    blocks = decode_exl3_blocks(trellis, suh, svh, mcg=src.get("lm_head.mcg"), mul1=src.get("lm_head.mul1"))
+    for lo, hi, block in blocks:
+        hi = min(hi, param.shape[0])
+        if lo >= hi:
+            break
+        param.data[lo:hi].copy_(torch.from_numpy(np.ascontiguousarray(block[:, : hi - lo].T)))
+    logger.info("[EmmyGenModel] decoded the EXL3 lm_head (%d x %d) from the checkpoint", param.shape[0], param.shape[1])
+
+
 class _SharedRawEmbedding(nn.Module):
     """The token embedding vLLM's speculative-decoding drafter shares off the target model.
 
@@ -163,6 +214,7 @@ class EmmyGenModel(nn.Module):
         config = getattr(mc.hf_config, "text_config", mc.hf_config)
         self.config = config
         self.dtype = mc.dtype
+        self._model_id = mc.model  # ``load_weights`` re-opens the checkpoint for an EXL3-coded head
 
         # Per-layer sliding/global attention (Gemma-3/4) IS supported: each vLLM Attention below
         # gets its layer's window and each layer its own-theta RoPE. A single uniform sliding
@@ -185,22 +237,28 @@ class EmmyGenModel(nn.Module):
         # + bucket] (``EmmyGenRunner.rider_width``), so a full chunk step keeps carrying
         # its decode riders instead of freezing every decoding request for the chunk.
         rider = max(decode_bucket, 0)
-        if max_batched and max_batched > DYNAMIC_DIM_MAX + rider:
-            raise ValueError(
-                f"max_num_batched_tokens={max_batched} exceeds DYNAMIC_DIM_MAX + decode_bucket "
-                f"({DYNAMIC_DIM_MAX} + {rider}); serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX + rider} or lower"
-            )
-
         # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step they
-        # serve (the dynamic-dim cap; wider steps are the split's) — the device-resident
-        # PREFILL path (``run_device_sym``) needs fixed capacity buffers; without it prefill
-        # falls back to the per-layer host numpy hops. Capacity is pinned at the CAP, not at
-        # mnbt: the pack key carries `max_tokens`/`prefill_bucket`, so tying them to the
-        # scheduler knob would recompile the whole program set (and cold-build twins at
-        # unseeded golden widths) every time mnbt is tuned per lane. The prefill-chunk twin
-        # defaults to that same width (chunked prefill fills steps to mnbt whenever the
-        # queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit value overrides.
-        capacity = DYNAMIC_DIM_MAX if max_batched else None
+        # serve (wider steps are the split's) — the device-resident PREFILL path
+        # (``run_device_sym``) needs fixed capacity buffers; without it prefill falls back to the
+        # per-layer host numpy hops. Capacity is pinned at a CONFIGURED width, not at mnbt: the
+        # pack key carries `max_tokens`/`prefill_bucket`, so tying them to the scheduler knob
+        # would recompile the whole program set (and cold-build twins at unseeded golden widths)
+        # every time mnbt is tuned per lane. It defaults to the dynamic-dim cap;
+        # ``EMMY_GEN_PREFILL_CAPACITY`` lowers it for a model whose activation arena competes
+        # with the KV cache. The prefill-chunk twin defaults to that same width (chunked prefill
+        # fills steps to mnbt whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an
+        # explicit value overrides.
+        capacity = emmy_config.gen_prefill_capacity()
+        if capacity < 0:
+            capacity = DYNAMIC_DIM_MAX
+        if not 0 < capacity <= DYNAMIC_DIM_MAX:
+            raise ValueError(f"EMMY_GEN_PREFILL_CAPACITY={capacity} must be in 1..{DYNAMIC_DIM_MAX} (or -1 for the cap)")
+        if max_batched and max_batched > capacity + rider:
+            raise ValueError(
+                f"max_num_batched_tokens={max_batched} exceeds the prefill capacity + decode_bucket "
+                f"({capacity} + {rider}); serve with --max-num-batched-tokens {capacity + rider} or lower"
+            )
+        capacity = capacity if max_batched else None
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
@@ -438,39 +496,80 @@ class EmmyGenModel(nn.Module):
         """vLLM owns ONLY ``lm_head`` (the runner already loaded embed + trunk). Load
         ``lm_head.weight`` from the checkpoint; when ``tie_word_embeddings`` the checkpoint
         may carry only the embedding, so accept an ``*embed_tokens.weight`` alias for the head
-        (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``)."""
+        (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``).
+
+        An EXL3 checkpoint carries no ``lm_head.weight`` at all — the head is trellis-coded — so
+        it decodes straight from the checkpoint instead (:func:`_coded_lm_head_source`) and the
+        weight stream is consumed only for what remains. An unsourced head is a hard error: vLLM's
+        own strict check waives any parameter whose quant method defines
+        ``process_weights_after_loading``, which the head's does, so nothing downstream would
+        notice a head left at its construction garbage and the server would serve noise while
+        looking healthy."""
         param = self.lm_head.weight
         loader = getattr(param, "weight_loader", default_weight_loader)
         tied = getattr(self.config, "tie_word_embeddings", False)
         loaded: set[str] = set()
-        for name, w in weights:
-            if name == "lm_head.weight":
-                loader(param, w)
-                loaded.add("lm_head.weight")
-            elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
-                loader(param, w)
-                loaded.add("lm_head.weight")
-            elif self.sinks is not None and name.endswith(".self_attn.sinks"):
-                # gpt-oss attention sinks — the per-layer [num_heads] weight beside lm_head
-                # (see __init__). Single GPU: the full copy (stock's tp narrow at tp=1).
-                layer = int(name.split(".layers.")[1].split(".")[0])
-                self.sinks[layer].data.copy_(w)
-                loaded.add(name)
+        coded = _coded_lm_head_source(self._model_id)
+        if coded is not None:
+            _decode_lm_head_into(self.lm_head, coded)
+            loaded.add("lm_head.weight")
+        if coded is None or self.sinks is not None:
+            for name, w in weights:
+                if name == "lm_head.weight" and coded is None:
+                    loader(param, w)
+                    loaded.add("lm_head.weight")
+                elif tied and coded is None and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
+                    loader(param, w)
+                    loaded.add("lm_head.weight")
+                elif self.sinks is not None and name.endswith(".self_attn.sinks"):
+                    # gpt-oss attention sinks — the per-layer [num_heads] weight beside lm_head
+                    # (see __init__). Single GPU: the full copy (stock's tp narrow at tp=1).
+                    layer = int(name.split(".layers.")[1].split(".")[0])
+                    self.sinks[layer].data.copy_(w)
+                    loaded.add(name)
+        if "lm_head.weight" not in loaded:
+            raise ValueError(
+                "EmmyGenModel: no source for lm_head.weight in this checkpoint (no 'lm_head.weight', "
+                f"no tied '*embed_tokens.weight'{'' if tied else ' — the config is untied'}, and no EXL3 "
+                "'lm_head.trellis'). The head would stay uninitialized and every logit would be garbage."
+            )
         # Tied checkpoints: the loaded head IS the raw embed table — hand it to the runner and drop
         # the runner's own ~2 GiB folded device copy (uploaded eagerly at construction for the
-        # profiling-order contract). empty_cache + the cupy pool trim actually RELEASE the freed
-        # blocks to the driver, so vLLM's KV-cache profiling (which runs after load) sees them —
-        # this is where the reclaimed memory becomes KV blocks. The runner re-applies the gemma
-        # embed_scale at gather; the shared table stays raw (the head must read it unscaled).
-        if tied and "lm_head.weight" in loaded and param.data.is_cuda:
+        # profiling-order contract). The runner re-applies the gemma embed_scale at gather; the
+        # shared table stays raw (the head must read it unscaled).
+        if tied and param.data.is_cuda:
             self.runner.adopt_embed_table(param.data, scale=getattr(self.runner, "_embed_scale", 1.0))
-            import cupy as cp
-
-            torch.cuda.empty_cache()
-            cp.get_default_memory_pool().free_all_blocks()
+        # RECLAIM, unconditionally: empty_cache + the cupy pool trim RELEASE freed blocks back to
+        # the driver, and vLLM's KV-cache sizing (which runs right after load) budgets
+        # ``util x total - currently-used`` off the driver's own accounting — it cannot see that a
+        # cached block is free. Everything this boot churned through counts: the adopted table's
+        # replaced copy above, the runner's staging buffers, and the head decode's own upload
+        # blocks. This is where reclaimed memory becomes KV blocks.
+        self.reclaim_device_memory()
         # The spec-decode shim shares this table with the drafter; verify the tie once, here,
         # where the adopt hand-off just happened (the compiled forward carries no guards).
         shim = getattr(self, "model", None)
         if shim is not None:
             shim.embed_tokens.validate_tied()
         return loaded
+
+    @staticmethod
+    def reclaim_device_memory() -> None:
+        """Return both allocators' free blocks to the driver (torch's caching allocator and
+        cupy's memory pool). Idempotent and cheap; call it before anything sizes itself off the
+        driver's free-memory reading.
+
+        Logged in the driver's own units, because that is the accounting vLLM's KV sizing reads
+        and the reclaim is otherwise invisible — which is how the untied path went without one."""
+        import cupy as cp
+
+        before = torch.cuda.mem_get_info()[0]
+        torch.cuda.empty_cache()
+        cp.get_default_memory_pool().free_all_blocks()
+        free, total = torch.cuda.mem_get_info()
+        logger.info(
+            "[EmmyGenModel] reclaimed %.3f GiB of allocator free blocks; %.3f of %.3f GiB now free for the KV cache",
+            (free - before) / 2**30,
+            free / 2**30,
+            total / 2**30,
+        )

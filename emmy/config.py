@@ -56,6 +56,7 @@ GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
+GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 READABLE = "EMMY_READABLE"
 FP8_EXPAND = "EMMY_FP8_EXPAND"
 TRELLIS_EXPAND = "EMMY_TRELLIS_EXPAND"
@@ -378,6 +379,20 @@ def gen_prefill_bucket(default: int = -1) -> int:
     hot chunk width); **0 disables** the twin (prefill stays on the symbolic masked-tile
     programs). See `serving/gen_runner.py`."""
     return int_env(GEN_PREFILL_BUCKET, default)
+
+
+def gen_prefill_capacity(default: int = -1) -> int:
+    """``EMMY_GEN_PREFILL_CAPACITY`` — the token width the generative runner's symbolic
+    programs size their device buffers at. The default ``-1`` means the dynamic-dim cap
+    (``DYNAMIC_DIM_MAX``), which is what ``max_num_batched_tokens`` defaults to as well.
+
+    Set it when the ACTIVATION ARENA is competing with the KV cache. Capacity is otherwise
+    independent of ``max_num_batched_tokens`` on purpose — the pack key carries it, so tying it
+    to the scheduler knob recompiles the whole program set every time a lane is retuned — but a
+    model that fills the card with weights (GLM-4.5-Air at 2.25 bpw leaves ~1.3 GiB) pays for
+    every token of capacity it never serves. Pin it at the width the deployment actually runs
+    and lower ``--max-num-batched-tokens`` to match. See `serving/vllm_model_gen.py`."""
+    return int_env(GEN_PREFILL_CAPACITY, default)
 
 
 def gen_m1_tier(default: int = 1) -> int:

@@ -14,6 +14,7 @@ import pytest
 from emmy.compiler.loader.exl3 import (
     CODEBOOK_SCALE,
     codebook_values,
+    decode_exl3_blocks,
     decode_exl3_linear,
     decode_trellis,
     fold_hadamard,
@@ -245,6 +246,38 @@ def test_decode_exl3_linear_rejects_both_markers():
     ones = np.ones(128, dtype=np.float16)
     with pytest.raises(ValueError, match="mutually exclusive"):
         decode_exl3_linear(tr, ones, ones, mcg=np.array(1, np.int32), mul1=np.array(1, np.int32))
+
+
+@pytest.mark.parametrize("cols", [128, 256, 300, 4096])
+def test_decode_exl3_blocks_tile_the_whole_decode(cols):
+    """The out-feature blocking a vocab-sized head needs (``lm_head`` folds ~5 GiB in float64
+    whole) reproduces the whole-tensor decode: bit-exact in the HAT basis (tiles are independent
+    walks, so the trellis slice is the only thing that changes) and within the fold's own fp16
+    rounding after it. ``cols`` rounds DOWN to whole 128-blocks (300 → 256), which is what keeps
+    the trailing per-128-column H128 and the per-column ``svh`` aligned."""
+    tr = _random_trellis(8, 40, 3)
+    suh = (rng.choice([-1.0, 1.0], 128) * 0.01).astype(np.float16)
+    svh = (rng.choice([-1.0, 1.0], 640) * 0.5).astype(np.float16)
+    ref, ref_hat = decode_exl3_linear(tr, suh, svh), decode_trellis(tr)
+    seen = 0
+    for lo, hi, block in decode_exl3_blocks(tr, suh, svh, cols=cols):
+        assert lo == seen and block.shape == (128, hi - lo)
+        np.testing.assert_array_equal(decode_trellis(tr[:, lo // 16 : hi // 16]).view(np.uint16), ref_hat[:, lo:hi].view(np.uint16))
+        np.testing.assert_allclose(block.astype(np.float32), ref[:, lo:hi].astype(np.float32), rtol=1e-3, atol=0)
+        seen = hi
+    assert seen == 640
+
+
+def test_decode_exl3_blocks_honors_the_codebook_markers():
+    tr = _random_trellis(8, 16, 2)
+    suh, svh = np.ones(128, dtype=np.float16), np.ones(256, dtype=np.float16)
+    ref = decode_exl3_linear(tr, suh, svh, mul1=np.array(0, np.int32))
+    got = np.concatenate([b for _, _, b in decode_exl3_blocks(tr, suh, svh, mul1=np.array(0, np.int32), cols=128)], axis=1)
+    np.testing.assert_allclose(got.astype(np.float32), ref.astype(np.float32), rtol=1e-3, atol=0)
+    # cb=0 (no marker) decodes to something else entirely — the marker really is being honored.
+    assert not np.allclose(got.astype(np.float32), decode_exl3_linear(tr, suh, svh).astype(np.float32), rtol=1e-3)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        next(decode_exl3_blocks(tr, suh, svh, mcg=np.array(1, np.int32), mul1=np.array(1, np.int32)))
 
 
 # ===================================================================

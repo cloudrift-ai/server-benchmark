@@ -273,11 +273,17 @@ round-up to that multiple cannot push a step's padded width past the decode buck
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
 `--gpu-memory-utilization` to **0.97** (its
 cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
-model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the dynamic-dim cap + the decode bucket** — the
-bucket-sized rider headroom is covered by the chunk+decode twin row split (`serving/ARCHITECTURE.md`), so full
-chunk steps keep carrying their decode riders; an explicit value past that cap is rejected. `EMMY_SERVING_BATCHED=1`
+model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
+bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
+(`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap
+is rejected. Capacity is the dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
+lever for a card the weights nearly fill), and the default follows it down. `EMMY_SERVING_BATCHED=1`
 embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
-the batch.
+the batch. A checkpoint whose compressed weights emmy's loader owns end to end (today: **EXL3**, trellis-coded) is
+additionally presented to vLLM as **unquantized** through the `--hf-overrides` — vLLM carries no method for the
+scheme and refuses the boot outright, while nothing in the engine needs one, since the runner owns every coded
+weight and the one vLLM-owned parameter (`lm_head`) decodes to fp16 at load. Which schemes those are is the loader
+band's call (`compiler/loader/quant.py::engine_config_overrides`), not the command layer's.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)

@@ -145,6 +145,22 @@ def _exl3_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
+def engine_config_overrides(hf_config) -> dict:
+    """HF-config overrides a serving engine needs so it does not try to own weights emmy's
+    loader already owns. ``{}`` for an ordinary checkpoint (and for ``None``, the caller's
+    "config unreadable").
+
+    The trellis-coded (EXL3) scheme is the case today: vLLM carries no method for it and refuses
+    the boot outright, while nothing in the engine needs one — emmy's runner owns every coded
+    weight, and the single engine-owned parameter (``lm_head``) decodes to fp16 at load
+    (``serving/vllm_model_gen.py``). Presented as unquantized, the model is exactly what the
+    engine then treats it as. This lives in the loader band rather than at the ``emmy serve``
+    call site because naming a checkpoint scheme is frontend-band knowledge."""
+    scheme = getattr(hf_config, "quantization_config", None)
+    method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
+    return {"quantization_config": None} if method == "exl3" else {}
+
+
 def _exl3_codebook(index, base: str) -> int:
     """The codebook id of the EXL3 linear at ``base``: marker-sibling PRESENCE in the
     index selects it (``mcg`` → 1, ``mul1`` → 2, neither → 0; stored values never read)."""

@@ -162,7 +162,10 @@ compile as table-resolved operands for the fixed-slot dispatch.
 trellis-coded) weight format: per-16x16-tile bit-window extraction from the tail-biting code stream, the 3INST
 computed codebook (bit-exact against exllamav3's CUDA kernels), the mma-fragment tile ordering, and the
 128-block Hadamard/sign fold that restores the original basis from the `suh`/`svh` sibling vectors.
-`decode_exl3_linear` reconstructs one linear's fp16 weight from its sibling tensors. Ingestion follows the fp8
+`decode_exl3_linear` reconstructs one linear's fp16 weight from its sibling tensors; `decode_exl3_blocks` does the
+same in out-feature blocks, for a tensor whose float64 fold would not fit beside the rest of a boot (a vocab-sized
+`lm_head` folds ~5 GiB whole). Blocking is bit-exact in the hat basis and within the fold's own documented fp16
+rounding after it. Ingestion follows the fp8
 design exactly: `config.json` declares `quant_method: "exl3"` (detected by `quantized_checkpoint_dir` alongside
 fp8), the twin carries decoded real weights (`load_dequantized_state_dict` decodes trellis siblings to `.weight`
 values; per-expert checkpoint modules pack into the v5 3-D expert params, encode padding — both dims rounded up

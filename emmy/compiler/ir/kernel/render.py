@@ -287,6 +287,22 @@ static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp_kzer
     emmy_mma884_load_b_impl<T, F>(r, g, ldm, left, k_left, true);
 }
 
+// The lane map is independent of address space. Pointing the same inlined
+// gather at a shared-memory slab makes ptxas select ordinary LDS instructions;
+// Volta has no warp matrix-load instruction.
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_a_smem(unsigned* r, const T* s, int ldm) {
+    emmy_mma884_load_a_impl<T, F>(r, s, ldm, 16, 4);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_smem(unsigned* r, const T* s, int ldm) {
+    emmy_mma884_load_b_impl<T, F>(r, s, ldm, 16, 4, false);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r, const T* s, int ldm) {
+    emmy_mma884_load_b_impl<T, F>(r, s, ldm, 16, 4, true);
+}
+
 static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(
     float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "

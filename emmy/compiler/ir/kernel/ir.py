@@ -1370,8 +1370,9 @@ class LdmatrixLoad(Stmt):
     K×8 ``b`` tile uses ``x2.trans`` (``row = lane%16``) so a row-major
     smem slab feeds the mma's col-major B operand.
 
-    ``staged`` (default ``True``) selects the transport: ``ldmatrix`` is **smem
-    only**, so when the operand was NOT staged into shared memory
+    ``staged`` (default ``True``) selects the transport. The modern fragment layout's ``ldmatrix`` is **smem
+    only**, while the Volta layout uses its cooperative gather against either address space. When the
+    operand was NOT staged into shared memory
     (``staged=False``, ``src_buffer`` is the gmem operand) the render emits the
     ``emmy_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
     replicates the same lane→element map without ldmatrix. Slower (no smem reuse)
@@ -1433,6 +1434,8 @@ class LdmatrixLoad(Stmt):
             return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
         if self.byte_slab:
             variant = "byte gather"
+        elif self.fragment_layout == "m8n8k4" and self.staged:
+            variant = "shared gather"
         else:
             variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
@@ -1534,6 +1537,22 @@ class LdmatrixLoad(Stmt):
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
             return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+        if self.fragment_layout == "m8n8k4":
+            # SM70 has no ldmatrix. The Volta fragment's cooperative lane map is the same for
+            # global and shared addresses, so point its inlined gather at the staged slab; ptxas
+            # resolves the generic pointer to ordinary LDS instructions. Fill-side clamps make
+            # the slab exact, and the first implementation intentionally keeps it unswizzled.
+            assert self.pair_frag is None and not self.byte_slab, "the Volta staged drain is an unpacked f16 gather"
+            assert self.swizzle == "NONE", "the Volta shared-memory gather has no swizzled layout"
+            slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
+            frag_dt = ctx.ssa_dtypes.get(self.frag) or slab_dt
+            targs = "" if slab_dt == frag_dt else f"<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
+            helper = (
+                "emmy_mma884_load_a_smem"
+                if self.role == "a"
+                else ("emmy_mma884_load_b_smem_trans" if self.b_trans else "emmy_mma884_load_b_smem")
+            )
+            return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         if self.byte_slab:
             # Staged 1-byte (fp8) slab — the cooperative byte-gather drain: the gmem fragment
             # loaders' lane→element map pointed at the smem slab (generic-address loads; ptxas

@@ -55,7 +55,8 @@ class AtomKind:
     fragment_registers: tuple[tuple[str, int], ...] = ()
     fragment_layout: str = "m16n8k16"
     target_feature: str = "has_mma_m16n8k16"
-    gmem_direct_only: bool = False
+    materialized_edges_only: bool = False
+    sync_copy_staging: bool = False
 
     def operand_dtype(self, role: str) -> DataType:
         """The element dtype of operand ``role`` (``"a"`` / ``"b"`` / ``"c"``)."""
@@ -187,7 +188,8 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
         fragment_registers=(("a", 2), ("b", 2), ("c", 8)),
         fragment_layout="m8n8k4",
         target_feature="has_volta_mma",
-        gmem_direct_only=True,
+        materialized_edges_only=True,
+        sync_copy_staging=True,
     ),
     "mma_m16n8k16_f16_f32": AtomKind("mma_m16n8k16_f16_f32", (16, 8, 16), (("a", F16), ("b", F16), ("c", F32))),
     "mma_m16n8k16_bf16_f32": AtomKind(

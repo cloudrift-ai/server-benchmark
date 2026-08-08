@@ -183,10 +183,10 @@ def warp_atom_target(atom, ctx) -> str | None:
 
 def warp_atom_edges(node: Fold, atom) -> str | None:
     """Whether the atom can consume this contraction's materialized/computed operand edges."""
-    if not atom.gmem_direct_only:
+    if not atom.materialized_edges_only:
         return None
     if not isinstance(node.a, Load) or any(not isinstance(ch.b, Load) for ch in node.channels):
-        return f"warp TILE: atom {atom.name} is gmem-direct only and cannot consume a computed A or B edge"
+        return f"warp TILE: atom {atom.name} accepts only materialized A and B edges"
     return None
 
 
@@ -201,8 +201,8 @@ def stage_target(stage: Stage, ctx) -> str | None:
 
 def warp_atom_stage(atom, stage: Stage) -> str | None:
     """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
-    if atom.gmem_direct_only:
-        return f"STAGE {stage.spell()}: atom {atom.name} has only a gmem-direct fragment loader"
+    if atom.materialized_edges_only and not (stage.transport == "sync" and atom.sync_copy_staging):
+        return f"STAGE {stage.spell()}: atom {atom.name} supports only synchronous-copy staging"
     return None
 
 
@@ -300,8 +300,8 @@ def _tma_operand_rank(index: tuple, tile_name: str, k_name: str) -> bool:
     return all(not ({tile_name, k_name} & e.free_vars()) for e in index[:-2])
 
 
-def _warp_cp_async(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool) -> bool:
-    """cp.async staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim."""
+def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool) -> bool:
+    """Vector-copy staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim."""
     if mask_n or not k_axis.extent.is_static:
         return False
     if k_axis.extent.as_static() % bk_elems:
@@ -323,8 +323,8 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: i
 
 
 def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
-    """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
-    gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
+    """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
+    cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
     slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose single depth-1 slot
     already exceeds ``budget`` DECLINES — unlike the scalar resolver it cannot shrink the slab.
 
@@ -345,7 +345,8 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
-    if atom.gmem_direct_only:
+    sync_copy = stage.transport == "sync" and atom.sync_copy_staging
+    if atom.materialized_edges_only and not sync_copy:
         return None
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
@@ -355,6 +356,8 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
             t = inputs.get(edge.input) if isinstance(edge, Load) else None
             if t is None or t.dtype == atom.operand_dtype(role):
                 continue
+            if sync_copy:
+                return None  # the Volta shared gather consumes f16 slabs; synchronous copies do not convert
             if role == "b" and t.dtype.nbytes == 1 and b_nbytes == 2:
                 b_nbytes = 1  # fp8-B under a 16-bit atom: byte slab, convert at the drain
                 continue
@@ -382,8 +385,10 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
         and box_ok
         and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.b_trans)
     )
-    cp_ok = stage.transport == "cp.async" and _warp_cp_async(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
-    if not (tma_ok or cp_ok):
+    vector_copy_ok = _warp_vector_copy(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
+    cp_ok = stage.transport == "cp.async" and vector_copy_ok
+    sync_ok = sync_copy and vector_copy_ok
+    if not (tma_ok or cp_ok or sync_ok):
         return None
     pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
     b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.b_trans else (bk_elems, n.tile + pad_b)
@@ -467,7 +472,7 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape."""
     atom = tile.atom
-    if atom.gmem_direct_only:
+    if atom.materialized_edges_only:
         return None
     if atom.operand_dtype("a").nbytes < 2:
         return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only

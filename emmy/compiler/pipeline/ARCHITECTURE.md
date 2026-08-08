@@ -1361,7 +1361,7 @@ a wrong or un-launchable kernel:
 - A warp `TILE` pin needs its **static** contraction K to be a multiple of the inner mma K-step (`atom_k·bk`), since
   the warp K-loop has no static-K tail masking (a **symbolic** K is fine — it reaches the masked zero-filled tier).
 - A warp `TILE` atom must belong to the target's selected MMA family. On SM70, newer `m16n8k16` atoms and `cp.async`
-  or TMA `STAGE` pins fail explicitly; the Volta m8n8k4 atom accepts only the global-memory-direct stage.
+  or TMA `STAGE` pins fail explicitly; the Volta m8n8k4 atom accepts global-memory-direct or `d<n>/sync` staging.
 - A scalar `TILE` parallel block (`par_n·par_m`) is capped at the 1024-thread/CTA hardware limit.
 - A `BOOL` knob rejects an unrecognized value instead of coercing a typo (`ture`) to `False`.
 

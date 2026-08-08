@@ -621,7 +621,7 @@ def _promoted(node, inputs, ctx):
         getattr(getattr(t, "dtype", None), "name", None) != "f32"
         or ch is None
         or ch.nbytes == 1
-        or not any(not atom.gmem_direct_only for atom in atoms)
+        or not any(not atom.materialized_edges_only for atom in atoms)
     ):
         return None
     # ``a`` is a DERIVED reading, so the rewrite REBUILDS the bilinear fold over the new edge — the

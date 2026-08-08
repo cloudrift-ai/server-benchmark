@@ -519,10 +519,14 @@ just that node gaining a warp `TilePlan` — no new path.
 
 An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
 16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
-groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It is global-memory-direct only: SM70
-has no `ldmatrix`, so staging, computed operand edges, C-to-A repacking, and flash decline this atom. Target capability
-predicates select this family below SM80 and the established `m16n8k16` families on SM80 and newer; an incompatible
-atom or copy-transport pin fails instead of lowering through instructions the target cannot execute.
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It accepts only materialized A/B edges:
+SM70 has no `ldmatrix`, but materialized f16 A/B edges may use synchronous-copy staging: ordinary vector global loads
+and shared stores fill the existing slab ring, and the same cooperative m8n8k4 lane map gathers fragments from shared
+memory. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>` register-fragment pipelining;
+blocking copies make deeper shared rings correct but do not promise copy/compute overlap. Computed operand edges,
+C-to-A repacking, and flash still decline this atom. Target capability predicates select this family below SM80 and
+the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
+lowering through instructions the target cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order; the historical acc-unspecified

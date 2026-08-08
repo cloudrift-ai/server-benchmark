@@ -28,8 +28,8 @@ def _graph(*, m: int = 16, n: int = 16, k: int = 4, trans: bool = False) -> Grap
     return graph
 
 
-def _pin(monkeypatch, atom: str, *, stage: str = "") -> None:
-    monkeypatch.setenv("EMMY_TILE", f"{atom}/f1x1")
+def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None:
+    monkeypatch.setenv("EMMY_TILE", f"{atom}/{tile}")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_REDUCE", "")
@@ -70,7 +70,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     assert atom.ptx_shape == (8, 8, 4)
     assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
-    assert atom.gmem_direct_only and not atom.c_to_a_repack
+    assert atom.materialized_edges_only and atom.sync_copy_staging and not atom.c_to_a_repack
 
     # The PTX C-fragment map covers the logical 16x16 output exactly once.
     coords = []
@@ -112,6 +112,34 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     assert ("emmy_mma884_load_b_gmem_trans(_b0" in src) == trans
     for forbidden in ("ldmatrix", "cp.async", "cp.async.bulk", "m16n8k16", ".bf16", ".e4m3", ".e5m2"):
         assert forbidden not in src
+
+
+@pytest.mark.parametrize("trans", [False, True])
+def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch, trans) -> None:
+    _pin(monkeypatch, VOLTA, stage="d1/sync")
+    src, knobs = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
+    assert knobs["STAGE"] == "d1/sync"
+    assert "__shared__ __half _a_smem[64]" in src
+    assert "__shared__ __half _b_smem[64]" in src
+    assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
+    b_helper = "emmy_mma884_load_b_smem_trans" if trans else "emmy_mma884_load_b_smem"
+    assert f"{b_helper}(_b0, &_b_smem" in src
+    assert src.count("__syncthreads();") == 2
+    for forbidden in ("ldmatrix", "cp.async", "cp.async.bulk", "m16n8k16"):
+        assert forbidden not in src
+
+
+def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
+    _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/sync/p2")
+    src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
+    assert knobs["TILE"] == f"{VOLTA}/f1x1/k2"
+    assert knobs["STAGE"] == "d2/sync/p2"
+    assert "__shared__ __half _a_smem[256]" in src
+    assert "__shared__ __half _b_smem[256]" in src
+    for fragment in ("_a0_s0", "_a0_s1", "_b0_s0", "_b0_s1"):
+        assert fragment in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32(_c0_0") == 2
+    assert "cp.async" not in src and "ldmatrix" not in src
 
 
 def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:

@@ -1,0 +1,171 @@
+# exllamav3 / tabbyAPI on the IDENTICAL GLM-4.5-Air 2.25 bpw EXL3 checkpoint (RTX 5090) —
+# the PRIMARY contender. Same weights, same quality, same tokenizer, same client: the only
+# thing being compared is kernels plus serving stack.
+#
+#   emmy bench experiments/GLM-4.5-Air-EXL3/serving_exllamav3_rtx5090 --local
+#
+# Docker-free by necessity — exllamav3 needs its own torch build (2.10.0+cu128 for sm_120)
+# and tabbyAPI is a source checkout, so this lane provisions a separate venv rather than
+# pulling an image. The emmy venv is never touched.
+#
+# ============================ TWO CACHE LANES, ON PURPOSE ============================
+# emmy serves this model with an fp8 KV cache because nothing else fits (recipes/
+# GLM-4.5-Air-EXL3). Comparing that against tabby's FP16 cache would hand emmy an
+# admission-capacity advantage that has nothing to do with kernels, so the grid runs
+# tabby BOTH ways and the article should quote the q4 lane as the like-for-like row:
+#   FP16  the engine's default precision, its own best latency
+#   Q4    its quantized cache — the nearest analogue of emmy's fp8 KV, roughly double the
+#         resident tokens
+# Phase 0 measured, on the 2.25 rung: the checkpoint loads at 29,750 MiB torch-allocated
+# and the cache maxes out at 4096 FP16 / 8192 Q4 tokens.
+#
+# TODO(Phase 6) — re-measure both cache ceilings on 2.25 before the sweep. Phase 0's
+#   numbers came off a probe, not a tabby boot, and tabby's loader reserve is more
+#   conservative than raw allocation: at 2.00 bpw it refused cache_size 32768 and 24576 in
+#   Q4 mode ("Insufficient VRAM in split") even though the allocation fit. Start at the
+#   values below and step down until the server loads; record what it took.
+#
+# ============================ THE PHASE 0 CLIENT ============================
+# The client invocation is the recorded one, verbatim, driven by scripts/bench_serve_sweep.py
+# (see the sibling serving_rtx5090 recipe's header for why every lane goes through that
+# driver). Two Phase 0 defects have to stay fixed or the numbers are quietly wrong:
+#   - tabby's exllamav3 backend crashes on the client's unconditional "logprobs": null.
+#     Server-side, no client workaround: scripts/patch_tabbyapi.py applies it below.
+#   - `vllm bench serve` wedges on CRLF-framed events and on sse-starlette's 15 s keepalive
+#     ping, and then reports empty generations with fabricated TPOT — at c=16 it silently
+#     lost 51 of 64 requests. That one is fixed CLIENT-side, once, inside
+#     bench_serve_sweep.py, so it protects every lane rather than this one; the driver also
+#     refuses to report any run that lost a request. `sse_ping_interval: 0` below removes
+#     the keepalive half at the source as well, which is a supported tabby config option
+#     and needs no source patch.
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+
+    REPO=turboderp/GLM-4.5-Air-exl3
+    REV=6a309ed6d606fc0154e6e1aeb0912cd3c25534fe
+    EXL3_VER=1.4.0
+    TABBY_REV=d844f705aa4f18b3425a4c611dc1ff7d59e8a256
+    ENVDIR=$$HOME/venvs/exl3
+    POINT=c${max_concurrency}_in${random_input_len}
+    OUT=$task_dir/$lane
+    mkdir -p $$OUT
+
+    # The full 29.37 GiB checkpoint, pinned to the rung's commit. Cached in the HF hub
+    # across runs; the first run on a fresh box pays the download.
+    SNAP=$$(./venv/bin/python -c "
+    from huggingface_hub import snapshot_download
+    print(snapshot_download('$$REPO', revision='$$REV'))")
+    echo "checkpoint snapshot: $$SNAP" | tee $task_dir/checkpoint.txt
+    [ -f "$$SNAP/quantization_config.json" ] || { echo "FATAL: $$SNAP is not an EXL3 checkpoint"; exit 1; }
+
+    # exllamav3 venv: a prebuilt wheel for sm_120, no JIT build. Recorded version goes in
+    # the manifest — this is an actively developed single-maintainer stack and a kernel
+    # change moves the baseline.
+    if [ ! -x "$$ENVDIR/bin/python" ]; then
+      python3 -m venv $$ENVDIR
+      $$ENVDIR/bin/pip install -q -U pip wheel
+      $$ENVDIR/bin/pip install -q torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+      $$ENVDIR/bin/pip install -q "exllamav3==$$EXL3_VER" --extra-index-url https://download.pytorch.org/whl/cu128
+    fi
+    $$ENVDIR/bin/python -c "import exllamav3, torch; print('exllamav3', exllamav3.__version__, '| torch', torch.__version__)" \
+      | tee $$OUT/versions.txt
+
+    if [ ! -d "$$ENVDIR/tabbyAPI" ]; then
+      git clone https://github.com/theroyallab/tabbyAPI $$ENVDIR/tabbyAPI
+      git -C $$ENVDIR/tabbyAPI checkout $$TABBY_REV
+      $$ENVDIR/bin/pip install -q -r $$ENVDIR/tabbyAPI/requirements.txt 2>/dev/null || true
+      # The one patch that has to be server-side (see the header).
+      ./venv/bin/python scripts/patch_tabbyapi.py --path $$ENVDIR/tabbyAPI
+    fi
+    git -C $$ENVDIR/tabbyAPI rev-parse HEAD | tee -a $$OUT/versions.txt
+
+    case "$cache_mode" in
+      FP16) CACHE=4096 ;;
+      Q4)   CACHE=8192 ;;
+      *)    echo "FATAL: unknown cache_mode $cache_mode"; exit 1 ;;
+    esac
+    cat > $$ENVDIR/tabbyAPI/config.yml <<YML
+    network:
+      host: 127.0.0.1
+      port: 5000
+      disable_auth: true
+      # Removes sse-starlette's 15 s keepalive comment at the source. The client-side
+      # hardening in bench_serve_sweep.py covers it too; both, because a silent wedge
+      # fabricates plausible numbers instead of failing.
+      sse_ping_interval: 0
+    model:
+      model_dir: $$(dirname $$SNAP)
+      model_name: $$(basename $$SNAP)
+      max_seq_len: 8192
+      cache_size: $$CACHE
+      cache_mode: $cache_mode
+    YML
+    cp $$ENVDIR/tabbyAPI/config.yml $$OUT/config.yml
+
+    stop() { pkill -f "[t]abbyAPI/main.py" 2>/dev/null || true; }
+    trap stop EXIT
+    stop; sleep 3
+    (cd $$ENVDIR/tabbyAPI && $$ENVDIR/bin/python main.py > $$OUT/server.log 2>&1 &)
+    for i in $$(seq 1 240); do curl -sf localhost:5000/health >/dev/null && break; sleep 5; done
+    curl -sf localhost:5000/health >/dev/null || { echo "FATAL: tabbyAPI never became healthy"; tail -40 $$OUT/server.log; exit 1; }
+
+    # --model is the served name, which for tabby is the checkpoint directory's name (the
+    # rung's commit sha). --tokenizer is the same snapshot every other lane tokenizes with.
+    ./venv/bin/pip install -q vllm 2>/dev/null || true
+    ./venv/bin/python scripts/bench_serve_sweep.py \
+      --out-dir $$OUT --point $$POINT --reps 3 --warmup 1 --seed-base 42 --gpu-index $gpu_device_ids -- \
+      --backend openai --endpoint /v1/completions --base-url http://127.0.0.1:5000 \
+      --model $$(basename $$SNAP) --tokenizer $$SNAP \
+      --dataset-name random --random-input-len $random_input_len --random-output-len $random_output_len \
+      --ignore-eos --num-prompts $num_prompts --max-concurrency $max_concurrency
+
+    # tabby's exllamav3 backend logs "Ignoring sampler params ... ban_eos_token" and does not
+    # honour ignore_eos. With random-token prompts the outputs still reach the 128-token cap
+    # in practice, so the point stands at these lengths — but check it rather than assume it.
+    grep -c "Ignoring sampler params" $$OUT/server.log > $$OUT/ignored_sampler_params.txt || true
+    echo "GLM_LANE_DONE $lane $$POINT"
+  result_files:
+    - "*/*.txt"
+    - "*/*.json"
+    - "*/*.csv"
+    - "*/*.yml"
+    - "*/*.log"
+    - "checkpoint.txt"
+  timeout: 28800
+
+matrices:
+  # One entry per cache lane rather than a cross over both: a `cross` node takes at most one
+  # nested `zip` (a dict has one key of that name), and the two lanes differ in two fields.
+  # ---- FP16 cache: the engine's default precision ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    lane: exllamav3
+    cache_mode: FP16
+    benchmark.random_output_len: 128
+    cross:
+      benchmark.random_input_len: [512, 2048]
+      zip:
+        benchmark.max_concurrency: [1, 4, 8, 16]
+        benchmark.num_prompts: [8, 24, 48, 64]
+
+  # ---- Q4 cache: the like-for-like row against emmy's fp8 KV ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    lane: exllamav3q4
+    cache_mode: Q4
+    benchmark.random_output_len: 128
+    cross:
+      benchmark.random_input_len: [512, 2048]
+      zip:
+        benchmark.max_concurrency: [1, 4, 8, 16]
+        benchmark.num_prompts: [8, 24, 48, 64]

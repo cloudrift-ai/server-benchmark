@@ -1,0 +1,164 @@
+# GLM-4.5-Air 2.25 bpw EXL3 on one RTX 5090 — the emmy lane and the stock-vLLM lane.
+#
+#   emmy bench experiments/GLM-4.5-Air-EXL3/serving_rtx5090 --local
+#
+# Sibling lanes, run separately and folded together by the README's aggregation step:
+#   serving_exllamav3_rtx5090   the PRIMARY contender — exllamav3/tabbyAPI on the IDENTICAL
+#                               checkpoint, so the fight is pure kernels plus serving
+#   serving_llamacpp_rtx5090    the secondary lane at matched bpw — what the community runs
+#
+# WHY THIS IS A COMMAND RECIPE AND NOT AN INFERENCE ONE. The harness's inference path
+# (`engine.llm` + `benchmark:`) builds its own `vllm bench serve` argument list, runs it
+# inside the vLLM image, and records nothing about the GPU. Three requirements of this
+# comparison need more than that, and all three are load-bearing rather than cosmetic:
+#   1. every lane must issue the SAME client invocation, character for character, as the
+#      one the exllamav3 baseline was measured with (plans/vq-phase0-findings.md §5) —
+#      tabbyAPI and llama.cpp are not deployable through `engine.llm` at all, so the only
+#      way to share one client is to drive it explicitly;
+#   2. power draw and peak VRAM are part of the deliverable, and the inference path has no
+#      hook for a poller;
+#   3. the stock-vLLM row is a LOAD FAILURE, and a failed deploy writes no result file —
+#      the harness logs it and moves on. That row is the article's headline, so it has to
+#      land as a committed artifact with the engine's own error text in it.
+# scripts/bench_serve_sweep.py is the shared driver: verbatim passthrough after `--`,
+# repeats with per-run seeds, a discarded warmup, 1 Hz nvidia-smi polling, and a hard
+# failure when a run loses requests.
+#
+# ============================ THE WORKLOAD GRID ============================
+# 512 in / 128 out at c = 1/4/8/16 with N = 8/24/48/64 is the Phase 0 grid exactly, so
+# these cells are directly comparable to the recorded exllamav3 numbers — after those are
+# RE-MEASURED on 2.25 bpw (Phase 0 measured the 2.00 rung; see the README).
+# 2048 in / 128 out is the long-input point: TTFT-dominated, and at c=16 it asks for
+# 16 x 2176 = 34,816 KV tokens against a pool of a few thousand, which is exactly the
+# admission-capacity limit the plan says to measure early and report honestly.
+#
+# TODO(Phase 5) — the input lengths are provisional and follow max-model-len. If the
+#   headroom sweep pins 8192, promote the long-input point 2048 -> 4096 (4096 + 128 still
+#   fits) and keep 512 as the comparability point. If it pins 4096 or less, 2048 stays and
+#   the README must say the long-input point is shorter than the article's usual 4K.
+#
+# Each point: 1 discarded warmup + 3 recorded runs, seeds 42 / 43 / 44 / 45 — the Phase 0
+# protocol plus one extra recorded run (Phase 0 recorded two).
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm 2>/dev/null || true
+
+    REPO=turboderp/GLM-4.5-Air-exl3
+    REV=6a309ed6d606fc0154e6e1aeb0912cd3c25534fe
+    IMAGE_EMMY=cloudriftai/vllm-emmy-glm-4.5-air-exl3:latest
+    IMAGE_STOCK=vllm/vllm-openai:v0.23.0
+    POINT=c${max_concurrency}_in${random_input_len}
+    OUT=$task_dir/$lane
+    mkdir -p $$OUT
+
+    # ONE tokenizer for every lane and every engine, pinned to the rung's commit: token
+    # accounting is what turns latency into tok/s, so a lane that tokenizes differently is
+    # not measuring the same workload. Tokenizer files only — the weights come from
+    # whatever each lane loads.
+    SNAP=$$(./venv/bin/python -c "
+    from huggingface_hub import snapshot_download
+    print(snapshot_download('$$REPO', revision='$$REV', allow_patterns=['*.json','*.txt','*.model','*.py']))")
+    echo "tokenizer snapshot: $$SNAP" | tee $task_dir/tokenizer.txt
+
+    stop() { docker rm -f glm_$lane >/dev/null 2>&1 || true; }
+    trap stop EXIT
+    stop
+
+    case "$lane" in
+    emmy)
+      # The prebuilt per-model image (docker/vllm-emmy-serve/): checkpoint snapshot, warmed
+      # sm_120 cubins and the execution-plan pack baked in. The flags below MUST match
+      # recipes/GLM-4.5-Air-EXL3/recipe.yaml — that recipe is the deployment config this
+      # lane measures, and the pack is keyed on the serving shape, so a drift here means
+      # this lane benchmarks a cold-compiled server instead of the released one.
+      #
+      # TODO(Phase 5) — the image does not exist yet, and every serving-shape value on the
+      #   next few lines (--max-model-len, --gpu-memory-utilization,
+      #   --max-num-batched-tokens, --kv-cache-dtype, EMMY_GEN_DECODE_BUCKET) is an
+      #   estimate carried over from recipes/GLM-4.5-Air-EXL3/recipe.yaml, where the
+      #   reasoning behind each one is written out. When the headroom sweep pins them,
+      #   change BOTH files together — a test asserts they agree.
+      docker run -d --rm --name glm_emmy --gpus all --ipc=host -p 8000:8000 \
+        -e EMMY_GEN_DECODE_BUCKET=16 -e EMMY_GEN_M1_TIER=1 \
+        $$IMAGE_EMMY \
+        --revision $$REV --runner generate --dtype float16 \
+        --max-model-len 8192 --gpu-memory-utilization 0.97 \
+        --hf-overrides '{"architectures":["EmmyGenModel"],"quantization_config":null}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}' \
+        --kv-cache-dtype fp8_e4m3 --max-num-batched-tokens 2064 --no-enable-prefix-caching
+      # A pack-hit boot still loads ~29 GB of coded weights; a pack MISS re-runs the
+      # compiler frontend per program. 40 min covers the first, not the second — a timeout
+      # here means the deployed shape drifted off the warmed one.
+      for i in $$(seq 1 480); do curl -sf localhost:8000/health >/dev/null && break; sleep 5; done
+      curl -sf localhost:8000/health >/dev/null || {
+        docker logs glm_emmy > $$OUT/boot.log 2>&1; echo "FATAL: emmy lane never became healthy"; exit 1; }
+      docker logs glm_emmy > $$OUT/boot.log 2>&1
+
+      ./venv/bin/python scripts/bench_serve_sweep.py \
+        --out-dir $$OUT --point $$POINT --reps 3 --warmup 1 --seed-base 42 --gpu-index $gpu_device_ids -- \
+        --backend openai --endpoint /v1/completions --base-url http://127.0.0.1:8000 \
+        --model $$REPO --tokenizer $$SNAP \
+        --dataset-name random --random-input-len $random_input_len --random-output-len $random_output_len \
+        --ignore-eos --num-prompts $num_prompts --max-concurrency $max_concurrency
+      ;;
+    stock)
+      # EXPECTED TO FAIL, and the failure is the result. vLLM has no EXL3 quantization
+      # method and aborts the boot with "Unknown quantization method: exl3"; there is no
+      # flag that makes it read these files. Nothing is benchmarked — the artifact is the
+      # engine's own error text, captured verbatim. The one deliberate concession is
+      # --max-model-len 8192, so nobody can claim the failure was a context or memory
+      # choice: it happens during config parsing, before any weight is touched.
+      set +e
+      timeout 1800 docker run --rm --name glm_stock --gpus all --ipc=host -p 8000:8000 \
+        -v $$HOME/.cache/huggingface:/root/.cache/huggingface \
+        $$IMAGE_STOCK --model $$REPO --revision $$REV \
+        --max-model-len 8192 --gpu-memory-utilization 0.97 > $$OUT/load.log 2>&1
+      rc=$$?
+      set -e
+      echo "stock vLLM $$IMAGE_STOCK exit=$$rc" | tee $$OUT/verdict.txt
+      grep -iE "quantization method|exl3|Traceback|Error" $$OUT/load.log | tail -20 | tee -a $$OUT/verdict.txt
+      if [ $$rc -eq 0 ]; then
+        echo "UNEXPECTED: stock vLLM served the EXL3 checkpoint — the plan's headline row is wrong" | tee -a $$OUT/verdict.txt
+        exit 1
+      fi
+      ;;
+    esac
+    echo "GLM_LANE_DONE $lane $$POINT"
+  result_files:
+    - "*/*.txt"
+    - "*/*.json"
+    - "*/*.csv"
+    - "*/*.log"
+    - "tokenizer.txt"
+  timeout: 21600
+
+matrices:
+  # ---- emmy: the full grid, 8 points ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    lane: emmy
+    benchmark.random_output_len: 128
+    cross:
+      benchmark.random_input_len: [512, 2048]
+      zip:
+        benchmark.max_concurrency: [1, 4, 8, 16]
+        benchmark.num_prompts: [8, 24, 48, 64]
+
+  # ---- stock vLLM: one point, and it is a load-failure record, not a measurement ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    lane: stock
+    benchmark.random_input_len: 512
+    benchmark.random_output_len: 128
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 8

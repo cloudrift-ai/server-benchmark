@@ -1,0 +1,128 @@
+# llama.cpp on GLM-4.5-Air at MATCHED bit rate (RTX 5090) — the secondary lane: not the
+# same weights, but what most of the community actually runs at this size on this card.
+#
+#   emmy bench experiments/GLM-4.5-Air-EXL3/serving_llamacpp_rtx5090 --local
+#
+# llama.cpp cannot read EXL3 files, so this lane is a DIFFERENT quantization of the same
+# base model at a comparable bit rate. That makes it a market comparison, not an
+# apples-to-apples one: any quality difference belongs to the format, and the article must
+# say so rather than presenting the row beside the exllamav3 lane without qualification.
+# The apples-to-apples fight is serving_exllamav3_rtx5090.
+#
+# TODO(Phase 6) — pin the GGUF. GGUF_REPO / GGUF_FILE below name the class of quant the
+#   plan calls for (Unsloth UD-IQ2, ~2.2-2.5 bpw); the exact filename must be resolved
+#   against the repo's listing at run time and then written in here, pinned by revision the
+#   same way the EXL3 rung is. The lane refuses to run outside a size band around the EXL3
+#   checkpoint's 29.37 GiB, so a mis-picked rung fails loudly instead of quietly
+#   benchmarking a different bit rate. If a trellis-vs-trellis point is wanted instead, the
+#   plan's alternative is IQ2_KT under ik_llama.cpp — a different fork and a different
+#   build, i.e. a second lane, not a flag on this one.
+#
+# ============================ THINGS THAT WILL FAIL ============================
+# llama.cpp preallocates the WHOLE KV cache up front — no paged allocator. Beside ~29 GB of
+# weights on a 32 GB card that leaves roughly 2 GB, so the context is sized to the workload
+# (concurrency x (in + out)) rather than to a protocol constant, and the KV is q8_0 on both
+# sides — the nearest analogue of emmy's fp8 KV, and the only way the wider cells fit at
+# all. The c=16 / 2048-in cell asks for 16 x 2176 = 34,816 tokens and is expected to OOM;
+# that failure is a row in the table, like the gemma article's c=64 footnote, not a harness
+# bug.
+#
+# ============================ THE SSE CHECK ============================
+# This lane drives the SAME client as every other (scripts/bench_serve_sweep.py). Phase 0
+# found that `vllm bench serve` wedges permanently on CRLF-framed SSE and on keepalive
+# comments, and then reports empty generations with fabricated TPOT instead of an error —
+# so llama-server's framing must be checked, not assumed. Two things cover it: the driver
+# hardens the parser (CRLF normalization + comment-line drop) before it runs, and it
+# refuses to report any run whose requests did not all complete. A wedge here therefore
+# shows up as a failed task, never as a plausible-looking number.
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm 2>/dev/null || true
+
+    REPO=turboderp/GLM-4.5-Air-exl3
+    REV=6a309ed6d606fc0154e6e1aeb0912cd3c25534fe
+    GGUF_REPO=unsloth/GLM-4.5-Air-GGUF
+    GGUF_FILE=UD-IQ2_XXS/GLM-4.5-Air-UD-IQ2_XXS-00001-of-00001.gguf
+    SRC=$$HOME/src/llama.cpp
+    POINT=c${max_concurrency}_in${random_input_len}
+    OUT=$task_dir/$lane
+    mkdir -p $$OUT
+
+    # The same tokenizer every other lane uses, off the pinned EXL3 rung: llama.cpp reports
+    # its own token counts, but the CLIENT's tok/s must be computed the same way in every
+    # lane or the throughput columns are not comparable.
+    SNAP=$$(./venv/bin/python -c "
+    from huggingface_hub import snapshot_download
+    print(snapshot_download('$$REPO', revision='$$REV', allow_patterns=['*.json','*.txt','*.model','*.py']))")
+
+    # Build llama.cpp with CUDA for the live card. Fail fast on a missing toolchain, and
+    # bound build parallelism by RAM — the CUDA attention template instances run ~3 GB per
+    # job and -j$(nproc) gets OOM-killed on a 32-core / 60 GB box.
+    command -v cmake >/dev/null || { echo "FATAL: cmake not on PATH"; exit 1; }
+    if [ ! -x "$$SRC/build/bin/llama-server" ]; then
+      git clone --depth 1 https://github.com/ggml-org/llama.cpp $$SRC
+      arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+      jobs=$$(nproc); memg=$$(free -g | awk '/^Mem:/{print $$2}'); [ $$((memg / 3)) -lt $$jobs ] && jobs=$$((memg / 3))
+      cmake -S $$SRC -B $$SRC/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$$arch -DLLAMA_CURL=ON > $$OUT/cmake.log 2>&1
+      cmake --build $$SRC/build --target llama-server -j $$jobs >> $$OUT/cmake.log 2>&1
+    fi
+    $$SRC/build/bin/llama-server --version 2>&1 | head -2 | tee $$OUT/versions.txt
+
+    GGUF=$$(./venv/bin/python -c "
+    from huggingface_hub import hf_hub_download
+    print(hf_hub_download('$$GGUF_REPO', '$$GGUF_FILE'))")
+    bytes=$$(stat -c %s "$$GGUF")
+    echo "gguf $$GGUF_REPO/$$GGUF_FILE = $$bytes bytes (EXL3 2.25bpw reference: 31536000000)" | tee -a $$OUT/versions.txt
+    # Matched-bit-rate guard: the EXL3 rung is 29.37 GiB, so accept roughly 2.0-2.5 bpw and
+    # refuse anything else rather than publish a mislabelled row.
+    [ "$$bytes" -ge 27000000000 ] && [ "$$bytes" -le 35000000000 ] || {
+      echo "FATAL: GGUF is $$bytes bytes — outside the matched-bit-rate band (27-35 GB). Pin a different quant."; exit 1; }
+
+    # Context sized to the workload, q8_0 KV on both sides. llama.cpp allocates it all at
+    # boot, so an over-sized -c is an OOM rather than spare capacity.
+    CTX=$$(( $max_concurrency * ($random_input_len + $random_output_len + 64) ))
+    stop() { pkill -f "[l]lama-server" 2>/dev/null || true; }
+    trap stop EXIT
+    stop; sleep 3
+    $$SRC/build/bin/llama-server -m $$GGUF --alias $$REPO -ngl 99 -fa on --no-webui \
+      --cache-type-k q8_0 --cache-type-v q8_0 \
+      --parallel $max_concurrency -c $$CTX --host 127.0.0.1 --port 8010 > $$OUT/server.log 2>&1 &
+    for i in $$(seq 1 240); do curl -sf localhost:8010/health >/dev/null && break; sleep 5; done
+    curl -sf localhost:8010/health >/dev/null || {
+      echo "llama-server did not come up at c=$max_concurrency ctx=$$CTX — expected for the widest cells (whole-KV preallocation)"
+      tail -30 $$OUT/server.log | tee $$OUT/oom.txt; exit 1; }
+
+    ./venv/bin/python scripts/bench_serve_sweep.py \
+      --out-dir $$OUT --point $$POINT --reps 3 --warmup 1 --seed-base 42 --gpu-index $gpu_device_ids -- \
+      --backend openai --endpoint /v1/completions --base-url http://127.0.0.1:8010 \
+      --model $$REPO --tokenizer $$SNAP \
+      --dataset-name random --random-input-len $random_input_len --random-output-len $random_output_len \
+      --ignore-eos --num-prompts $num_prompts --max-concurrency $max_concurrency
+    echo "GLM_LANE_DONE $lane $$POINT"
+  result_files:
+    - "*/*.txt"
+    - "*/*.json"
+    - "*/*.csv"
+    - "*/*.log"
+  timeout: 28800
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    lane: llamacpp
+    benchmark.random_output_len: 128
+    cross:
+      benchmark.random_input_len: [512, 2048]
+      zip:
+        benchmark.max_concurrency: [1, 4, 8, 16]
+        benchmark.num_prompts: [8, 24, 48, 64]

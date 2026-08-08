@@ -1,0 +1,128 @@
+# GLM-4.5-Air (106B-A12B) from an EXL3 trellis-coded checkpoint at 2.25 bpw — the
+# recommended serving configuration: vLLM + the emmy generative plugin (EmmyGenModel),
+# FP16 activations, weights decoded inside emmy's kernels, one RTX 5090.
+#
+#   emmy deploy local --recipe recipes/GLM-4.5-Air-EXL3
+#   emmy deploy ssh   --recipe recipes/GLM-4.5-Air-EXL3 --ssh user@host
+#
+# This file is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no
+# `benchmark:` block. The A/B grid against exllamav3, llama.cpp and stock vLLM lives in
+# experiments/GLM-4.5-Air-EXL3/serving_rtx5090/.
+#
+# ============================ THE PINNED CHECKPOINT ============================
+#   repo     turboderp/GLM-4.5-Air-exl3      (the format author's own conversion, MIT)
+#   branch   2.25bpw                          (the Hessian-allocated "optimized" rung)
+#   commit   6a309ed6d606fc0154e6e1aeb0912cd3c25534fe
+#   size     29.37 GiB on disk
+# The pin is load-bearing twice over. EXL3 is a single-maintainer, actively-developed
+# format, so a re-cut checkpoint under the same branch name would silently change both the
+# quality numbers and the per-tensor bit allocation the goldens are keyed on. And the rung
+# is a BRANCH, not `main`: without `--revision` this id resolves to the 2.00 bpw default
+# and serves a different model. The 2.00 rung failed the quality gate (KL 0.409, ΔPPL
+# +1.97); 2.25 passes the KL arm at 0.272 with ΔPPL +1.21 — see plans/vq-phase0-findings.md.
+#
+# ============================ WHAT IS STILL A TODO ============================
+# Five values below are Phase 5's to pin by measurement (the release workflow's headroom
+# sweep, docker/vllm-emmy-serve/ARCHITECTURE.md step 4). They are marked `TODO(Phase 5)`
+# and carry the current best estimate plus the arithmetic behind it. The measured budget
+# they all draw on, from the full 46-layer boot on 2026-08-07:
+#
+#   card                          31.843 GiB (32607 MiB)
+#   emmy-owned resident           28.888 GiB  = experts 25.099 + trunk codes/siblings
+#                                               2.493 + trunk fp16-kept 1.296
+#   free at the runner's own boot  1.28 GiB   (nvidia-smi 31299 of 32607 MiB) — BEFORE
+#                                               vLLM's lm_head and its KV cache
+#   lm_head                        0.434 GiB coded / 1.156 GiB decoded to fp16
+#   KV per token                   0.180 MiB fp16 / 0.090 MiB fp8_e4m3
+#
+# So the head decision eats the context budget whole: EmmyGenModel decodes the coded head
+# at load today (1.156 GiB), which leaves ~0.12 GiB and no usable KV pool at all. Giving
+# the runner the head coded, and reclaiming the allocators' free blocks at the end of
+# boot, are what buy the numbers guessed below. Measure; do not deploy the estimates.
+model:
+  huggingface: "turboderp/GLM-4.5-Air-exl3"
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    # TODO(Phase 5) — measure. Estimate 8192, floor 2048.
+    #   8192 tokens of fp8 KV costs 0.72 GiB; 4096 costs 0.36; 16384 costs 1.44. Against
+    #   ~1.28 GiB free at boot MINUS whatever the head takes, only the coded-head lane
+    #   reaches 8192. 8192 is also what the exllamav3 baseline was measured at (its fp16
+    #   cache maxed at exactly 8192 tokens), so it is the value that makes the primary
+    #   comparison a like-for-like one — which is the reason to fight for it.
+    #   vLLM refuses to boot when max-model-len exceeds the KV pool, so this cannot be set
+    #   optimistically: it is the sweep's OUTPUT.
+    context_length: 8192
+    # TODO(Phase 5) — measure, but there is little room to move. The emmy generative arm
+    #   claims its cupy/torch residents BEFORE vLLM's memory profiler runs, so they must
+    #   sit inside this budget: 28.888 / 31.843 = 0.907 is the hard floor, and each 0.01
+    #   of utilization is 0.318 GiB ≈ 3,600 fp8 KV tokens. 0.97 leaves ~0.94 GiB above the
+    #   weights for the head, the CUDA context, emmy's activation arena and the pool.
+    #   It is BRITTLE: at this utilization nothing else may touch the card — a second
+    #   process, or a display server, and the boot fails the KV min-fit check.
+    gpu_memory_utilization: 0.97
+    vllm:
+      # TODO(Phase 5) — the prebuilt per-model image does not exist yet. The slug is fixed
+      #   by docker/vllm-emmy-serve/model_slug.sh (turboderp/GLM-4.5-Air-exl3 →
+      #   glm-4.5-air-exl3); the tag comes out of `make serve-push MODEL=…`.
+      #   Two release-pipeline gaps block that build and are neither this file's to fix
+      #   nor safe to discover during a warm run:
+      #     - models/<slug>.env has no SERVE_REVISION and serve.sh passes no --revision,
+      #       so the warm would bake the DEFAULT branch (2.00 bpw), not this rung.
+      #     - serve.sh hardcodes --hf-overrides '{"architectures": ["EmmyGenModel"]}' with
+      #       no EXL3 arm and a power-of-two cudagraph ladder. An EXL3 boot needs
+      #       "quantization_config": null (vLLM has no exl3 quant method and refuses the
+      #       boot outright), and an MoE boot needs the capture ladder capped at 1.
+      #       Both are what `emmy serve --generate` already does; serve.sh has to catch up
+      #       or the warm run dies before it compiles anything.
+      image: "cloudriftai/vllm-emmy-glm-4.5-air-exl3:latest"
+      # --revision pins the rung's commit (see the header). --hf-overrides carries the two
+      # overrides emmy/commands/serve.py builds for this class of checkpoint: the plugin
+      # architecture, and quantization_config: null — vLLM has no EXL3 quantization method
+      # and refuses the boot with "Unknown quantization method: exl3", yet nothing in the
+      # engine needs one (emmy owns every coded weight). The compilation-config is the MoE
+      # form: whole-step decode cudagraphs capped at capture size 1, because single-token
+      # steps ride the fixed-slot expert dispatch (capture-legal) while wider decode steps
+      # host-sync and must stay eager. --no-enable-prefix-caching matches the benchmark
+      # protocol, where every request does full prefill work.
+      #
+      # TODO(Phase 5) — --kv-cache-dtype: measure, but fp8_e4m3 is effectively mandatory,
+      #   not an option. fp16 KV costs 0.180 MiB/token and halves an already tiny pool;
+      #   the glue landed in 3a79ac6e and measured exactly 2.0x the token capacity on a
+      #   smoke model. Two consequences to carry into Phase 6: the quality re-gate must be
+      #   run WITH fp8 KV on (the checkpoint's KL/PPL is not the served model's), and the
+      #   exllamav3 baseline should be compared against its own q4 cache lane, not only
+      #   its fp16 one.
+      # TODO(Phase 5) — --max-num-batched-tokens: measure. Estimate 2048 + the decode
+      #   bucket (= 2064 at bucket 16). Ceiling is emmy's dynamic-dim prefill cap 4096
+      #   plus the bucket-sized rider headroom; below that, a narrower chunk means a
+      #   smaller activation arena and therefore more KV, which is the scarce resource
+      #   here. Sweep {1024, 2048, 4096} + bucket and take the widest that still boots
+      #   with the context above.
+      extra_args: >-
+        --revision 6a309ed6d606fc0154e6e1aeb0912cd3c25534fe
+        --runner generate --dtype float16
+        --hf-overrides '{"architectures":["EmmyGenModel"],"quantization_config":null}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}'
+        --kv-cache-dtype fp8_e4m3
+        --max-num-batched-tokens 2064
+        --no-enable-prefix-caching
+      extra_env:
+        # TODO(Phase 5) — measure. Estimate 16 (emmy's own default), which covers the
+        #   benchmark grid's c=16 in one static decode twin. The full-boot smoke run used
+        #   8. The bucket is part of the execution-plan pack key, so the value here and
+        #   the value the image is warmed at must be the same or every boot re-runs the
+        #   compiler frontend; warm the alternatives as extra SERVE_WARM_SHAPES rather
+        #   than editing this after the bake.
+        EMMY_GEN_DECODE_BUCKET: "16"
+        # The static M=1 decode twins — the gemv-class tier the trellis decode band was
+        # built for, and where the TPOT win cashes out (the seeded goldens for this model
+        # are M=1 entries). On by default; named explicitly because the Phase 3.4 boot
+        # smoke test ran with it OFF to bound cold-boot time, and that is not the
+        # serving configuration.
+        EMMY_GEN_M1_TIER: "1"
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

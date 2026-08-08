@@ -65,6 +65,12 @@ Two ceilings decide most of a serving config, and both are measured rather than 
 - **The prefill-chunk cap is a compiler limit.** `--max-num-batched-tokens` rides the 4096 dynamic-dim cap (plus
   bucket-sized rider headroom); long inputs stream through chunked prefill under it. Context length is not bounded
   by the compiler — RoPE and paged KV are vLLM-owned on this path.
+- **A quantized KV cache moves the first ceiling, and on a tight fit it is what makes the config possible at all.**
+  `--kv-cache-dtype fp8_e4m3` halves the bytes per token, so it roughly doubles the pool and therefore the context.
+  The cache is vLLM-owned on this path (emmy owns no KV), so it is a plain `extra_args` flag. It is a quality
+  decision as well as a capacity one: the served model's accuracy is no longer the checkpoint's, so a recipe that
+  turns it on owes a quality measurement taken with it on. `recipes/GLM-4.5-Air-EXL3` is the case where nothing fits
+  without it.
 
 Both numbers come from the headroom sweep in the release workflow, which is why adding a model means running that
 sweep rather than guessing (`release-serving-image` skill, Step 4).

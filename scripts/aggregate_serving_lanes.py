@@ -7,6 +7,9 @@ token throughput and median TTFT / TPOT — one column per lane, one row per wor
 plus a flat ``lanes.json`` with every parsed field for downstream tooling.
 
     python scripts/aggregate_serving_lanes.py _tune/artbench --lanes stock,emmy,fastmath,llamacpp
+
+The point names default to the gemma-4-12B article's grid; ``--points`` names a different
+one (``stem=label`` pairs, in table order) for any other experiment.
 """
 
 from __future__ import annotations
@@ -28,8 +31,8 @@ FIELDS = {
     "num_prompts": r"--num-prompts (\d+)",
 }
 
-POINT_ORDER = ["small_c1", "small_c64", "head_c1", "head_c4", "head_c8", "rag_c4"]
-POINT_LABEL = {
+DEFAULT_POINT_ORDER = ["small_c1", "small_c64", "head_c1", "head_c4", "head_c8", "rag_c4"]
+DEFAULT_POINT_LABEL = {
     "small_c1": "256 / 256 / c=1",
     "small_c64": "256 / 256 / c=64",
     "head_c1": "4096 / 4096 / c=1",
@@ -71,8 +74,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("root", help="results root: <root>/<lane>/<point>[_rN].txt")
     ap.add_argument("--lanes", default="stock,emmy,fastmath,llamacpp")
+    ap.add_argument("--points", default=None, help="comma-separated stem=label pairs in table order (default: the gemma-4-12B grid)")
     ap.add_argument("--out", default=None, help="output .md path (default <root>/lanes.md)")
     args = ap.parse_args()
+
+    if args.points:
+        pairs = [p.split("=", 1) for p in args.points.split(",")]
+        point_order = [stem for stem, _ in pairs]
+        point_label = dict(pairs)
+    else:
+        point_order, point_label = DEFAULT_POINT_ORDER, DEFAULT_POINT_LABEL
 
     root = Path(args.root)
     lanes = args.lanes.split(",")
@@ -80,7 +91,7 @@ def main() -> None:
     for lane in lanes:
         for f in sorted((root / lane).glob("*.txt")):
             m = re.match(r"([a-z0-9_]+?)(?:_r(\d+))?$", f.stem)
-            if not m or m.group(1) not in POINT_ORDER:
+            if not m or m.group(1) not in point_order:
                 continue
             s = parse_stanza(f)
             if s:
@@ -91,8 +102,8 @@ def main() -> None:
     def table(title: str, key: str, digits: int) -> list[str]:
         lines = [f"### {title}", "", "| in / out / conc | " + " | ".join(lanes) + " |"]
         lines.append("|---|" + "---:|" * len(lanes))
-        for pt in POINT_ORDER:
-            row = [POINT_LABEL[pt]]
+        for pt in point_order:
+            row = [point_label[pt]]
             for lane in lanes:
                 fd = folded.get(lane, {}).get(pt)
                 # a point whose requests didn't all succeed doesn't earn the cell

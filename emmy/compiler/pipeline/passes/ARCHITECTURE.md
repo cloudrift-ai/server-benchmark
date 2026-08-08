@@ -314,7 +314,10 @@ failing several passes later:
   mandatory `sync` compute-fill (the fill evaluates the decode into the K-major B slab the ldmatrix drain already
   reads, so the packed codes are the only weight bytes crossing DRAM; split-K declines — no gmem index to σ-reindex —
   and TMA / the copy transports decline on the edge test; the COLLAPSE reading carries the reduce-tier fallback, a
-  per-cell decode). Any other computed B raises, and the recognizer
+  per-cell decode). It binds that way on BOTH A arms — a decode leaf opposite a computed A cone is a
+  double-computed edge, and handing the bare leaf back would make it a materialized B whose staging gates
+  byte-copy the packed codes into the slab as decoded elements, dropping the decode from the kernel entirely.
+  Any other computed B raises, and the recognizer
   demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an

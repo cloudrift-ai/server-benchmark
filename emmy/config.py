@@ -288,12 +288,16 @@ def fp8_expand() -> bool:
 
 
 def trellis_expand() -> bool:
-    """``EMMY_TRELLIS_EXPAND`` — keep a HAT-BASIS trellis decode cone in-graph for the kernel
-    path (packed codes in device memory, the per-tile decode realized in the warp tier's
-    compute fill) by SKIPPING the ``032_fold_constant_subgraphs`` fold for it. OFF by default:
-    the fold collapses the cone into one bind-time-evaluated constant (the correctness lane —
-    the weight materializes at the compute dtype). Only hat-basis (``hadamard=False``) cones
-    are gated — the checkpoint-basis form has no kernel realization and folds regardless."""
+    """``EMMY_TRELLIS_EXPAND`` — the trellis KERNEL PATH: packed codes stay in device memory and
+    the per-tile decode is realized in the warp tier's compute fill. Two effects, both off by
+    default (the folded correctness lane — the weight materializes at the compute dtype):
+
+    - ``loader.quant.spell_trellis_constants`` rewrites the CONSUMING LINEAR into the
+      activation-side basis restore (``x·suh`` / the 128-block Hadamard / ``·svh``) around a
+      HAT-BASIS decode, instead of spelling the checkpoint-basis cone over the weight alone.
+    - ``032_fold_constant_subgraphs`` SKIPS the fold for hat-basis (``hadamard=False``) cones, so
+      they reach the lift. The checkpoint-basis form has no kernel realization and folds
+      regardless."""
     return _bool(TRELLIS_EXPAND)
 
 

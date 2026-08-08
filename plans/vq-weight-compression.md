@@ -296,6 +296,37 @@ Order matters — the fragment path first, or every measurement undersells the f
 2. **Reduce/gemv tier, decode phase**: the LUT decode needs a reduce-tier realization. This is where TPOT cashes out.
 3. **Activation-side Hadamard** as a computed-A-style prologue, if the format requires it at kernel level rather
    than being foldable into the checkpoint.
+   **STATUS: DONE (2026-08-07).** Under the same `EMMY_TRELLIS_EXPAND` gate, `spell_trellis_constants` now
+   rewrites the CONSUMING LINEAR instead of the weight constant:
+   `x → [pad to k_pad] → ·suh → H → ·1/16 → @ W_hat → ·1/8 → H → ·svh → [slice] → [+bias]`. The 128-block
+   Hadamard is plain algebra (a 128x128 matmul over a 128-blocked operand against one graph-wide `HadamardOp`
+   constant, symmetric so no transpose) — no butterfly realization was needed. Two placement rules are
+   load-bearing: every layout change rides a POINTWISE, never a matmul's activation operand (see the residual
+   below), and the `1/sqrt(128)` per side splits into the exact powers of two `1/16` / `1/8` so the constant is
+   plain ±1 and intermediates stay below the balanced magnitude. Accuracy vs the checkpoint-basis reference
+   (`fold_hadamard`), f16 matmul tolerance: 5e-4 numpy, ≤1.2e-3 on CUDA over M=1..128, K=2/3/6, all three
+   codebooks, both padding directions, bias — and on real GLM-4.5-Air `q_proj` siblings. A config-truncated
+   one-layer cut of the pinned 2.25bpw checkpoint runs end to end on the 5090 under the gate (7 constants
+   spelled, 7 launches carrying `emmy_trellis_decode`, `max_diff 0.0023` vs eager, PASS). NOTE `emmy run
+   --layer` does NOT exercise this: the layer path binds constants from the decoded twin MODULE, whose
+   parameter paths never reach the checkpoint index, so the speller is a no-op there — use a whole-model trace.
+   Hadamard tax on the
+   5090 at N=K=22016, K=2 (past L2), against the same matmul with no basis restore: **+4.5 % at M=1, +13.4 % at
+   M=128**, in 3–4 kernels (the scale multiplies fuse as computed-A cones) — at/under exllamav3's ~14 %.
+   Two defects fixed on the way: `bind_contraction` handed the decode leaf back as a MATERIALIZED B whenever A
+   was a computed cone (the staging gates then byte-copied the packed codes into the slab and the decode
+   vanished from the kernel — a hang/fault); and the residual below.
+   **RESIDUAL — a pre-existing miscompile, not trellis-specific**: an index map that reaches a matmul's
+   ACTIVATION operand (a K-regrouping reshape, an A-side transpose) is silently mis-lowered — the fragment
+   loaders take the operand's declared row stride, not the one the index implies. Reproduces on plain f16
+   linears with no quantization (`x (128,256) → reshape (256,128) → linear` is wrong on the TMA, gmem-direct and
+   reduce paths; `d2/cp` alone is right). The chain above dodges it by construction. Fixing it (derive the
+   operand stride from the index, or decline) would collapse the chain to fewer kernels and is the main lever
+   left on the tax.
+   **RESIDUAL — pack saving on N-padded linears**: their `svh` leaf carries a graph slice that folds into the
+   constant's load chain as an `IndexMapOp`, which `_encode_load_ops`' two-form vocabulary cannot express, so
+   that one small vector logs "will not rebind from a pack". `suh` is fine (its reshape IS in the vocabulary).
+   Extend the vocabulary before Phase 5 bakes an image.
 4. Expert-path integration: the routed expert FFN matmuls are the bulk of the bytes; confirm indirect operands and
    the compute fill compose.
 

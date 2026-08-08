@@ -177,8 +177,8 @@ every linear is coded — the quantizer keeps sensitivity-selected ones at plain
 `o_proj`), and those load as ordinary tensors.
 
 **In-kernel trellis decode (computed-B).** The HAT-BASIS form of the op (`TrellisDecodeOp(hadamard=False)` —
-the raw per-tile decode, no channel vectors, no Hadamard fold; the activation-side basis restore is separate
-graph algebra, later work) has a kernel realization: it lifts to a `LoopOp` of per-element `TrellisLoad` reads
+the raw per-tile decode, no channel vectors, no Hadamard fold; the basis restore rides the activations, below)
+has a kernel realization: it lifts to a `LoopOp` of per-element `TrellisLoad` reads
 (the window is directly addressable in the tile's circular bit stream, so each element decodes independently —
 no carried walk state), loop fusion inlines it into the consuming matmul, and the contraction binder stores it
 as a COMPUTED-B cone. The warp tier then schedules it over the mandatory `sync` compute-fill: the fill decodes
@@ -193,6 +193,25 @@ at N=K=22016, K=2 (codes 121 MB — past L2): the compressed matmul beats the sa
 (2.10 vs 2.34 ms) and runs decode-ALU-bound at larger prefill M (1.6–1.7× f16 at M=256–2048) — the per-element
 decode re-runs per M-tile row, which is the standing lever for the reduce-tier (decode-phase) and
 fragment-drain follow-ups.
+
+**Activation-side basis restore.** Only `W_hat` decodes in-kernel, so under the same `EMMY_TRELLIS_EXPAND` gate
+`spell_trellis_constants` rewrites the CONSUMING LINEAR instead of the weight constant, moving the checkpoint's
+`W = diag(suh)·H·W_hat·H·diag(svh)` basis onto the activations — `x → [pad to k_pad] → ·suh → H → ·1/16 →
+@ W_hat → ·1/8 → H → ·svh → [slice] → [+bias]`. The 128-block Hadamard is spelled as PLAIN ALGEBRA: a
+128×128 matmul over a 128-blocked operand against one graph-wide `HadamardOp` constant (a zero-input generator
+inside a zero-leaf `source_graph` bind record — the matrix has no checkpoint source; symmetric, so `LinearOp`
+needs no transpose), which puts the transform on the existing tiers with no new kernel machinery. Two rules make
+the chain lower correctly and are load-bearing: every layout change (the encode-pad concat, the flat↔block
+reshapes, the output slice) is absorbed by a POINTWISE and never reaches a matmul's activation operand, and the
+`1/sqrt(128)` per side is split as the exact powers of two `1/16` before the weight and `1/8` after, so the
+shared constant is plain ±1 and both intermediates stay below the balanced magnitude. A linear the rewrite
+declines (a weight without exactly one `LinearOp` consumer, symbolic activation dims) falls back to the folded
+checkpoint-basis cone, correct everywhere. Measured on the 5090 at N=K=22016, K=2 (past L2), against the same
+matmul with no basis restore: **+4.5 % at M=1 and +13.4 % at M=128**, the transforms collapsing into 3–4 kernels
+(the scale multiplies fuse as computed-A cones on the two Hadamard matmuls) — at or under exllamav3's ~14 %
+standalone cost. At L2-resident shapes the ratio is much worse (+36 % / +68 % at M=128 on the GLM dense
+projections) because the compressed matmul is artificially fast there; those absolute microseconds do not
+predict in-model step time.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph

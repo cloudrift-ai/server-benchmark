@@ -13,13 +13,14 @@ Three groups:
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
    ``MeanOp``. Rewritten to elementwise/reduce chains (sometimes with
    inserted ``IndexMapOp`` unsqueezes so the broadcast contraction works).
-3. **Storage-decode ops** — ``TrellisDecodeOp``. The full (``hadamard=True``) form is not
-   decomposed: it only ever appears inside a constant-only cone that
-   ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph`` record, where
-   its numpy ``forward`` runs through the reference NumPy backend. The HAT-BASIS form
+3. **Storage-decode ops** — ``TrellisDecodeOp``, ``HadamardOp``. ``TrellisDecodeOp``'s full
+   (``hadamard=True``) form is not decomposed: it only ever appears inside a constant-only cone
+   that ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph`` record,
+   where its numpy ``forward`` runs through the reference NumPy backend. The HAT-BASIS form
    (``hadamard=False``) has a kernel realization: it lifts to a ``LoopOp`` of per-element
    ``TrellisLoad`` reads (``loop/lifting/050_lift_trellis_decode``) so loop fusion can inline
-   it into its consuming matmul as a computed-B cone.
+   it into its consuming matmul as a computed-B cone. ``HadamardOp`` is a zero-input generator
+   that only ever lives inside such a bind record.
 """
 
 from __future__ import annotations
@@ -455,3 +456,30 @@ class TrellisDecodeOp(Op):
         # exllamav3's reconstruction surface); the interpreter casts to the graph dtype after.
         w = fold_hadamard(decode_trellis(np.asarray(trellis), self.cb), suh, svh).T
         return w[: self.out_features, : self.in_features]
+
+
+@dataclass
+class HadamardOp(Op):
+    """The natural-order Sylvester Hadamard matrix of size ``size``: plain ±1, UNSCALED.
+
+    A ZERO-input generator: the matrix is a compile-time constant with no checkpoint source, so
+    it is spelled as a ``ConstantOp(source_graph=…)`` bind record holding this one node and the
+    loader evaluates it through the reference NumPy backend (``evaluate_source_graph``). Like
+    the checkpoint-basis ``TrellisDecodeOp`` it has no decomposition or lowering rule — it must
+    never appear in the live graph.
+
+    Unscaled because ±1 is exact in every float width: the transform's ``1/sqrt(size)`` rides a
+    separate multiply in the chain that spells it (``loader.quant``), which also gets to split
+    the factor into exact powers of two. The matrix is symmetric, so the same constant serves
+    ``x @ H`` and ``H @ x`` — the ``LinearOp`` spelling (``x @ W.T``) needs no transpose.
+    """
+
+    size: int = 128
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return (self.size, self.size)
+
+    def forward(self, *inputs):
+        from emmy.compiler.loader.exl3 import sylvester_hadamard  # noqa: PLC0415
+
+        return sylvester_hadamard(self.size).astype(np.float32)

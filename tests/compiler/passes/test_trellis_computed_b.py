@@ -367,3 +367,106 @@ def test_trellis_matmul_real_checkpoint_cuda():
     codes = np.ascontiguousarray(codes[:, :64])  # 4096 x 1024 slice keeps the test quick
     k_in, n_out = codes.shape[0] * 16, codes.shape[1] * 16
     _run_cuda(32, n_out, k_in, 2, _WARP_PINS, codes=codes)
+
+
+# ===================================================================
+# CUDA: the activation-side basis restore (VQ Phase 3.3) end to end
+# ===================================================================
+
+
+def _exl3_checkpoint(tmp_path, n, k, kbits, *, seed=0):
+    """A one-linear EXL3 checkpoint at the PADDED extents, plus its checkpoint-basis weight in
+    the traced HF ``(out, in)`` orientation."""
+    from safetensors.numpy import save_file
+
+    from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard
+
+    rng = np.random.default_rng(seed)
+    k_pad, n_pad = -(-k // 128) * 128, -(-n // 128) * 128
+    codes = _codes(rng, k_pad, n_pad, kbits)
+    suh = (rng.standard_normal(k_pad) * 0.012).astype(np.float16)
+    svh = np.sign(rng.standard_normal(n_pad)).astype(np.float16)
+    save_file({"m.proj.trellis": codes, "m.proj.suh": suh, "m.proj.svh": svh}, str(tmp_path / "model.safetensors"))
+    (tmp_path / "config.json").write_text('{"quantization_config": {"quant_method": "exl3"}}')
+    return fold_hadamard(decode_trellis(codes, 0), suh, svh).T[:n, :k]
+
+
+def _run_activation_cuda(tmp_path, monkeypatch, m, n, k, ref_w):
+    """Spell → compile → run the activation-side chain over the EXL3 checkpoint written to
+    ``tmp_path``; compare against ``x @ ref_w`` — the CHECKPOINT basis (the ``fold_hadamard``
+    weight, the Phase-2 correctness lane's own value)."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import spell_trellis_constants
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    monkeypatch.setenv("EMMY_TRELLIS_EXPAND", "1")
+
+    from emmy.compiler.ir.frontend.ir import LinearOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k), "f16"), node_id="x")
+    g.add_node(
+        ConstantOp(name="w", source_path="m.proj.weight", source_shape=(n, k), source_dtype="f16"),
+        [],
+        Tensor("w", (n, k), "f16"),
+        node_id="w",
+    )
+    g.add_node(LinearOp(), ["x", "w"], Tensor("y", (m, n), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    assert spell_trellis_constants(g, str(tmp_path)) == 1
+
+    be = CudaBackend()
+    compiled = be.compile(g)
+    kernels = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values() if getattr(nd.op, "kernel_source", None)]
+    assert sum("emmy_trellis_decode" in s for s in kernels) == 1, "exactly one kernel decodes in-kernel"
+    consts = load_constants_from_safetensors(compiled, str(tmp_path))
+    consts.update(bind_constants(compiled, {}))  # the zero-leaf Hadamard record
+    x = (np.random.default_rng(7).standard_normal((m, k))).astype(np.float16)
+    result, _ = be.run(compiled, input_data={"x": x, **consts})
+    y = np.asarray(result.outputs["y"]).reshape(m, n).astype(np.float32)
+    ref = x.astype(np.float32) @ ref_w.astype(np.float32).T
+    assert float(np.abs(y - ref).max()) / max(float(np.abs(ref).max()), 1e-9) < 2e-3
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize(("m", "n", "k", "kbits"), [(32, 256, 256, 2), (1, 512, 512, 2), (32, 128, 128, 6), (8, 200, 300, 2)])
+def test_activation_side_trellis_linear_cuda(tmp_path, monkeypatch, m, n, k, kbits):
+    """The kernel path end to end: decode M=1 and prefill M, the lm_head K=6 rung, and a
+    doubly encode-padded shape (200→256 out, 300→384 in)."""
+    _run_activation_cuda(tmp_path, monkeypatch, m, n, k, _exl3_checkpoint(tmp_path, n, k, kbits))
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.skipif(not os.path.isdir(_GLM_SNAPSHOT), reason="pinned GLM-4.5-Air-exl3 snapshot not in the HF cache")
+def test_activation_side_real_checkpoint_cuda(tmp_path, monkeypatch):
+    """Real GLM-4.5-Air 2.0bpw siblings (q_proj, K=2) through the activation-side chain vs the
+    checkpoint-basis reference — the Phase 3.3 accuracy bar, stated in the ORIGINAL basis."""
+    from safetensors import safe_open
+    from safetensors.numpy import save_file
+
+    base = "model.layers.1.self_attn.q_proj"
+    got: dict[str, np.ndarray] = {}
+    for shard in glob.glob(_GLM_SNAPSHOT + "/*.safetensors"):
+        with safe_open(shard, framework="numpy") as f:
+            for leaf in ("trellis", "suh", "svh"):
+                if f"{base}.{leaf}" in f.keys():
+                    got[leaf] = f.get_tensor(f"{base}.{leaf}")
+    assert set(got) == {"trellis", "suh", "svh"}, f"{base} siblings not found in the snapshot"
+    codes = np.ascontiguousarray(got["trellis"][:, :64])  # a 4096 x 1024 window keeps the test quick
+    k_in, n_out = codes.shape[0] * 16, codes.shape[1] * 16
+    save_file(
+        {"m.proj.trellis": codes, "m.proj.suh": got["suh"], "m.proj.svh": np.ascontiguousarray(got["svh"][:n_out])},
+        str(tmp_path / "model.safetensors"),
+    )
+    (tmp_path / "config.json").write_text('{"quantization_config": {"quant_method": "exl3"}}')
+
+    from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard
+
+    ref_w = fold_hadamard(decode_trellis(codes, 0), got["suh"], got["svh"][:n_out]).T
+    _run_activation_cuda(tmp_path, monkeypatch, 32, n_out, k_in, ref_w)

@@ -283,7 +283,11 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
                 return hoist
             cone = map_cone(body, a_arg)
             if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
-                return cone, b_leaf, acc, epilogue
+                # A DOUBLE-computed edge when B is the decode leaf: bind B as a cone here too.
+                # Handing back the bare ``TrellisLoad`` would make it a materialized B, and the
+                # staging gates would byte-copy the packed codes into the slab as if they held
+                # decoded elements — the decode would vanish from the kernel entirely.
+                return cone, ([b_leaf] if isinstance(b_leaf, TrellisLoad) else b_leaf), acc, epilogue
             # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
             # n-indexed load riding it) — falling through to the positional (m, k) rule below would
             # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the

@@ -690,3 +690,217 @@ def test_exl3_checkpoint_e2e_cuda(tmp_path):
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
     assert not any(isinstance(nn.op, TrellisDecodeOp) for nn in compiled.nodes.values()), "a trellis op survived the fold"
     _assert_e2e_gate(emmy_logits, ref_logits, "exl3 fold mode")
+
+
+# ===================================================================
+# The kernel path (VQ Phase 3.3): the activation-side basis restore.
+# ``EMMY_TRELLIS_EXPAND`` re-spells the consuming LINEAR so the weight
+# stays in the hat basis (the form the warp tier decodes in-kernel) and
+# the Hadamard / suh / svh restore rides the activations instead.
+# ===================================================================
+
+
+def _linear_graph(m, n, k, *, bias=False, dtype="f16", lead=(), symbolic=False):
+    """``y = x @ W.T [+ b]`` with ``W`` the checkpoint's trellis-coded weight constant."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+
+    rows = Dim("seq") if symbolic else m
+    x_shape = (*lead, rows, k)
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", x_shape, dtype), node_id="x")
+    g.add_node(
+        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(n, k), source_dtype=dtype),
+        inputs=[],
+        output=Tensor("p_w", (n, k), dtype),
+        node_id="p_w",
+    )
+    ins = ["x", "p_w"]
+    if bias:
+        g.add_node(
+            op=ConstantOp(name="p_b", source_path="layer.bias", source_shape=(n,), source_dtype=dtype),
+            inputs=[],
+            output=Tensor("p_b", (n,), dtype),
+            node_id="p_b",
+        )
+        ins.append("p_b")
+    g.add_node(op=LinearOp(has_bias=bias), inputs=ins, output=Tensor("y", (*lead, rows, n), dtype), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    return g
+
+
+def _spelled_linear(tmp_path, monkeypatch, *, m=8, n=256, k=128, K=2, cb=0, bias=False, expand=True, **kw):
+    """Mint the checkpoint, spell the linear under (or without) the kernel-path gate."""
+    import torch
+
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    monkeypatch.setenv("EMMY_TRELLIS_EXPAND", "1" if expand else "0")
+    tensors, ref = _exl3_linear_tensors("layer", n, k, K=K, cb=cb)
+    if bias:
+        tensors["layer.bias"] = torch.from_numpy((rng.standard_normal(n) * 0.1).astype(np.float16))
+    _write_exl3_checkpoint(tmp_path, tensors)
+    g = _linear_graph(m, n, k, bias=bias, **kw)
+    spell_trellis_constants(g, str(tmp_path))
+    g.validate()
+    bias_v = tensors["layer.bias"].numpy() if bias else None
+    return g, ref, bias_v
+
+
+def _numpy_run(graph, tmp_path, x):
+    """Evaluate the spelled graph through the reference NumPy backend."""
+    from emmy.compiler.backend.base import Backend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    class _Interp(Backend):
+        def compile(self, graph):
+            return graph
+
+    consts = load_constants_from_safetensors(graph, str(tmp_path))
+    consts.update(bind_constants(graph, {}))  # the zero-leaf Hadamard record
+    unbound = [nid for nid, _ in graph.loadable_constants() if nid not in consts]
+    assert not unbound, f"unbound constants: {unbound}"
+    result, _ = _Interp().run(graph, input_data={"x": x, **consts})
+    return np.asarray(result.outputs[graph.outputs[0]]).astype(np.float32)
+
+
+def test_hadamard_op_generates_the_sylvester_matrix():
+    from emmy.compiler.ir.frontend.ir import HadamardOp
+    from emmy.compiler.loader.exl3 import sylvester_hadamard
+
+    h = HadamardOp(size=128).forward()
+    assert h.shape == (128, 128)
+    np.testing.assert_array_equal(h, _ref_sylvester(128).astype(np.float32))
+    np.testing.assert_array_equal(sylvester_hadamard(128), sylvester_hadamard(128).T)  # symmetric: LinearOp needs no transpose
+
+
+def test_activation_spelling_rewrites_the_linear(tmp_path, monkeypatch):
+    """The weight constant is gone; what remains is the two 128-block Hadamard matmuls around a
+    HAT-BASIS decode at the FULL padded extent, plus the channel-vector multiplies."""
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.frontend.ir import LinearOp, TrellisDecodeOp
+
+    g, _ref, _b = _spelled_linear(tmp_path, monkeypatch, n=256, k=128)
+    decs = [nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
+    assert len(decs) == 1
+    assert decs[0].op.hadamard is False, "the kernel path must spell the hat-basis decode"
+    assert (decs[0].op.out_features, decs[0].op.in_features) == (256, 128)
+    assert len([nn for nn in g.nodes.values() if isinstance(nn.op, LinearOp)]) == 3  # two Hadamards + the weight
+    paths = {nn.op.source_path for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_path}
+    assert paths == {"layer.trellis", "layer.suh", "layer.svh"}
+    out = g.nodes[g.outputs[0]].output
+    assert out.dtype.name == "f16" and tuple(d.as_static() for d in out.shape) == (8, 256)
+
+
+@pytest.mark.parametrize(("n", "k"), [(256, 128), (200, 128), (256, 192), (200, 300)])
+def test_activation_spelling_keeps_index_maps_off_matmul_operands(tmp_path, monkeypatch, n, k):
+    """The placement rule the chain depends on: every layout change (encode pad, the flat↔block
+    reshapes, the output slice) is absorbed by a POINTWISE, never by a matmul's A operand — a
+    matmul operand reached by an index map takes its declared row stride, not the one the index
+    implies, and lowers to the wrong addresses."""
+    from emmy.compiler.ir.frontend.ir import CatOp, LinearOp, MatmulOp, ReshapeOp, SliceOp, TransposeOp
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+
+    layout = (ReshapeOp, SliceOp, CatOp, TransposeOp, IndexMapOp)
+    g, _ref, _b = _spelled_linear(tmp_path, monkeypatch, n=n, k=k)
+    for nid, node in g.nodes.items():
+        if isinstance(node.op, (LinearOp, MatmulOp)):
+            producer = g.nodes[node.inputs[0]]
+            assert not isinstance(producer.op, layout), f"{nid}: activation operand reached through {type(producer.op).__name__}"
+
+
+@pytest.mark.parametrize(
+    ("m", "n", "k", "K", "cb", "bias", "lead"),
+    [
+        (8, 256, 128, 2, 0, False, ()),  # no padding
+        (8, 256, 128, 2, 0, True, ()),  # bias applies after the basis restore
+        (4, 200, 128, 2, 0, False, ()),  # n padded 200 → 256: contract, then slice
+        (4, 256, 200, 2, 0, False, ()),  # k padded 200 → 256: zero-pad the activation
+        (2, 200, 300, 3, 1, True, ()),  # both padded, K=3, mcg codebook
+        (2, 128, 128, 6, 2, False, ()),  # the lm_head rung, mul1 codebook
+        (4, 256, 128, 2, 0, False, (1,)),  # a leading batch dim
+        (1, 512, 128, 2, 0, False, ()),  # decode M=1
+    ],
+)
+def test_activation_spelling_matches_the_checkpoint_basis(tmp_path, monkeypatch, m, n, k, K, cb, bias, lead):
+    """The bar: the activation-side chain reproduces ``x @ W`` against the CHECKPOINT-BASIS
+    reference (the ``fold_hadamard`` weight) to f16 matmul tolerance. The gap is pure f16
+    intermediate rounding — the reference folds in float64 and rounds once."""
+    g, ref_w, bias_v = _spelled_linear(tmp_path, monkeypatch, m=m, n=n, k=k, K=K, cb=cb, bias=bias, lead=lead)
+    x = rng.standard_normal((*lead, m, k)).astype(np.float16)
+    got = _numpy_run(g, tmp_path, x)
+    ref = x.astype(np.float32) @ ref_w.astype(np.float32).T
+    if bias:
+        ref = ref + bias_v.astype(np.float32)
+    assert np.abs(got - ref).max() / max(np.abs(ref).max(), 1e-9) < 2e-3
+
+
+def test_activation_spelling_is_off_by_default(tmp_path, monkeypatch):
+    """The folded correctness lane stays the default: no gate, no activation-side rewrite."""
+    from emmy.compiler.ir.frontend.ir import LinearOp, TrellisDecodeOp
+
+    g, _ref, _b = _spelled_linear(tmp_path, monkeypatch, expand=False)
+    dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
+    assert dec.op.hadamard is True
+    assert len([nn for nn in g.nodes.values() if isinstance(nn.op, LinearOp)]) == 1
+
+
+def test_activation_spelling_falls_back_without_a_linear_consumer(tmp_path, monkeypatch):
+    """A weight with no single ``LinearOp`` consumer has no activation to carry the transform —
+    fall back to the folded checkpoint-basis cone, which is correct everywhere."""
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    monkeypatch.setenv("EMMY_TRELLIS_EXPAND", "1")
+    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    _write_exl3_checkpoint(tmp_path, tensors)
+    g = _weight_graph((256, 128), dtype="f16")
+    assert spell_trellis_constants(g, str(tmp_path)) == 1
+    dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
+    assert dec.op.hadamard is True
+
+
+def test_activation_spelling_falls_back_on_symbolic_activation(tmp_path, monkeypatch):
+    """A symbolic row count leaves the 128-block reshapes unsizable — folded lane."""
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+
+    g, _ref, _b = _spelled_linear(tmp_path, monkeypatch, symbolic=True)
+    dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
+    assert dec.op.hadamard is True
+
+
+def test_hadamard_constant_is_shared_across_linears(tmp_path, monkeypatch):
+    """One Hadamard node serves every trellis linear in the graph — it is a 32 KiB constant and
+    a per-linear copy would be pure footprint."""
+    import torch
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.frontend.ir import HadamardOp, LinearOp
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    monkeypatch.setenv("EMMY_TRELLIS_EXPAND", "1")
+    tensors: dict[str, torch.Tensor] = {}
+    for base in ("a", "b"):
+        part, _ref = _exl3_linear_tensors(base, 256, 128)
+        tensors.update(part)
+    _write_exl3_checkpoint(tmp_path, tensors)
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (8, 128), "f16"), node_id="x")
+    for base in ("a", "b"):
+        g.add_node(
+            op=ConstantOp(name=f"p_{base}", source_path=f"{base}.weight", source_shape=(256, 128), source_dtype="f16"),
+            inputs=[],
+            output=Tensor(f"p_{base}", (256, 128), "f16"),
+            node_id=f"p_{base}",
+        )
+        g.add_node(op=LinearOp(), inputs=["x", f"p_{base}"], output=Tensor(f"y_{base}", (8, 256), "f16"), node_id=f"y_{base}")
+    g.inputs, g.outputs = ["x"], ["y_a", "y_b"]
+    assert spell_trellis_constants(g, str(tmp_path)) == 2
+    hads = [nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_graph is not None]
+    assert len(hads) == 1
+    assert any(isinstance(rn.op, HadamardOp) for rn in hads[0].op.source_graph.nodes.values())

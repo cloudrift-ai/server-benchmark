@@ -261,6 +261,78 @@ class Load(Stmt):
         return out_lines
 
 
+@dataclass(frozen=True, init=False)
+class TrellisLoad(Load):
+    """Read ONE decoded element of a trellis-coded (EXL3) weight — a :class:`Load` whose
+    element is not stored but COMPUTED from the packed codes buffer at read time.
+
+    ``input`` is the int16 codes buffer (``(k/16, n/16, 16*k_bits)`` — one tail-biting trellis
+    walk per 16x16 weight tile) and ``index`` the LOGICAL ``(k, n)`` element coordinates of the
+    hat-basis weight ``W_hat[k, n]`` (rows in-features, cols out-features). The decode is
+    window-addressable — the element's 16-bit trellis window is bits
+    ``[(t+1)*k_bits - 16, (t+1)*k_bits) mod 256*k_bits`` of the tile's circular stream, with
+    ``t`` derived from ``(k % 16, n % 16)`` through the mma B-fragment step order — so each
+    element decodes independently, with no carried walk state (``loader/exl3.py`` is the numpy
+    reference; the CUDA realization is ``emmy_trellis_decode`` in ``ir/kernel/render.py``).
+
+    A SUBCLASS of ``Load`` on purpose: inside a lift body / operand cone it behaves exactly
+    like a scalar load (defs, index deps, σ-rewrites), which is what lets the recognizer,
+    ``map_cone`` and the compute fill carry it generically. It must NEVER be treated as a
+    byte-copyable gmem operand, which is why the contraction binder wraps it in a COMPUTED
+    cone (``bind_contraction``'s trellis arm) — every ``isinstance(edge, Load)`` staging /
+    split-K gate then answers "computed" off the edge. ``cb`` / ``k_bits`` / ``n_tiles`` (the
+    3INST codebook id, bits per weight, and the codes grid's column-tile count) are part of the
+    dataclass repr, so kernel identity (``structural_key`` digests stmt reprs) keys them.
+
+    Renders as a ``float`` binding — the decode is exact fp16 arithmetic widened once, so the
+    compute fill's slab store demotes it back to f16 losslessly and the scalar tier's promoted
+    math is exact."""
+
+    cb: int
+    k_bits: int
+    n_tiles: int
+
+    def __init__(
+        self,
+        name: str | None = None,
+        input: str | None = None,
+        index: tuple[Expr, ...] | None = None,
+        *,
+        names: tuple[str, ...] | None = None,
+        dtype: DataType | None = None,
+        cb: int = 0,
+        k_bits: int = 2,
+        n_tiles: int = 1,
+    ) -> None:
+        # The VALUE dtype is f32 (the decode's widened return) — never the codes buffer's i16;
+        # defaulting it here keeps ``030_stamp_types`` from stamping the carrier dtype onto the
+        # decoded SSA value.
+        super().__init__(name, input, index, names=names, dtype=dtype if dtype is not None else F32)
+        object.__setattr__(self, "cb", int(cb))
+        object.__setattr__(self, "k_bits", int(k_bits))
+        object.__setattr__(self, "n_tiles", int(n_tiles))
+
+    def pretty(self, indent: str = "") -> list[str]:
+        idx = ", ".join(e.pretty() for e in self.index)
+        return [f"{indent}{self.names[0]} = trellis_decode {self.input}[{idx}] cb={self.cb} K={self.k_bits}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        assert self.is_scalar, "TrellisLoad decodes one element per binding"
+        from emmy.compiler.ir.expr import SimplifyCtx  # noqa: PLC0415
+
+        kx = self.index[0].simplify(SimplifyCtx.empty()).render(ctx)
+        nx = self.index[1].simplify(SimplifyCtx.empty()).render(ctx)
+        words = 16 * self.k_bits
+        nm = self.names[0]
+        ctx.ssa_dtypes[nm] = "f32"
+        tile = f"((({kx}) >> 4) * {self.n_tiles} + (({nx}) >> 4)) * {words}"
+        return [
+            f"{pad}float {nm} = emmy_trellis_decode((const unsigned short*){self.input} + ({tile}), "
+            f"{self.k_bits}, {self.cb}, ({kx}) & 15, ({nx}) & 15);"
+        ]
+
+
 @dataclass(frozen=True)
 class Pack(Stmt):
     """Pack two scalar values into one ``__half2`` (or future short-vec).

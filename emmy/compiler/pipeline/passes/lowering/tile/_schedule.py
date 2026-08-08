@@ -461,11 +461,11 @@ class _Term:
         atoms = _warp_atoms(self, node)
         warp = [p for p in warp_tile_moves(atoms) if _tile_ok(self, node, p)] if atoms else []
         self.warp_eligible = self.warp_eligible or bool(warp)
-        # A COMPUTED ``a`` edge is warp-ONLY: the fill that evaluates a producer cone is the mma
-        # tier's compute fill, and a per-cell / scalar expansion would re-run the cone on every K
-        # step. The reduce tiers stay reachable — through the COLLAPSE reading, whose spliced fold
-        # computes the whole body per cell (:func:`_readings`).
-        scalar = scalar_tile_moves() if isinstance(node.a, Load) else []
+        # A COMPUTED edge — ``a`` or any channel's ``b`` — is warp-ONLY: the fill that evaluates
+        # a producer cone is the mma tier's compute fill, and a per-cell / scalar expansion
+        # would re-run the cone on every K step. The reduce tiers stay reachable — through the
+        # COLLAPSE reading, whose spliced fold computes the whole body per cell (:func:`_readings`).
+        scalar = scalar_tile_moves() if isinstance(node.a, Load) and not _computed_b(node) else []
         grouped: dict[str, list[TilePlan]] = {}
         for plan in scalar + warp:
             w = plan_workers(plan)
@@ -584,6 +584,19 @@ def _reading(tile: TileOp, op, ctx, *, free=None, stores=None, ref: Sched | None
     return _Term(alt, place.on_grid(), ctx, ref=ref)
 
 
+def _computed_b(node) -> bool:
+    """Whether any channel's B is a compute-FILLABLE cone (the trellis decode edge): a ZERO-AXIS
+    inline node, the B-side twin of the ``isinstance(node.a, Load)`` dispatch. Such a node is
+    warp-only through the mandatory ``sync`` compute-fill (the fill decodes the B tile into its
+    slab; no copy transport can evaluate a cone, and a per-cell tier would re-decode per K
+    step), with the COLLAPSE reading as its reduce-tier fallback.
+
+    Zero-axis ONLY: an ITERATING inline B fold (the two-site enumeration term — a reduce-bearing
+    edge that schedules its own ``REDUCE@<axis>`` site) is not a per-cell map the fill can
+    evaluate, and it keeps its historical scheduling untouched."""
+    return any(isinstance(ch.b, Fold) and ch.b.axis is None for ch in node.channels)
+
+
 def _promoted(node, inputs):
     """A mixed-dtype contraction — a plain **f32** ``a`` ``Load`` against 16-bit channels — with its
     ``a`` edge re-expressed as a one-``Load`` COMPUTED cone, so it rides the mandatory ``sync``
@@ -637,7 +650,13 @@ def _readings(tile: TileOp, ctx) -> list[_Term]:
     node = head(tile.op)
     if node is None or not is_contraction(node):
         return [base]
-    if not isinstance(node.a, Load):
+    if not isinstance(node.a, Load) or _computed_b(node):
+        # A computed edge on EITHER side takes the COLLAPSE sibling: the cone splices back
+        # inline, the fold derives PLANAR, and the reduce tiers carry the fallback (for a
+        # computed B, the per-cell trellis decode re-runs per element — correct, searchable,
+        # and exactly what a shape with no legal warp row degrades to). Mutually exclusive
+        # with the mixed-A PROMOTION by shape: ``_promoted`` needs every channel's B
+        # materialized (``_channel_dtype``) and a materialized f32 ``a``.
         return [base, _reading(tile, _rewrap(tile.op, node.demoted()), ctx, ref=base.sched)]
     promoted = _promoted(node, tile.inputs)
     if promoted is None:
@@ -657,12 +676,16 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     ``_legality`` predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
     if not legal.enforce(legal.warp_k_step(node, plan), pinned=False):
         return False
-    if isinstance(node.a, Load):
+    if isinstance(node.a, Load) and not _computed_b(node):
         return True
     placed = plan.placed_on(term.place)
     if placed.axes is None:
         return False  # no (m, n) pair on the grid — nothing to place a compute-filled tile on
-    return legal.enforce(legal.computed_a_cover(node, placed), pinned=False)
+    if not isinstance(node.a, Load) and not legal.enforce(legal.computed_a_cover(node, placed), pinned=False):
+        return False
+    if _computed_b(node) and not legal.enforce(legal.computed_b_cover(node, placed), pinned=False):
+        return False
+    return True
 
 
 def _f16acc_allowed(ctx) -> bool:
@@ -913,10 +936,11 @@ def _tile_area(plan: TilePlan) -> int:
 
 
 def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Stage | None:
-    """The ONE transport-resolver dispatch — which resolver a node's ``a`` edge and tier select.
+    """The ONE transport-resolver dispatch — which resolver a node's operand edges and tier select.
 
-    A COMPUTED ``a`` edge takes the sync compute-fill, which is MANDATORY (no copy transport can
-    evaluate a cone), so ``want=None`` still resolves and only the DEPTH is ever free. A
+    A COMPUTED edge — ``a`` or any channel's ``b`` — takes the sync compute-fill, which is
+    MANDATORY (no copy transport can evaluate a cone), so ``want=None`` still resolves and only
+    the DEPTH is ever free. A
     MATERIALIZED edge takes the mma resolver on a warp tile and the scalar one otherwise, with
     ``want=None`` the gmem-direct baseline; TMA declines below sm_90 rather than failing to
     compile. ``tile`` is the PLACED slice.
@@ -925,7 +949,7 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     here, so a row's resolved spelling is reproducible BY CONSTRUCTION rather than by three copies
     of the dispatch staying in step."""
     budget = term.ctx.max_dynamic_smem
-    if not isinstance(node.a, Load):
+    if not isinstance(node.a, Load) or _computed_b(node):
         return legal.resolve_sync_stage(node, tile, budget, want.depth if want is not None else 1)
     if want is None or (want.transport == "tma" and not term.ctx.has_tma):
         return None
@@ -980,7 +1004,7 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
     if not plan.is_tiled:
         return [None]  # per-cell / unbindable — no operand slab to stage
     tile = plan.placed_on(term.place)
-    if not isinstance(node.a, Load):
+    if not isinstance(node.a, Load) or _computed_b(node):
         return _sync_values(term, node, tile)
 
     def resolve(st: Stage) -> Stage | None:
@@ -1068,6 +1092,8 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
                 # the unpinned catalog above drops on, one home each.
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
+                if _computed_b(node):
+                    legal.enforce(legal.computed_b_cover(node, plan.placed_on(term.place)), pinned=True)
                 if not isinstance(node.a, Load):
                     legal.enforce(legal.computed_a_cover(node, plan.placed_on(term.place)), pinned=True)
                 # The operand-dtype rule DROPS even under a pin: an unconvertible A means the pinned
@@ -1075,7 +1101,7 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
                 # here, so this is choosing the reading rather than ignoring the pin.
                 elif not legal.enforce(legal.warp_operand_dtype(node, plan, _a_dtype(node, term.tile.inputs)), pinned=False):
                     return []
-            elif not isinstance(node.a, Load):
+            elif not isinstance(node.a, Load) or _computed_b(node):
                 return []  # a scalar / per-cell pin asks for a tier the compute fill has no fill for
             else:
                 # The CTA thread budget, raised HERE rather than left to materialization: a pinned

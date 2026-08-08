@@ -174,7 +174,25 @@ slice the encode padding — the reference math, since exllamav3 zero-pads activ
 `032_fold_constant_subgraphs` collapses the cone into a bind-time `source_graph` record — this is the
 correctness lane: full value footprint in memory, bind-time decode bit-exact against the direct decode. Not
 every linear is coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0
-`o_proj`), and those load as ordinary tensors. In-kernel decode (computed-B) is later work.
+`o_proj`), and those load as ordinary tensors.
+
+**In-kernel trellis decode (computed-B).** The HAT-BASIS form of the op (`TrellisDecodeOp(hadamard=False)` —
+the raw per-tile decode, no channel vectors, no Hadamard fold; the activation-side basis restore is separate
+graph algebra, later work) has a kernel realization: it lifts to a `LoopOp` of per-element `TrellisLoad` reads
+(the window is directly addressable in the tile's circular bit stream, so each element decodes independently —
+no carried walk state), loop fusion inlines it into the consuming matmul, and the contraction binder stores it
+as a COMPUTED-B cone. The warp tier then schedules it over the mandatory `sync` compute-fill: the fill decodes
+each B tile straight into the K-major smem slab the ldmatrix drain already reads (one `emmy_trellis_decode`
+helper call per element — window extraction + the 3INST computed codebook, no stored LUT), while the packed
+codes are the only weight bytes that ever cross DRAM (~8× fewer than f16 at K=2) and the A operand rides its
+usual vectorized `cp.async` fill underneath. Split-K, TMA and the scalar staged tiers decline (a computed B has
+no gmem element layout); the COLLAPSE reading is the reduce-tier fallback (per-cell decode — correct, slow).
+Constant-rooted hat-basis cones fold by default and stay in-graph under `EMMY_TRELLIS_EXPAND` (the kernel-path
+gate, the trellis sibling of `EMMY_FP8_EXPAND`); checkpoint-basis cones fold regardless. Measured on the 5090
+at N=K=22016, K=2 (codes 121 MB — past L2): the compressed matmul beats the same-shape f16 matmul at M=128
+(2.10 vs 2.34 ms) and runs decode-ALU-bound at larger prefill M (1.6–1.7× f16 at M=256–2048) — the per-element
+decode re-runs per M-tile row, which is the standing lever for the reduce-tier (decode-phase) and
+fragment-drain follow-ups.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph

@@ -363,10 +363,12 @@ class Operand:
 class SyncOperand:
     """One ``sync``-transport slab operand — filled by plain per-thread COMPUTE, not an
     async copy. ``value(k0, row, col)`` returns the stmts producing the cell's value at slab
-    coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: the fused producer
-    CONE (the fused-edge A operand — the computed tile materializes straight into the slab the
-    ``ldmatrix`` drain reads). B weights never ride this: every B fill — canonical or
-    transposed — is a vectorized ``cp.async`` :class:`Operand` on ``async_operands``."""
+    coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it. Two edges ride it:
+    the fused producer CONE (the fused-edge A operand — the computed tile materializes straight
+    into the slab the ``ldmatrix`` drain reads), and a COMPUTED B channel (the trellis-coded
+    weight: the fill decodes each element from the packed codes in gmem into the K-major B slab,
+    so the weight bytes moved are the codes alone). A MATERIALIZED edge — either side — never
+    rides this: it is a vectorized ``cp.async`` :class:`Operand` on ``async_operands``."""
 
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
@@ -392,8 +394,9 @@ class SyncOperand:
 @dataclass(frozen=True)
 class SyncTransport:
     """The ``sync`` producer — per-thread compute/copy fills closed by ONE CTA barrier. This is the
-    mma tier's ``sync`` transport: the fused-edge compute-fill (a producer cone materializing the A
-    tile) rides ``operands``; plain-copy operands (the fused edge's B weights) ride
+    mma tier's ``sync`` transport: the compute-fills (a producer cone materializing the A tile,
+    or a computed-B decode materializing a weight tile) ride ``operands``; plain-copy operands
+    (materialized weights on either side) ride
     ``async_operands`` as vectorized ``cp.async`` fills issued BEFORE the compute fill, so the
     hardware copies fly underneath it — the same ``fill``/``commit``/``wait`` seam as the pure
     cp.async / TMA producers, closed by one ``CpAsyncWait`` + CTA barrier. ``depth >= 2`` is the
@@ -472,7 +475,7 @@ class SyncTransport:
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
             anchor = sz[p].index[-1].simplify(ctx) if isinstance(sz[p], Load) else None
             if (
-                isinstance(a, Load)
+                type(a) is Load  # exact type: a decode leaf (TrellisLoad) must never merge into a plain vector Load
                 and a.is_scalar
                 and b.is_scalar
                 and a.input == b.input

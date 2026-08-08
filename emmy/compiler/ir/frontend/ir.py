@@ -13,10 +13,13 @@ Three groups:
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
    ``MeanOp``. Rewritten to elementwise/reduce chains (sometimes with
    inserted ``IndexMapOp`` unsqueezes so the broadcast contraction works).
-3. **Storage-decode ops** — ``TrellisDecodeOp``. Not decomposed: it only ever
-   appears inside a constant-only cone that ``032_fold_constant_subgraphs``
-   collapses into a bind-time ``source_graph`` record, where its numpy
-   ``forward`` runs through the reference NumPy backend.
+3. **Storage-decode ops** — ``TrellisDecodeOp``. The full (``hadamard=True``) form is not
+   decomposed: it only ever appears inside a constant-only cone that
+   ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph`` record, where
+   its numpy ``forward`` runs through the reference NumPy backend. The HAT-BASIS form
+   (``hadamard=False``) has a kernel realization: it lifts to a ``LoopOp`` of per-element
+   ``TrellisLoad`` reads (``loop/lifting/050_lift_trellis_decode``) so loop fusion can inline
+   it into its consuming matmul as a computed-B cone.
 """
 
 from __future__ import annotations
@@ -408,25 +411,45 @@ class TrellisDecodeOp(Op):
     exactly the reference math (exllamav3 zero-pads the input activations and slices the
     output, which reads only that submatrix). ``None`` keeps the full padded extent.
 
-    The op only ever appears inside a constant-only cone spelled at birth
-    (``loader.quant.spell_trellis_constants``); ``032_fold_constant_subgraphs`` collapses
-    that cone into a bind-time ``ConstantOp(source_graph=record)``, and ``forward`` is the
-    record's evaluation through the reference NumPy backend. No decomposition or lowering
-    rule exists for it — it must never survive the fold into the pipeline.
+    Two forms, discriminated by ``hadamard``:
+
+    - ``hadamard=True`` (the checkpoint-basis form, spelled by
+      ``loader.quant.spell_trellis_constants``): inputs ``(codes, suh, svh)``, output the
+      original-basis weight. It only ever appears inside a constant-only cone spelled at
+      birth; ``032_fold_constant_subgraphs`` collapses that cone into a bind-time
+      ``ConstantOp(source_graph=record)``, and ``forward`` is the record's evaluation through
+      the reference NumPy backend. No decomposition or lowering rule exists for it — it must
+      never survive the fold into the pipeline.
+    - ``hadamard=False`` (the HAT-BASIS form — the raw per-tile decode, no channel vectors and
+      no Hadamard fold): input ``(codes,)`` alone, output ``W_hat.T`` sliced to the logical
+      dims. This is the form with an in-kernel realization — it lifts to a ``LoopOp`` of
+      per-element :class:`~emmy.compiler.ir.stmt.TrellisLoad` reads, which loop fusion inlines
+      into the consuming matmul as a computed-B cone (the warp tier's compute fill decodes the
+      B tile in-kernel and the codes stay compressed in device memory). The activation-side
+      basis restore (``x·suh`` / the 128-block Hadamard / ``·svh``) is spelled as separate
+      graph algebra by its caller.
     """
 
     cb: int = 0
     out_features: int | None = None
     in_features: int | None = None
+    hadamard: bool = True
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         # (n, k) — the HF ``nn.Linear`` weight orientation the trace promised;
         # sized by the suh/svh channel vectors (inputs 1 and 2) minus the encode padding.
+        if not self.hadamard:
+            assert self.out_features is not None and self.in_features is not None, "the hat-basis form sizes off its own fields"
+            return (self.out_features, self.in_features)
         return (self.out_features or input_shapes[2][0], self.in_features or input_shapes[1][0])
 
     def forward(self, *inputs):
         from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard
 
+        if not self.hadamard:
+            (trellis,) = inputs
+            w_hat = decode_trellis(np.asarray(trellis), self.cb).T
+            return w_hat[: self.out_features, : self.in_features]
         trellis, suh, svh = inputs
         # fp16 is the decode's canonical precision (the checkpoint's own storage dtype and
         # exllamav3's reconstruction surface); the interpreter casts to the graph dtype after.

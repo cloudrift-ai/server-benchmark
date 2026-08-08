@@ -30,6 +30,7 @@ from emmy.compiler.ir.stmt.leaves import (
     Select,
     SelectBranch,
     StateMerge,
+    TrellisLoad,
     Unpack,
     Write,
 )
@@ -94,6 +95,19 @@ def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         input=s.input,
         index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index),
         dtype=s.dtype,
+    )
+
+
+@rewrite.register
+def _(s: TrellisLoad, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    # Registered so a σ-rewrite keeps the SUBCLASS (its decode params) — the base ``Load``
+    # handler would silently degrade a trellis decode to a plain codes-word load.
+    from dataclasses import replace  # noqa: PLC0415
+
+    return replace(
+        s,
+        names=tuple(rename(n) for n in s.names),
+        index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index),
     )
 
 
@@ -268,6 +282,13 @@ def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
 @simplify.register
 def _(s: Load, ctx: SimplifyCtx) -> Stmt:
     return Load(names=s.names, input=s.input, index=tuple(e.simplify(ctx) for e in s.index), dtype=s.dtype)
+
+
+@simplify.register
+def _(s: TrellisLoad, ctx: SimplifyCtx) -> Stmt:
+    from dataclasses import replace  # noqa: PLC0415
+
+    return replace(s, index=tuple(e.simplify(ctx) for e in s.index))
 
 
 @simplify.register

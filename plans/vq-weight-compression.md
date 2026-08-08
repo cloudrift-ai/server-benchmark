@@ -283,6 +283,16 @@ Order matters — the fragment path first, or every measurement undersells the f
 1. **Warp/mma tier, prefill**: computed-B reading in `_schedule.py` plus legality arms; decode as a `SyncOperand`
    compute fill in the B staging path, once per B tile, amortized across the M tile. Codes through the async
    prefetch ring; LUT once via the prologue slot.
+   **STATUS: DONE (2026-08-07).** Landed as the computed-B cone over a per-element `TrellisLoad` leaf (the window
+   is directly addressable, so no carried walk state and no LUT prologue — the 3INST codebook is computed
+   in-registers by `emmy_trellis_decode`); the sync compute-fill decodes the B slab reading codes straight from
+   gmem (L1-cached — no codes slab and no `SyncTransport` multi-dtype change needed), the materialized A rides
+   the cp.async fill underneath, and the collapse reading is the fallback. Hat-basis accuracy verified on real
+   GLM-4.5-Air tensors (K=2 q_proj, K=6 lm_head) at f16 matmul tolerance; 5090 @ N=K=22016 K=2 (codes 121 MB,
+   past L2): beats same-shape f16 matmul at M=128 (2.10 vs 2.34 ms), decode-ALU-bound 1.6–1.7× at M=256–2048 —
+   the per-element decode re-runs per M-tile row, the standing lever for steps 2 and the fragment-drain follow-up.
+   `EMMY_TRELLIS_EXPAND` gates the constant-rooted hat-basis cone in-graph; checkpoint-basis cones still fold
+   (step 3 owns the basis-restore rewrite that makes real models reach this kernel).
 2. **Reduce/gemv tier, decode phase**: the LUT decode needs a reduce-tier realization. This is where TPOT cashes out.
 3. **Activation-side Hadamard** as a computed-A-style prologue, if the format requires it at kernel level rather
    than being foldable into the checkpoint.

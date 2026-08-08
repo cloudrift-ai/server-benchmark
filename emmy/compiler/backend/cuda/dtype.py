@@ -26,6 +26,9 @@ _CUDA_NAME: dict[DataType, str] = {
     _dtype.F8E4M3: "__nv_fp8_e4m3",
     _dtype.F8E5M2: "__nv_fp8_e5m2",
     _dtype.F16x2: "__half2",
+    # The packed-code carrier of trellis-coded (EXL3) weights — kernels take the
+    # codes buffer as raw int16 words and decode in-kernel (``emmy_trellis_decode``).
+    _dtype.I16: "short",
     _dtype.I32: "int",
     _dtype.I64: "long long",
     _dtype.BOOL: "bool",
@@ -78,6 +81,8 @@ _C_NAME_BYTES: dict[str, int] = {
     "bf16": 2,
     "__nv_fp8_e4m3": _dtype.F8E4M3.nbytes,
     "__nv_fp8_e5m2": _dtype.F8E5M2.nbytes,
+    "short": 2,
+    "i16": 2,
     "i32": 4,
     "i64": 8,
     "f64": 8,

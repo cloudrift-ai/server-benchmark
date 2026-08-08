@@ -31,7 +31,12 @@ because those cones' kernels exist today and must not change bytes silently.
 Gate: the fold is DEFAULT ON. ``EMMY_FP8_EXPAND`` (``config.fp8_expand``) SKIPS it for fp8
 cones — the decode cone then stays in-graph and rides the operand cone into the kernel (fp8
 bits in device memory, the decode absorbed by the storage dtype at the warp tier — see
-``lowering/tile/_atomize``). Trellis cones fold regardless: no lowering rule knows the op.
+``lowering/tile/_atomize``). ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``) is the
+trellis sibling, and narrower: it skips the fold only for HAT-BASIS (``hadamard=False``)
+trellis cones, the form with a kernel realization (the per-element ``TrellisLoad`` lift →
+the computed-B compute fill); a checkpoint-basis (``hadamard=True``) cone folds regardless —
+no lowering rule knows it, and leaving it in-graph would hand the pipeline an op it cannot
+lower.
 
 Numbered 032 — after the arithmetic normalizations (``010``–``030``), BEFORE the sibling merge
 (``035``) and the layout folds (``050``/``060``), so those passes only ever see the collapsed
@@ -128,10 +133,15 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
     if not has_decode:
         # Digest-safety scope: only cones carrying a storage decode fold — see module docstring.
         raise RuleSkipped("constant cone carries no storage-decode op — outside the fold's scope")
-    # EMMY_FP8_EXPAND keeps fp8 decode cones in-graph for the kernel path; a trellis cone has
-    # no in-kernel realization yet, so it folds unconditionally — leaving it in-graph would
-    # hand the pipeline an op no lowering rule knows.
-    if config.fp8_expand() and not any(isinstance(match.graph.nodes[nid].op, TrellisDecodeOp) for nid in cone):
+    # EMMY_FP8_EXPAND keeps fp8 decode cones in-graph for the kernel path. EMMY_TRELLIS_EXPAND
+    # is the trellis sibling, gated to the HAT-BASIS form: only a hadamard-free decode has a
+    # kernel realization (the ``TrellisLoad`` lift → computed-B compute fill); a
+    # checkpoint-basis cone folds regardless — no lowering rule knows it.
+    trellis_ops = [match.graph.nodes[nid].op for nid in cone if isinstance(match.graph.nodes[nid].op, TrellisDecodeOp)]
+    if trellis_ops:
+        if config.trellis_expand() and not any(op.hadamard for op in trellis_ops):
+            raise RuleSkipped("EMMY_TRELLIS_EXPAND on — the hat-basis decode cone stays in-graph for the kernel path")
+    elif config.fp8_expand():
         raise RuleSkipped("EMMY_FP8_EXPAND on — the decode cone stays in-graph for the kernel path")
     for nid in cone:
         if nid != root.id and (nid in match.graph.outputs or not match.graph.users(nid) <= cone):

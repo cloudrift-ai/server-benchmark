@@ -482,7 +482,9 @@ class Fold(Stmt):
     def b_trans(self) -> bool:
         """B stored N×K (the K axis last in its index) vs the canonical ``B[k, n]`` — a gmem
         LAYOUT question, so it is meaningful only for a materialized B; a computed B answers
-        ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``)."""
+        ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``,
+        and the computed-B compute fill deposits its decoded slab K-major by construction — the
+        trellis decode has no gmem element layout at all, only packed codes)."""
         return isinstance(self.b, Load) and self.axis.name in self.b.index[-1].free_vars()
 
     @classmethod

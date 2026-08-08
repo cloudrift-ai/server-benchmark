@@ -1,0 +1,36 @@
+# Tune the checked-in V100 Qwen projection seeds on the Phase 1 host. O1 measurements rank
+# candidates only; reviewed O3 A/B rows are collected separately before editing the golden YAML.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+  run: |
+    set -euo pipefail
+    docker rm -f vllm_0 >/dev/null 2>&1 || true
+    mkdir -p $task_dir/cubins
+    repo_path=$$(realpath $repo_dir)
+    task_path=$$(realpath $task_dir)
+    docker run --rm --gpus all \
+      --entrypoint bash \
+      --volume "$$repo_path:/workspace:ro" \
+      --volume "$$task_path:/artifacts" \
+      --env EMMY_CUBIN_CACHE=/artifacts/cubins \
+      --env EMMY_TUNE_DB=/artifacts/autotune.db \
+      --env EMMY_ONLINE_FILE=/artifacts/online.json \
+      cloudriftai/1cat-vllm-sm70:1.2.2 \
+      -lc 'set -euo pipefail
+    export PYTHONPATH=/workspace
+    cd /workspace
+    python -c "from emmy.compiler.pipeline.search.golden import live_recorded_goldens; rows=live_recorded_goldens(); print(len(rows or [])); assert rows and len(rows) == 44" \
+      2>&1 | tee /artifacts/live-goldens.log
+    python -c "from emmy.emmy import main; main()" tune --dataset golden --clean --gpus 16 --target sm_70 \
+      2>&1 | tee /artifacts/tune.log'
+  result_files:
+    - "*.log"
+    - "*.db"
+    - "*.json"
+  timeout: 21600
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 16

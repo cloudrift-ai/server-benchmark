@@ -1,0 +1,37 @@
+# O3 review lane for the manual-shard O1 candidates. The candidate JSON is produced from the
+# sharded run before this recipe is executed; every bootstrap/candidate pair is repeated three times.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - scripts/run_volta_golden_o3.py
+    - experiments/volta-sm70-golden-o3/candidates.json
+  run: |
+    set -euo pipefail
+    mkdir -p $task_dir/o3
+    repo_path=$$(realpath $repo_dir)
+    task_path=$$(realpath $task_dir)
+    image=cloudriftai/1cat-vllm-sm70:1.2.2
+    expected_image=sha256:7a62dcfeb1622665035eab501ffe0aea159662cb63872730c0c1ea0d61f43b2e
+    actual_image=$$(docker image inspect --format '{{.Id}}' "$$image")
+    test "$$actual_image" = "$$expected_image"
+    docker run --rm --name volta-golden-o3 --gpus all \
+      --entrypoint bash \
+      --volume "$$repo_path:/workspace:ro" \
+      --volume "$$task_path:/artifacts" \
+      "$$image" \
+      -lc 'set -euo pipefail
+    export PYTHONPATH=/workspace
+    cd /workspace
+    python scripts/run_volta_golden_o3.py \
+      --candidates experiments/volta-sm70-golden-o3/candidates.json \
+      --out-dir /artifacts/o3'
+  result_files:
+    - "o3/*.json"
+    - "o3/logs/*.log"
+    - "o3/records/*.json"
+  timeout: 21600
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 16

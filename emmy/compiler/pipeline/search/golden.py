@@ -920,6 +920,10 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
 
         if not torch.cuda.is_available():
             return None
-        return torch.cuda.get_device_name(0), tuple(torch.cuda.get_device_capability(0))
+        name = torch.cuda.get_device_name(0)
+        from emmy.gpu import by_name  # noqa: PLC0415
+
+        gpu = by_name(name)
+        return (gpu.name if gpu is not None else name), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001 — any probe failure ⇒ no live filter
         return None

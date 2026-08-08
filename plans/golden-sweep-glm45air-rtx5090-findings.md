@@ -21,6 +21,10 @@ its rep min/max in the YAML.
 Headline: **batch-1 TPOT 104.2 → 57.90 ms (1.80×)** on the served model, spread 0.02 % over three runs. TTFT is
 unchanged at 1.93 s, which is exactly what the withheld prefill entries predict.
 
+> **Part 2 (§8-14) is a later round (2026-08-09) that went after TTFT** and revises two conclusions of this one: the
+> boot audit's prefill flag is 0.15 % of a prefill step (not a lever), and prefill is GPU-bound rather than
+> dispatch-bound, with 85 % of its kernel time in the routed-expert programs. Read §8 before acting on §4 or §7.
+
 ## 1. The 17× roofline flag — what it actually was
 
 The boot audit's one warning, `L0.post.decode.m32` at 17× its ~67 µs weight-streaming floor, is layer 0's
@@ -305,3 +309,220 @@ projection at decode width, and no golden can reach it because the run form is n
   could refuse a branch-only checkpoint id up front with the message the release pipeline's `warm.sh` already has.
 - The `--json` record from `emmy run --bench` carries `record_knobs` per row, which is what made a scripted sweep
   possible at all — no table parsing. That part of the workflow is in good shape.
+
+# Part 2 — the prefill/TTFT round (2026-08-09)
+
+Same card, same checkpoint, same pinned serving config. The brief: attack TTFT, starting from the boot audit's one
+remaining flag (`L0.post.chunk.m512` at 46× its weight floor) and the open question of whether prefill is
+host-dispatch-bound the way the decode step turned out to be. Measurement wall ~1 h; no cold runner build was needed
+(the 2026-08-09 pack was reused and only the four expert `m256` programs were recompiled — see the workflow note).
+
+## 8. What a 512-token prefill chunk actually spends its time on
+
+One `T = 512` chunk through all 46 layers, at the runner level (`EmmyGenRunner` at `decode_bucket=32`,
+`prefill_bucket=512`, `capacity=512`; fake attention output, real embedding). Wall **1791.9 ms**, five runs, spread
+0.3 %.
+
+GPU-side, from nsys with `--cuda-graph-trace=node`:
+
+| | ms | % of GPU time |
+| --- | --- | --- |
+| routed experts, `m256` tier (1 141 launches) | 635.9 | 42.0 |
+| routed experts, `bucket` M=32 tier (3 981 launches) | 596.7 | 39.4 |
+| **trunk chunk twins** (46 `pre.prefill` + 46 `post.prefill`, M=512) | **121.7** | **8.0** |
+| torch router / combine / glue (51 678 launches) | 98.2 | 6.5 |
+| routed experts, symbolic tier (120 launches) | 50.1 | 3.3 |
+| routed experts, M=1 tier (297 launches) | 10.4 | 0.7 |
+| **total GPU kernel time** (120 034 kernel instances) | **1513.1** | 100 |
+
+The step span under nsys is 2033.7 ms, so **GPU utilization is 74.4 %** instrumented and ≈ 84 % against the clean
+1791.9 ms wall. **Prefill is kernel-bound, not dispatch-bound** — the opposite of the decode step, and the reason the
+warp-tier fill port moved TTFT 1.15× while leaving TPOT at zero. Coded (trellis) matmuls are 1185.8 ms, **78.4 % of
+all GPU time**; the routed experts together are **85.5 %**.
+
+Two things this table settles.
+
+**The 46× flag is a red herring for TTFT.** `L0.post.chunk.m512` measures 2740.7 µs against a 59.6 µs floor — it is
+layer 0's post half, the model's only DENSE layer (`first_k_dense_replace=1`), carrying the uncoded fp16 `o_proj` plus
+the dense MLP's three 2-bit projections. It is **0.15 % of the step**. The audit reports it not because it is
+expensive but because it is the only program in the model whose weight floor clears `MIN_FLOOR_US`, so it is the only
+one eligible to be flagged at all. Every other chunk twin is 1.3 MB–29 MB of weights and invisible to the audit.
+
+**A prefill golden on the trunk is not worth its risk, and now there is a number for that.** All 92 chunk twins
+together are 8 % of the step's GPU time. A 1.5× win on every one of them would be ~2 % of TTFT — against the
+measured 1.36× *regression* the 2026-08-08 round got when it tried (§4). The prefill kernel time is in the routed
+experts, and that is where this round went instead.
+
+## 9. The routed-expert prefill tier — 42 % of the step, and it had never been swept
+
+`_launch_expert` routes a hit expert's rows through `moe.expert.*.m256` when the row count lands in
+(`decode_bucket`, 256]. At a 512-token chunk with `top_k=8` over `E=128` the mean per-expert row count is exactly 32,
+so the distribution straddles the bucket boundary: 3 981 launches take the M=32 twin, **1 141 take the M=256 twin**,
+297 take M=1 and 120 spill to the symbolic program. Every MoE layer launches ~123 of its 128 experts, i.e. **5 539
+expert program launches per chunk** — each expert exactly once per layer, so there is no duplicated weight read to
+reclaim.
+
+The M=32 tier is golden-covered (the `shared_gate_up` / `shared_down` entries key it — §1). **The M=256 tier was
+not**, and it was invisible: `twins.py` builds no expert twin, so `eval golden --in-model` cannot audit it, and the
+file's own residual list had M=256 filed under "widths this deployment does not run". It does run it — on 42 % of the
+step's GPU time.
+
+Swept at M=256 over a 13-row ladder walking both of the CTA's output extents:
+
+| shape | N | K | bits | golden µs | reps | cold pick µs | ratio | golden knobs | cold pick |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| shared_gate_up | 1408 | 4096 | 2 | 45.87 | 45.75/46.01 (0.56 %) | 70.27 | **1.53×** | `w2x2/f2x1/k8` | `w4x1/f1x8/k8` |
+| shared_gate_up | 1408 | 4096 | 3 | 47.24 | 47.24/47.25 (0.02 %) | 72.73 | **1.54×** | `w2x2/f2x1/k8` | `w4x1/f1x8/k8` |
+| shared_gate_up | 1408 | 4096 | 4 | 46.03 | 45.84/46.28 (0.96 %) | 71.15 | **1.55×** | `w2x2/f2x1/k8` | `w4x1/f1x8/k8` |
+| shared_down | 4096 | 1408 | 2 | — | — | 34.62 | 1.00× | *not recorded* | `w8x1/f1x8/k8` |
+
+Same diagnosis as the decode band, one width up, and — checked rather than assumed — the same *correction*. The CTA
+extents are `WORK=wAxB` warps by `fCxD` fragment cells over the m16n8k16 atom, so M extent = A·C·16 and
+N extent = B·D·8:
+
+| | knobs | M extent | M blocks | N extent | N tiles | CTAs |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gate_up.m256` cold pick | `w4x1/f1x8` | 64 | 4 | 64 | 22 | **88** |
+| `gate_up.m256` recorded | `w2x2/f2x1` | 64 | 4 | 16 | 88 | **352** |
+| `gate_up.m256` tied row, withheld | `w2x2/f1x2` | 32 | **8** | 32 | 44 | 352 |
+
+Both grids were confirmed against the observed launch grids in the stored plan (88 for the cold pick, and 88/128 for
+the M=32 gate_up / down twins, which the same arithmetic reproduces). So the cold pick is **not** short of CTAs
+because of the M axis — it spends its parallelism budget on a 64-wide N fragment, exactly the wide-fragment mistake §1
+diagnosed at decode width. The recorded row narrows N back to 16 at an **unchanged four M blocks**: same codes
+traffic, four times the CTAs, on a 170-SM card. Split-K is refused outright on a computed B, so the output axis is
+the only source of CTAs either way.
+
+That matters for whether the entry is shippable at all. The file's rule is that a kept entry must read the codes slab
+no more often than the pick it replaces, and this one reads it **exactly** as often — so the M=512 inversion
+mechanism does not apply, and no L2-residency argument is needed. The row that TIES it in the isolated bench,
+`w2x2/f1x2` (45.86 against 45.87), reaches the same 352 CTAs by halving the M extent instead — eight M blocks, twice
+the codes reads — and is therefore the one row in the ladder that carries the M=512 hazard. It is not recorded. That
+was luck rather than judgement when the entry was written (b3/b4 simply preferred `f2x1` outright); the arithmetic
+above is what turned it into a reason, and it is the check to run on any future wide-M entry **before** measuring
+in-model rather than after.
+
+`shared_down` at M=256 is left unrecorded on purpose: greedy is already within 0.4 % of the best pinned row, that
+0.4 % is inside the rep spread, and the best row is one greedy does not reach on its own — recording it would risk
+the cold-pick drop for no measured gain.
+
+## 10. In-model verification — paired, with only the four expert programs rebuilt
+
+The pack's validity key is model × GPU × serving shape, so a golden edit does **not** invalidate it and a stale pack
+silently re-serves the old kernels. Exploited deliberately here to get a clean paired A/B: the "after" pack is a
+byte-copy of the "before" pack with the four `*.m256` entries removed from `manifest.json`, so `load_pack` returns
+384 of 388 plans and exactly those four programs recompile against the new goldens. Everything else in the runner is
+the identical stored plan.
+
+| | before | after | delta |
+| --- | --- | --- | --- |
+| `moe.expert.m256` (g0) per launch | 349.7 µs | 319.9 µs | −29.8 |
+| `moe.expert.g1.m256` per launch | 347.6 µs | 317.3 µs | −30.3 |
+| `moe.expert.g2.m256` per launch | 345.9 µs | 317.0 µs | −28.9 |
+| `moe.expert.g3.m256` per launch | 345.6 µs | 316.8 µs | −28.8 |
+| `moe.expert.*.bucket` / `.one` (controls, unchanged) | 129.1–129.3 / 34.9–36.9 µs | 129.1–129.3 / 34.9–36.9 µs | 0.0 |
+| **T=512 prefill step wall** | **1791.9 ms** | **1767.9 ms** | **−24.0 (1.014×)** |
+
+The direction is right and the controls did not move, which is what makes the 29 µs attributable. It is also **less
+than the isolated bench promised**: 1.53× on the two gate/up matmuls of a 346 µs program predicts −49 µs and the
+program delivers −29, so about 40 % of the isolated gain does not survive being put in a program. Not root-caused,
+and the codes-traffic mechanism of §9 is ruled out (the recorded tile reads the slab exactly as often as the pick it
+replaces). The plausible remainder is context — in the program these two matmuls sit inside the activation-side basis
+chain, reading different buffers, with L2 in a different state — but that was not separated here. The operational
+lesson is the safe one either way: **read an isolated coded-matmul ratio as a rank, never as a budget**, and take the
+size of a win from the program.
+
+**The greedy gate passes**: after the edit, greedy lands on `w2x2/f2x1/k8` unaided at all three rates (45.36 / 47.07 /
+45.96 µs), and `shared_down.b2.m256` correctly stays on its own `w8x1/f1x8`. No shape was dropped to a cold pick.
+
+## 11. In-situ versus isolated — a factor of 2–3, and it is not noise
+
+Worth recording because every µs in this file is an isolated number. The same kernel, at the same recorded tile:
+
+| kernel | isolated (`run --bench`, L2-resident) | in-situ (nsys, inside the real step) | ratio |
+| --- | --- | --- | --- |
+| `shared_gate_up.b2.m32` (expert `bucket` gate/up) | 20.16 µs | 58.7 µs | 2.9× |
+| `shared_gate_up.b2.m256` cold pick (expert `m256` gate/up) | 70.27 µs | 132.3 µs | 1.9× |
+
+The isolated bench replays one kernel ~100× over a slab that fits in L2, on an otherwise idle card. In the step the
+same kernel runs inside a 46-layer sweep of a 29 GB trunk, with L2 thrashed and clocks under a sustained ALU load.
+Neither number is wrong; they answer different questions. The file's existing L2 warning covers cross-shape and
+cross-format comparisons — this adds that **absolute** in-model cost is 2–3× the recorded µs, so the recorded value
+must not be used to budget a step either.
+
+## 12. Where the prefill headroom actually is
+
+After this round the step is still ~1.77 s for 512 tokens, and the shape of what is left is clear and is not tuning:
+
+**The routed-expert matmuls are CTA-starved, and that is structural.** At M=32 the expert gate/up kernel runs at
+**88 CTAs on 170 SMs** with 4 warps each, and takes 58.7 µs in-situ to stream 1.44 MB — **~59× its DRAM floor**. The
+M=256 tier now reaches 352 CTAs, which is why it is 3× more efficient per row (3.8 µs/row against 11.5). The M=32
+tier carries 24 % of the rows for 39 % of the GPU time for exactly this reason, and no golden can fix it: at 32 rows
+the shape offers one M block, N=1408 offers 88 tiles, and split-K is refused on a computed B. **1.23 s of the 1.51 s
+GPU budget is expert matmuls running at 40–60× their weight floor because the launches are too small to fill the
+card.**
+
+This promotes option (d) of `plans/moe-m2-dispatch-design.md` — the sorted grouped pass, one kernel per layer per
+projection — from "deferred, promote if measurements show prefill is the binding gap" to measured-and-binding. That
+document already calls it "THE prefill answer"; the numbers above are the go/no-go datum it asked for, and they are
+unambiguous: prefill GPU time is 85 % routed-expert matmuls, and their inefficiency is per-launch CTA starvation,
+which is exactly what a grouped pass removes. Note the argument that prefill FFN is *launch*-bound ~3× (§4 of that
+doc, modelled on OLMoE) does **not** hold on this model — measured 74–84 % GPU-busy — so (d)'s value here is the
+occupancy, not the dispatch saving.
+
+Two smaller items, both measured and both real:
+
+- **The activation-side basis chain is ~7 % of the step's GPU time** (the `k_linear_reduce_*` Hadamard/suh/svh
+  kernels around the coded contraction: ~102 ms of the `m256` tier's 636 ms alone). The 2026-08-08 index-map fix made
+  the flat↔128-block reshapes lowerable as index maps, which should let that chain collapse; unexploited.
+- **The torch router/combine chain issues 51 678 of the step's 120 034 kernel launches** for 98.2 ms (6.5 %) of GPU
+  work — `torch.where` + gather + `index_add_` per hit expert, ~1.9 µs a kernel. It is not the wall at prefill, but
+  it is 43 % of the wall's *host* side and the whole wall at decode.
+
+## 13. Serving A/B and the boot audit
+
+Paired same-session boots (the operational rule from the decode round: host framing tracks machine load, so numbers
+from different sessions are not comparable), pack hit both arms, identical config —
+`VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE` 256 MiB, util 0.9641, `--max-model-len` 4096,
+`--max-num-batched-tokens` 512, `--max-num-seqs` 32, decode bucket 32, prefill capacity 512,
+`--kv-cache-dtype fp8_e4m3`, `--enforce-eager`, snapshot path (not `--revision`).
+
+| arm (both pack-hit, same session, idle box) | TTFT median, 3 reps | median | TPOT median | out tok/s |
+| --- | --- | --- | --- | --- |
+| **A** — pack as shipped (`m256` at the cold pick) | 1665.5 / 1677.5 / 1708.7 | **1677.5 ms** | 31.00 / 31.01 / 31.01 | 22.84 / 22.78 / 22.68 |
+| **B** — same pack, the four `*.m256` programs recompiled on the new goldens | 1641.5 / 1644.6 / 1688.1 | **1644.6 ms** | 30.99 / 31.01 / 31.01 | 22.95 / 22.89 / 22.76 |
+| delta | every rep paired-lower, 3/3 | **1.020x (-32.9 ms)** | unchanged | +0.5 % |
+
+Both arms reported the same 9 184-token KV pool, so the serving shape is identical. TPOT not moving is the expected
+result and a useful control: the `m256` tier is prefill-only, so a change confined to it must leave the decode step
+alone, and it does. The rep ranges overlap (A spans 43 ms, B spans 47 ms — machine-side jitter dominates a 33 ms
+effect), so the resolving evidence is the paired ordering plus the runner-level step measurement in §10, not the
+serving medians on their own. A 2 % TTFT change is near the limit of what this workload can resolve; anything smaller
+should be measured at the runner level instead.
+
+**Boot roofline audit, after**: unchanged, one flag, `L0.post.chunk.m512` at 46-47x its ~66 µs
+floor (47x on the A boot, 46x on the B boot — the audit's own 3-rep timing jitter). Expected: this round touched no
+trunk program. Nothing new appeared, and nothing that was flagged cleared. See §8 for why that flag is not the
+prefill problem and `emmy/serving/ARCHITECTURE.md` for the durable version of the caveat.
+
+## 14. Workflow notes from this round
+
+- **`nsys` without `--cuda-graph-trace=node` silently hides every captured program.** The first profile of this step
+  reported 754 ms of GPU work at 37.4 % utilization and led to the wrong conclusion (dispatch-bound) for twenty
+  minutes. The trunk chunk twins and the `m256` expert tier both go through
+  `capture_program_graph` / `replay_program_graph`, so their kernels are collapsed into graph-launch nodes and
+  vanish from `cuda_gpu_kern_sum`; the `bucket` / `one` / `sym` tiers use `run_once` and stayed visible, which made
+  the truncated trace look plausible rather than empty. It was caught by mapping every kernel name in the trace back
+  to the pack's per-program kernel lists and noticing that no `pre.prefill` / `post.prefill` / `*.m256` program was
+  represented at all. **Always pass `--cuda-graph-trace=node` when profiling emmy serving, and always check the
+  kernel↔program mapping before believing a utilization number.**
+- **Dropping entries from a pack's `manifest.json` is the cheap way to re-measure one program.** `load_pack` is
+  all-or-nothing on a *missing file* but ignores a program simply absent from the manifest index, so deleting an
+  entry recompiles exactly that program while every other plan is served from the pack. That turned this round's
+  in-model A/B from two 18-minute cold builds into two 90-second ones, and it is what made a paired same-session
+  comparison affordable at all.
+- **The roofline audit's blindness now has a second face.** §7 noted it audits one layer and only above a 20 µs
+  floor. It also builds no expert twin — and on this model the expert programs are 85 % of prefill GPU time and
+  ~half of decode. The audit's one prefill flag is 0.15 % of the prefill step. *Improvement*: give the audit the
+  expert tiers it already has handles for (`runner._expert_tiers`) and rank by measured cost rather than by
+  ratio-over-floor, so the biggest item is reported rather than the one with the biggest floor.

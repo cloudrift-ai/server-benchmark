@@ -83,6 +83,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   sit under the floor and are silent. In the 2026-08-08 golden sweep the one flagged program was 18x over and the
   UNREPORTED representative MoE layer was 77x — so on a low-bit model treat a quiet audit as no information, and
   measure the twins directly (`_Program.program.iter_once()` gives the per-kernel split).
+  **A LOUD audit is also no information about where the time is**, which the 2026-08-09 prefill round settled: the
+  ratio ranks a program by how far it sits above its own floor, and the biggest floor belongs to the least
+  representative program. GLM-4.5-Air's one boot flag, `L0.post.chunk.m512` at 46x, is **0.15 % of a 512-token
+  prefill step**; 85 % of that step's GPU time is in the routed-expert programs, which the audit cannot even build a
+  twin for. Rank by measured cost, not by ratio-over-floor, when deciding what to tune.
 - `sampling.py` — **no vLLM, no CUDA**. Pure-numpy token sampling (`Sampler`: greedy / temperature / top-k / top-p) +
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA

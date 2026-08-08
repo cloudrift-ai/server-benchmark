@@ -781,9 +781,30 @@ an order of magnitude lower and for a different reason — launch chain, not adm
    about 8,000 more fp8 tokens, and it is now the only vocab-sized item left. Its value changed character, though:
    with the pool no longer binding, those bytes buy headroom (a bigger workspace, a longer context, whole-step
    capture) rather than the difference between serving and not.
-4. **TTFT.** 2.8-3.0 s for a 512-token prompt — 5.6 ms/token of prefill — against exllamav3's 499 ms at c=1 on the
-   2.00 rung. Prefill runs the symbolic programs at `EMMY_GEN_PREFILL_CAPACITY=512`; raising capacity is a pack-key
-   change (cold rebuild) and should be swept once (2) has moved the kernels.
+4. **TTFT** — 1.68 s for a 512-token prompt (was 2.8-3.0 s when this list was written), against exllamav3's 499 ms at
+   c=1 on the 2.00 rung. **DIAGNOSED 2026-08-09** (part 2 of `plans/golden-sweep-glm45air-rtx5090-findings.md`), and
+   the answer is the opposite of the decode step's: a 512-token chunk is **74-84 % GPU-busy** (1513 ms of kernel time
+   measured under `nsys --cuda-graph-trace=node`, in a 1792 ms step), so prefill is **kernel-bound, not
+   dispatch-bound**, which is why the warp-tier fill port moved TTFT 1.15x and TPOT not at all. Where that time sits
+   settles what to do next:
+   - **85 % of it is the routed-expert programs**, and their problem is CTA starvation, not the schedule. At M=32 the
+     expert gate/up kernel runs at **88 CTAs on a 170-SM card** (N=1408 gives 88 tiles at a 16-wide N tile, one M
+     block, and split-K is refused on a computed B), taking 58.7 µs in-situ to stream 1.44 MB — ~59x its DRAM floor.
+     1.23 s of the 1.51 s GPU budget is expert matmuls at 40-60x their weight floor because the launches cannot fill
+     the machine. **This promotes option (d) of `plans/moe-m2-dispatch-design.md`** (the sorted grouped pass) from
+     "deferred" to measured-and-binding — its own §4 already calls it the prefill answer. Note its *reason* was
+     wrong for this model: it predicted prefill FFN is launch-bound ~3x; measured here it is GPU-bound, so (d)'s
+     value is the occupancy, not the dispatch saving.
+   - **The M=256 routed-expert tier had no golden and is 42 % of the step's GPU time** — the only tuning-shaped item
+     found, now closed: three `shared_gate_up.*.m256` entries, 1.53-1.55x on the matmul, verified in-model (paired
+     runner step 1791.9 -> 1767.9 ms) and end to end (paired boots, TTFT 1677.5 -> 1643 ms, 1.02x).
+   - **The trunk chunk twins are 8 %**, so the prefill golden this list used to imply is worth ~2 % of TTFT at best
+     against a measured 1.36x inversion risk — deliberately still withheld. The boot audit's one remaining flag,
+     `L0.post.chunk.m512` at 46x, is **0.15 % of the step**: the audit ranks by ratio-over-floor, and the biggest
+     floor is the least representative program.
+   - Smaller and unexploited: the activation-side basis chain is ~7 % of the step's GPU time and the 2026-08-08
+     index-map fix should let it collapse; raising `EMMY_GEN_PREFILL_CAPACITY` above 512 is a pack-key change and was
+     not swept (it is not where the time is).
 5. **Pin `models/<slug>.env`** — **not yet**, deliberately: the config seals the cache key, and (1), (2) and (4) all
    still move it. The recipe/experiment TODO(Phase 5) placeholders stay until then.
 

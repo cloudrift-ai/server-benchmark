@@ -115,12 +115,24 @@
 # dense MLP at 2. Every entry records the rate it was measured at. The op side stamps
 # `S_trellis_k_bits` off the decode leaves.
 #
-# WIDTHS: M is a static width the generative runner deploys — 1 (`EMMY_GEN_M1_TIER`) and 8 / 32
-# (`EMMY_GEN_DECODE_BUCKET`; the pinned serving config uses 32). All three are widths
-# `emmy/serving/twins.py` traces, which is what makes `eval golden --in-model` able to audit them.
-# At every one of them the recorded tile keeps the SAME number of M blocks the shape already had
-# (one), so it changes how the decode is parallelized and not how many times the codes are read.
-# That is the invariant the prefill width broke — see the residuals.
+# WIDTHS: M is a static width the generative runner deploys — 1 (`EMMY_GEN_M1_TIER`), 8 / 32
+# (`EMMY_GEN_DECODE_BUCKET`; the pinned serving config uses 32), and 256 (`_EXPERT_PREFILL_M`, the
+# ROUTED-EXPERT prefill tier, on the `shared_gate_up` shapes only — see below). All four are widths
+# `emmy/serving/twins.py` traces, which is what makes `eval golden --in-model` able to audit them
+# (the expert programs themselves have no twin — a twin cannot build one — so the shared-expert
+# entries are what covers them; the mechanism was verified at M=32 in the 2026-08-08 round).
+# EVERY recorded tile in this file, M=256 included, keeps the SAME number of M BLOCKS as the pick
+# it replaces, so it changes how the decode is parallelized and never how many times the codes slab
+# is read. That is the file's shipping rule (see the residuals) and it is what the withheld M=512
+# entries violated. Worth spelling out at M=256, because it is not obvious from the knob strings —
+# the CTA extents are `WORK=wAxB` warps by `fCxD` fragment cells over the m16n8k16 atom, so
+# M extent = A*C*16 and N extent = B*D*8:
+#   gate_up.m256 cold pick  w4x1/f1x8  ->  M ext 64 (4 blocks), N ext 64 -> 22 tiles ->  88 CTAs
+#   gate_up.m256 RECORDED   w2x2/f2x1  ->  M ext 64 (4 blocks), N ext 16 -> 88 tiles -> 352 CTAs
+# Same four M blocks, same codes traffic, four times the CTAs — the identical correction the decode
+# band gets, one width up. (The row that TIES it, `w2x2/f1x2`, reaches the same 352 CTAs the other
+# way: M ext 32, so EIGHT M blocks and twice the codes reads. That is the M=512 hazard, so it is
+# not the row recorded, even though it measured 0.01 us faster.)
 #
 # `model:` HEADER: tagged with the rung's own branch (`<repo>@<revision>`), because the rungs
 # differ in exactly the bit allocation the keys carry — auditing 2.25 goldens against the 2.0
@@ -140,6 +152,15 @@
 #    against a 29 GB trunk. The M = 1 / 8 / 32 entries do NOT have that property (one M block
 #    either way, verified above), and their in-model gain reproduced: 1.7-2.3x per program. A
 #    prefill golden needs an in-model or past-L2 measurement, not this harness.
+#    STILL WITHHELD as of 2026-08-09, and now with a reason to stop asking: the chunk twins are
+#    8 % of a 512-token prefill step's GPU time (121.7 ms of 1513 ms, measured under nsys with
+#    `--cuda-graph-trace=node`), so even a 1.5x win on all 92 of them is ~2 % of TTFT — less than
+#    the measured downside when they invert. The prefill kernel time is in the ROUTED EXPERTS
+#    (85 % of it), which is what the M=256 entries above address.
+#  * the ROUTED-EXPERT `shared_down` shape at M=256: swept, and greedy is already at the optimum
+#    (34.62 us against 34.49 for the best pinned row, inside the rep spread). Deliberately NOT
+#    recorded: the 0.4 % is noise, and the best row is one greedy does not reach on its own, so
+#    recording it would risk the cold-pick drop the file warns about above for no measured gain.
 #  * the SYMBOLIC (`.dynM`) coded forks — the masked-tile programs a partial prefill chunk rides.
 #    With `--max-num-batched-tokens` 512 a 512-token prompt is one full chunk and takes the static
 #    twin, so the symbolic path carries only chunk tails; unswept on that ranking, and it would hit
@@ -149,8 +170,12 @@
 #    shapes, so the direction is solid but the last few percent is not claimed.
 #  * the UNCODED f16 forks of this model — layer 0's fp16 o_proj (4096x12288, 151.7 us in-model at
 #    M=32 and untouched by this sweep), the norms, the router, and the fused/pointwise glue.
-#  * the M=192 / 256 / 1024 / 2048 / 4096 widths `twins.py` traces for other serving lanes. This
-#    deployment runs none of them, and they are wide-M, so the caveat above applies.
+#  * the M=192 / 1024 / 2048 / 4096 widths `twins.py` traces for other serving lanes. This
+#    deployment runs none of them, and they are wide-M, so the caveat above applies. (M=256 was on
+#    this list until 2026-08-09 and should not have been — `_EXPERT_PREFILL_M` deploys it on every
+#    routed expert whose chunk row count lands in (32, 256], which at a 512-token chunk is ~20 % of
+#    the launches and 42 % of the step's GPU time. The audit could not see it because it builds no
+#    expert twin.)
 #  * the `pastl2_22016` control was not re-measured this round; its 2026-08-07 row stands.
 gpu_name: NVIDIA GeForce RTX 5090
 # Tagged by commit sha, not the `2.25bpw` branch name: a branch can be re-cut, and the release
@@ -501,6 +526,10 @@ configs:
   # m1            g32k    4.64 | greedy         g32k    4.64 = 1.00x | reps 4.64/4.64 (0.14%)  <- greedy already there
   # m8   w1x4/f1x1/k8    27.20 | per-element fill  42.00 = 1.54x | cold pick 2.93x | reps 27.19/27.20
   # m32  w2x2/f1x1/k8    20.16 | per-element fill  27.15 = 1.35x | cold pick 4.48x | reps 20.16/20.17
+  # m256 w2x2/f2x1/k8    45.87 | cold pick  70.27 = 1.53x | reps 45.75/46.01 (0.56%)  <- the PREFILL expert tier
+  #      f1x2 ties it (45.86, 45.82/46.11) and is NOT recorded: it buys its CTAs by halving the M
+  #      extent (8 M blocks, twice the codes reads) where f2x1 keeps the cold pick's 4 — see WIDTHS.
+  #      b3 and b4 prefer f2x1 outright anyway, so one row serves all three rates.
   - kernel: matmul
     name: glm45air.shared_gate_up.b2.m1
     M: 1
@@ -537,12 +566,25 @@ configs:
     knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
     emmy_us: 20.16
     cublas_us: 10.5
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b2.m256
+    M: 256
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 45.87
+    cublas_us: 27.0
   # ---- shared-expert gate / up projection, 3 bits (4 of 45 MoE layers, both leaves) --------------------------------
   # Also the routed experts' 3-bit gate/up shape.
   # m1            g32k    4.74 | greedy         g32k    4.74 = 1.00x | reps 4.74/4.74 (0.03%)  <- greedy already there
   # m8   w1x4/f1x1/k8    28.06 | per-element fill  42.35 = 1.51x | cold pick 3.02x | reps 28.04/28.06
   #      ^ MOVED 2026-08-09 off w2x2/f1x1/k8 (36.44 at that tile now, 0.96x the OTHER way under the per-element fill)
   # m32  w2x2/f1x1/k8    20.32 | per-element fill  27.90 = 1.37x | cold pick 4.53x | reps 20.31/20.32
+  # m256 w2x2/f2x1/k8    47.24 | cold pick  72.73 = 1.54x | reps 47.24/47.25 (0.02%)  <- the PREFILL expert tier
   - kernel: matmul
     name: glm45air.shared_gate_up.b3.m1
     M: 1
@@ -579,12 +621,25 @@ configs:
     knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
     emmy_us: 20.32
     cublas_us: 10.5
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b3.m256
+    M: 256
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 47.24
+    cublas_us: 27.0
   # ---- shared-expert gate / up projection, 4 bits (1 of 45 MoE layers, both leaves) --------------------------------
   # Also the routed experts' 4-bit gate/up shape.
   # m1            g32k    4.77 | greedy         g32k    4.77 = 1.00x | reps 4.77/4.77 (0.15%)  <- greedy already there
   # m8   w1x4/f1x1/k8    27.78 | per-element fill  42.53 = 1.53x | cold pick 2.96x | reps 27.77/27.78
   #      ^ MOVED 2026-08-09 off w2x2/f1x1/k8 (36.16 at that tile now, 0.97x the OTHER way under the per-element fill)
   # m32  w2x2/f1x1/k8    20.24 | per-element fill  28.00 = 1.38x | cold pick 4.43x | reps 20.24/20.24
+  # m256 w2x2/f2x1/k8    46.03 | cold pick  71.15 = 1.55x | reps 45.84/46.28 (0.96%)  <- the PREFILL expert tier
   - kernel: matmul
     name: glm45air.shared_gate_up.b4.m1
     M: 1
@@ -621,6 +676,18 @@ configs:
     knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
     emmy_us: 20.24
     cublas_us: 10.5
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b4.m256
+    M: 256
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 46.03
+    cublas_us: 27.0
   # ---- shared-expert down projection, 2 bits (38 of 45 MoE layers) -------------------------------------------------
   # 1408 -> 4096. Also the routed experts' 2-bit down shape.
   # m1            g11k    4.31 | greedy         g11k    4.31 = 1.00x | reps 4.30/4.32 (0.49%)  <- greedy already there

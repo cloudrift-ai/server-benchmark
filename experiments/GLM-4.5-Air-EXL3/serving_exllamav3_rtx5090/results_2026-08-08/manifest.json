@@ -1,0 +1,26 @@
+{
+ "date": "2026-08-08",
+ "session": "one session, one idle RTX 5090, both engines back to back",
+ "host": {"gpu": "NVIDIA GeForce RTX 5090", "vram_total_mib": 32607, "driver": "580.173.02",
+          "idle_baseline_mib": 185, "note": "185 MiB is Xorg + gnome-shell; the card was confirmed drained to it between engines"},
+ "checkpoint": {"repo": "turboderp/GLM-4.5-Air-exl3", "branch": "2.25bpw",
+                "commit": "6a309ed6d606fc0154e6e1aeb0912cd3c25534fe", "size_gib_on_disk": 29.37},
+ "engine": {"exllamav3": "1.4.0+cu128.torch2.10.0", "torch": "2.10.0+cu128",
+            "tabbyAPI": "d844f705aa4f18b3425a4c611dc1ff7d59e8a256",
+            "tabby_patches": ["logprobs None guard via scripts/patch_tabbyapi.py"],
+            "tabby_patches_reverted": ["the Phase 0 sep=\"\\n\" EventSourceResponse transport patch — the client-side hardening in bench_serve_sweep.py subsumes it"]},
+ "client": {"tool": "vllm bench serve", "vllm": "0.23.0", "driver": "scripts/bench_serve_sweep.py",
+            "tokenizer": "the pinned 2.25 snapshot, shared by every lane",
+            "protocol": "random dataset, 512 in / 128 out, --ignore-eos, N=8/24/48/64 at c=1/4/8/16, 1 discarded warmup, 2 recorded reps, 1 Hz nvidia-smi poll"},
+ "lanes": {
+  "fp16": {"cache_mode": "FP16", "cache_size": 8192, "max_seq_len": 8192,
+           "kv_pool_tokens": 8192, "kv_bytes_per_token_kib": 182.9,
+           "why": "the largest fp16 pool that both boots AND survives a 512-token prefill at c=16"},
+  "q4":   {"cache_mode": "Q4", "cache_size": 16384, "max_seq_len": 8192,
+           "kv_pool_tokens": 16384,
+           "why": "validated under load; 32768 boots but OOMs mid-request. The usable ceiling was not bisected between 16384 and 32768."}},
+ "cache_ceiling_probe": {
+  "fp16": {"8192": "boots, serves", "10240": "boots, OOMs under load", "11264": "boots, OOMs under load", "12288": "refuses to boot"},
+  "q4": {"16384": "boots, serves", "32768": "boots, OOMs under load", "36864": "boots, load not attempted", "40960": "refuses to boot"}},
+ "caveat_ignore_eos": "tabby's exllamav3 backend does not honour ignore_eos; measured 93-99 % of the 128-token cap per request, so it does 1-7 % less decode work per request than emmy, which honours it exactly."
+}

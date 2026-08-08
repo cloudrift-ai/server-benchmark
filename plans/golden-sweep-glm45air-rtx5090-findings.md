@@ -526,3 +526,208 @@ prefill problem and `emmy/serving/ARCHITECTURE.md` for the durable version of th
   ~half of decode. The audit's one prefill flag is 0.15 % of the prefill step. *Improvement*: give the audit the
   expert tiers it already has handles for (`runner._expert_tiers`) and rank by measured cost rather than by
   ratio-over-floor, so the biggest item is reported rather than the one with the biggest floor.
+
+---
+
+# Part 3 — the head-to-head baseline on the 2.25 rung (2026-08-08, one session)
+
+Phase 6 requires one comparison table both engines can be held to, and until this round none existed. Every
+exllamav3 number in the campaign came off the **2.00** rung during Phase 0; the serving target moved to **2.25**
+when 2.00 failed the quality gate. Part 1 §13 additionally established that host framing tracks machine load, so
+numbers from different sessions do not compare — the 57.90 ms emmy TPOT recorded in Part 1 re-measured at 31.04 ms
+from the identical pack on an idle box. **Everything below was therefore measured back to back in one session on
+one idle card**, each server torn down and the card confirmed drained to its 185 MiB desktop baseline before the
+next booted.
+
+The short version: **emmy loses this comparison at every concurrency, by 2.8x at batch 1 and 4.4x at c = 16 on
+output throughput**, and the deficit is not admission capacity — emmy serves a *larger* KV pool in tokens than the
+exllamav3 lane it loses to. What emmy does match is the weights: teacher-forced perplexity agrees with
+exllamav3's to 0.48 % on the identical checkpoint, which is the Phase 6 correctness bar and it passes.
+
+## 15. What was measured, and with what
+
+| | emmy | exllamav3 / tabbyAPI |
+| --- | --- | --- |
+| weights | the pinned 2.25 rung, decoded in-kernel | the identical snapshot, same bytes |
+| engine | vLLM 0.23.0 + the emmy generative plugin | exllamav3 `1.4.0+cu128.torch2.10.0`, torch `2.10.0+cu128` |
+| server | `emmy serve --generate`, snapshot path | tabbyAPI git `d844f705` |
+| client | `vllm bench serve` 0.23.0 through `scripts/bench_serve_sweep.py` | the same client, driver and tokenizer snapshot |
+
+Versions were re-recorded this session and had not drifted from Phase 0. The tabby clone carries **one** local
+patch, the `logprobs: null` guard `scripts/patch_tabbyapi.py` applies; Phase 0's second patch (`sep="\n"` on the two
+`EventSourceResponse` call sites) was **reverted before measuring** — the client-side CRLF/keepalive hardening in
+`bench_serve_sweep.py` subsumes it, and a source patch to a contender's transport is a thing reviewers are right to
+distrust. `sse_ping_interval: 0` stays in tabby's config, which is a supported option.
+
+Protocol: the Phase 0 grid — random dataset, 512 in / 128 out, `--ignore-eos`, N = 8/24/48/64 at c = 1/4/8/16, one
+discarded warmup, **two recorded reps**, 1 Hz `nvidia-smi` polling. The driver's completed-count guard earned its
+keep twice this session (§16). The long-input point (2048 in) was not run.
+
+**The emmy pack was rebuilt, not reused.** The pack on disk predated two commits that change what the compiler
+emits — `8c43c3c9` (the run-fused column decode at the warp tier) and `eff405ac` (the routed-expert `m256` prefill
+golden) — and a pack hit ignores compiler source and golden changes, so reusing it would have silently re-served
+stale kernels. Cold rebuild: **1641 s, 416 programs compiled, 388 plans written**; the fresh pack has 388 plans
+where the stale one had 296, which is the change made visible.
+
+## 16. The exllamav3 cache ceiling on 2.25 — a boot is not a fit
+
+The plan expected the 2.25 rung (~29.8 GiB) might leave no room for an fp16 cache at all. **It does leave room, and
+more than Phase 0's probe suggested** — but the number that matters is not the one the boot reports.
+
+| cache mode | boots? | survives a 512-token prefill at c = 16? |
+| --- | --- | --- |
+| FP16 8 192 | yes, 31 313 MiB | **yes — the served config** |
+| FP16 10 240 | yes, 31 665 MiB | **no** — `torch.OutOfMemoryError` on the first batch |
+| FP16 11 264 | yes, 31 857 MiB | **no** — OOM on the first 512-token prefill |
+| FP16 12 288 | no — `Insufficient VRAM in split for model and cache` | — |
+| Q4 16 384 | yes, 30 705 MiB | **yes — the served config** |
+| Q4 32 768 | yes, 31 537 MiB | **no** — OOM under the c = 16 workload |
+| Q4 36 864 | yes, 31 729 MiB | not attempted (32 768 already failed) |
+| Q4 40 960 | no — `Insufficient VRAM in split` | — |
+
+Phase 0's probe reported 4 096 fp16 / 8 192 Q4 for this rung; both are pessimistic, because that probe went through
+the raw exllamav3 API with its own generator overhead rather than through tabby's loader. The honest ceiling is
+neither the probe's nor the boot's: **the server loads happily at cache sizes it cannot then serve from**, and the
+failure is a mid-request `torch.OutOfMemoryError` that kills every in-flight job, not a refused boot. A health check
+proves nothing here; validate with the real workload. The Q4 usable edge was not bisected — 16 384 passed, 32 768
+failed, and 16 384 was pinned because Phase 0 used it.
+
+**KV arithmetic, and what it says about the model.** Across the fp16 boot ladder the marginal cost measures
+**182.9 KiB/token**, which is 46 layers of K+V at 8 heads x 128 dims in fp16 (184.0 KiB/token) and not 47
+(188.0) — exllamav3 does not instantiate the checkpoint's MTP layer, consistent with the Phase 2 note that the index
+carries one `Glm4MoeForCausalLM` does not build. Extrapolating the ladder to a zero-sized cache puts weights + CUDA
+context + workspace at **29 661 MiB (28.96 GiB)** of the card's 32 607.
+
+## 17. The comparison table
+
+512 in / 128 out. Mean of two recorded reps, ± the spread between them. `exl3-fp16` is the contender at its own
+reference cache precision; `exl3-q4` is the same engine with its quantized cache, the nearest analogue of emmy's
+fp8 KV.
+
+| c | lane | out tok/s | req/s | mean TTFT ms | mean TPOT ms | p99 TPOT ms | power mean/max W | peak VRAM MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **emmy** | 22.94±0.07 | 0.179±0.001 | 1643±14 | 31.00±0.02 | 31.0 | 220/234 | 31 979 |
+| 1 | exl3-fp16 | **63.61**±0.77 | 0.508±0.016 | **488**±11 | **11.92**±0.18 | 12.2 | 294/335 | 31 787 |
+| 1 | exl3-q4 | 62.90±1.63 | 0.530±0.053 | 491±4 | 11.15±1.49 | 12.1 | 295/352 | 31 309 |
+| 4 | **emmy** | 16.16±0.14 | 0.126±0.001 | 4593±29 | 213.16±1.88 | 223.8 | 173/213 | 31 979 |
+| 4 | exl3-fp16 | 98.41±0.82 | 0.787±0.005 | **1487**±23 | 27.86±0.15 | 32.8 | 317/430 | 31 813 |
+| 4 | exl3-q4 | **106.25**±1.53 | 0.864±0.002 | 1561±153 | **24.29**±1.55 | 32.9 | 345/469 | 31 309 |
+| 8 | **emmy** | 19.14±0.41 | 0.150±0.003 | 6374±44 | 370.58±8.63 | 401.6 | 171/217 | 31 979 |
+| 8 | exl3-fp16 | 99.72±1.39 | 0.789±0.002 | 6023±58 | **29.13**±0.50 | 30.8 | 336/417 | 31 813 |
+| 8 | exl3-q4 | **119.89**±3.27 | 0.974±0.012 | **2629**±3 | 43.56±0.51 | 55.6 | 364/505 | 31 309 |
+| 16 | **emmy** | 22.48±1.14 | 0.176±0.009 | 11 172±617 | 594.78±32.26 | 875.9 | 195/306 | 31 980 |
+| 16 | exl3-fp16 | 98.84±1.94 | 0.800±0.002 | 14 432±5 | **30.93**±1.20 | 65.1 | 340/424 | 31 813 |
+| 16 | exl3-q4 | **121.12**±0.34 | 0.966±0.004 | **10 012**±114 | 41.70±0.74 | 52.6 | 365/504 | 31 309 |
+
+Every point completed every request on every rep (the driver refuses to report otherwise).
+
+**Reading it straight.**
+
+- **Batch 1**: emmy TTFT 1643 ms against 488, TPOT 31.00 ms against 11.92. **3.4x behind on TTFT, 2.6x on TPOT,
+  2.8x on throughput.**
+- **Under load**: exllamav3 saturates near 99 tok/s (fp16) and 120 tok/s (q4) from c = 4 and stays there — the same
+  flattening Phase 0 saw at 2.00. emmy does not flatten so much as **fail to rise**: 22.94 → 16.16 → 19.14 → 22.48
+  as c goes 1 → 4 → 8 → 16, i.e. c = 16 throughput is *equal to* batch 1, with a dip in the middle. Both engines
+  flatten; exllamav3 flattens at 4-5x emmy's level.
+- **The one place emmy is ahead**: mean TTFT at c = 16, 11.2 s against the fp16 lane's 14.4 s. That is real, and it
+  is the continuous-batching admission behaviour the plan predicted — but it is worth little while the same run
+  takes 4.6x longer end to end, and the q4 lane (10.0 s) beats emmy on it anyway.
+- **Power corroborates the mechanism**: emmy draws 171-220 W mean where exllamav3 draws 294-365 W. On a card this
+  size that is the signature of a machine waiting on launches, not one doing arithmetic.
+- **Phase 0's exllamav3 numbers transfer to 2.25 essentially unchanged** (c1 TTFT 488 vs 499 ms, TPOT 11.92 vs
+  11.91, c16 98.8 vs 98.9 tok/s). That is now measured rather than assumed, and it is what the campaign needed: the
+  extra 0.25 bpw costs the contender nothing at the same cache size.
+
+## 18. The KV pools, which are part of the result and do not excuse it
+
+| lane | pool | dtype | bytes/token | GiB |
+| --- | --- | --- | --- | --- |
+| emmy | **9 184 tokens** | fp8_e4m3 | 92.5 KiB | 0.81 |
+| exl3-fp16 | 8 192 tokens | fp16 | 182.9 KiB | 1.47 |
+| exl3-q4 | 16 384 tokens | Q4 | — | — |
+
+The asymmetry runs **in emmy's favour against the lane it loses to**: emmy admits 12 % more tokens than the fp16
+lane while spending 55 % of the bytes, because fp8 KV is exactly half the width. At 640 tokens per request
+(512 + 128) that is 14.35 concurrent requests for emmy against 12.8 for exl3-fp16. So the throughput gap is not an
+admission-capacity artifact and cannot be argued away as one. Only the q4 lane has a genuine capacity advantage
+(16 384 tokens, 1.8x emmy's), and it is the lane that also happens to be fastest — worth stating plainly rather
+than quoting the fp16 lane when it flatters.
+
+**Where emmy's step time actually goes.** TPOT scales close to linearly with concurrency — 31 → 213 → 371 → 595 ms
+at c = 1/4/8/16 — which is the diagnostic. Per concurrent row that is 31.0 / 53.3 / 46.3 / 37.2 ms: batching
+amortizes weakly, and **no batched point beats batch 1 per row**. If the static decode bucket (32) were the
+dominant cost, TPOT would be roughly *flat* across c = 4/8/16, since every step would pay for 32 rows regardless of
+fill; it is not flat, it nearly doubles from c = 4 to c = 8. So the cost tracks the rows actually present, not the
+bucket, and the mechanism is the routed-expert dispatch: one program per (layer, expert) hit, so more concurrent
+rows touch more distinct experts and the launch count grows with the batch. This is the same wall §12 named for
+prefill, and the same fix answers it — option (d) of `plans/moe-m2-dispatch-design.md`, the sorted grouped pass,
+which is **unbuilt**. Separating the bucket term from the dispatch term properly needs a rebuild at
+`EMMY_GEN_DECODE_BUCKET` 8 or 16, which is a pack-key change and therefore a fresh ~27-minute cold build; not done
+here.
+
+## 19. Quality on the served rung — emmy matches exllamav3 to 0.48 %
+
+The plan requires our PPL/KL to match exllamav3's on the same checkpoint, since decode is exact reconstruction and
+any gap is a bug. Measured teacher-forced, on **identical token ids** so no tokenizer difference can enter: 16 rows
+of 256 tokens from wikitext-2-raw test, fed to emmy as an explicit token-id prompt with `prompt_logprobs`, and to
+exllamav3 through the same `model.forward(..., {"attn_mode": "flash_attn_nc"})` call `eval/ppl.py` uses.
+
+| arm | PPL over 16 x 255 scored tokens |
+| --- | --- |
+| exllamav3 1.4.0, no KV quantization | **7.3581** |
+| emmy, served, fp8_e4m3 KV | **7.3934** (+0.0353, **+0.48 %**) |
+
+emmy is higher on 10 of 16 rows — a small consistent bias, the size one expects from an fp8 paged cache against an
+unquantized forward, and far too small to be a decode defect. **The correctness bar passes.** These are 256-token
+contexts, so the absolute value is not comparable to Phase 0's 6.306 (measured at 2048); the paired comparison is
+what the gate asks for and it is clean.
+
+**Two things this cost, both worth recording.** First, the served configuration **cannot** produce prompt logprobs:
+it has 22 MiB free, and logits for even one 512-token chunk over vocab 151 552 is ~310 MB, so the request OOMs and
+takes EngineCore down with it. Lowering utilization does not help in the obvious way either — at 0.93 there is no
+KV pool at all, because the emmy runner claims its residents before vLLM's profiler runs. The quality arm was
+measured at utilization 0.95 (a 4 144-token pool), same pack, same kernels, same fp8 KV dtype; it is not a serving
+measurement and is labelled as such in the manifest.
+
+Second, **greedy agreement is not a usable quality metric here**, and the control is what shows it. Across 16
+prompts at temperature 0:
+
+| pair | exact-match sequences | median first divergence |
+| --- | --- | --- |
+| emmy vs exl3-fp16 | 0/16 | token 4.5 |
+| emmy vs exl3-q4 | 0/16 | token 6.5 |
+| **control: exl3-fp16 vs exl3-q4** (same engine, cache precision only) | **2/16** | token 8 |
+
+Changing nothing but the KV cache precision *within exllamav3* already destroys agreement, so a cross-engine greedy
+comparison measures floating-point path differences rather than model quality. Do not report it as a quality
+number; the PPL pairing above is the datum.
+
+## 20. Handicaps, named against the numbers they touch
+
+None of these are excuses — the table above is the result — but a reader comparing engines should know which emmy
+numbers carry a known, unremoved cost.
+
+- **`--enforce-eager`** applies to **every** emmy row. Whole-step decode capture does not fit in the memory budget,
+  so the decode step pays per-launch host overhead that the captured path would remove. On a step already suspected
+  of being launch-bound this is the handicap most likely to matter, and it is not separable from the numbers here.
+- **The unbuilt sorted grouped MoE dispatch pass** applies to the c = 4/8/16 rows, and §18 argues it is the
+  dominant term in them.
+- **The withheld prefill trunk goldens** (Part 1 §4) apply to every TTFT figure.
+- **No prebuilt serving image** — Phase 5 is incomplete, so the emmy lane boots from source with a locally built
+  pack rather than the released artifact the recipe names.
+- **The M1 tier was ON** (`EMMY_GEN_M1_TIER` unset, default 1) and is what makes batch 1 the best per-row point;
+  it routes only T = 1, so it contributes nothing at c > 1.
+- **`--ignore-eos` asymmetry, favouring exllamav3 slightly**: tabby's backend does not honour the flag and produced
+  93-99 % of the 128-token cap per request, so it did 1-7 % less decode work per request than emmy, which honours
+  it exactly. Throughput and TPOT are per-token and unaffected; `req/s` and duration slightly favour exllamav3.
+
+**One operational note.** The emmy sweep is split across two boots: the harness reaped the server process during
+the c = 16 point, so c = 1/4/8 come from the cold-build boot and c = 16 from a pack-hit reboot minutes later. A
+c = 1 control was re-run on the second boot and reproduces the first to 0.1 % (22.92 vs 22.94 tok/s, TPOT 31.03 vs
+31.00, TTFT 1644 vs 1643 ms), both boots reporting the same 9 184-token pool — which is what makes the split
+comparable rather than a defect. Launch long-lived servers detached (`setsid nohup`), not as a background job of
+the agent harness.
+
+**Raw manifests**: `experiments/GLM-4.5-Air-EXL3/serving_exllamav3_rtx5090/results_2026-08-08/{fp16,q4}/` and
+`experiments/GLM-4.5-Air-EXL3/serving_rtx5090/results_2026-08-08/{emmy,emmy_boot2_c1_control,quality}/`, each
+directory's `manifest.json` carrying the versions, the serving shape, the cache-ceiling probe and the boot facts.

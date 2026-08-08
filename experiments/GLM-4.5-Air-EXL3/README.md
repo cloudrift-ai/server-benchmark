@@ -24,17 +24,24 @@ plan's quality gate. EXL3 is a single-maintainer, actively developed format: a r
 name would silently move both the quality numbers and the per-tensor bit allocation that the seeded goldens are keyed
 on. Pin by commit, always.
 
-## The Phase 0 baselines are on the WRONG RUNG — re-measure before publishing anything
+## The head-to-head baseline on 2.25 — measured 2026-08-08
 
-`plans/vq-phase0-findings.md` §5 carries a full exllamav3/tabbyAPI serving sweep: c = 1/4/8/16, batch-1 TTFT 499 ms /
-TPOT 11.9 ms, throughput saturating near 100 tok/s from c = 4 onward, plus a q4-cache lane reaching ~120 tok/s.
+`plans/vq-phase0-findings.md` §5 carries a full exllamav3/tabbyAPI serving sweep measured on the **2.00** rung, which
+is not the checkpoint this directory serves. Both engines have since been re-measured on 2.25, back to back in one
+session on one idle card — the only way the numbers compare, because host framing tracks machine load. The results
+live under `results_2026-08-08/` in the two serving lanes; each lane's `manifest.json` carries the versions, the
+serving shape, the cache-ceiling probe and the boot facts behind every number.
 
-**Those numbers were measured on the 2.00 bpw rung, and they are not the baseline for this comparison.** The 2.25 rung
-is 2.9 GiB heavier, which changes the cache ceiling (Phase 0 probed 4096 FP16 / 8192 Q4 tokens at 2.25 against
-8192 / 32768 at 2.00) and therefore changes admission capacity, queueing and every throughput number that depends on
-it. The `serving_exllamav3_rtx5090` lane exists to re-measure them on 2.25 with the same client. Until it has run, no
-table in this directory may quote a Phase 0 figure as the contender's number; the Phase 0 sweep is a
-methodology reference and a 2.00-vs-2.25 comparison point, nothing more.
+Headline, 512 in / 128 out: exllamav3 saturates at ~99 tok/s (fp16 cache) and ~120 tok/s (Q4) from c = 4; emmy runs
+22.9 tok/s at batch 1 and does not rise with concurrency (22.5 at c = 16) — **2.8x behind at batch 1, 4.4x at
+c = 16**, with batch-1 TTFT 1643 ms against 488 and TPOT 31.00 ms against 11.92. The gap is not admission capacity:
+emmy's 9,184-token fp8 pool is 12 % *larger* than the fp16 lane's 8,192. Teacher-forced perplexity on identical
+token ids agrees to 0.48 % (7.3934 vs 7.3581), so the weights and the decode are right and the deficit is serving.
+
+Two facts that configuration work here depends on. **The 2.25 rung does leave room for an fp16 cache** — Phase 0's
+probe said 4096 tokens, the real usable pool is 8192 — and **a tabby boot is not a fit**: it loads happily at cache
+sizes it then OOMs on mid-request (fp16 10 240 and 11 264 both boot and both die on the first 512-token prefill).
+Validate a cache size with the real workload, never with a health check.
 
 ## The L2-residency caveat, for anyone reading kernel-level numbers
 
@@ -62,9 +69,11 @@ kernels plus serving stack. llama.cpp reads a different quantization, so its row
 community actually runs at this size on this card — and any quality difference there belongs to the format, which the
 article has to say rather than leave to the reader.
 
-The exllamav3 lane runs twice, once per cache precision. emmy serves with an fp8 KV cache because nothing else fits, so
-tabby's Q4 lane — not its FP16 lane — is the like-for-like row; both are recorded so the difference is visible instead
-of assumed.
+The exllamav3 lane runs twice, once per cache precision, and both are recorded so the difference is visible instead of
+assumed. Which one is "like for like" depends on what you are matching. On *precision*, tabby's Q4 lane is the nearest
+analogue of emmy's fp8 KV. On *admission capacity* — the thing that actually drives throughput under load — the
+measured pools say the FP16 lane is the closer match: 8,192 fp16 tokens against emmy's 9,184 fp8, while Q4 reaches
+16,384. Quote the pool alongside the throughput in either case.
 
 The stock-vLLM lane is a load-failure record, not a measurement: vLLM has no EXL3 quantization method and aborts with
 `Unknown quantization method: exl3` during config parsing, before it touches a weight. The lane captures that text
@@ -161,5 +170,11 @@ runs) plus a flat `lanes.json`. Power and peak VRAM ride alongside each point as
   `--max-model-len 8192`.
 - **The GGUF is not pinned.** The llama.cpp lane names a quant class and enforces a size band; the exact file and
   revision are Phase 6's to resolve and write down.
-- **The quality gate has to be re-run on the served model**, with the fp8 KV cache on. The checkpoint's KL/PPL is not
-  the served model's once the cache is quantized.
+- **The quality gate on the served model is partly done.** Teacher-forced perplexity through the served endpoint,
+  fp8 KV on, agrees with exllamav3's on identical token ids to 0.48 % (7.3934 vs 7.3581 over 16 x 256 tokens); the
+  rows and both scorings are in `serving_rtx5090/results_2026-08-08/quality/`. Note that cross-engine greedy
+  agreement is **not** a usable substitute — switching only the cache precision inside exllamav3 already drops it to
+  2/16 exact matches. What is still owed is the full KL/PPL arm at 2048-token context against the bf16
+  reference, comparable to Phase 0's 6.306: the served configuration has 22 MiB free and OOMs producing logits over
+  a 151,552 vocab, so that run needs either an offline harness over emmy's compiled forward or a boot with the head
+  reclaimed.

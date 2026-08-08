@@ -16,6 +16,35 @@ import re
 # Repo root: tests/architecture/ → tests/ → repo
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+_POST_DECOMPOSITION_ROOTS = (
+    "emmy/config.py",
+    "emmy/compiler/backend",
+    "emmy/compiler/dtype.py",
+    "emmy/compiler/ir/kernel",
+    "emmy/compiler/ir/loop",
+    "emmy/compiler/ir/stmt",
+    "emmy/compiler/ir/tile",
+    "emmy/compiler/pipeline/passes/loop",
+    "emmy/compiler/pipeline/passes/lowering",
+)
+
+
+def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
+    """Checkpoint-format implementation details may not enter downstream dialects or passes."""
+    forbidden = re.compile(r"\b(?:trellis|exl3)\b", re.IGNORECASE)
+    offenders: list[str] = []
+    for relative in _POST_DECOMPOSITION_ROOTS:
+        root = _REPO_ROOT / relative
+        paths = sorted(root.rglob("*.py")) if root.is_dir() else [root]
+        for path in paths:
+            for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+                if forbidden.search(line):
+                    offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "checkpoint-format names must stop at frontend decomposition; downstream code and comments "
+        "may contain only generic IR:\n" + "\n".join(offenders)
+    )
+
 
 def test_lowering_tile_does_not_import_kernel_ir() -> None:
     """``lowering/tile/*.py`` may not import from ``ir.kernel.ir``.
@@ -53,13 +82,12 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     The tile layer (``enumeration`` + ``assembly`` + ``split``) runs ABOVE the
     kernel pass layer; a tile pass importing ``lowering.kernel`` is a back-edge in
     the pass DAG — a tile pass depending on a downstream kernel pass's internals.
-    Structural predicates the two layers share (``is_matmul_reduce``,
-    ``segmentable_k_extent``, ``reduce_body_has_coupled_accum``,
-    ``classify_fragment_epilogue``, the fused-edge ``map_transform`` /
-    ``split_monoid_producer``) live in ``lowering/_predicates.py`` — pure ``ir.*``
-    queries imported by both layers.
+    What the two layers genuinely share lives in the ``lowering/`` root modules —
+    ``_addr`` (addressing algebra: ``gmem_row_stride``, ``BYTE_SLAB_PAD``) and
+    ``_reduction`` (``Reduction``, ``loop_state_head``) — pure ``ir.*`` queries and
+    layout facts imported by both layers.
 
-    If this fires: move the shared helper into ``lowering/_predicates`` and import
+    If this fires: move the shared helper into a ``lowering/`` root module and import
     it there from both layers, rather than reaching down into ``lowering/kernel``.
     """
     tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "tile"

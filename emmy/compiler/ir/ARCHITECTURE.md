@@ -96,7 +96,7 @@ them.
 |-----------------|--------------------------------------------------------------------------------|
 | `Op`            | Base class. Subclasses implement `infer_output_shape` and `forward` (numpy).   |
 | `InputOp`       | Sentinel: graph input tensor. Value supplied by the executor.                  |
-| `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative (`merge_sibling_linears`' weight concat): `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain — exactly one of `source_path` / `source_parts` is set on a loadable constant. |
+| `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative (`merge_sibling_linears`' weight concat): `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain. `source_graph` is the N-source bind record (`032_fold_constant_subgraphs`' collapsed static cone): a mini-graph whose external leaves name source paths and whose scalar leaves carry values — the loader binds/evaluates it through the NumPy backend, then runs the chain. Exactly one of `source_path` / `source_parts` / `source_graph` is set on a loadable constant. |
 | `_keepdim_axis` | Shape helper shared by `ReduceOp` (tensor) and `MeanOp` (frontend).            |
 
 ## `expr.py`
@@ -132,10 +132,16 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`exp`/`sin`/`cos`/…). |
+| `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
+| `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
 | `IndexMapOp` + `IndexSource`         | Unified layout-only op over `Expr`.                            |
+
+`RangeOp`, `CastOp`, and `BitcastOp` are generic value operations, not checkpoint-format operations. Their current
+consumer is static reconstruction algebra, so `032_fold_constant_subgraphs` removes them before Loop lifting. A
+future runtime consumer may add ordinary lifting for the same semantics without changing checkpoint ingestion.
 
 Op metadata (arity / `commutative` / `associative` / `identity` /
 `has_identity` / `selecting` / `semiring_product`) lives on `ElementwiseImpl` in
@@ -152,7 +158,9 @@ base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 behind the four sites that used to switch on the reduce op name (`Accum.render`'s
 `+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expr`, and
 `ReduceOp.forward` / `ScanOp.forward`'s numpy reductions). `op.selecting` (the
-max/min family) drives the init-placement dtype choice.
+max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
+dtype an op is the decode cast for (the f8 family today) — the trait the tile binding
+arm's factor hoist queries instead of matching op names.
 
 ## `loop/`
 
@@ -572,11 +580,11 @@ directly (no separate AST class).
 | `Smem`             | `__shared__` array allocation (name + dtype + extents + optional `align`). Swizzled TMA operand slabs align to their full swizzle atom (`8 × swizzle_width` B: B128→1024, B64→512, B32→256) — the coordinate-only `ldmatrix` XOR only reproduces the hardware's absolute-address swizzle when the base zeroes the swizzle's source-address bits; non-swizzled TMA keeps 128 B, fp16 16 B. `pack_smem` (the shared pool packer used by `smem_bytes` and the renderer) pads each buffer to `max(sizeof(dtype), align)` so the static-vs-dynamic gate and the launch-time dynamic-pool size agree. |
 | `Sync`             | `__syncthreads()` barrier.                                        |
 | `TreeHalve`        | Cross-thread tree reduction over a smem buffer.                   |
-| `RegFragment`      | mma.sync (s16816) per-thread register array decl (one per operand role `"a"`/`"b"`/`"c"`): `unsigned a[4]`/`b[2]` (16-bit operands, 2 elems/reg), `float c[4]` (f32 acc) or packed `unsigned c[2]` (a 16-bit C dtype — the f16-accumulate atom, 2 halfs/reg on the same element map), zero-init at decl — no separate fill. Carries the cell shape `(M, N, K)` + dtype. Emitted by the MMA lowering pass. The sole tensor-core fragment family (the opaque `nvcuda::wmma` nodes were removed). |
-| `LdmatrixLoad`     | Load one operand into a `RegFragment`. `staged=True` (default): `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from smem (`role="a"` → x4; `role="b"` → x2.trans; each lane derives its row address from `threadIdx.x & 31`; `swizzle` applies the per-lane chunk XOR for a TMA-swizzled slab). `staged=False`: operand not staged into smem (ldmatrix is smem-only) → renders a **gmem-direct fragment load** (`emmy_mma_load_{a,b}_gmem`) reading the fragment straight from gmem with the same m16n8k16 lane→element map — slower (no smem reuse) but lets an unstageable MMA tile compile instead of crashing. `b_trans=True` (role "b" only) marks a transposed-B operand stored `[N, K]` (the native `mma.row.col` col-major B — a Q@K^T cell): gmem-direct via `emmy_mma_load_b_gmem_trans` (k contiguous; masked → `_trans_nclamp`). |
-| `MmaSyncPtx`       | `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` — one s16816 MMA via inline PTX (`c += a @ b`). `ab_dtype` (`"f16"`/`"bf16"`) and `c_dtype` (`"f32"` default; `"f16"` = the f16-accumulate atom, full HMMA rate where f32-accumulate is half rate) pick the `emmy_mma_…` wrapper. |
+| `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit 2/2/8 counts because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
+| `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. |
+| `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. |
 | `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps, or the flash streaming KV block) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
-| `RegStore`         | Per-lane epilogue store of the f32 `c[4]` accumulator to the output (no `store_matrix_sync` for mma.sync) — direct for f32 dst, `__float2half` downconvert for f16. Optional `epilogue` (a `RegEpilogue`: leaf `EpilogueLoad`s with per-dim `m`/`n`/`fixed` roles + `(name, op, args)` chain in topo order, plus `selects` — coord-predicated causal-mask ternaries) carries a fused pointwise chain — residual adds, bias/scale broadcasts, activations, the causal attention mask — evaluated per element in f32 at the element's own (row, col), leaves loaded at each buffer's own dim stride, ops rendered via `op_to_expr` (folded in by the MMA lowering pass after the shared negative-form gate `classify_fragment_epilogue` (`ir/stmt/algebra.py`) admits the slice; leaf buffers declared via `external_reads` so they stay in the kernel signature after their scalar Loads are stripped). Each `selects` entry `(name, ((cond|None, value), …))` renders as a per-element ternary, its `__M__`/`__N__` placeholder coords substituted with the element's absolute (row, col). |
+| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. Stores f32 directly or downconverts to f16. Optional `RegEpilogue` loads and pointwise chains are evaluated at each element's own coordinates; guarded tails predicate every load and store. |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Write`, `Select`, `Cond`. |
 
 ## `cuda/ir.py`

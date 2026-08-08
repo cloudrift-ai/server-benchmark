@@ -173,8 +173,8 @@ class ConstantOp(Op):
     ``(path, pre-chain shape)`` pairs the loader reads individually and concatenates along
     **axis 0** before running ``load_ops`` (``merge_sibling_linears``' N-concat of sibling
     projection weights — axis 0 is the ``(N, K)`` out-features axis). Exactly one of
-    ``source_path`` / ``source_parts`` is set on a loadable constant; ``source_shape`` /
-    ``source_dtype`` describe the post-concat source.
+    ``source_path`` / ``source_parts`` / ``source_graph`` is set on a loadable constant;
+    ``source_shape`` / ``source_dtype`` describe the post-concat (or post-evaluation) source.
 
     **Value binding** — a scalar constant binds its value EXACTLY ONE of three ways, never
     ambiguously (enforced in :meth:`__post_init__`):
@@ -193,19 +193,34 @@ class ConstantOp(Op):
     """
 
     name: str
-    value: float | None = None  # a STATIC scalar (None ⇒ not a static constant)
+    value: float | int | None = None  # a STATIC scalar (None ⇒ not a static constant)
     context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
     source_shape: tuple[int, ...] | None = None
     source_dtype: str | None = None
+    # N-source bind record: a constant-only frontend mini-graph whose leaf
+    # ``ConstantOp``s name checkpoint source paths. The loader binds each leaf
+    # source (its own dtype rules apply — an f8-dtype leaf binds raw bits),
+    # evaluates the graph through the reference NumPy backend, and only THEN
+    # runs this constant's ``load_ops`` chain — so later layout folds
+    # (``050``/``060``) compose onto a folded constant exactly as onto a plain
+    # one. Produced by the generic constant folder when it collapses a static
+    # computation cone; ``None`` for every ordinary source constant.
+    # ``source_shape`` / ``source_dtype`` describe the EVALUATED (pre-chain)
+    # result. ``fold_into_constant`` rebuilds constants via
+    # ``dataclasses.replace``, so the field propagates through the layout-fold
+    # band by construction.
+    source_graph: Graph | None = None
 
     def __post_init__(self) -> None:
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
         if self.source_path is not None and self.source_parts:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_path OR source_parts, not both")
+        if self.source_graph is not None and (self.source_path is not None or self.source_parts):
+            raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_graph record OR checkpoint source paths, not both")
         if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
             self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
 

@@ -9,6 +9,20 @@ walk; the derived `Fold.role` for the loop annotation the materializer reads), n
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
+## Quantization is not a concept past the decomposition band
+
+A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).
+The scheme may choose different generic algebra, but it may not mint a scheme-specific op. The generic
+`frontend/decomposition/032_fold_constant_subgraphs` rule collapses static computation cones into a bind-time
+`ConstantOp` (`source_graph`) before Loop IR. It deliberately leaves storage-decode cones expanded so compressed
+device storage is preserved, and leaves layout-only cones to the target-specific `050`/`060` load-layout policy.
+
+The boundary is structural, not a naming guideline. Lowering, shared statement and tile dialects, backends, and search
+may contain canonical dtypes, generic ops, and graph algebra. They may NEVER contain a checkpoint format's custom op,
+statement, helper, pass branch, schedule feature, environment gate, comment, or name. A new format belongs in the
+loader and its birth-time speller must emit only generic algebra. `tests/architecture/test_layering.py` scans every
+post-decomposition Python source file for known format names.
+
 ## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its
@@ -192,7 +206,7 @@ How to comply:
   `bind_prologue_contraction` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
   bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
-  nobody designed for (a weight-side dequant cone) is covered for free.
+  nobody designed for (a weight-side decode cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
@@ -264,7 +278,26 @@ failing several passes later:
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
-  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The same rule holds on the **B side**:
+  a lift whose B operand is a computed cone never falls through to the positional rule (that binding dropped the fp8
+  decode cone's scale from the kernel). A **storage decode times k-invariant multiplicative factors** chain — a
+  decode of the (n, k) load ⊗ factors constant along the reduce axis — binds through the **mul-hoist**
+  (`_atomize._hoist_k_invariant_factors`):
+  the factors commute out of the fold onto the accumulator in the epilogue (`Σ_k a·(s·w) = s·Σ_k a·w`, the split-K
+  reassociation category) and the decode is ABSORBED by the B load's own storage dtype — every consumer converts a
+  bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element
+  convert on the warp tier, `emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>`). The chain's leaf is recognized by TRAIT —
+  `ElementwiseImpl.decodes` names the storage dtype an op is the decode cast for (the fp8 family today), so a new
+  storage format registers one decode op and never touches the binding arm. The warp staged transports carry a
+  storage-dtype operand as a RAW BYTE SLAB (each operand slab sized at its OWN element width; ldmatrix is b16-only
+  below sm_100a, so the byte slab drains through a cooperative per-lane gather — the gmem fragment loaders' lane map
+  pointed at smem, converting to 16-bit fragments under a k16 atom / repacking raw bytes under the fp8 k32 atoms —
+  bit-identical to gmem-direct; `resolve_warp_stage`'s byte-slab arm states the 16-divisibility legality, and the
+  cp.async byte slab pads its rows by `_stage.BYTE_SLAB_PAD` for the drain's bank spread). The scalar resolver still
+  declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
+  the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
+  codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
+  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**
@@ -439,8 +472,10 @@ never a schedule; the loader rejects a mixed entry, and the schedule golden tier
 retired single-namespace hazards — a cut row tying its knob-identical fused twin — cannot return) — or an
 authoritative `PLACE` pin picks a cut seam; the realizer (`lowering/tile/_cut.py`) splits the tree there: the child
 subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
-index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child's carrier state
-bridges as **f32** per the split-reduce workspace rule, a value seam keeps its leaf operand dtype), and the parent
+index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child — one that FOLDS AN
+AXIS — bridges carrier state as **f32** per the split-reduce workspace rule, while a zero-axis projection child is
+the value seam and keeps its leaf operand dtype: in the one-kind IR every node is a `Fold`, so the axis is the
+discriminator, not the class), and the parent
 consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal). Both pieces re-recognize as fresh
 roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries through the full deploy hierarchy —
 recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic
@@ -460,6 +495,17 @@ is the plain scalar fma cell). The contraction binder (`bind_contraction`) is lo
 reuse it on flash's nested QK^T / PV; flash's score IS a role=CONTRACTION **fold** on a hoisted operand edge of the
 kv stream (its PV twin synthesized in the derived blocked evaluation), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
+
+An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
+16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It accepts only materialized A/B edges:
+SM70 has no `ldmatrix`, but materialized f16 A/B edges may use synchronous-copy staging: ordinary vector global loads
+and shared stores fill the existing slab ring, and the same cooperative m8n8k4 lane map gathers fragments from shared
+memory. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>` register-fragment pipelining;
+blocking copies make deeper shared rings correct but do not promise copy/compute overlap. Computed operand edges,
+C-to-A repacking, and flash still decline this atom. Target capability predicates select this family below SM80 and
+the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
+lowering through instructions the target cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order; the historical acc-unspecified

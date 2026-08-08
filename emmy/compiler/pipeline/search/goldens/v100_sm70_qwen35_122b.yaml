@@ -1,0 +1,458 @@
+gpu_name: NVIDIA Tesla V100 SXM3 32GB
+compute_cap: [7, 0]
+# Isolated FP16 projection seeds derived from the Qwen3.5-122B-A10B architecture for M >= 32.
+# They are not tagged as observed in-model coverage: the current Emmy model runner cannot emit
+# this architecture. These provisional V100 entries retain the best reviewed schedules available
+# even below the 0.95 performance bar; the selection evidence lives in the findings report.
+configs:
+  - kernel: matmul
+    name: qwen35_122b.attn_q.m32.lin
+    M: 32
+    N: 16384
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 950.272
+    cublas_us: 201.728
+  - kernel: matmul
+    name: qwen35_122b.attn_q.m128.lin
+    M: 128
+    N: 16384
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 1938.432
+    cublas_us: 386.560
+  - kernel: matmul
+    name: qwen35_122b.attn_q.m512.lin
+    M: 512
+    N: 16384
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 8181.760
+    cublas_us: 656.896
+  - kernel: matmul
+    name: qwen35_122b.attn_q.lin.dynM
+    M: 512
+    N: 16384
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k2', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 7615.488
+    cublas_us: 668.160
+  - kernel: matmul
+    name: qwen35_122b.attn_kv.m32.lin
+    M: 32
+    N: 512
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m8n8k4_f16_f32/f2x1/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 78.297
+    cublas_us: 12.530
+  - kernel: matmul
+    name: qwen35_122b.attn_kv.m128.lin
+    M: 128
+    N: 512
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w8x1', TILE: 'mma_m8n8k4_f16_f32/f1x4/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 214.835
+    cublas_us: 20.864
+  - kernel: matmul
+    name: qwen35_122b.attn_kv.m512.lin
+    M: 512
+    N: 512
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f2x2/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 604.672
+    cublas_us: 47.360
+  - kernel: matmul
+    name: qwen35_122b.attn_kv.lin.dynM
+    M: 512
+    N: 512
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w1x2', TILE: 'mma_m8n8k4_f16_f32/f4x2/k2', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 720.896
+    cublas_us: 49.664
+  - kernel: matmul
+    name: qwen35_122b.attn_gdn_out.m32.lin
+    M: 32
+    N: 3072
+    K: 8192
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 984.064
+    cublas_us: 90.624
+  - kernel: matmul
+    name: qwen35_122b.attn_gdn_out.m128.lin
+    M: 128
+    N: 3072
+    K: 8192
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 1110.016
+    cublas_us: 140.800
+  - kernel: matmul
+    name: qwen35_122b.attn_gdn_out.m512.lin
+    M: 512
+    N: 3072
+    K: 8192
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4080.640
+    cublas_us: 317.440
+  - kernel: matmul
+    name: qwen35_122b.attn_gdn_out.lin.dynM
+    M: 512
+    N: 3072
+    K: 8192
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k2', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 5706.752
+    cublas_us: 326.144
+  - kernel: matmul
+    name: qwen35_122b.gdn_qkv.m32.lin
+    M: 32
+    N: 12288
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x2/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 777.216
+    cublas_us: 127.488
+  - kernel: matmul
+    name: qwen35_122b.gdn_qkv.m128.lin
+    M: 128
+    N: 12288
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x2/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: 'gm8'}
+    emmy_us: 2586.624
+    cublas_us: 311.296
+  - kernel: matmul
+    name: qwen35_122b.gdn_qkv.m512.lin
+    M: 512
+    N: 12288
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w2x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 6203.392
+    cublas_us: 486.400
+  - kernel: matmul
+    name: qwen35_122b.gdn_qkv.lin.dynM
+    M: 512
+    N: 12288
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 6154.240
+    cublas_us: 485.888
+  - kernel: matmul
+    name: qwen35_122b.gdn_z.m32.lin
+    M: 32
+    N: 8192
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x2/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: 'gm8'}
+    emmy_us: 813.056
+    cublas_us: 121.344
+  - kernel: matmul
+    name: qwen35_122b.gdn_z.m128.lin
+    M: 128
+    N: 8192
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x8/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 2098.176
+    cublas_us: 234.496
+  - kernel: matmul
+    name: qwen35_122b.gdn_z.m512.lin
+    M: 512
+    N: 8192
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 13952.000
+    cublas_us: 351.744
+  - kernel: matmul
+    name: qwen35_122b.gdn_z.lin.dynM
+    M: 512
+    N: 8192
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4360.192
+    cublas_us: 361.984
+  - kernel: matmul
+    name: qwen35_122b.gdn_ba.m32.lin
+    M: 32
+    N: 64
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 12.480
+    cublas_us: 7.332
+  - kernel: matmul
+    name: qwen35_122b.gdn_ba.m128.lin
+    M: 128
+    N: 64
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 38.321
+    cublas_us: 9.183
+  - kernel: matmul
+    name: qwen35_122b.gdn_ba.m512.lin
+    M: 512
+    N: 64
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x2/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 96.461
+    cublas_us: 13.163
+  - kernel: matmul
+    name: qwen35_122b.gdn_ba.lin.dynM
+    M: 512
+    N: 64
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 159.232
+    cublas_us: 14.643
+  - kernel: matmul
+    name: qwen35_122b.router.m32.lin
+    M: 32
+    N: 256
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 46.127
+    cublas_us: 9.194
+  - kernel: matmul
+    name: qwen35_122b.router.m128.lin
+    M: 128
+    N: 256
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 144.677
+    cublas_us: 17.566
+  - kernel: matmul
+    name: qwen35_122b.router.m512.lin
+    M: 512
+    N: 256
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 531.968
+    cublas_us: 39.168
+  - kernel: matmul
+    name: qwen35_122b.router.lin.dynM
+    M: 512
+    N: 256
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 529.920
+    cublas_us: 44.288
+  - kernel: matmul
+    name: qwen35_122b.gate_up.m32.lin
+    M: 32
+    N: 2048
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m8n8k4_f16_f32/f4x2/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 180.053
+    cublas_us: 40.875
+  - kernel: matmul
+    name: qwen35_122b.gate_up.m128.lin
+    M: 128
+    N: 2048
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g4a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 365.909
+    cublas_us: 63.829
+  - kernel: matmul
+    name: qwen35_122b.gate_up.m512.lin
+    M: 512
+    N: 2048
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k4', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 999.424
+    cublas_us: 135.680
+  - kernel: matmul
+    name: qwen35_122b.gate_up.lin.dynM
+    M: 512
+    N: 2048
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 1141.760
+    cublas_us: 138.752
+  - kernel: matmul
+    name: qwen35_122b.down.m32.lin
+    M: 32
+    N: 3072
+    K: 1024
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 125.952
+    cublas_us: 18.432
+  - kernel: matmul
+    name: qwen35_122b.down.m128.lin
+    M: 128
+    N: 3072
+    K: 1024
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 234.752
+    cublas_us: 32.256
+  - kernel: matmul
+    name: qwen35_122b.down.m512.lin
+    M: 512
+    N: 3072
+    K: 1024
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 500.736
+    cublas_us: 73.728
+  - kernel: matmul
+    name: qwen35_122b.down.lin.dynM
+    M: 512
+    N: 3072
+    K: 1024
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k2', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 503.296
+    cublas_us: 73.472
+  - kernel: matmul
+    name: qwen35_122b.shared_gate_or_up.m32.lin
+    M: 32
+    N: 1024
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 164.352
+    cublas_us: 20.147
+  - kernel: matmul
+    name: qwen35_122b.shared_gate_or_up.m128.lin
+    M: 128
+    N: 1024
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 't16x16', TILE: 'f4x8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 385.707
+    cublas_us: 31.744
+  - kernel: matmul
+    name: qwen35_122b.shared_gate_or_up.m512.lin
+    M: 512
+    N: 1024
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f8x2', REDUCE: 'g4a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 746.496
+    cublas_us: 83.456
+  - kernel: matmul
+    name: qwen35_122b.shared_gate_or_up.lin.dynM
+    M: 512
+    N: 1024
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 624.128
+    cublas_us: 77.824
+  - kernel: matmul
+    name: qwen35_122b.lm_head.m32.lin
+    M: 32
+    N: 248320
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 10541.056
+    cublas_us: 2369.024
+  - kernel: matmul
+    name: qwen35_122b.lm_head.m128.lin
+    M: 128
+    N: 248320
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 26258.432
+    cublas_us: 4995.072
+  - kernel: matmul
+    name: qwen35_122b.lm_head.m512.lin
+    M: 512
+    N: 248320
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 100307.968
+    cublas_us: 8044.544
+  - kernel: matmul
+    name: qwen35_122b.lm_head.lin.dynM
+    M: 512
+    N: 248320
+    K: 3072
+    dtype: fp16
+    trans_b: true
+    dynamic: true
+    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 100302.849
+    cublas_us: 8079.360

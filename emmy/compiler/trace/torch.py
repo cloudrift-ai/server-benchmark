@@ -383,7 +383,10 @@ def _handle_placeholder(
     name = fx_node.name
     shape = _get_shape(fx_node, sym_rename)
     dtype = _get_dtype(fx_node)
-    is_const = name.startswith(("p_", "b_"))
+    # The prefix alone is not enough: a USER forward arg may legitimately start with
+    # ``b_`` (the MoE expert wrapper's ``b_gate_up`` bias input) — only placeholders the
+    # export signature actually maps to a parameter/buffer are constants.
+    is_const = name.startswith(("p_", "b_")) and name in const_targets
 
     if is_const:
         op = ConstantOp(
@@ -563,6 +566,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # ``_op_shape`` when a downstream reshape / view references them via
     # ``args``; making them graph nodes would only confuse the matcher.
     val = fx_node.meta.get("val")
+    if isinstance(val, (list, tuple)):
+        raise NotImplementedError(f"no tracer mapping for multi-output op aten.{op_name or fx_node.target} ({len(val)} outputs)")
     if val is not None and not hasattr(val, "shape"):
         return
     name = fx_node.name
@@ -619,7 +624,57 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         "sigmoid",
         "gelu",
         "erf",
+        # Binary elementwise min/max (``torch.maximum`` / ``torch.minimum``). NOT the
+        # reductions: ``amax`` (below) reduces an axis; ``maximum`` compares two operands
+        # elementwise — the ``clamp`` decomposition emits these too.
+        "maximum",
+        "minimum",
     }
+    # --- Clamp ---
+    # ``aten.clamp(x, min, max)`` / ``clamp_min`` / ``clamp_max`` decompose to the
+    # elementwise ``maximum`` (lower bound) / ``minimum`` (upper bound) chain with the
+    # bound constants; a ``None`` bound skips that side (gpt-oss clamps ``gate`` with
+    # ``max=`` only). Scalar bounds only — a tensor bound raises rather than mis-clamping.
+    if op_name in ("clamp", "clamp_min", "clamp_max"):
+        from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+
+        raw = list(fx_node.args[1:]) + [None, None]
+        kw = fx_node.kwargs or {}
+        if op_name == "clamp":
+            lo, hi = kw.get("min", raw[0]), kw.get("max", raw[1])
+        elif op_name == "clamp_min":
+            lo, hi = kw.get("min", raw[0]), None
+        else:
+            lo, hi = None, kw.get("max", raw[0])
+        for bound in (lo, hi):
+            if bound is not None and not isinstance(bound, (int, float)):
+                raise NotImplementedError(f"aten.{op_name}: only scalar (or None) bounds are supported, got {bound!r}")
+        cur = input_ids[0] if input_ids else None
+        if cur is None:
+            return
+        sides = [(b, ew) for b, ew in ((lo, "maximum"), (hi, "minimum")) if b is not None]
+        if not sides:
+            node_map[name] = cur  # clamp(None, None) is the identity
+            return
+        for j, (bound, ew) in enumerate(sides):
+            const_name = f"{name}_bound{j}"
+            const_id = g.add_node(
+                op=ConstantOp(name=const_name, value=float(bound)),
+                inputs=[],
+                output=Tensor(const_name, (1,), dtype),
+                node_id=const_name,
+            )
+            last = j == len(sides) - 1
+            out_name = name if last else f"{name}_lo"
+            cur = g.add_node(
+                op=ElementwiseOp(op=ew),
+                inputs=[broadcast_to(g, cur, shape), broadcast_to(g, const_id, shape)],
+                output=Tensor(out_name, shape, dtype),
+                node_id=out_name,
+            )
+        node_map[name] = cur
+        return
+
     if op_name in _ELEMENTWISE_SOURCES:
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
@@ -714,8 +769,9 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # Torch reduction names pass through to ``ReduceOp`` as-is; ``mean`` is
     # the exception that lands as ``MeanOp`` (decomposition splits it into
     # sum + div). Keeping torch's spelling — ``amax`` stays ``amax``, not
-    # mapped to ``max`` — avoids a needless name table.
-    if op_name in ("sum", "maximum", "amax", "mean"):
+    # mapped to ``max`` — avoids a needless name table. (``maximum`` is NOT a
+    # reduction — the binary elementwise max is handled above.)
+    if op_name in ("sum", "amax", "mean"):
         axis = _get_reduce_axis(fx_node)
         x_shape = tuple(g.nodes[input_ids[0]].output.shape) if input_ids else ()
         keepdim_shape = _keepdim_shape(x_shape, axis)

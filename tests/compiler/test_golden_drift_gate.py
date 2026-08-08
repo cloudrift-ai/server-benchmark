@@ -35,6 +35,8 @@ Interactive twin: ``emmy eval golden --in-model``.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -61,16 +63,8 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 # burn them down by recording aux rows opportunistically (manual --ab), majors stay zero.
 EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 5090": {
-        # 2026-08-05: the m1 (gemv-tier) SCALAR siblings of the re-keyed fused forks — the
-        # computed-A re-keying that orphaned the eleven warp majors above also dropped these
-        # non-warp m1 joins (static + dynM at the qkv / qk_global / gate_up widths). Same
-        # burn-down: the 5090 fused re-seed; delete with the major entries.
-        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=30720),
-        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=True, kind="", free_max=0),
+        # (2026-08-05: the m1 scalar siblings that briefly sat here — the same seam-dtype
+        # defect as the eleven warp majors, fixed in ``_cut._ws_dtype`` — are covered again.)
         ShapeKey(free_prod=33554432, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=35651584, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=557056, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
@@ -199,25 +193,13 @@ EXPECTED_GAPS = {
 # fused serving fork and the gate stayed green precisely because those keys blended into a
 # routine baseline edit (``test_no_major_key_hides_in_the_generic_baseline``).
 EXPECTED_MAJOR_GAPS = {
-    # 2026-08-05: eleven fused (computed-A) warp-contraction forks — the gemma-4 norm→linear /
-    # gate⊗up edges at the m8 / m64 / m2048 / m4096 serving widths — lost their 5090 golden join
-    # in the computed-A re-keying (the map reading's cooperative row moved onto ``REDUCE@<stat>``
-    # and re-keyed the fused rows; reproduced identically at the pre-rebuild commit, so it is not
-    # an enumeration regression). Burn-down: a 5090 card sweep re-seeding the fused widths (the
-    # 2026-08-02 seeding recipe in the gemma4 YAML); delete these entries when it lands.
-    "NVIDIA GeForce RTX 5090": {
-        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=524288, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=557056, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=33554432, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=35651584, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=125829120, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-    },
+    # 2026-08-05: the eleven fused (computed-A) warp-contraction forks the tile-scheduler
+    # rebuild listed here were not a re-keying to accept: the rebuild's one-kind ``Fold`` made
+    # ``_cut._ws_dtype`` read EVERY routed-cut seam as carrier state (f32), so each cut consumer
+    # re-wrapped into a demoting cone, keyed ``fused``, and lost its golden join. Fixed in
+    # ``_ws_dtype`` (carrier state ⇔ the child folds an axis) — all eleven keys covered again,
+    # no re-seeding needed.
+    "NVIDIA GeForce RTX 5090": set(),
     "NVIDIA GeForce RTX 4090": {
         # The 4090 majors are all one deferral: the card's mirror re-tune (box lost its GPU at
         # the PCI level; several widths have no 24 GB serving at all — m1, m192 — and the
@@ -282,6 +264,19 @@ CARDS = [
     pytest.param("NVIDIA GeForce RTX 4090", (8, 9), id="rtx4090"),
 ]
 
+# Each card's audit is one greedy compile per twin (36 of them) and was, whole, the longest
+# test in the suite by a wide margin — the makespan floor of `make test` once the conftest
+# balances the workers. The graphs are independent, so the audit shards across them and xdist
+# runs the shards in parallel. Coverage is UNCHANGED: every twin is still audited on every
+# card. What the split costs is that a shard sees only its own slice, so the ratchets divide
+# in two (see ``_publish`` / ``_union``):
+#   - the FORWARD ratchets (a NEW gap / drift / major / compile failure) are per-shard — any
+#     shard seeing one fails, which is exactly as strong as the whole-card check was;
+#   - the REVERSE ratchets (a listed gap that is now covered — "delete the line") and the
+#     MIN_MATCH floor need the WHOLE card, since a key absent from this shard may well be
+#     covered in the next one. Those run once, in whichever shard publishes last.
+SHARDS = 4
+
 
 @pytest.fixture(scope="module")
 def twins():
@@ -298,16 +293,78 @@ def twins():
         mp.undo()
 
 
-@pytest.mark.parametrize(("gpu_name", "cap"), CARDS)
-def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
-    res = audit_card(twins, gpu_name, cap)
-    counts = summarize(res)
+@pytest.fixture(scope="session")
+def share_dir(tmp_path_factory):
+    """A directory every xdist worker of THIS session shares, for the cross-shard union.
 
-    fails = [(name, r) for name, records in res.items() for r in records if r["verdict"] == COMPILE_FAIL]
-    assert not fails, f"serving twins failed to compile: {[(n, r['error']) for n, r in fails]}"
+    A worker's basetemp is ``…/pytest-<n>/popen-gw<k>``; its parent is the session root the
+    other workers also write under. Without xdist there is no ``popen-gw`` level and the
+    basetemp IS the session root — whose parent would be ``/tmp/pytest-of-<user>``, shared
+    with PREVIOUS runs, so a stale shard file could fake a complete set."""
+    base = tmp_path_factory.getbasetemp()
+    root = base.parent if base.name.startswith("popen-gw") else base
+    share = root / "golden-drift-shards"
+    share.mkdir(exist_ok=True)
+    return share
+
+
+def _key_wire(key: ShapeKey) -> list:
+    """A ShapeKey as JSON-able primitives (field order is the constructor's)."""
+    return [key.free_prod, key.reduce_max, key.is_warp, key.is_dyn, key.kind, key.free_max]
+
+
+def _key_of(wire: list) -> ShapeKey:
+    free_prod, reduce_max, is_warp, is_dyn, kind, free_max = wire
+    return ShapeKey(free_prod=free_prod, reduce_max=reduce_max, is_warp=is_warp, is_dyn=is_dyn, kind=kind, free_max=free_max)
+
+
+def _publish(share_dir, gpu_name: str, shard: int, gaps: set, majors: set, drifts: set, matches: int) -> list[dict] | None:
+    """Record this shard's verdict summary; return every shard's summary once they are all in.
+
+    Written to a temp name and ``os.replace``d so a peer worker never reads a half-file. The
+    LAST writer necessarily sees all ``SHARDS`` files (its own included), so the union check
+    is guaranteed to run exactly once — or more than once if two shards land together, which
+    is harmless: the check only reads. Publishing happens BEFORE this shard's own assertions,
+    so a shard that fails its forward ratchet still contributes its slice to the union rather
+    than silently suppressing it."""
+    card = share_dir / gpu_name.replace(" ", "_")
+    card.mkdir(exist_ok=True)
+    payload = {
+        "gaps": [_key_wire(k) for k in gaps],
+        "majors": [_key_wire(k) for k in majors],
+        "drifts": sorted(drifts),
+        "matches": matches,
+    }
+    tmp = card / f"{shard}.tmp"
+    tmp.write_text(json.dumps(payload))
+    os.replace(tmp, card / f"{shard}.json")
+    parts = sorted(card.glob("[0-9]*.json"))
+    if len(parts) < SHARDS:
+        return None
+    return [json.loads(p.read_text()) for p in parts]
+
+
+@pytest.mark.parametrize("shard", range(SHARDS))
+@pytest.mark.parametrize(("gpu_name", "cap"), CARDS)
+def test_gemma4_goldens_deploy_in_serving_twins(twins, share_dir, gpu_name, cap, shard):
+    # Round-robin over the sorted names, so each shard draws evenly from the expensive
+    # ``post`` twins (~2-3x a ``pre`` twin) rather than one shard taking them all.
+    names = sorted(twins)[shard::SHARDS]
+    res = audit_card({n: twins[n] for n in names}, gpu_name, cap)
+    counts = summarize(res)
 
     drifts = [(name, r) for name, records in res.items() for r in records if r["verdict"] == "DRIFT"]
     drift_pairs = {(r["golden"], name) for name, r in drifts}
+    majors = major_gap_keys(res)
+    gaps = gap_keys(res) - majors
+
+    # Before the assertions below, so a failing shard still feeds the union.
+    parts = _publish(share_dir, gpu_name, shard, gaps, majors, drift_pairs, counts["MATCH"])
+
+    # ── forward ratchets: this shard's slice, as strong as the whole-card check ──
+    fails = [(name, r) for name, records in res.items() for r in records if r["verdict"] == COMPILE_FAIL]
+    assert not fails, f"serving twins failed to compile: {[(n, r['error']) for n, r in fails]}"
+
     new_drifts = drift_pairs - EXPECTED_DRIFTS[gpu_name]
     assert not new_drifts, (
         f"{len(new_drifts)} golden(s) no longer deploy in the serving twins of {gpu_name}:\n  "
@@ -316,13 +373,7 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
         "or a transformers bump changed the traced model — the twins track the installed modeling code, exactly "
         "as serving does."
     )
-    fixed_drifts = EXPECTED_DRIFTS[gpu_name] - drift_pairs
-    assert not fixed_drifts, (
-        f"expected drift(s) on {gpu_name} no longer occur — delete their EXPECTED_DRIFTS lines so the "
-        f"ratchet tightens: {sorted(fixed_drifts)}"
-    )
 
-    majors = major_gap_keys(res)
     new_major = majors - EXPECTED_MAJOR_GAPS[gpu_name]
     assert not new_major, (
         f"NEW uncovered WARP-CONTRACTION fork(s) on {gpu_name}: {sorted(new_major, key=str)}\n"
@@ -331,26 +382,38 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
         "Close it (seed a golden or a routing row on the card) rather than listing it; extending "
         "EXPECTED_MAJOR_GAPS needs a dated reason and a concrete burn-down condition in review."
     )
-    closed_major = EXPECTED_MAJOR_GAPS[gpu_name] - majors
-    assert not closed_major, (
-        f"major gap(s) on {gpu_name} are now covered — delete their EXPECTED_MAJOR_GAPS lines so the "
-        f"ratchet tightens: {sorted(closed_major, key=str)}"
-    )
 
-    gaps = gap_keys(res) - majors
     new = gaps - EXPECTED_GAPS[gpu_name]
     assert not new, (
         f"NEW uncovered kernel fork(s) on {gpu_name}: {sorted(new, key=str)}\n"
         "Every kernel fork in the model must be golden-covered. Record a golden for each (manual "
         "pinned sweep on the card, `run --bench --ab`), or deliberately extend EXPECTED_GAPS in review."
     )
-    closed = EXPECTED_GAPS[gpu_name] - gaps
+
+    # ── reverse ratchets + the match floor: the WHOLE card, once every shard is in ──
+    if parts is None:
+        return
+    all_drifts = {tuple(pair) for p in parts for pair in p["drifts"]}
+    all_majors = {_key_of(w) for p in parts for w in p["majors"]}
+    all_gaps = {_key_of(w) for p in parts for w in p["gaps"]}
+    all_matches = sum(p["matches"] for p in parts)
+
+    fixed_drifts = EXPECTED_DRIFTS[gpu_name] - all_drifts
+    assert not fixed_drifts, (
+        f"expected drift(s) on {gpu_name} no longer occur — delete their EXPECTED_DRIFTS lines so the "
+        f"ratchet tightens: {sorted(fixed_drifts)}"
+    )
+    closed_major = EXPECTED_MAJOR_GAPS[gpu_name] - all_majors
+    assert not closed_major, (
+        f"major gap(s) on {gpu_name} are now covered — delete their EXPECTED_MAJOR_GAPS lines so the "
+        f"ratchet tightens: {sorted(closed_major, key=str)}"
+    )
+    closed = EXPECTED_GAPS[gpu_name] - all_gaps
     assert not closed, (
         f"gap(s) on {gpu_name} are now covered — delete their EXPECTED_GAPS lines so the ratchet tightens: {sorted(closed, key=str)}"
     )
-
-    assert counts["MATCH"] >= MIN_MATCH[gpu_name], (
-        f"only {counts['MATCH']} golden matches on {gpu_name} (floor {MIN_MATCH[gpu_name]}) with no DRIFT — "
+    assert all_matches >= MIN_MATCH[gpu_name], (
+        f"only {all_matches} golden matches on {gpu_name} (floor {MIN_MATCH[gpu_name]}) with no DRIFT — "
         "the twins likely re-keyed wholesale (tracer or ShapeKey classifier change), turning matches into GAPs."
     )
 

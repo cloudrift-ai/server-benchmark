@@ -9,13 +9,21 @@ local run directory.
 
 import logging
 import shlex
-from pathlib import Path
 from string import Template
 
 from emmy.planner import BenchmarkTask
 from emmy.planner.variant import Variant
 
 logger = logging.getLogger(__name__)
+
+
+def _local_result_name(variant: str, rel: str) -> str:
+    """Local filename for a pulled result file, from its task_dir-relative path.
+
+    Two patterns pulling same-named files from different subdirs (std/*, fm/*)
+    must not collide, so subdir separators join the name with underscores.
+    """
+    return f"{variant}_{rel.replace('/', '_')}"
 
 
 def _leaf_name(key: str) -> str:
@@ -73,15 +81,14 @@ def render_command(template: str, subs: dict[str, str]) -> str:
 async def _expand_remote_glob(run_cmd, task_dir: str, pattern: str) -> list[str]:
     """List files matching `pattern` inside `task_dir` on the remote VM.
 
-    Returns absolute remote paths. Empty list when nothing matches (the
-    `|| true` swallows the ls failure).
+    Returns ``task_dir``-relative paths (the glob's own spelling — callers join
+    ``task_dir`` back on for transfer and keep the relative path for naming).
+    Empty list when nothing matches.
     """
     safe_pattern = shlex.quote(pattern)
     # task_dir may start with `~/`; pass it unquoted so the remote shell
     # expands tilde. It is internally composed and free of shell metachars.
-    cmd = (
-        f'sh -c \'cd {task_dir} && for f in {pattern}; do [ -e "$f" ] && printf "%s/%s\\n" {task_dir} "$f"; done\' # pattern={safe_pattern}'
-    )
+    cmd = f'sh -c \'cd {task_dir} && for f in {pattern}; do [ -e "$f" ] && printf "%s\\n" "$f"; done\' # pattern={safe_pattern}'
     rc, stdout, _ = await run_cmd(cmd, stream=False)
     if rc != 0 or not stdout:
         return []
@@ -140,24 +147,24 @@ async def run_command_workload(
     if dry_run:
         return True, info
 
-    # Pull back result files (with glob expansion on the remote).
+    # Pull back result files (with glob expansion on the remote). Paths stay task_dir-relative
+    # until transfer so the local name can keep the subdir spelling.
     for pattern in cmd_cfg.result_files:
         # If the pattern contains no glob metachars, treat it literally; else expand.
         if any(c in pattern for c in "*?["):
-            remote_paths = await _expand_remote_glob(run_cmd, task_dir, pattern)
-            if not remote_paths:
+            rel_paths = await _expand_remote_glob(run_cmd, task_dir, pattern)
+            if not rel_paths:
                 logger.warning(f"result_files pattern '{pattern}' matched no files in {task_dir}")
                 continue
         else:
-            remote_paths = [f"{task_dir}/{pattern}"]
+            rel_paths = [pattern]
 
-        for remote_path in remote_paths:
-            basename = Path(remote_path).name
-            local_path = task.run_dir / f"{task.variant}_{basename}"
+        for rel in rel_paths:
+            local_path = task.run_dir / _local_result_name(task.variant, rel)
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, remote_path, str(local_path))
+            rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, f"{task_dir}/{rel}", str(local_path))
             if rc_scp != 0:
-                logger.warning(f"scp_from_remote failed for {remote_path}: {stderr}")
+                logger.warning(f"scp_from_remote failed for {task_dir}/{rel}: {stderr}")
                 continue
             info["result_paths"].append(str(local_path))
 

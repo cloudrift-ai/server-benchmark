@@ -68,9 +68,26 @@ class ShapeKey:
     # silently deployed the latter's golden at a fabricated 24.1 µs.
     # Dynamic keys always normalize to 0 — the symbolic axis has no static extent.
     free_max: int = 0
+    # The STORAGE dtype class of the matmul's B side — ``""`` for the f32/f16/bf16
+    # world (every pre-existing golden/DB key keeps its identity: the default
+    # participates in equality/hash exactly as if the field didn't exist), ``"f8"``
+    # when the B operand is stored as an fp8 dtype (``f8e4m3`` / ``f8e5m2``). An
+    # fp8-stored weight is a different kernel family from its 16-bit twin at the
+    # same ``(M, N, K)`` — half the B bytes, a decode convert in the staging path —
+    # so the keys must not join, exactly as ``is_warp`` keeps the fp32/fp16 twins
+    # apart (see the FP8 plan). f16 and bf16 deliberately still SHARE a key (same
+    # bytes, same atoms); the class splits only where the kernel family splits.
+    # ``dtype_class == "f8"`` forces ``is_warp=True`` in both constructors: the
+    # fp8-B contraction is a warp-family kernel, and the op-side dtype-multiset
+    # signal is unreliable there (the f32 scale constant flips ``S_dtype_f32`` on).
+    dtype_class: str = ""
 
     # Key classes that carry the aspect discriminator (see ``free_max``).
     _FREE_MAX_KINDS = ("", "fused")
+
+    # Golden/CLI dtype spellings that name fp8 B-side storage (``fp8`` is the
+    # generic golden spelling, defaulting to e4m3 — see ``golden_eval._DTYPES``).
+    _F8_DTYPES = ("fp8", "f8e4m3", "f8e5m2")
 
     def __post_init__(self) -> None:
         if (self.is_dyn or self.kind not in self._FREE_MAX_KINDS) and self.free_max:
@@ -79,19 +96,23 @@ class ShapeKey:
     @classmethod
     def from_matmul(cls, M: int, N: int, K: int, dtype: str, *, dynamic: bool = False) -> ShapeKey:
         """The shape of an ``(M, K) @ (K, N)`` matmul. fp32 lowers on the scalar
-        thread tier; fp16 / bf16 on the warp (MMA) tier. ``dynamic`` marks the M
+        thread tier; fp16 / bf16 on the warp (MMA) tier; an fp8-B spelling
+        (``fp8`` / ``f8e4m3`` / ``f8e5m2``) is warp too and additionally carries
+        ``dtype_class="f8"`` (see the field doc). ``dynamic`` marks the M
         axis symbolic (the only symbolic-axis golden form today): the key then
         MIRRORS what ``992_stamp_structural_features`` puts on the op — symbolic
         axes are **excluded** from the extent products (``free_prod = N``, not the
         hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
         the stamped histogram is the only identity the op side has (it doesn't
         know the hint), so a hint-sized golden key would never join it."""
+        f8 = dtype in cls._F8_DTYPES
         return cls(
             free_prod=N if dynamic else M * N,
             reduce_max=K,
-            is_warp=dtype != "fp32",
+            is_warp=f8 or dtype != "fp32",
             is_dyn=dynamic,
             free_max=0 if dynamic else max(M, N),
+            dtype_class="f8" if f8 else "",
         )
 
     @classmethod
@@ -123,7 +144,14 @@ class ShapeKey:
         RMSNorm has just the one statistic reduce. The fused op's ``is_warp`` is forced True:
         it is a warp mma contraction, but its f32 statistic constants set ``S_dtype_f32``, so
         the dtype-multiset signal would wrongly read scalar. An unrecognized sweep keeps
-        ``""`` — conservative: it can only stop a cross-kind join, never invent one."""
+        ``""`` — conservative: it can only stop a cross-kind join, never invent one.
+
+        ``dtype_class`` reads the stamped dtype multiset: an ``S_dtype_f8e4m3`` /
+        ``S_dtype_f8e5m2`` load (the ``992`` stamp generates ``S_dtype_*`` from buffer
+        dtype names, so fp8 stamps with no stamp-side change) marks the fp8-B storage
+        class, which also forces ``is_warp=True`` — the fp8 kernel's f32 scale constant
+        would otherwise flip the dtype-multiset signal to scalar, the same hazard the
+        ``"fused"`` kind forces around."""
         n_axes = s.get("S_ext_n_free_axis", 0) + s.get("S_ext_n_reduce_axis", 0) + s.get("S_ext_n_symbolic_axis", 0)
         kind = ""
         if 0 < s.get("S_loop_depth", 0) < n_axes:
@@ -131,13 +159,15 @@ class ShapeKey:
                 kind = "fused" if s.get("S_ext_n_reduce_axis", 0) >= 2 else "rms_norm"
             elif s.get("S_pw_exp", 0):
                 kind = "flash" if s.get("S_n_free_loop", 0) >= 3 else "softmax"
+        f8 = any(s.get(f"S_dtype_{t}", 0) for t in ("f8e4m3", "f8e5m2"))
         return cls(
             free_prod=int(s.get("S_ext_free_prod", 0)),
             reduce_max=int(s.get("S_ext_reduce_max", 0)),
-            is_warp=kind == "fused" or not s.get("S_dtype_f32", 0),
+            is_warp=kind == "fused" or f8 or not s.get("S_dtype_f32", 0),
             is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),
+            dtype_class="f8" if f8 else "",
         )
 
     def joins(self, golden: ShapeKey) -> bool:

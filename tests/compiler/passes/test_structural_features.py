@@ -233,3 +233,43 @@ def test_matmul_features_differ_from_reduction():
     matmul_skel = {k: v for k, v in structure_features(loops[0].body).items() if not k.startswith("S_ext_")}
     rms_skel = {k: v for k, v in structure_features(_rms_body()).items() if not k.startswith("S_ext_")}
     assert matmul_skel != rms_skel
+
+
+def test_dtype_multiset_stamps_f8_generically():
+    """``S_dtype_*`` is generated from buffer dtype NAMES, so an fp8 buffer stamps
+    ``S_dtype_f8e4m3`` with no stamp-side change — the fp8 storage-class signal
+    ``ShapeKey.from_s_features`` reads (M2a of the FP8 plan)."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (8, 64), "f8e4m3"), node_id="a")
+    feats = structure_features(_rms_body(), g)
+    assert feats["S_dtype_f8e4m3"] == 1.0
+
+
+def test_in_graph_fp8_decode_cone_stamps_the_f8_dtype_feature():
+    """End to end through the loop dialect: the birth-time decode cone survives the generic
+    constant fold and fuses into the matmul kernel, whose dtype multiset carries the fp8 load."""
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    w = g.add_node(
+        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(16, 8), source_dtype="f8e4m3"),
+        inputs=[],
+        output=Tensor("w_bits", (16, 8), "f8e4m3"),
+    )
+    scale = g.add_node(
+        op=ConstantOp(name="p_w_scale", source_path="layer.weight_scale", source_shape=(16, 1), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("w_scale", (16, 1), "f32"),
+    )
+    cast = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[w], output=Tensor("w_dq", (16, 8), "f16"))
+    s_bc = broadcast_to(g, scale, (16, 8))
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=[cast, s_bc], output=Tensor("w", (16, 8), "f16"), node_id="w")
+    g.add_node(MatmulOp(), ["x", "w"], Tensor("y", (4, 8), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    _, loops = _fused_loops(g)
+    stamped = [op for op in loops if op.knobs.get("S_dtype_f8e4m3")]
+    assert stamped, "no LoopOp stamped S_dtype_f8e4m3 for the in-graph fp8-B decode cone"

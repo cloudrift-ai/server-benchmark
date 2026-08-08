@@ -104,7 +104,9 @@ The compiler commands (`compile`, `run`, and `tune`) share a model-adapter selec
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs.
+and Emmy always rebuild the same module and example inputs. A quantized checkpoint (config.json
+`quantization_config`, e.g. an FP8 release) resolves to its bf16 architecture twin for tracing; the loader
+dequantizes the real weights at bind time (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
 
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
@@ -215,6 +217,14 @@ emmy
 
 ## CLI Reference
 
+`emmy --version` prints the installed distribution version (`unknown` when running straight from a source checkout
+with nothing installed).
+
+Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` via `--recipe`, and `bench`'s
+positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
+installed package, copying it into the current directory first. An existing path always wins over a bundled name.
+See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
+
 ### `emmy deploy local`
 
 Runs `docker compose` directly on the current machine. Auto-detects the local GPU via PCI sysfs and selects the matching `matrices` entry from the recipe.
@@ -254,7 +264,10 @@ applied for both engines unless overridden, so `--stock` is an apples-to-apples 
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
-`EMMY_GEN_DECODE_BUCKET=0`). Under `--speculative-config` the ladder is derived from the resulting
+`EMMY_GEN_DECODE_BUCKET=0`, and for MoE models — the routed expert dispatch host-syncs, which a whole-step capture
+cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an
+MoE model is rejected with the reason, and `EmmyGenModel.__init__` carries the authoritative boot guard for probe
+misses). Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults

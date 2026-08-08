@@ -18,8 +18,11 @@ from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.features import tile_signature
 from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
 
-# Golden dtype spelling → the graph Tensor dtype name.
-_DTYPES = {"fp32": "f32", "fp16": "f16", "bf16": "bf16"}
+# Golden dtype spelling → the graph Tensor dtype name. ``fp8`` is the generic
+# fp8-storage spelling (e4m3, the format every target checkpoint uses); the
+# canonical tokens ``f8e4m3`` / ``f8e5m2`` also pass through via the
+# ``_DTYPES.get(dtype, dtype)`` fallthrough below.
+_DTYPES = {"fp32": "f32", "fp16": "f16", "bf16": "bf16", "fp8": "f8e4m3"}
 
 
 def _matmul_graph(M: int, N: int, K: int, dtype: str):

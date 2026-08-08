@@ -154,10 +154,9 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
     base = ("--use_fast_math",)
     if not uses_tma:
         return base
-    import cupy as cp
+    from emmy.compiler.target import compute_capability  # noqa: PLC0415
 
-    cap_str = str(cp.cuda.Device().compute_capability)  # e.g. "120" for sm_12.0
-    major, minor = cap_str[:-1], cap_str[-1]
+    major, minor = compute_capability()
     return (*base, f"--gpu-architecture=sm_{major}{minor}a")
 
 
@@ -394,7 +393,22 @@ def _launch(
     kernel = compiled.kernels[launch.kernel_name]
     desc_args = desc_args or {}
     sym_values = sym_values or {}
-    args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
+    if launch.indirect_args:
+        # Indirect operands: the marked arg's position expands in place to (table, sel, slot)
+        # — the kernel resolves ``table[sel[slot]]`` in its body preamble. Table/selector are
+        # device arrays the caller binds into ``arrays`` under the spec's names; the slot is a
+        # plain ``int`` arg (same packing as the runtime-arg tail).
+        indirect = {a: (t, s, sl) for a, t, s, sl in launch.indirect_args}
+        parts: list = []
+        for name in launch.arg_names:
+            entry = indirect.get(name)
+            if entry is not None:
+                parts.extend((arrays[entry[0]], arrays[entry[1]], entry[2]))
+            else:
+                parts.append(desc_args.get(name) if name in desc_args else arrays[name])
+        args = tuple(parts)
+    else:
+        args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
     # Symbolic axes appear as ``int`` kernel params after buffers + TMA
     # descriptors — append their resolved values to the arg pack.
     if launch.runtime_args:

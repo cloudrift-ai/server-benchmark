@@ -10,7 +10,7 @@ from emmy.deploy.local import make_run_cmd, make_write_file
 from emmy.detect import detect_local_gpus
 from emmy.provisioning.host import LocalHost
 from emmy.provisioning.remote import provision_remote
-from emmy.recipe import resolve_for_hardware
+from emmy.recipe import resolve_for_hardware, resolve_recipe_dir
 from emmy.redact import register_secret
 from emmy.timing import PhaseTimer
 
@@ -23,7 +23,7 @@ def handle_local(args):
 
 
 async def _handle_local(args):
-    recipe_dir = args.recipe
+    recipe_dir = resolve_recipe_dir(args.recipe)
     hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
     register_secret(hf_token)
     model_dir = args.model_dir

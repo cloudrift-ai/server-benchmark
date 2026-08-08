@@ -67,7 +67,9 @@ def test_bench_dry_run_reports_timing(run_cli, make_bench_config, recipes_dir, t
 def test_bench_multiple_recipes(run_cli, make_bench_config, recipes_dir, tmp_path):
     config_path = make_bench_config(tmp_path)
     recipe1 = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
-    recipe2 = os.path.join(recipes_dir, "GLM-4.6-FP8")
+    # GLM-5.1-FP8, not 4.6: the 4.6 recipe was removed from the repo, and the test only kept
+    # passing on dev machines where the directory survives as a shell of old bench run dirs.
+    recipe2 = os.path.join(recipes_dir, "GLM-5.1-FP8")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe1,

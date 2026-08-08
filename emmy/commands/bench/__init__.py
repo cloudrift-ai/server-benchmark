@@ -28,6 +28,7 @@ from emmy.benchmark.fixed_hosts import (
 )
 from emmy.planner import BenchmarkTask
 from emmy.planner.group_by_model_and_gpu import GroupByModelAndGpuPlanner
+from emmy.recipe import resolve_recipe_dir
 
 # Each summary column aggregates these timing phase keys (seconds). A column is shown
 # only when at least one task has a non-zero value for it, so command-recipe runs (which
@@ -100,7 +101,8 @@ def handle_bench(args):
             key, pattern = f.split("=", 1)
             parsed_filters.append((key, pattern))
 
-    # Enumerate tasks from recipe dirs
+    # Enumerate tasks from recipe dirs (a bare name resolves to a bundled recipe)
+    args.recipes = [resolve_recipe_dir(r) for r in args.recipes]
     tasks = enumerate_tasks(args.recipes, filters=parsed_filters)
     if not tasks:
         root_logger.error("Error: No benchmark tasks found.")

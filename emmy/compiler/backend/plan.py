@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 # interpretation of the plan changes.
 PLAN_FORMAT_VERSION = 1
 
+# Arg-passing extension: a plan whose launches carry INDIRECT OPERANDS (a base pointer resolved
+# in-kernel from a device table — the MoE fixed-slot dispatch) serializes as format 2, because a
+# runtime that ignored the field would pass the wrong arg pack. Plans without the field keep
+# format 1 byte-identically, so existing packs and readers are untouched; an old runtime reading
+# a format-2 plan rejects it and falls back to the full compile (the pack loader's contract).
+PLAN_FORMAT_INDIRECT = 2
+
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
 # factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
 _EXPR_OPS = ("+", "-", "*", "/", "//", "%")
@@ -82,6 +89,12 @@ class LaunchSpec:
     # Empty on plans stored before the field existed — readers fall back to
     # ``(node_id,)``. ``node_id`` itself stays for naming / diagnostics.
     writes: tuple[str, ...] = ()
+    # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input arg. The
+    # kernel takes ``(const T* const* table, const int* sel, int slot)`` in place of the plain
+    # pointer and resolves ``table[sel[slot]]`` in a body preamble; ``_launch`` expands the
+    # operand's ``arg_names`` position into ``arrays[table_arg], arrays[sel_arg], slot``. A
+    # plan carrying any of these serializes as ``PLAN_FORMAT_INDIRECT``.
+    indirect_args: tuple[tuple[str, str, str, int], ...] = ()
 
 
 @dataclass
@@ -184,6 +197,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
                 writes=node.buffer_names(),
+                indirect_args=tuple(getattr(op, "indirect_args", ())),
             )
         )
 
@@ -339,7 +353,7 @@ def _dim_from_json(v) -> Dim:
 
 def plan_to_dict(plan: ExecutionPlan) -> dict:
     return {
-        "format": PLAN_FORMAT_VERSION,
+        "format": PLAN_FORMAT_INDIRECT if any(lc.indirect_args for lc in plan.launches) else PLAN_FORMAT_VERSION,
         "backend": plan.backend,
         "inputs": list(plan.inputs),
         "outputs": list(plan.outputs),
@@ -359,6 +373,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "zero_outputs": list(lc.zero_outputs),
                 **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 **({"writes": list(lc.writes)} if lc.writes else {}),
+                **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
                 "runtime_args": list(lc.runtime_args),
                 "cuda": {
                     "tma": [
@@ -395,8 +410,8 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt != PLAN_FORMAT_VERSION:
-        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION})")
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT):
+        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} and {PLAN_FORMAT_INDIRECT})")
     symbols = d.get("symbols", {})
     return ExecutionPlan(
         backend=d["backend"],
@@ -424,6 +439,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
                 zero_prologues=tuple(lc.get("zero_prologues", ())),
                 writes=tuple(lc.get("writes", ())),
+                indirect_args=tuple((a, t, s, int(sl)) for a, t, s, sl in lc.get("indirect", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())

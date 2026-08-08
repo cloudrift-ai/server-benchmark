@@ -2,12 +2,24 @@
 
 import pytest
 
-from emmy.benchmark.command_workload import build_substitution_map, render_command
+from emmy.benchmark.command_workload import _local_result_name, build_substitution_map, render_command
 from emmy.planner.variant import Variant
 
 
 def _variant(params):
     return Variant(params=params)
+
+
+def test_local_result_name_top_level_file_keeps_flat_name():
+    assert _local_result_name("rtx5090x1", "accum_error.json") == "rtx5090x1_accum_error.json"
+
+
+def test_local_result_name_subdir_files_do_not_collide():
+    std = _local_result_name("rtx4090x1", "std/golden_bench.json")
+    fm = _local_result_name("rtx4090x1", "fm/golden_bench.json")
+    assert std == "rtx4090x1_std_golden_bench.json"
+    assert fm == "rtx4090x1_fm_golden_bench.json"
+    assert std != fm
 
 
 def test_build_substitution_map_flattens_dot_keys():

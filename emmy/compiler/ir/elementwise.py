@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from emmy.compiler.dtype import decode_f8, encode_f8
+
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
 # intrinsics (all unary). Every other op name matches a numpy attribute,
@@ -43,6 +45,18 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
+    # fp8 decode casts. The dtype-boundary cast out of an fp8 tensor cannot be
+    # a plain ``copy``: the numpy carrier is uint8 BITS, so copying would move
+    # the bit patterns, not the values — the decode IS the cast's semantics.
+    # Host-side these read the one LUT in ``dtype.py``; the CUDA render
+    # converts by dtype (the fragment-path ``cvt``).
+    "from_f8e4m3": lambda x: decode_f8(x, "f8e4m3"),
+    "from_f8e5m2": lambda x: decode_f8(x, "f8e5m2"),
+    # fp8 encode casts — the decode twins (M3: activation storage ahead of the native fp8 mma).
+    # Host-side: round-to-nearest-even onto the representable set, saturate-to-finite, producing
+    # the uint8 bits carrier; the CUDA render spells the <cuda_fp8.h> constructor (same rounding).
+    "to_f8e4m3": lambda x: encode_f8(x, "f8e4m3"),
+    "to_f8e5m2": lambda x: encode_f8(x, "f8e5m2"),
 }
 
 
@@ -89,6 +103,12 @@ class ElementwiseImpl:
     # the table is *data* so tropical ``(min, +)`` etc. is a one-line add when a
     # consumer exists — but DO NOT add unused semirings (simplicity-first).
     _SEMIRING: dict[str, frozenset[str]] = {"add": frozenset({"multiply"})}
+    # Storage-decode ops — op name → the bits-carrier storage dtype token the op is
+    # the decode cast for. This is the trait the tile binding arm (the k-invariant
+    # factor hoist, ``_atomize``) keys on instead of op-name lists: a new storage
+    # format registers its decode op here (one ``_NAME_TO_FN`` entry + one row)
+    # and the binding arm covers it without change.
+    _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}
 
     def __init__(self, name: str) -> None:
         fn = _NAME_TO_FN.get(name)
@@ -134,6 +154,16 @@ class ElementwiseImpl:
         family) instead of accumulating magnitude — an Accum over one may keep
         the input dtype rather than promote to the accumulating dtype."""
         return self.name in self._SELECTING
+
+    @property
+    def decodes(self) -> str | None:
+        """The storage dtype token this op is the decode cast for (``from_f8e4m3`` →
+        ``"f8e4m3"``), else ``None``. The trait behind the dtype-directed decode rule: a
+        bits-carrier element consumed at a value dtype converts by dtype, so the graph's
+        decode op is absorbed wherever the consumer already converts (the render's promote,
+        the mma fragment load) — and the tile binding arm asks THIS trait, never an op-name
+        list, to recognize a decode cone's leaf."""
+        return self._DECODES.get(self.name)
 
     @property
     def semiring_product(self) -> bool:

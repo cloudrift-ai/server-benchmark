@@ -8,10 +8,14 @@ the FX graph. The mask is precomputed and stapled on as a buffer; HF's
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = False, slice_last_logits: bool = False) -> nn.Module:
@@ -266,15 +270,80 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
+def _build_pre_wrapper(block):
+    """The shared q/k/v carve of one HF decoder layer: ``pre(hidden[T, H]) -> (q, k, v)`` runs
+    ``input_layernorm`` → separate projections → reshape-into-heads → q/k(/v) norm, returning
+    **un-rotated** q,k,v in the 2-D seam ABI. Used by both the dense and the MoE split builders;
+    carries the structural probes (PLE / clip_qkv rejects, norm placement, ``attention_k_eq_v``)."""
+    import torch.nn as nn
+
+    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if ple_dim:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: block carries Per-Layer Embeddings "
+            f"(hidden_size_per_layer_input={ple_dim}, Gemma-nano E2B/E4B) — the attention-split carve "
+            f"would silently drop the per_layer_input multiply; this model is not servable via the split path"
+        )
+
+    attn = block.self_attn
+    clip_qkv = getattr(getattr(attn, "config", None), "clip_qkv", None)
+    if clip_qkv is not None:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: clip_qkv={clip_qkv} (OLMo-style q/k/v clamping) has no seam in the "
+            f"attention-split carve — the pre wrapper would silently skip the clamp, corrupting outputs"
+        )
+    head_dim = attn.head_dim
+    num_heads = attn.q_proj.out_features // head_dim
+    num_kv_heads = attn.k_proj.out_features // head_dim
+    q_norm = getattr(attn, "q_norm", None)
+    k_norm = getattr(attn, "k_norm", None)
+    v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
+    # Two q/k-norm placements exist: Qwen3 / Gemma-3/4 normalize PER HEAD over head_dim (after the
+    # head reshape); OLMoE normalizes the FLAT projection (before the reshape) with a norm sized
+    # over the whole projection width. Distinguish them by the norm's own width.
+    flat_qk_norm = q_norm is not None and q_norm.weight.numel() != head_dim
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_layernorm = block.input_layernorm
+            self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, attn.v_proj
+            self.q_norm, self.k_norm, self.v_norm = q_norm, k_norm, v_norm
+
+        def forward(self, hidden):
+            h = self.input_layernorm(hidden)  # [T, H]
+            t = h.shape[0]
+            if flat_qk_norm:  # OLMoE: RMSNorm over the flat projection, before the head reshape
+                q = self.q_norm(self.q_proj(h)).view(t, num_heads, head_dim)
+                k = self.k_norm(self.k_proj(h)).view(t, num_kv_heads, head_dim)
+                v = self.v_proj(h).view(t, num_kv_heads, head_dim)
+                return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
+            q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
+            kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
+            # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
+            # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
+            v = self.v_proj(h).view(t, num_kv_heads, head_dim) if self.v_proj is not None else kp
+            k = kp
+            if self.q_norm is not None:
+                q = self.q_norm(q)  # per-head RMSNorm over D
+                k = self.k_norm(kp)
+            if self.v_norm is not None:
+                v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
+            return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
+
+    return Pre()
+
+
 def build_attention_split_wrapper(block):
     """Carve SDPA out of one HF decoder layer (Phase 1). Returns ``(pre, post)`` ``nn.Module``s over
     the flattened **``[num_tokens, H]``** per-token layout:
 
     - ``pre(hidden[T, H]) -> (q, k, v)`` runs ``input_layernorm`` → separate
       ``q_proj`` / ``k_proj`` / ``v_proj`` → reshape-into-heads → per-head ``q_norm`` /
-      ``k_norm`` (Qwen3 only), and returns **un-rotated** q,k,v in the 2-D seam ABI
-      ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what vLLM's ``Attention.forward`` consumes.
-      RoPE is applied downstream (by vLLM, or by the test/oracle reference).
+      ``k_norm`` (Qwen3 only; OLMoE's FLAT pre-reshape placement is handled), and returns
+      **un-rotated** q,k,v in the 2-D seam ABI ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what
+      vLLM's ``Attention.forward`` consumes. RoPE is applied downstream (by vLLM, or by the
+      test/oracle reference).
     - ``post(attn_out[T, Hq·D], residual[T, H]) -> layer_out[T, H]`` runs ``o_proj`` →
       ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual. **Gemma-3/4** is
       instead a 4-norm layer: ``o_proj(attn)`` and ``mlp(...)`` each get wrapped in their OWN
@@ -290,48 +359,13 @@ def build_attention_split_wrapper(block):
     Qwen3 / Gemma-3/4 (q/k norm) and Llama (no q/k norm) all share the ``pre``; the ``post``
     is the Llama/Qwen 2-norm form or the Gemma 4-norm form above.
 
-    Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``): the carve has no seam for
-    the ``hidden * per_layer_input`` multiply and would silently drop it, corrupting outputs."""
+    Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``
+    (in :func:`_build_pre_wrapper`): the carve has no seam for either and would silently drop
+    them, corrupting outputs."""
     import torch.nn as nn
 
-    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
-    if ple_dim:
-        raise NotImplementedError(
-            f"build_attention_split_wrapper: block carries Per-Layer Embeddings "
-            f"(hidden_size_per_layer_input={ple_dim}, Gemma-nano E2B/E4B) — the attention-split carve "
-            f"would silently drop the per_layer_input multiply; this model is not servable via the split path"
-        )
-
+    pre = _build_pre_wrapper(block)  # carries the PLE / clip_qkv rejects — before any attribute reads
     attn = block.self_attn
-    head_dim = attn.head_dim
-    num_heads = attn.q_proj.out_features // head_dim
-    num_kv_heads = attn.k_proj.out_features // head_dim
-    q_norm = getattr(attn, "q_norm", None)
-    k_norm = getattr(attn, "k_norm", None)
-    v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
-
-    class Pre(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.input_layernorm = block.input_layernorm
-            self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, attn.v_proj
-            self.q_norm, self.k_norm, self.v_norm = q_norm, k_norm, v_norm
-
-        def forward(self, hidden):
-            h = self.input_layernorm(hidden)  # [T, H]
-            t = h.shape[0]
-            q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
-            kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
-            # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
-            # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
-            v = self.v_proj(h).view(t, num_kv_heads, head_dim) if self.v_proj is not None else kp
-            k = kp
-            if self.q_norm is not None:
-                q = self.q_norm(q)  # per-head RMSNorm over D
-                k = self.k_norm(kp)
-            if self.v_norm is not None:
-                v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
-            return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
 
     class Post(nn.Module):
         def __init__(self) -> None:
@@ -358,7 +392,167 @@ def build_attention_split_wrapper(block):
             h = residual + self.o_proj(attn_out)  # Llama/Qwen: residual1 + o_proj(SDPA)
             return h + self.mlp(self.post_attention_layernorm(h))  # residual2 + MLP
 
-    return Pre(), Post()
+    return pre, Post()
+
+
+def moe_block_parts(mlp):
+    """The ``(router, experts)`` pair of a token-choice MoE block, or ``None`` for a dense MLP.
+
+    Matches the transformers-v5 experts interface: a router module (named ``gate`` in the
+    OLMoE/Qwen lineage, ``router`` in gpt-oss) beside an ``experts`` module holding the
+    per-expert weights as 3-D ``nn.Parameter``s (``gate_up_proj``, ``down_proj``). That storage
+    layout is what lets serving pass per-expert dim-0 slices as program inputs."""
+    import torch
+
+    router = getattr(mlp, "gate", None) or getattr(mlp, "router", None)
+    experts = getattr(mlp, "experts", None)
+    if router is None or experts is None:
+        return None
+    gate_up = getattr(experts, "gate_up_proj", None)
+    down = getattr(experts, "down_proj", None)
+    if not (isinstance(gate_up, torch.Tensor) and gate_up.dim() == 3 and isinstance(down, torch.Tensor) and down.dim() == 3):
+        return None
+    return router, experts
+
+
+def moe_expert_layout(experts):
+    """The experts module's weight-layout contract, read off the attributes transformers'
+    ``@use_experts_implementation`` decorator stamps on every v5 experts class — NOT off the
+    tensor shapes (gpt-oss ``down_proj`` is square ``(E, 2880, 2880)``, so shape sniffing
+    cannot tell the orientations apart). Returns ``(transposed, interleaved, has_bias)``:
+
+    - ``transposed`` — weights stored ``(E, in, out)`` and applied as ``x @ W`` (gpt-oss);
+      ``False`` is the ``F.linear`` ``(E, out, in)`` orientation (OLMoE).
+    - ``interleaved`` — gate/up live in the gate-up projection's OUT axis as even/odd
+      columns (gpt-oss) rather than concatenated halves; the serving load de-interleaves
+      once so the wrapper's ``chunk(2)`` split holds for both (see
+      :func:`deinterleave_gate_up`).
+    - ``has_bias`` — per-expert ``gate_up_proj_bias`` / ``down_proj_bias`` exist and become
+      two more expert-program inputs."""
+    return (
+        bool(getattr(experts, "is_transposed", False)),
+        not bool(getattr(experts, "is_concatenated", True)),
+        bool(getattr(experts, "has_bias", False)),
+    )
+
+
+def deinterleave_gate_up(t):
+    """De-interleave a gate-up tensor's LAST axis from even/odd gate/up columns into
+    concatenated ``[gate | up]`` halves — a one-time exact column permutation applied at
+    LOAD (weight bits, scale and bias alike), which restores the ``chunk(2, dim=-1)``
+    algebra so ONE expert-wrapper spelling serves both the OLMoE and the gpt-oss layouts.
+    The alternative — strided ``::2`` slices spelled in-graph — would make every gate/up
+    read a stride-2 column access, which the staged tile transports do not lower well."""
+    import torch
+
+    return torch.cat([t[..., 0::2], t[..., 1::2]], dim=-1).contiguous()
+
+
+def build_moe_split_wrapper(block):
+    """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
+
+    - ``pre`` — the same q/k/v carve as :func:`build_attention_split_wrapper`.
+    - ``post_attn(attn_out[T, Hq·D], residual[T, H]) -> (h[T, H], xn[T, H])`` — o_proj + residual,
+      then the post-attention norm. BOTH come out: the router and the expert programs consume the
+      normed ``xn``, and the layer output is ``h + combine(expert outputs)`` — the norm output must
+      materialize at the seam because it is shared across the k routed experts. A DeepSeek/GLM-style
+      always-on ``shared_experts`` module (a plain dense MLP over the same ``xn``) folds INTO the
+      returned ``h`` (``h = residual + o_proj(attn) + shared_experts(xn)``), so the runner's
+      route-and-combine half needs no seam change for it.
+    - ``expert(x[T_e, H], w_gate_up, w_down [, b_gate_up, b_down]) -> y[T_e, H]`` — one expert's
+      gated MLP with the weights as FORWARD ARGUMENTS (they trace as graph inputs, not constants),
+      so ONE compiled program serves every expert of every same-shaped layer; the caller passes
+      per-expert slices of the 3-D expert tensors at launch. Two layouts, selected by
+      :func:`moe_expert_layout`: the OLMoE ``F.linear`` form (``(out, in)`` weights, ``act_fn``,
+      no bias) and the gpt-oss ``x @ W`` form (``(in, out)`` weights, per-expert biases as two
+      more forward args, and the clamped-SwiGLU activation — ``gate.clamp(max=limit)``,
+      ``up.clamp(±limit)``, ``glu = gate·σ(α·gate)``, ``out = (up + 1)·glu`` with the module's
+      ``alpha``/``limit``). Both spell the gate/up split as ``chunk(2, dim=-1)``: an interleaved
+      checkpoint (gpt-oss) is de-interleaved once at load (:func:`deinterleave_gate_up`), never
+      strided in-graph.
+
+    The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
+    torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
+    block layout only; the Gemma 4-norm MoE form and Qwen-MoE's GATED shared expert
+    (``shared_expert_gate``) are rejected loudly until a model needs them — a silent pass would
+    drop (or mis-weight) the shared term from every layer's output."""
+    import torch
+    import torch.nn as nn
+
+    parts = moe_block_parts(block.mlp)
+    if parts is None:
+        raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
+    _, experts = parts
+    if getattr(block.mlp, "shared_expert_gate", None) is not None:
+        raise NotImplementedError(
+            "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
+            "the ungated shared-experts fold below would silently drop the gate, mis-weighting every layer's output"
+        )
+    shared_experts = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(block.mlp, a, None)) is not None), None)
+    if getattr(block, "pre_feedforward_layernorm", None) is not None:
+        raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
+    pre = _build_pre_wrapper(block)
+    attn = block.self_attn
+
+    class PostAttn(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.o_proj = attn.o_proj
+            self.post_attention_layernorm = block.post_attention_layernorm
+            # DeepSeek/GLM lineage: an always-on dense MLP beside the routed experts,
+            # consuming the same normed xn. Folding it into h keeps the runner's
+            # route-and-combine half seam-free: layer_out = h + Σ w_e · expert_e(xn).
+            self.shared_experts = shared_experts
+
+        def forward(self, attn_out, residual):
+            h = residual + self.o_proj(attn_out)
+            xn = self.post_attention_layernorm(h)
+            if self.shared_experts is not None:
+                h = h + self.shared_experts(xn)
+            return h, xn
+
+    transposed, _interleaved, has_bias = moe_expert_layout(experts)
+    act_fn = getattr(experts, "act_fn", None)
+    clamped = act_fn is None and getattr(experts, "alpha", None) is not None and getattr(experts, "limit", None) is not None
+    if act_fn is None and not clamped:
+        raise NotImplementedError(
+            "build_moe_split_wrapper: experts module has neither an act_fn nor the gpt-oss clamped-SwiGLU "
+            "(alpha/limit) contract — the expert activation cannot be spelled"
+        )
+
+    if transposed and has_bias and clamped:
+        alpha, limit = float(experts.alpha), float(experts.limit)
+
+        class ExpertFFN(nn.Module):
+            # gpt-oss: (in, out) weights applied as ``x @ W + b``; gate/up as chunk halves
+            # (the load de-interleaved the checkpoint's even/odd columns); clamped-SwiGLU.
+            def forward(self, x, w_gate_up, w_down, b_gate_up, b_down):
+                gate, up = (x @ w_gate_up + b_gate_up).chunk(2, dim=-1)
+                gate = gate.clamp(max=limit)
+                up = up.clamp(min=-limit, max=limit)
+                glu = gate * torch.sigmoid(gate * alpha)
+                return ((up + 1) * glu) @ w_down + b_down
+
+    elif not transposed and not has_bias and act_fn is not None:
+
+        class ExpertFFN(nn.Module):
+            # OLMoE: (out, in) weights applied via F.linear; plain gated activation.
+            def __init__(self) -> None:
+                super().__init__()
+                self.act_fn = act_fn
+
+            def forward(self, x, w_gate_up, w_down):
+                gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+                return nn.functional.linear(self.act_fn(gate) * up, w_down)
+
+    else:
+        raise NotImplementedError(
+            f"build_moe_split_wrapper: unsupported experts layout (transposed={transposed}, "
+            f"has_bias={has_bias}, clamped={clamped}) — only the OLMoE (F.linear, biasless, act_fn) "
+            f"and gpt-oss (x @ W, biased, clamped-SwiGLU) forms are spelled"
+        )
+
+    return pre, PostAttn(), ExpertFFN()
 
 
 def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> None:
@@ -416,3 +610,279 @@ class _PassThroughMask:
 
     def __call__(self, *_, **__):
         return self._wrapper.causal_mask
+
+
+def _is_quantized_dir(p) -> bool:
+    """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
+    (FP8 scale-paired bits, or EXL3 trellis-coded siblings)."""
+    from emmy.compiler.loader.quant import _exl3_quant_config, _fp8_quant_config  # noqa: PLC0415
+
+    return _fp8_quant_config(p) is not None or _exl3_quant_config(p) is not None
+
+
+def quantized_checkpoint_dir(model_id_or_path: str):
+    """The local checkpoint dir when the model is a quantized checkpoint (FP8 or EXL3),
+    else ``None``.
+
+    Detection reads only ``config.json`` (for a repo id, a single cached hub
+    download); the full snapshot is fetched only when the checkpoint IS
+    quantized — the trace-and-bind path then needs the shards anyway (the
+    dequant algebra is spelled from the safetensors index, weights read from
+    the shards).
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    p = Path(model_id_or_path)
+    if p.is_dir():
+        return p if _is_quantized_dir(p) else None
+    from huggingface_hub import hf_hub_download  # noqa: PLC0415
+
+    try:
+        cfg_path = hf_hub_download(model_id_or_path, "config.json")
+    except Exception as e:  # detection is best-effort: an unreadable config means
+        # "not a quantized checkpoint here" and the pre-existing from_pretrained
+        # path keeps ownership of error reporting (bad id, gated repo, offline).
+        logger.debug("quantized-checkpoint detection skipped for %s: %s", model_id_or_path, e)
+        return None
+    if not _is_quantized_dir(Path(cfg_path).parent):
+        return None
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+    return _resolve_model_dir(model_id_or_path)
+
+
+# Expert-tensor leaves of a transformers-v5 experts module → the expert program's INPUT names
+# (the contract between the streaming loader below and the serving runner's expert launches).
+_EXPERT_LEAVES = {
+    "gate_up_proj": "w_gate_up",
+    "down_proj": "w_down",
+    "gate_up_proj_scale": "w_gate_up_scale",
+    "down_proj_scale": "w_down_scale",
+    "gate_up_proj_bias": "b_gate_up",
+    "down_proj_bias": "b_down",
+}
+
+
+def _expert_slot(key: str):
+    """``(layer_index, program_input_name)`` when ``key`` is a per-expert tensor of a MoE
+    layer's experts module, else ``None``."""
+    if ".experts." not in key:
+        return None
+    name = _EXPERT_LEAVES.get(key.rsplit(".", 1)[1])
+    if name is None or ".layers." not in key:
+        return None
+    return int(key.split(".layers.")[1].split(".")[0]), name
+
+
+def load_quantized_split(model_dir, dtype):
+    """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
+
+    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss):
+    never materializes the whole dequantized dict (a 20B checkpoint dequantizes to ~42 GB of
+    host values — the whole-dict ``load_dequantized_state_dict`` OOMs a 60 GB box). Instead:
+
+    - The twin is built from config alone on the META device (weights never read at trace;
+      the experts' would-be random init never materializes).
+    - The DENSE trunk (attention projections + biases, norms, router, embeddings, lm_head)
+      streams per shard: fp8 weights dequantize by their ``<key>_scale`` partner, everything
+      casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
+      3-D expert params are skipped — they stay meta on the twin.
+    - The EXPERT tensors are collected into a per-layer store keyed by the expert program's
+      INPUT names: fp8 weights as RAW BITS on the uint8 carrier plus their f32 scale
+      tensors (the runner spells the dequant in-graph via ``spell_quantized_inputs`` and
+      uploads 1-byte weights — the whole point of the fp8 checkpoint), biases (and any
+      unquantized expert weights) as ``dtype`` value tensors. An interleaved gate/up layout
+      de-interleaves here — bits, scale and bias alike (:func:`deinterleave_gate_up`).
+
+    Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | None,
+    "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized).
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+    from safetensors import safe_open  # noqa: PLC0415
+    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import _fp8_quant_config, _is_skipped, dequantize  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
+
+    model_dir = Path(model_dir)
+    config = AutoConfig.from_pretrained(model_dir)
+    if getattr(config, "quantization_config", None) is not None:
+        delattr(config, "quantization_config")
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config)
+
+    qc = _fp8_quant_config(model_dir) or {}
+    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    index = _build_index(model_dir)
+    by_shard: dict[str, list[str]] = {}
+    for key, shard in index.items():
+        by_shard.setdefault(str(shard), []).append(key)
+
+    torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
+    state: dict = {}
+    layers_store: dict[int, dict] = {}
+    fmt: str | None = None
+    from contextlib import ExitStack  # noqa: PLC0415
+
+    with ExitStack() as stack:
+        handles: dict[str, object] = {}
+
+        def _open(path: str):
+            h = handles.get(path)
+            if h is None:
+                h = handles[path] = stack.enter_context(safe_open(path, framework="pt"))
+            return h
+
+        for shard_path in sorted(by_shard):
+            f = _open(shard_path)
+            for k in sorted(by_shard[shard_path]):
+                slot = _expert_slot(k)
+                if slot is not None:
+                    layer, name = slot
+                    t = f.get_tensor(k)
+                    if t.dtype in torch_f8:
+                        fmt = "f8e4m3" if t.dtype == torch.float8_e4m3fn else "f8e5m2"
+                        t = t.view(torch.uint8)
+                    elif name.endswith("_scale"):
+                        t = t.float()  # bf16-stored scales read as f32 values (the loader convention)
+                    else:
+                        t = t.to(dtype)
+                    layers_store.setdefault(layer, {})[name] = t
+                    continue
+                if k.endswith(("_scale", "_scale_inv")) and k[: k.rfind("_scale")] in index:
+                    continue  # consumed by its base weight's dequant
+                t = f.get_tensor(k)
+                if t.dtype in torch_f8:
+                    scale_key = next((c for c in (k + "_scale", k + "_scale_inv") if c in index), None)
+                    if scale_key is not None and not _is_skipped(k, patterns):
+                        s = _open(str(index[scale_key])).get_tensor(scale_key)
+                        vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_key.endswith("_inv"))
+                        state[k] = torch.from_numpy(vals).to(dtype)
+                        continue
+                    t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
+                state[k] = t.to(dtype) if t.is_floating_point() else t
+
+    # De-interleave the gate/up family once, so the wrapper's chunk-half split holds.
+    trunk = getattr(model, "model", model)
+    trunk = getattr(trunk, "language_model", trunk)
+    interleaved = False
+    for block in trunk.layers:
+        parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
+        if parts is not None:
+            _, interleaved, _ = moe_expert_layout(parts[1])
+            break
+    if interleaved:
+        for store in layers_store.values():
+            for name in ("w_gate_up", "w_gate_up_scale", "b_gate_up"):
+                if name in store:
+                    store[name] = deinterleave_gate_up(store[name])
+
+    missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+    if unexpected:
+        logger.warning("quantized split load: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
+    missing_dense = [m for m in missing if _expert_slot(m) is None]
+    if missing_dense:
+        logger.info("quantized split load: %d module tensors not in checkpoint (e.g. %s)", len(missing_dense), missing_dense[0])
+    model.tie_weights()
+    model.eval()
+    return model, {"fmt": fmt, "layers": layers_store}
+
+
+def _trim_padded_weights(model, state: dict) -> None:
+    """Slice encode-padded weight values back to the module's declared shape, in place.
+
+    EXL3 pads both dims of every quantized linear to multiples of 128 at encode time
+    (GLM-4.5-Air: ``intermediate_size`` 10944 → 11008), so a decoded state value can
+    overhang the module's parameter. Slicing the leading extents is exactly the reference
+    math (zero-padded activations in, sliced outputs). Guarded
+    tightly: only when every overhanging dim is exactly the declared dim's roundup to 128 —
+    anything else stays as-is for ``load_state_dict`` to report."""
+    for key, param in model.state_dict().items():
+        t = state.get(key)
+        if t is None or t.shape == param.shape or t.dim() != param.dim():
+            continue
+        if all(td == -(-pd // 128) * 128 or td == pd for td, pd in zip(t.shape, param.shape, strict=True)):
+            state[key] = t[tuple(slice(0, pd) for pd in param.shape)].contiguous()
+
+
+def _pack_expert_state(model, state: dict) -> None:
+    """Pack per-expert checkpoint weights into the transformers-v5 3-D expert params, in place.
+
+    The DeepSeek/GLM checkpoint lineage stores each expert as its own module
+    (``…experts.E.{gate,up,down}_proj.weight``), while the v5 experts module declares the
+    E-stacked 3-D params (``…experts.gate_up_proj`` ``(E, 2*I, H)`` / ``…experts.down_proj``
+    ``(E, H, I)``) — ``from_pretrained`` applies the hub conversion mapping, but a state dict
+    built by the loaders must pack here. Per-expert ``nn.Linear`` weights are the ``(out,
+    in)`` orientation by construction, so the packing is deterministic: stack, with gate/up
+    concatenated along the out axis (the ``chunk(2)`` halves). Fires only when the model
+    expects a packed param whose per-expert sources are all present in ``state``; a shape
+    mismatch raises rather than loading a silently wrong twin."""
+    import torch  # noqa: PLC0415
+
+    for key, param in model.state_dict().items():
+        m = re.match(r"(.*\.experts)\.(gate_up_proj|down_proj)$", key)
+        if m is None or key in state:
+            continue
+        base, leaf = m.groups()
+        n_experts = param.shape[0]
+        parts = []
+        consumed: list[str] = []
+        for e in range(n_experts):
+            names = [f"{base}.{e}.{p}.weight" for p in (("gate_proj", "up_proj") if leaf == "gate_up_proj" else ("down_proj",))]
+            halves = [state.get(nm) for nm in names]
+            consumed += names
+            parts.append(None if any(h is None for h in halves) else halves[0] if len(halves) == 1 else torch.cat(halves, dim=0))
+        if any(p is None for p in parts):
+            continue  # not the per-expert layout (or an incomplete checkpoint) — leave for load_state_dict to report
+        packed = torch.stack(parts, dim=0)
+        if packed.shape != param.shape:
+            raise ValueError(f"expert packing for {key}: packed shape {tuple(packed.shape)} != expected {tuple(param.shape)}")
+        for nm in consumed:
+            del state[nm]
+        state[key] = packed
+
+
+def load_quantized_twin(model_dir, dtype):
+    """Architecture twin of a quantized checkpoint, carrying the DEQUANTIZED real weights.
+
+    A quantized checkpoint cannot go through ``from_pretrained`` as-is —
+    transformers would engage its own quantizer machinery (or reject the
+    scheme outright: EXL3), and the trace is quantization-blind (quantization
+    is a property of the checkpoint, not the architecture; see the FP8 plan).
+    So: build the plain architecture from config with ``quantization_config``
+    stripped, then load the checkpoint's tensors with every quantized weight
+    decoded (``loader.quant.load_dequantized_state_dict`` — fp8 scale pairs
+    and EXL3 trellis siblings alike) — the returned module is both the trace
+    subject and the eager / accuracy reference. Per-expert checkpoint weights
+    pack into the v5 3-D expert params (:func:`_pack_expert_state`).
+    ``strict=False`` tolerates non-persistent buffers absent from the
+    checkpoint (rotary ``inv_freq``); ``tie_weights()`` re-asserts tied
+    embeddings after the load (see ``binder.py``'s
+    state_dict-vs-named_parameters note).
+    """
+    import numpy as np  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import load_dequantized_state_dict  # noqa: PLC0415
+
+    config = AutoConfig.from_pretrained(model_dir)
+    if getattr(config, "quantization_config", None) is not None:
+        delattr(config, "quantization_config")
+    model = AutoModelForCausalLM.from_config(config).to(dtype)
+    state: dict = {}
+    for k, v in load_dequantized_state_dict(model_dir).items():
+        t = torch.from_numpy(np.ascontiguousarray(v))
+        state[k] = t.to(dtype) if t.is_floating_point() else t
+    _trim_padded_weights(model, state)
+    _pack_expert_state(model, state)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected:
+        logger.warning("quantized twin: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
+    if missing:
+        logger.info("quantized twin: %d module tensors not in checkpoint (e.g. %s)", len(missing), missing[0])
+    model.tie_weights()
+    model.eval()
+    return model

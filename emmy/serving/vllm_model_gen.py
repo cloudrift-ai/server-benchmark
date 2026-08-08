@@ -222,6 +222,34 @@ class EmmyGenModel(nn.Module):
             )
         n_layers = self.runner.num_layers
 
+        # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
+        # only): single-token decode is capture-legal through the runner's FIXED-SLOT tier
+        # (``_moe_combine_slots`` — fixed launch set, no host sync), so an MoE boot may keep
+        # whole-step decode capture at capture size 1. Every wider decode step still rides the
+        # routed dispatch, which host-syncs and cannot be recorded — so capture sizes above 1,
+        # or a boot where the fixed-slot tier failed to build (M=1 expert compile failure, or a
+        # schedule that stages weights through TMA descriptors), are rejected LOUDLY here.
+        # Failing with the real reason beats the cryptic CUDA 'operation not permitted during
+        # stream capture' crash vLLM's capture pass would hit later.
+        if self.runner._moe is not None and not mc.enforce_eager:
+            cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+            if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
+                if not self.runner.has_moe_fixed_slot:
+                    raise ValueError(
+                        "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
+                        "boot (the M=1 expert program failed to build, or its schedule stages weights through "
+                        "TMA descriptors — see the gen_runner warnings above); serve with --enforce-eager"
+                    )
+                sizes = getattr(vllm_config.compilation_config, "cudagraph_capture_sizes", None) or []
+                over = sorted(s for s in sizes if s > 1)
+                if over:
+                    raise ValueError(
+                        f"MoE decode capture is limited to capture size 1 (the fixed-slot tier covers "
+                        f"single-token steps only; wider decode steps run the routed dispatch eager) — "
+                        f"capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
+                        f"emmy serve --generate default for MoE) or --enforce-eager"
+                    )
+
         sliding_window = getattr(config, "sliding_window", None)
 
         def _layer_window(i):
@@ -231,9 +259,23 @@ class EmmyGenModel(nn.Module):
                 return sliding_window
             return None
 
+        # Attention sinks (gpt-oss): a per-layer ``sinks`` weight, shape [num_heads], that the
+        # attention softmax treats as one extra always-present logit column. The config carries
+        # no flag — sinks exist purely as checkpoint weights — so key on the architecture.
+        # Passing ``sinks=`` into ``Attention`` makes vLLM's backend selection sinks-aware
+        # (on sm_120 it lands on TRITON_ATTN; FA2 and FlashInfer both reject sinks there); the
+        # params are the second vLLM-owned weight beside ``lm_head`` (``load_weights`` claims
+        # ``*.self_attn.sinks``).
+        self.sinks = None
+        if getattr(config, "model_type", None) == "gpt_oss":
+            self.sinks = nn.ParameterList(
+                [nn.Parameter(torch.empty(self.runner.layer_meta(i)[1], dtype=mc.dtype), requires_grad=False) for i in range(n_layers)]
+            )
+
         # One real vLLM Attention per layer — unique prefix (vLLM keys static_forward_context /
-        # cache-spec discovery by it and rejects duplicates). No weights. per_layer_sliding_window
-        # makes vLLM's paged attention window that layer (and size its KV-cache spec accordingly).
+        # cache-spec discovery by it and rejects duplicates). No weights (except sinks, above).
+        # per_layer_sliding_window makes vLLM's paged attention window that layer (and size its
+        # KV-cache spec accordingly).
         # Dims come from the runner PER LAYER: Gemma-4's global layers use a larger head_dim than
         # its sliding ones, so a single (num_heads, head_dim) would misshape the global layers.
         attn = []
@@ -249,6 +291,7 @@ class EmmyGenModel(nn.Module):
                     quant_config=vllm_config.quant_config,
                     per_layer_sliding_window=_layer_window(i),
                     prefix=f"{prefix}.layers.{i}.self_attn.attn",
+                    **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
                 )
             )
         self.attn = nn.ModuleList(attn)
@@ -330,14 +373,13 @@ class EmmyGenModel(nn.Module):
     def _forward_device(self, ids, positions):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
-        t = ids.shape[0]
         hidden = self.runner.embed_device(ids)  # [T, H] CUDA
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
             q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
-            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn and t == 1 else None
+            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn else None  # A4: any tier; the backing router decides
             if attn_out is None:
                 attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
@@ -398,6 +440,12 @@ class EmmyGenModel(nn.Module):
             elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                 loader(param, w)
                 loaded.add("lm_head.weight")
+            elif self.sinks is not None and name.endswith(".self_attn.sinks"):
+                # gpt-oss attention sinks — the per-layer [num_heads] weight beside lm_head
+                # (see __init__). Single GPU: the full copy (stock's tp narrow at tp=1).
+                layer = int(name.split(".layers.")[1].split(".")[0])
+                self.sinks[layer].data.copy_(w)
+                loaded.add(name)
         # Tied checkpoints: the loaded head IS the raw embed table — hand it to the runner and drop
         # the runner's own ~2 GiB folded device copy (uploaded eagerly at construction for the
         # profiling-order contract). empty_cache + the cupy pool trim actually RELEASE the freed

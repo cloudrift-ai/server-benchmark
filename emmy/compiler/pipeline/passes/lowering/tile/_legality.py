@@ -38,6 +38,7 @@ from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -170,12 +171,50 @@ def coop_band_epilogue(tail) -> str | None:
 # ---- the warp tier's K step -------------------------------------------------------------------- #
 
 
+def warp_atom_target(atom, ctx) -> str | None:
+    """Whether ``atom`` belongs to the target's selected MMA instruction family."""
+    if atom.available_on(ctx):
+        return None
+    return (
+        f"warp TILE: atom {atom.name} requires target feature {atom.target_feature}, which is unavailable "
+        f"on sm_{ctx.compute_capability[0]}{ctx.compute_capability[1]}"
+    )
+
+
+def warp_atom_edges(node: Fold, atom) -> str | None:
+    """Whether the atom can consume this contraction's materialized/computed operand edges."""
+    if not atom.materialized_edges_only:
+        return None
+    if not isinstance(node.a, Load) or any(not isinstance(ch.b, Load) for ch in node.channels):
+        return f"warp TILE: atom {atom.name} accepts only materialized A and B edges"
+    return None
+
+
+def stage_target(stage: Stage, ctx) -> str | None:
+    """Whether ``stage`` names a copy instruction family present on ``ctx``."""
+    if stage.transport == "cp.async" and not ctx.has_cp_async:
+        return f"STAGE {stage.spell()}: cp.async requires sm_80 or newer"
+    if stage.transport == "tma" and not ctx.has_tma:
+        return f"STAGE {stage.spell()}: TMA requires sm_90 or newer"
+    return None
+
+
+def warp_atom_stage(atom, stage: Stage) -> str | None:
+    """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
+    if atom.materialized_edges_only and not (stage.transport == "sync" and atom.sync_copy_staging):
+        return f"STAGE {stage.spell()}: atom {atom.name} supports only synchronous-copy staging"
+    return None
+
+
 def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
     """The inner mma K-step ``atom_k·bk`` must tile a STATIC contraction K: the warp K-loop has no
     static-K tail masking, so a partial final step reads past the operand and silently corrupts the
-    result. A SYMBOLIC K reaches the masked tier and is fine."""
+    result. A SYMBOLIC K reaches the masked tier and is fine — except on the fp8 atoms, whose
+    byte-gather fragment loaders have no masked-K zero-fill family."""
     ext = node.axis.extent
     if not ext.is_static:
+        if plan.is_warp and plan.atom.operand_dtype("a").nbytes == 1:
+            return f"atom {plan.atom.name}: the fp8 byte-gather loaders have no masked-K zero-fill — a symbolic K stays off the fp8 tier"
         return None
     k, step = ext.as_static(), plan.atom.atom_k * plan.bk
     if k % step == 0:
@@ -261,8 +300,8 @@ def _tma_operand_rank(index: tuple, tile_name: str, k_name: str) -> bool:
     return all(not ({tile_name, k_name} & e.free_vars()) for e in index[:-2])
 
 
-def _warp_cp_async(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool) -> bool:
-    """cp.async staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim."""
+def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool) -> bool:
+    """Vector-copy staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim."""
     if mask_n or not k_axis.extent.is_static:
         return False
     if k_axis.extent.as_static() % bk_elems:
@@ -270,34 +309,69 @@ def _warp_cp_async(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_tra
     return bk_elems % _CP_ASYNC_MIN_ELEMS == 0 and (b_trans or tile_n % _CP_ASYNC_MIN_ELEMS == 0)
 
 
-def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, elem_bytes: int, mask_n: bool, b_trans: bool) -> bool:
-    """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims. A transposed B boxes
-    N-major, so N drops out of the alignment gate."""
+def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: int, b_bytes: int, mask_n: bool, b_trans: bool) -> bool:
+    """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims — each operand's
+    box inner dim and gmem inner stride at its OWN element width (a byte-staged fp8 B sizes at
+    1 B). A transposed B boxes N-major, so N drops out of the alignment gate."""
     if mask_n or not (k_axis.extent.is_static and n_axis.extent.is_static):
         return False
     k, n = k_axis.extent.as_static(), n_axis.extent.as_static()
     if k % bk_elems:
         return False
-    inner = (bk_elems, k) if b_trans else (bk_elems, tile_n, k, n)
-    return all((x * elem_bytes) % _TMA_ALIGN == 0 for x in inner)
+    inner = (bk_elems * a_bytes, k * a_bytes) + ((bk_elems * b_bytes, k * b_bytes) if b_trans else (tile_n * b_bytes, n * b_bytes))
+    return all(x % _TMA_ALIGN == 0 for x in inner)
 
 
-def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> Stage | None:
-    """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
-    gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
+def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
+    """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
+    cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
     slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose single depth-1 slot
     already exceeds ``budget`` DECLINES — unlike the scalar resolver it cannot shrink the slab.
 
     A resolver rather than a predicate because the legal answer is a SIZE, not a yes/no: this is the
     one enforcement point for the smem budget, and returning the largest legal stage is what keeps
     an over-budget row out of the fork instead of failing at materialization.
-    """
+
+    ``inputs`` (the per-buffer tensors) gates operand dtypes: the copy transports byte-copy into
+    slabs sized at each operand's element width, so a slab is byte-copied verbatim and the drain
+    reads exactly the bytes the fill deposited. Two dtype forms resolve: an operand traced AT the
+    atom's operand dtype (the 16-bit family — ldmatrix drain), and a 1-byte (fp8-stored) operand —
+    a B under a 16-bit atom stages as a RAW BYTE slab drained by the cooperative convert gather
+    (W8A16), and the fp8 (k32) atoms stage both operands as byte slabs drained by the byte repack.
+    Any other mismatch DECLINES and keeps the warp tier gmem-direct, whose fragment load converts
+    per element (the same rule flash's ``stageable`` flag states). A byte slab's fill runs 16 B
+    chunks and its cp.async row pad is 16 B (``_addr.BYTE_SLAB_PAD``), so its inner span — and,
+    canonical-B, the gmem row stride N — must be 16-divisible."""
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
-    a_nbytes = atom.operand_dtype("a").nbytes
+    sync_copy = stage.transport == "sync" and atom.sync_copy_staging
+    if atom.materialized_edges_only and not sync_copy:
+        return None
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
+    a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
+    if inputs:
+        for edge, role in ((c.a, "a"), (c.b, "b")):
+            t = inputs.get(edge.input) if isinstance(edge, Load) else None
+            if t is None or t.dtype == atom.operand_dtype(role):
+                continue
+            if sync_copy:
+                return None  # the Volta shared gather consumes f16 slabs; synchronous copies do not convert
+            if role == "b" and t.dtype.nbytes == 1 and b_nbytes == 2:
+                b_nbytes = 1  # fp8-B under a 16-bit atom: byte slab, convert at the drain
+                continue
+            return None
+    for eb, inner, row_axis in (
+        (a_nbytes, bk_elems, None),
+        (b_nbytes, bk_elems if c.b_trans else n.tile, None if c.b_trans else n.axis),
+    ):
+        if eb != 1:
+            continue
+        if inner % 16:
+            return None  # byte slab: 16 B chunks + the 16 B row pad need a 16-divisible inner span
+        if row_axis is not None and (not row_axis.extent.is_static or row_axis.extent.as_static() % 16):
+            return None  # canonical byte B: the 16 B gmem chunks stride rows of N bytes
     rank_ok = (
         isinstance(c.a, Load)
         and isinstance(c.b, Load)  # a descriptor needs a gmem address on BOTH edges
@@ -305,11 +379,20 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int) -> St
         and _tma_operand_rank(c.b.index, n.axis.name, c.axis.name)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
-    tma_ok = stage.transport == "tma" and rank_ok and box_ok and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, n.mask, c.b_trans)
-    cp_ok = stage.transport == "cp.async" and _warp_cp_async(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
-    if not (tma_ok or cp_ok):
+    tma_ok = (
+        stage.transport == "tma"
+        and rank_ok
+        and box_ok
+        and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.b_trans)
+    )
+    vector_copy_ok = _warp_vector_copy(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
+    cp_ok = stage.transport == "cp.async" and vector_copy_ok
+    sync_ok = sync_copy and vector_copy_ok
+    if not (tma_ok or cp_ok or sync_ok):
         return None
-    slot_bytes = (m.tile + n.tile) * bk_elems * a_nbytes
+    pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
+    b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.b_trans else (bk_elems, n.tile + pad_b)
+    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + b_rows * b_cols * b_nbytes
     if slot_bytes > budget:
         return None
     depth = clamp_depth(stage, slot_bytes, budget)
@@ -369,6 +452,10 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape."""
     atom = tile.atom
+    if atom.materialized_edges_only:
+        return None
+    if atom.operand_dtype("a").nbytes < 2:
+        return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
     _, _, stats = cone_seam(c.a)
@@ -570,6 +657,11 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
         return None
     if not inputs or not isinstance(c.a, Load) or not isinstance(c.b, Load) or c.a.input not in inputs:
         return None
+    # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
+    # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier
+    # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
+    if any(t is not None and t.dtype.nbytes < 2 for t in (inputs.get(c.a.input), inputs.get(c.b.input))):
+        return None
     if stage.transport == "tma" and not (
         _tma_operand_rank(c.a.index, tile.m.axis.name, c.axis.name) and _tma_operand_rank(c.b.index, tile.n.axis.name, c.axis.name)
     ):
@@ -616,11 +708,15 @@ __all__ = [
     "splitk_width",
     "splitkv_slice",
     "stage_split_groups",
+    "stage_target",
     "strip_width",
     "twisted_atom",
     "twisted_block",
     "twisted_sites_agree",
     "twisted_warp_columns",
     "warp_k_step",
+    "warp_atom_edges",
+    "warp_atom_stage",
+    "warp_atom_target",
     "warp_operand_dtype",
 ]

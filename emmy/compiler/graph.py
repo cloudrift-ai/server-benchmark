@@ -187,6 +187,11 @@ def _serialize_field(v):
     # ``json.dumps(default=str)`` (which ``_deserialize_field`` couldn't reverse).
     if isinstance(v, IndexSource):
         return repr(v)
+    # ``ConstantOp.source_graph`` — a nested mini-graph field round-trips
+    # through the graph's own dict form, tagged so ``_deserialize_field`` can
+    # tell it from an ordinary dict-valued op field.
+    if isinstance(v, Graph):
+        return {"__graph__": v.to_dict()}
     if isinstance(v, (list, tuple)) and v and all(isinstance(x, IndexSource) for x in v):
         return [repr(x) for x in v]
     if isinstance(v, ElementwiseImpl):
@@ -234,6 +239,8 @@ def _deserialize_field(k, v):
         return tuple(_eval_stmt(e) for e in v)
     if k == "sources" and isinstance(v, list) and v and all(isinstance(e, str) and e.startswith("IndexSource(") for e in v):
         return tuple(_eval_stmt(e) for e in v)
+    if isinstance(v, dict) and "__graph__" in v:
+        return Graph.from_dict(v["__graph__"])
     if isinstance(v, dict) and "__op__" in v:
         op_cls = _lookup_op_class(v["__op__"])
         if op_cls is None:
@@ -293,11 +300,13 @@ def _stmt_eval_scope() -> dict:
     global _STMT_EVAL_SCOPE
     if _STMT_EVAL_SCOPE is not None:
         return _STMT_EVAL_SCOPE
+    import math as _math
+
     import numpy as _np
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis, AxisRole, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -349,6 +358,9 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
+        # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
+        # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
+        "Window": Window,
         "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,
@@ -360,6 +372,10 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
+        # ``repr(float('-inf'))`` is ``-inf`` — the online-softmax ``Fold.init`` running max, and
+        # any other non-finite literal, needs the bare names in scope to round-trip.
+        "inf": _math.inf,
+        "nan": _math.nan,
         # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
         # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
         # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
@@ -375,12 +391,13 @@ def _stmt_eval_scope() -> dict:
     # back. Auto-populate every public class from these modules (``setdefault`` so the
     # explicit stmt/expr entries above win on any name clash) — a new node/knob field
     # needs no edit here.
+    import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_axis_mod, _sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -821,11 +838,12 @@ class Graph:
     def loadable_constants(self) -> Iterator[tuple[str, ConstantOp]]:
         """Yield ``(node_id, op)`` for the constants an executor must *load* — non-static
         (``value is None``) constants that name an external ``source_path`` (or a
-        ``source_parts`` concat of several). Scalar, ``context_value``, and synthetic
-        (source-less) constants are skipped: the backend materializes those itself. The
-        single entry point shared by the safetensors and live-module loaders."""
+        ``source_parts`` concat of several, or a ``source_graph`` bind record whose leaves
+        name the external sources). Scalar, ``context_value``, and synthetic (source-less)
+        constants are skipped: the backend materializes those itself. The single entry
+        point shared by the safetensors and live-module loaders."""
         for nid, op in self.constant_ops():
-            if op.value is None and (op.source_path is not None or op.source_parts):
+            if op.value is None and (op.source_path is not None or op.source_parts or op.source_graph is not None):
                 yield nid, op
 
     def node_role(self, node_id: str) -> str:
@@ -982,10 +1000,16 @@ class Graph:
 
                 def _field_key(o: object, name: str) -> str:
                     # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
-                    # the bottom-up term key); every other field keeps its repr.
+                    # the bottom-up term key); a nested ``Graph`` field
+                    # (``ConstantOp.source_graph``) digests by its own structural key
+                    # (its default repr carries the object address); every other field
+                    # keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
                         return o.structural_key()
-                    return repr(_unwrap_dims(getattr(o, name)))
+                    val = getattr(o, name)
+                    if isinstance(val, Graph):
+                        return val.structural_key()
+                    return repr(_unwrap_dims(val))
 
                 attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)
                 op_payload = ("attrs", attrs)

@@ -1,16 +1,30 @@
 """Flat-address `Expr` builders — fold-aware `sum` / `product` over int / `Expr` terms, used to
 construct σ-tiled load/store indices in the lowering passes (`enumeration/_build` warp-tier σ-tiling,
 `assembly/_assemble` carrier realization), plus `gmem_row_stride` — the flattened row step (`ldm`)
-a fragment loader reads off a gmem `Load`'s index and buffer shape. Generic Expr / addressing
-algebra — no flash / attention / dialect dependency. Lives in `lowering/` (a sibling of `_masking` /
-`_predicates`) so both the enumeration and assembly layers — and both the `tile/` and `kernel/`
-lowering stages — import it without crossing the enumeration↔assembly boundary.
+a fragment loader reads off a gmem `Load`'s index and buffer shape, plus `BYTE_SLAB_PAD` — the
+smem row pad a cp.async-staged byte slab carries. Generic Expr / addressing algebra — no flash /
+attention / dialect dependency. Lives in `lowering/` so both the enumeration and assembly layers —
+and both the `tile/` and `kernel/` lowering stages — import it without crossing the
+enumeration↔assembly boundary.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, affine_form
 from emmy.compiler.ir.stmt import Load
+
+# Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
+# byte-gather drain (no ldmatrix below sm_100a — the fragment loads are per-lane byte gathers)
+# reads the slab at the fragment lane map's row strides, and a dense power-of-two byte row lands
+# every 4-row group in the same bank quartet (4-way conflicts measured by the lane→bank oracle on
+# both the k16 convert drain and the k32 repack drain, either B orientation). 16 extra bytes per
+# row breaks the stride while keeping every 16 B cp.async chunk aligned (the byte-staging
+# legality requires the data cols to be 16-divisible, so ``cols + 16`` stays 16 B-periodic).
+# Derived, not tuned — the same fixed-pad reasoning as the flash ``_twist._PAD``. cp.async only:
+# a TMA box deposit is dense (its byte slab stays unpadded and eats the measured conflicts).
+# Shared by the kernel staging pass and the tile-layer byte-staging legality check, so it lives
+# here rather than in `kernel/_stage` — a tile pass may not import the kernel pass layer.
+BYTE_SLAB_PAD = 16
 
 
 def add(*terms) -> Expr:

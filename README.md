@@ -9,6 +9,14 @@
 ## Install
 
 ```bash
+pip install emmy-ml          # the CLI, with the recommended recipes bundled
+emmy --version
+```
+
+The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). To hack on emmy
+itself, clone instead:
+
+```bash
 git clone https://github.com/cloudrift-ai/emmy.git
 cd emmy && make setup
 ```
@@ -39,7 +47,7 @@ LN()(torch.randn(64, 2048))"
 Principled compilation stack with six IR stages, each printable on demand via `--ir <stage>`:
 
 1. **Torch IR** — captures the FX graph as a 1:1 mirror of PyTorch's op set (`rmsnorm`, `linear`, `softmax`, ...)
-2. **Tensor IR** — decomposes every Torch op into three primitives: `Elementwise`, `Reduction`, and `IndexMap`
+2. **Tensor IR** — decomposes Torch ops into generic elementwise, reduction, indexing, and value-conversion primitives
 3. **Loop IR** — lifts each primitive to a `LoopOp` and fuses
 4. **Tile IR** — schedules kernels onto GPU
 5. **Kernel IR** — materializes the schedule into framework-agnostic hardware primitives
@@ -160,6 +168,10 @@ emmy deploy local --recipe recipes/gemma-4-12B-it
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
 ```
 
+`--recipe` also takes the bare name of a recipe bundled with the installed package (`--recipe gemma-4-12B-it`),
+which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
+its run directories. A path that exists always wins, so an edited working copy is never overwritten.
+
 ## Serve (compiled embeddings via vLLM)
 
 ```bash
@@ -242,7 +254,19 @@ emmy vm delete cloudrift --instance-id <id>
 make test      # run pytest
 make lint      # ruff check + format check
 make format    # auto-fix
+make wheel     # build the wheel into dist/
 ```
+
+### Release
+
+Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** workflow — it takes the version from
+there, and refuses to run if that version is already tagged. It lints, tests, builds, uploads to PyPI via trusted
+publishing, and only then creates the tag and GitHub release, so a failed upload leaves nothing behind. Publishing
+a GitHub release by hand works too; the tag must agree with `pyproject.toml`.
+
+`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies `recipes/*/recipe.yaml` into
+the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative links to absolute GitHub
+URLs, which the workflow runs because PyPI renders the README detached from the repo.
 
 ## Project Structure
 
@@ -278,7 +302,8 @@ make format    # auto-fix
 - [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
   (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
-  [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot)
+  [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
+  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned CloudRift 1Cat-vLLM runtime for Volta Qwen3.5)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs
 - [kernels/](kernels/) — Standalone CUDA kernel sources

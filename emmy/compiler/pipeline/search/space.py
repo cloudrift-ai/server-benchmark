@@ -221,7 +221,7 @@ FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
     hints=(False,),
-    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC): "
+    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA): "
     "EMMY_FAST_MATH=1 enables each one not individually pinned; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
@@ -234,6 +234,20 @@ F16_MMA_F32_ACC = Knob(
     "chain accumulates in f16 at the full HMMA rate, with a periodic register promote into f32 "
     "shadows; ~2x mma throughput on consumer dies where f32-accumulate is half rate). "
     "Pin 1 to offer on every target, 0 never; unset follows FAST_MATH (consumer-die targets only). "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+FP8_MMA = Knob(
+    "FP8_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the native fp8 tensor-core atom forks (a:mma_m16n8k32_e4m3_f32 / _e5m2_f32 — both "
+    "multiplicands consumed as raw f8 bytes at k32, scale factors on the f32 epilogue). The "
+    "instruction's effective accumulation precision is arch-dependent (reduced on sm_89, ~3e-4 rel "
+    "vs the exact f32 decode-and-fma scalar path), so the fork family is precision-trading: pin 1 "
+    "to offer, 0 never; unset follows FAST_MATH. The sm_89 hardware floor is absolute — below it "
+    "the instruction does not compile, and no pin overrides that. "
     "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
 )
 
@@ -296,6 +310,10 @@ WARP_LANES = 32
 # The mma C fragment's per-warp register budget, in accumulator cells (``FM·FN``). Above this the
 # fragment no longer fits the register file at any useful occupancy.
 MAX_FRAGMENT_CELLS = 32
+
+# The corresponding accumulator-register budget. Existing m16n8 f32 cells spend four registers,
+# so 32 cells remain legal; Volta's logical 16x16 cell spends eight and is capped at 16 cells.
+MAX_FRAGMENT_REGISTERS = 128
 
 # The scalar register-tile candidate SPACE: ``(par_n, par_m)`` parallel thread-tile widths ×
 # ``(reg_n, reg_m)`` per-thread register sub-tile widths, generated from the one constraint that
@@ -365,7 +383,11 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     moves = []
     for name in atom_names:
         atom = ATOM_REGISTRY[name]
-        moves.extend(TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"]) for p in _WARP_TILE_SPACE)
+        moves.extend(
+            TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"])
+            for p in _WARP_TILE_SPACE
+            if p["fm"] * p["fn"] * atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
+        )
     return moves
 
 
@@ -406,10 +428,11 @@ def map_tile_moves() -> list[TilePlan]:
 
 def stage_moves(*, warp: bool) -> list[Stage]:
     """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
-    double-buffer variants. Both tiers offer the gmem→smem prefetch ring depths (the scalar ring
-    lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived by the
-    scalar stage resolver); the ``p2`` smem→register double-buffer is an ``ldmatrix`` transform,
-    warp-only.
+    double-buffer variants. Both tiers offer the asynchronous gmem→smem prefetch ring depths (the
+    scalar ring lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived
+    by the scalar stage resolver). The warp tier additionally offers the synchronous-copy ring for
+    atoms that lack an asynchronous copy instruction. Its depths use the same slot schedule but do
+    not promise copy/compute overlap. The ``p2`` smem→register double-buffer is warp-only.
 
     ``split`` — one transport PER staged edge instead of one over all of them — joins the warp list.
     It resolves only where the fold's edges are consumed at DISTINCT positions of its derived
@@ -422,7 +445,8 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     depths = [Stage.parse(s) for s in ("d1/cp", "d2/cp", "d3/cp", "d4/cp", "d1/tma", "d2/tma", "d3/tma", "d4/tma")]
     if not warp:
         return depths
-    return [*depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
+    sync = [Stage.parse(s) for s in ("d1/sync", "d2/sync", "d3/sync", "d4/sync", "d1/sync/p2", "d2/sync/p2")]
+    return [*sync, *depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is

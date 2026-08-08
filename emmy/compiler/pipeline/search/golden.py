@@ -75,7 +75,23 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = 
     spellings realize on both layouts. The measured µs still differ per layout
     (different slab geometry and gmem walk), so a golden meant to decide a
     serving fork must still be TUNED on this layout — a canonical-form entry
-    would deploy its config with a foreign µs."""
+    would deploy its config with a foreign µs.
+
+    An **fp8** ``dtype`` (``fp8`` / ``f8e4m3`` / ``f8e5m2``) spells the W8A16 form the
+    fp8 lane actually compiles: B is an fp8-STORAGE input and its decode cast + per-output-
+    channel scale multiply are written in-graph as plain algebra, so the traced contraction
+    carries the f8 B operand — the storage class ``ShapeKey.dtype_class`` keys on. A
+    preamble statement mints the fp8 weight (``randn(...).to(f8)``); the tracer lifts it
+    as an input, which is what keeps the cast + multiply from folding away."""
+    if dtype in ("fp8", "f8e4m3", "f8e5m2"):
+        f8 = "torch.float8_e5m2" if dtype == "f8e5m2" else "torch.float8_e4m3fn"
+        w_shape, s_shape = (f"{N},{K}", f"{N},1") if trans_b else (f"{K},{N}", f"1,{N}")
+        call = "torch.nn.functional.linear" if trans_b else "torch.matmul"
+        return (
+            f"w = torch.randn({w_shape},dtype=torch.float16).to({f8})\n"
+            f"{call}(torch.randn({M},{K},dtype=torch.float16), "
+            f"w.to(torch.float16) * torch.randn({s_shape},dtype=torch.float32).to(torch.float16))"
+        )
     if dtype == "fp32":
         if trans_b:
             return f"torch.nn.functional.linear(torch.randn({M},{K}), torch.randn({N},{K}))"
@@ -904,6 +920,10 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
 
         if not torch.cuda.is_available():
             return None
-        return torch.cuda.get_device_name(0), tuple(torch.cuda.get_device_capability(0))
+        name = torch.cuda.get_device_name(0)
+        from emmy.gpu import by_name  # noqa: PLC0415
+
+        gpu = by_name(name)
+        return (gpu.name if gpu is not None else name), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001 — any probe failure ⇒ no live filter
         return None

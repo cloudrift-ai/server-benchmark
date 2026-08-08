@@ -151,21 +151,28 @@ its kill point so the copy overlaps every segment outside the live range. cp.asy
 static pass over the placed schedule (the commits younger than a group's fill at its wait point); the prologue primes
 exactly the fills the pre-loop iterations would have issued. `staged_kloop` is the whole-body single-group entry
 (the matmul tier's classic `fill → commit → wait → drain → Sync` phases fall out of the derivation). Behind it, a
-`Transport` strategy: `CpAsyncTransport` (fill → commit → wait-group) and `TmaTransport` (an `arrive.expect_tx` + box
-copy gated by a **per-slot mbarrier array**, so `depth` is a free knob for TMA too). The two producers —
+`Transport` strategy: `SyncCopyTransport` (blocking vector load/store → CTA barrier), `CpAsyncTransport`
+(fill → commit → wait-group), and `TmaTransport` (an `arrive.expect_tx` + box copy gated by a **per-slot mbarrier
+array**, so `depth` is a free knob for TMA too). The three producers —
 structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
-supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner `ldmatrix` drain
-`_staged_inner_atom_loop`, or the scalar `_scalar_drain`). The staging **decision** does not live here at all: the
+supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
+`_staged_inner_atom_loop` — `ldmatrix` on modern atoms, a cooperative shared gather on Volta — or the scalar
+`_scalar_drain`). The staging **decision** does not live here at all: the
 `Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
 `bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
 shared `reduce` (which emits the loop) apply it verbatim. The `Stage` spells two buffering levels:
-`d<depth>` is the gmem→smem ring (cp.async commit group / TMA mbarrier-phased prefetch over the K-slab loop),
-`p<reg_depth>` is the smem→register double-buffer (the `ldmatrix` ping-pong over the inner atom-K steps). Staging is a
+`d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
+prefetch over the K-slab loop),
+`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a
 **pure perf transform** — an ineligible kernel (masked N, symbolic / non-divisible K, or a computed-A
 flash operand; a transposed B stages N-major on every transport since the serving-layout work) silently falls back
 to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. The **TMA** transport additionally requires **sm_90+**
+**bit-identical** to its gmem-direct baseline. A synchronous ring uses the same slot rotation and barriers, but the
+copy runs on the consumer threads and therefore cannot overlap the current drain; `/p<n>` remains the independent
+smem→register fragment pipeline. The Volta m8n8k4 atom enables only this copy transport for materialized f16 A/B
+edges and keeps computed edges, flash, and newer instruction families disabled. The **TMA** transport additionally
+requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/tma*` moves are
 never offered and a `tma` pin declines to cp.async / gmem-direct — Ada/Ampere have no `cp.async.bulk.tensor` and nvcc
 has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the schedule fork enumerates the
@@ -272,6 +279,20 @@ shared inline cone; `_AtomOps.channels` reads them off the node) fills one B sla
 mma chains off the ONE ldmatrix'd A fragment
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
 store's `RegEpilogue` (`extra_accs`).
+
+**Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
+sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
+16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
+(`LdmatrixLoad(byte_slab=True)`): the gmem fragment loaders' lane→element map pointed at the slab — under a 16-bit
+atom (W8A16, the fp8-B mul-hoist form) converting per element, with the transposed-B slab's contiguous (k, k+1)
+pair loading as ONE fp8x2 and converting with one hardware `cvt.rn.f16x2.e4m3x2` (`emmy_mma_load_b_smem_trans_f8_f16`);
+under the fp8 k32 atoms (W8A8) repacking raw bytes, contiguous-K lanes as single u32 loads (`_smem_b8v`). Staged is
+BIT-identical to gmem-direct (same converts, same K order). Byte slabs are NONE-swizzle by construction (the
+ldmatrix XOR is b16-indexed); the cp.async byte slab instead pads each row by `_stage.BYTE_SLAB_PAD` (16 B — keeps
+every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-way per the lane→bank oracle), and a
+TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
+(`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
+the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
 
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two

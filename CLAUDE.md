@@ -12,6 +12,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Serving** (vLLM out-of-tree embedding plugin — emmy-compiled kernels behind vLLM's `/v1/embeddings`; `serving` extra) → [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md)
 - **Recipes vs experiments** (`recipes/` = the one recommended serving config per model, what `emmy deploy` runs;
   `experiments/` = benchmark grids, what `emmy bench` runs) → [`recipes/ARCHITECTURE.md`](recipes/ARCHITECTURE.md)
+  and [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md)
 - **Prebuilt serving images** (per-model warm/bake/verify/push release pipeline — `make serve-* MODEL=<hf-id>`, the
   model-slug naming schema, the cubin cache-key parity contract, the golden coverage gate) →
   [`docker/vllm-emmy-serve/ARCHITECTURE.md`](docker/vllm-emmy-serve/ARCHITECTURE.md)
@@ -122,10 +123,14 @@ Quick test models / scripts (for local iteration):
 - `make setup` — create venv and install dependencies (includes ruff)
 - `make test` — run `pytest` using the venv (skips `perf`-marked tests; see `tests/perf/ARCHITECTURE.md`). Compiles
   kernels at `-Xcicc -O1` for ~3× faster nvcc (correctness lane; perf tests use `-O3` via `make bench-kernels`)
+- `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
+  xdist workers on (see `tests/ARCHITECTURE.md`); commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`
 - `make format` — auto-format code and fix lint violations
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
 - `make bench-kernels` — run per-kernel perf comparison vs PyTorch (`tests/perf/`, requires CUDA)
+- `make wheel` — build the wheel into `dist/` (stages the bundled recipes first; see the Release section of
+  `README.md`)
 - `make clean` — remove venv and generated files
 
 ## Documentation Conventions
@@ -162,6 +167,10 @@ IMPORTANT: You MUST follow ALL of these steps for EVERY code change. Do NOT skip
 1. Create a feature branch from `main` (e.g. `feature/my-new-feature`) — NEVER commit directly to `main`
 2. Write code following guidelines in `STYLE.md`, `README.md` and `ARCHITECTURE.md` files in respective folders
 3. Add tests if reasonable (in `tests/` following `tests/ARCHITECTURE.md` guidelines)
+
+**Keep PRs minimal.** Retain only durable implementation, tests, documentation, recipes, and publication evidence.
+Delete exploratory scripts, intermediate experiments, run snapshots, and executed plans once their conclusions are
+encoded in a durable artifact.
 
 ### Before committing (MANDATORY — do NOT skip these)
 

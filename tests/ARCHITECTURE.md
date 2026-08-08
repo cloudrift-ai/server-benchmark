@@ -8,8 +8,9 @@ All tests use **pytest** with **pytest-asyncio** (`asyncio_mode = "auto"` in `py
 
 `tests/` mirrors the `emmy/` source tree: a test directory exists because a source package does, and a test
 module is named for the source module it covers. To find the tests for `emmy/<a>/<b>.py`, look in
-`tests/<a>/test_<b>.py`. The one file at the root that belongs to no package is `conftest.py` — shared fixtures
-plus the CUDA / LPT xdist routing hook (see **Running**).
+`tests/<a>/test_<b>.py`. Two files sit at the root: `conftest.py` — shared fixtures plus the CUDA / LPT xdist
+routing hook (see **Running**) — and `test_emmy.py`, which mirrors `emmy/emmy.py`, the CLI entrypoint that belongs
+to no subpackage.
 
 Mirroring is the rule, not a coincidence — when a source package grows subpackages, the test directory follows.
 `tests/compiler/pipeline/search/` is the worked example: its `data/`, `policy/`, and `prior/` subdirectories exist
@@ -108,13 +109,32 @@ are detected via the `requires_cuda` skipif reason, a `[cuda...]` callspec id, o
 bucketing would otherwise add a function-level group that shadows the module-level mark). The hook is
 `tryfirst` because xdist's worker-side hook bakes group names into nodeids before plain conftest hooks run —
 without it the markers land too late and CUDA tests silently scatter across workers. Non-CUDA tests are
-LPT-bucketed across the remaining workers using the cached duration table.
+LPT-bucketed across the remaining workers by cost, so the makespan approaches the load of the heaviest bucket
+rather than whatever an arbitrary split produced.
 
-The `perf` marker gates **suite-wide**, not just `tests/perf/`: collecting `tests/` loads `tests/perf/conftest.py`,
-whose hook skips every perf-marked item unless `-m perf` was passed. Reserve `perf` for two things — the
+Those costs come from `tests/durations.json` — a checked-in nodeid → seconds map — with the box's own pytest cache
+overlaid on top. The committed file exists because CI starts every job with an empty cache: without a baseline the
+bucketing never fired there and the long poles landed wherever chance put them. It records only entries at or above
+0.05 s (a few hundred lines rather than the full ~2600, and 99% of the suite's wall time); anything unlisted is
+assumed to cost 0.05 s. Regenerate it with `make test-durations` — which REPLACES the file with that run's timings, so
+renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. Point it at the whole
+suite, never a subset.
+
+Two things keep it honest. `make test` passes `--durations=25`, so every run (CI included) prints its slowest tests and
+a new long pole shows up in the log immediately. And the session-end gate in `conftest.py` fails any run where a test
+took **5 s or more without being in the baseline**, naming the offenders and asking for `make test-durations`. The bar
+sits far above the 0.05 s recording threshold on purpose — CI runners are several times slower than a dev box, and the
+gap guarantees nothing near the threshold can drift across it. It is a session hook rather than a test case because
+only the controller, and only after the last report, has every test's duration; an xdist worker sees just its own slice.
+
+The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
+perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate
+also covers subset runs like `pytest tests/serving/`. Reserve `perf` for two things — the
 perf-comparison tests `make bench-kernels` runs, and tests that genuinely cannot ride the parallel suite (today the
 two in-process vLLM engine tests, `test_vllm_plugin_gpu.py` / `test_vllm_plugin_gen_gpu.py`: the engine demands a
-large fraction of the card FREE at startup, plus checkpoint downloads and minutes of whole-model compile). A perf
+large fraction of the card FREE at startup, plus checkpoint downloads and minutes of whole-model compile — since
+`make bench-kernels` only runs `tests/perf/`, these two run nowhere by default; exercise them explicitly with
+`pytest tests/serving/ -m perf` on a machine with the card mostly free). A perf
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 

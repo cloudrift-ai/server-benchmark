@@ -175,3 +175,89 @@ def test_attention_split_rejects_ple_block():
 
     with pytest.raises(NotImplementedError, match="hidden_size_per_layer_input"):
         build_attention_split_wrapper(_ple_block())
+
+
+# ===================================================================
+# Quantized-twin state-dict adapters: encode-padding trim + per-expert packing
+# ===================================================================
+
+
+class _FakeStateModel:
+    """Duck-typed stand-in: the two adapters read only ``model.state_dict()``."""
+
+    def __init__(self, sd):
+        self._sd = sd
+
+    def state_dict(self):
+        return self._sd
+
+
+def test_trim_padded_weights_slices_exact_roundups_only():
+    """A decoded value overhanging its parameter trims only when every overhang is the
+    declared dim's exact roundup to 128 (EXL3's encode padding); anything else stays for
+    ``load_state_dict`` to report."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.trace.huggingface import _trim_padded_weights
+
+    model = _FakeStateModel({"a.weight": torch.empty(100, 64), "b.weight": torch.empty(100, 64)})
+    padded = torch.arange(128 * 64, dtype=torch.float32).reshape(128, 64)
+    state = {"a.weight": padded.clone(), "b.weight": torch.zeros(120, 64)}  # 120 is not roundup128(100)
+    _trim_padded_weights(model, state)
+    assert tuple(state["a.weight"].shape) == (100, 64)
+    torch.testing.assert_close(state["a.weight"], padded[:100], rtol=0, atol=0)
+    assert tuple(state["b.weight"].shape) == (120, 64)
+
+
+def test_pack_expert_state_stacks_per_expert_weights():
+    """Per-expert ``experts.E.{gate,up,down}_proj.weight`` values (the DeepSeek/GLM checkpoint
+    lineage) pack into the v5 3-D params: gate/up concatenated along the out axis, experts
+    stacked on axis 0; the per-expert entries are consumed."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.trace.huggingface import _pack_expert_state
+
+    e_count, inter, hidden = 2, 3, 4
+    model = _FakeStateModel(
+        {
+            "m.experts.gate_up_proj": torch.empty(e_count, 2 * inter, hidden),
+            "m.experts.down_proj": torch.empty(e_count, hidden, inter),
+        }
+    )
+    gates = [torch.randn(inter, hidden) for _ in range(e_count)]
+    ups = [torch.randn(inter, hidden) for _ in range(e_count)]
+    downs = [torch.randn(hidden, inter) for _ in range(e_count)]
+    state = {}
+    for e in range(e_count):
+        state[f"m.experts.{e}.gate_proj.weight"] = gates[e]
+        state[f"m.experts.{e}.up_proj.weight"] = ups[e]
+        state[f"m.experts.{e}.down_proj.weight"] = downs[e]
+    _pack_expert_state(model, state)
+    assert set(state) == {"m.experts.gate_up_proj", "m.experts.down_proj"}
+    torch.testing.assert_close(state["m.experts.gate_up_proj"][1, :inter], gates[1], rtol=0, atol=0)
+    torch.testing.assert_close(state["m.experts.gate_up_proj"][0, inter:], ups[0], rtol=0, atol=0)
+    torch.testing.assert_close(state["m.experts.down_proj"][1], downs[1], rtol=0, atol=0)
+
+
+def test_pack_expert_state_leaves_partial_sets_alone():
+    """An incomplete per-expert set (or an already-packed checkpoint) stays as-is for
+    ``load_state_dict`` to report."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.trace.huggingface import _pack_expert_state
+
+    model = _FakeStateModel({"m.experts.down_proj": torch.empty(2, 4, 3)})
+    state = {"m.experts.0.down_proj.weight": torch.randn(4, 3)}  # expert 1 missing
+    _pack_expert_state(model, state)
+    assert set(state) == {"m.experts.0.down_proj.weight"}
+
+
+def test_pack_expert_state_shape_mismatch_raises():
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.trace.huggingface import _pack_expert_state
+
+    model = _FakeStateModel({"m.experts.down_proj": torch.empty(1, 4, 3)})
+    state = {"m.experts.0.down_proj.weight": torch.randn(3, 4)}  # transposed vs expected
+    with pytest.raises(ValueError, match="expert packing"):
+        _pack_expert_state(model, state)

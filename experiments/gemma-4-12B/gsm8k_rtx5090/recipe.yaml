@@ -23,11 +23,10 @@
 # minutes per lane. The stock lane runs first, so a broken setup surfaces early.
 #
 #
-# CONTEXT RAISED TO 16384 (2026-07-31), up from the article's 8448. Both engines move
-# together so the A/B stays fair, but this recipe NO LONGER REPRODUCES THE PUBLISHED
-# TABLE — a run here and the article's numbers differ in protocol, not just in code, and
-# the difference is not a regression. Re-measure the whole grid before comparing anything
-# to the blog post, or check out the 8448 revision to reproduce it.
+# CONTEXT 16384 (raised 2026-07-31 from the original 8448 measurement). The article was
+# re-measured and updated to the 16384 protocol before publication (2026-08-01, the
+# article-reproduction session's re-run) — a run here compares against the published
+# table directly.
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/gsm8k_rtx5090 --local

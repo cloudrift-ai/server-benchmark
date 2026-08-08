@@ -110,6 +110,18 @@ on-disk format survives compiler changes; only runtime-contract changes bump `PL
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
 
+**Indirect operands** (`LaunchSpec.indirect_args`, `(arg, table_arg, sel_arg, slot)` per marked input): the
+kernel takes `const T* const* <arg>__table, const int* <arg>__sel, int <arg>__slot` in place of the plain
+pointer and resolves `table[sel[slot]]` in a body preamble — the serving MoE fixed-slot dispatch, where the
+weight base pointer comes from a device table indexed by the router's indices tensor. The change is ABI-level
+only: it enters as the `cuda.indirect_inputs` graph hint (set by the caller before compile, read by the final
+kernel lowering), so schedules, goldens, and the tile search are untouched, and non-indirect kernel sources stay
+byte-identical (`scripts/digest_kernels.py` is the gate). `arg_order` keeps the plain operand name; `_launch`
+expands it in place to `arrays[table], arrays[sel], slot`. An indirect operand staged through a TMA descriptor
+fails the lowering loudly (descriptors bake the base address at encode). A plan carrying the field serializes as
+`PLAN_FORMAT_INDIRECT` (2) — a runtime that ignored it would pass the wrong arg pack, so old readers reject such
+a plan and fall back to the full compile; plans without the field keep format 1 byte-compatibly.
+
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index) and `plan/<program>.json`. Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and

@@ -26,7 +26,16 @@ decoded weight is just a constant.
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+#: The per-module allocation sidecar exllamav3 writes beside ``config.json``.
+_SIDECAR = "quantization_config.json"
 
 # The full-codebook standard deviation of codebook 0 (exllamav3 quantize.py ``codebook_scale``):
 # decoded code values are approximately N(0, CODEBOOK_SCALE^2), so a decoded tile's rms sits near it.
@@ -233,3 +242,50 @@ def decode_exl3_linear(
         raise ValueError("mcg and mul1 codebook markers are mutually exclusive")
     cb = 1 if mcg is not None else 2 if mul1 is not None else 0
     return fold_hadamard(decode_trellis(trellis, cb), suh, svh)
+
+
+def coded_tensor_storage(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> dict:
+    """Every EXL3-coded module of a checkpoint, WEIGHT-FREE: ``{module: entry}``, where each entry
+    carries the module's code rate (``bits_per_weight``) and the exact shapes of its ``trellis`` /
+    ``suh`` / ``svh`` siblings.
+
+    The source is ``quantization_config.json`` at the checkpoint root — a few-hundred-KB sidecar
+    exllamav3 writes beside ``config.json``, listing the per-module allocation. Reading it is the
+    only way to learn a module's rate without the shards, which is what lets a WEIGHT-FREE serving
+    twin (``emmy/serving/twins.py``) spell the same coded contractions the deployed program does.
+    (The checkpoint-driven speller does not use this: with the shards in hand the safetensors index
+    is the pairing source, exactly as for fp8.)
+
+    ``hf_config`` is an already-loaded transformers config, consulted only to confirm the scheme is
+    EXL3 before any fetch — so a caller holding a config need never touch the hub for an ordinary
+    model. Omit it and the checkpoint's own ``config.json`` decides (local paths only). Anything
+    that is not an EXL3 checkpoint, or a sidecar that cannot be fetched, yields ``{}``.
+    """
+    scheme = getattr(hf_config, "quantization_config", None) if hf_config is not None else _local_quant_config(model_id_or_path)
+    method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
+    if method != "exl3":
+        return {}
+    path = Path(model_id_or_path) / _SIDECAR
+    if not path.exists():
+        try:
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
+
+            path = Path(hf_hub_download(model_id_or_path, _SIDECAR, revision=revision))
+        except Exception as exc:  # noqa: BLE001 — an unfetchable sidecar means "no rates known", never a crash
+            logger.warning("%s declares EXL3 but %s is unavailable (%s)", model_id_or_path, _SIDECAR, exc)
+            return {}
+    storage = json.loads(path.read_text()).get("tensor_storage") or {}
+    return {name: e for name, e in storage.items() if e.get("quant_format") == "exl3" and _is_codable(name, e)}
+
+
+def _local_quant_config(model_dir: str) -> dict | None:
+    path = Path(model_dir) / "config.json"
+    return json.loads(path.read_text()).get("quantization_config") if path.exists() else None
+
+
+def _is_codable(name: str, entry: dict) -> bool:
+    """Whether an entry records everything the activation-side spelling needs: a rate and all three
+    leaves. A legacy packed-sign checkpoint (``su``/``sv``, no ``suh``/``svh``) is skipped here
+    exactly as the checkpoint-driven speller leaves it alone."""
+    stored = entry.get("stored_tensors") or {}
+    return "bits_per_weight" in entry and all(f"{name}.{leaf}" in stored for leaf in ("trellis", "suh", "svh"))

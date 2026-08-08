@@ -829,6 +829,7 @@ _QUANT_CONCEPT_PATTERN = r"QuantSpec|quantization_config|quant_method|weight_sca
 
 _FRONTEND_BAND_ALLOWLIST = {
     "emmy/commands/compile.py",  # the post-trace spelling call site (twin trace + speller)
+    "emmy/compiler/loader/exl3.py",  # EXL3 format reader: the trellis decode + the weight-free allocation sidecar
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection

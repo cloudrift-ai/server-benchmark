@@ -239,3 +239,49 @@ def test_f8_key_agrees_between_from_matmul_and_from_s_features():
     s5 = dict(s)
     s5["S_dtype_f8e5m2"] = s5.pop("S_dtype_f8e4m3")
     assert ShapeKey.from_s_features(s5).dtype_class == "f8"
+
+
+def test_code_rate_splits_two_rates_of_one_shape():
+    """``k_bits`` (VQ Phase 4): an EXL3 "optimized" rung allocates bits per tensor by Hessian
+    sensitivity, so ONE ``(M, N, K)`` appears at several rates in one checkpoint — the pinned
+    GLM-4.5-Air 2.25 ships ``mlp.shared_experts.gate_proj`` at 2, 3 and 4 bits. The codes slab's
+    size and the decode's per-element word math both scale with the rate, so those are different
+    kernels; without the rate in the key they would fight over one golden."""
+    k2 = ShapeKey.from_matmul(1, 11008, 4096, "trellis", k_bits=2)
+    k3 = ShapeKey.from_matmul(1, 11008, 4096, "trellis", k_bits=3)
+    assert (k2.k_bits, k3.k_bits) == (2, 3)
+    assert k2 != k3 and not k2.joins(k3) and not k3.joins(k2)
+    assert len({k2, k3}) == 2  # hashable and distinct — they index a golden dict separately
+
+
+def test_code_rate_never_perturbs_a_non_coded_key():
+    """The rate is normalized off every other storage class, so no shipped golden / DB row moves:
+    a key spelled without the field equals the same key spelled with a stray rate, and neither
+    ``from_matmul`` nor ``from_s_features`` can put a rate on an uncoded shape."""
+    plain = ShapeKey(free_prod=512 * 4096, reduce_max=3840, is_warp=True, free_max=4096)
+    assert ShapeKey(free_prod=512 * 4096, reduce_max=3840, is_warp=True, free_max=4096, k_bits=4) == plain
+    for dtype in ("fp32", "fp16", "bf16", "fp8", "f8e4m3"):
+        assert ShapeKey.from_matmul(512, 4096, 3840, dtype, k_bits=4).k_bits == 0
+    # A stamped rate with no coded carrier (``S_dtype_i16``) is likewise dropped.
+    s = {"S_ext_free_prod": 2097152.0, "S_ext_reduce_max": 3840.0, "S_dtype_f16": 1.0, "S_trellis_k_bits": 4.0}
+    assert ShapeKey.from_s_features(s).k_bits == 0
+    assert ShapeKey.from_s_features(s) == ShapeKey.from_s_features({k: v for k, v in s.items() if k != "S_trellis_k_bits"})
+
+
+def test_code_rate_agrees_between_from_matmul_and_from_s_features():
+    """The op side reads the rate off ``S_trellis_k_bits``, stamped over the same load walk that
+    writes ``S_dtype_i16`` — so the two are present together and the golden ↔ measured join holds
+    at the rate as well as the shape."""
+    s = {
+        "S_ext_free_prod": 11008.0,
+        "S_ext_free_max": 11008.0,
+        "S_ext_reduce_max": 4096.0,
+        "S_ext_n_free_axis": 1.0,
+        "S_ext_n_reduce_axis": 1.0,
+        "S_loop_depth": 2.0,
+        "S_dtype_i16": 1.0,
+        "S_dtype_f16": 1.0,
+        "S_trellis_k_bits": 3.0,
+    }
+    assert ShapeKey.from_s_features(s) == ShapeKey.from_matmul(1, 11008, 4096, "trellis", k_bits=3)
+    assert not ShapeKey.from_s_features(s).joins(ShapeKey.from_matmul(1, 11008, 4096, "trellis", k_bits=2))

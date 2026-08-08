@@ -174,7 +174,11 @@ slice the encode padding — the reference math, since exllamav3 zero-pads activ
 `032_fold_constant_subgraphs` collapses the cone into a bind-time `source_graph` record — this is the
 correctness lane: full value footprint in memory, bind-time decode bit-exact against the direct decode. Not
 every linear is coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0
-`o_proj`), and those load as ordinary tensors.
+`o_proj`), and those load as ordinary tensors. `coded_tensor_storage` is the WEIGHT-FREE view of the same
+information: it reads the small per-module allocation sidecar exllamav3 writes beside `config.json` (each coded
+module's code rate and its `trellis`/`suh`/`svh` shapes) so a caller without the shards still knows what is coded
+and at what rate. Only the serving-twin builder needs it — with the shards in hand the safetensors index is the
+pairing source, exactly as for fp8.
 
 **In-kernel trellis decode (computed-B).** The HAT-BASIS form of the op (`TrellisDecodeOp(hadamard=False)` —
 the raw per-tile decode, no channel vectors, no Hadamard fold; the basis restore rides the activations, below)

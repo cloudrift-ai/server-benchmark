@@ -820,25 +820,34 @@ def test_trellis_shape_key_agrees_across_both_constructors():
 
 
 @pytest.mark.parametrize(("m", "n", "k"), [(1, 11008, 4096), (32, 1024, 512), (256, 512, 512)])
-def test_golden_snippet_key_joins_the_in_model_key(tmp_path, monkeypatch, m, n, k):
-    """The Phase 4 enablement bar, at BOTH tiers (M=1 decode band, prefill mma): the key a golden
-    records (``MatmulGoldenConfig.shape_key`` → ``from_matmul``), the key its own torch snippet
-    lowers to, and the key the EXL3-SPELLED in-model graph lowers to must all be one key. A golden
-    whose snippet keys differently from the deployed program is the "matched but never deploys"
-    failure this repo has hit repeatedly."""
+@pytest.mark.parametrize("kbits", [2, 3])
+def test_golden_snippet_key_joins_the_in_model_key(tmp_path, monkeypatch, m, n, k, kbits):
+    """The Phase 4 enablement bar, at BOTH tiers (M=1 decode band, prefill mma) and at TWO CODE
+    RATES: the key a golden records (``MatmulGoldenConfig.shape_key`` → ``from_matmul``), the key
+    its own torch snippet lowers to, and the key the EXL3-SPELLED in-model graph lowers to must
+    all be one key. A golden whose snippet keys differently from the deployed program is the
+    "matched but never deploys" failure this repo has hit repeatedly.
+
+    The rate is part of that key, and must be: the pinned 2.25-optimized rung allocates bits per
+    tensor by Hessian sensitivity, so one ``(M, N, K)`` appears at 2, 3 and 4 bits in ONE
+    checkpoint — sharing a key, they would fight over a single golden. So the cross-rate join is
+    asserted CLOSED here as firmly as the same-rate one is asserted open."""
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
 
     monkeypatch.setenv("EMMY_TRELLIS_EXPAND", "1")
-    cfg = MatmulGoldenConfig(name="probe", M=m, N=n, K=k, dtype="trellis", trans_b=True, k_bits=2, cb=0)
+    cfg = MatmulGoldenConfig(name="probe", M=m, N=n, K=k, dtype="trellis", trans_b=True, k_bits=kbits, cb=0)
     golden = cfg.shape_key()
+    other = MatmulGoldenConfig(name="probe", M=m, N=n, K=k, dtype="trellis", trans_b=True, k_bits=kbits + 1, cb=0).shape_key()
 
     snippet_graph, _, _ = graph_from_code(cfg.snippet())
     snippet_keys = _deploy_keys(snippet_graph)
     assert any(key.joins(golden) for key in snippet_keys), f"{golden} not in {snippet_keys}"
 
-    in_model_keys = _deploy_keys(_spelled_linear_graph(tmp_path, m, n, k, 2))
+    in_model_keys = _deploy_keys(_spelled_linear_graph(tmp_path, m, n, k, kbits))
     assert any(key.joins(golden) for key in in_model_keys), f"{golden} not in {in_model_keys}"
+    # Same shape, one bit more per weight: a different kernel, so no key of either graph joins it.
+    assert not any(key.joins(other) for key in snippet_keys + in_model_keys), f"{other} collides at {kbits} bits"
 
 
 def test_coded_prefill_fork_is_not_rekeyed_as_a_computed_a_cone():

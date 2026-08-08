@@ -607,7 +607,7 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
     not a fused megakernel. Left un-excluded, every prefill-M coded matmul re-keyed to
     ``kind="fused"`` AND lost its storage class — a key that collides with a real RMSNorm→linear
     cone of equal extents and can never join a coded shape's own golden. Both rebuilds carry
-    ``dtype_class`` through for the same reason."""
+    ``dtype_class`` and the coded ``k_bits`` rate through for the same reason."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
     stamps = base if base is not None else rows[0]
@@ -623,6 +623,7 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
             is_dyn=key.is_dyn,
             kind="flash",
             dtype_class=key.dtype_class,
+            k_bits=key.k_bits,
         )
     elif (
         key.kind == ""
@@ -651,6 +652,7 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
             kind="fused",
             free_max=key.free_max,
             dtype_class=key.dtype_class,
+            k_bits=key.k_bits,
         )
     return key
 

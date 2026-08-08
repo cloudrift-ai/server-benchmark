@@ -92,14 +92,20 @@ class ShapeKey:
     # produces f16 — while its op-side dtype multiset is unreliable exactly like fp8's
     # (the activation-side basis restore puts scale constants on the A cone), so the
     # class pins the flag instead of deriving it.
-    #
-    # CAVEAT (documented, not enforced): the class does NOT carry the code rate. Two
-    # tensors quantized at different bits/weight (an EXL3 "optimized" rung allocates them
-    # per-tensor by Hessian sensitivity) share a key at identical ``(M, N, K)`` even
-    # though the decode's instruction count — and so the best schedule — differs. The
-    # ``992`` stamp has no rate feature to key on today; until it does, a mixed-rate
-    # checkpoint must not record two entries of one shape at different rates.
     dtype_class: str = ""
+    # The CODE RATE of a trellis-coded B — bits per weight, 0 for every other storage class
+    # (``__post_init__`` normalizes it, so no non-trellis key's identity moves). The storage
+    # class alone is not enough: the codes slab's size and the decode's per-element word math
+    # both scale with the rate, so two tensors at identical ``(M, N, K)`` and different rates
+    # are different kernels that want different schedules. This is not hypothetical — an EXL3
+    # "optimized" rung allocates bits per tensor by Hessian sensitivity, and the pinned
+    # GLM-4.5-Air 2.25 checkpoint ships ``mlp.shared_experts.gate_proj`` at 2, 3 AND 4 bits
+    # across its layers at ONE shape (attention q/k/v likewise at 4 and 3). Without the rate in
+    # the key those tensors would fight over a single golden.
+    #
+    # Op side: the ``992`` stamp writes ``S_trellis_k_bits`` off the body's ``TrellisLoad``
+    # leaves, exactly where it writes ``S_dtype_i16``. Golden side: ``MatmulGoldenConfig.k_bits``.
+    k_bits: int = 0
 
     # Key classes that carry the aspect discriminator (see ``free_max``).
     _FREE_MAX_KINDS = ("", "fused")
@@ -114,16 +120,21 @@ class ShapeKey:
     def __post_init__(self) -> None:
         if (self.is_dyn or self.kind not in self._FREE_MAX_KINDS) and self.free_max:
             object.__setattr__(self, "free_max", 0)
+        # The rate belongs to the coded storage class alone; normalizing it here is what
+        # guarantees a stray stamp can never perturb a pre-existing (f32/f16/bf16/fp8) key.
+        if self.dtype_class != "trellis" and self.k_bits:
+            object.__setattr__(self, "k_bits", 0)
 
     @classmethod
-    def from_matmul(cls, M: int, N: int, K: int, dtype: str, *, dynamic: bool = False) -> ShapeKey:
+    def from_matmul(cls, M: int, N: int, K: int, dtype: str, *, dynamic: bool = False, k_bits: int = 0) -> ShapeKey:
         """The shape of an ``(M, K) @ (K, N)`` matmul. fp32 lowers on the scalar
         thread tier; fp16 / bf16 on the warp (MMA) tier; an fp8-B spelling
         (``fp8`` / ``f8e4m3`` / ``f8e5m2``) is warp too and additionally carries
         ``dtype_class="f8"``; the ``trellis`` spelling likewise carries
         ``dtype_class="trellis"`` and ``is_warp=True`` (see the field doc — the flag
         is the dtype family, not the deployed tier, so it holds for the ``M=1``
-        decode band as much as for the prefill mma). ``dynamic`` marks the M
+        decode band as much as for the prefill mma) plus its ``k_bits`` code rate
+        (normalized away for every other spelling). ``dynamic`` marks the M
         axis symbolic (the only symbolic-axis golden form today): the key then
         MIRRORS what ``992_stamp_structural_features`` puts on the op — symbolic
         axes are **excluded** from the extent products (``free_prod = N``, not the
@@ -138,6 +149,7 @@ class ShapeKey:
             is_dyn=dynamic,
             free_max=0 if dynamic else max(M, N),
             dtype_class="f8" if f8 else ("trellis" if trellis else ""),
+            k_bits=k_bits,
         )
 
     @classmethod
@@ -181,7 +193,8 @@ class ShapeKey:
         already separates a decoded B from its f16 twin at the same ``(M, N, K)``; it
         forces ``is_warp`` for the same reason fp8 does — see the field doc; the flag
         names the dtype family, not the tier, so the ``M=1`` decode band keys ``True``
-        just as an f16 matvec does."""
+        just as an f16 matvec does. ``S_trellis_k_bits`` — stamped over the same load walk,
+        so present exactly where ``S_dtype_i16`` is — carries the code rate."""
         n_axes = s.get("S_ext_n_free_axis", 0) + s.get("S_ext_n_reduce_axis", 0) + s.get("S_ext_n_symbolic_axis", 0)
         kind = ""
         if 0 < s.get("S_loop_depth", 0) < n_axes:
@@ -199,6 +212,7 @@ class ShapeKey:
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),
             dtype_class="f8" if f8 else ("trellis" if trellis else ""),
+            k_bits=int(s.get("S_trellis_k_bits", 0)),
         )
 
     def joins(self, golden: ShapeKey) -> bool:

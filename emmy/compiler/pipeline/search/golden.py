@@ -292,8 +292,10 @@ class MatmulGoldenConfig(GoldenConfig):
     trans_b: bool = False
     # TRELLIS entries only (``dtype: trellis``): the EXL3 code rate (bits per weight, 1..8) and
     # codebook id, which together fix the codes grid ``(K/16, N/16, 16*k_bits)`` the snippet
-    # mints and the decode arithmetic the kernel emits. They are NOT part of the ShapeKey — see
-    # the ``dtype_class`` field doc's rate caveat — so one shape may hold only one rate's entry.
+    # mints and the decode arithmetic the kernel emits. ``k_bits`` IS part of the ShapeKey (the
+    # op side stamps it as ``S_trellis_k_bits``), so one shape holds one entry PER RATE — a
+    # mixed-allocation rung records them all and they never collide. ``cb`` is not: it selects
+    # the codebook's multiply constants, not the kernel's shape or instruction count.
     k_bits: int = 0
     cb: int = 0
 
@@ -321,7 +323,7 @@ class MatmulGoldenConfig(GoldenConfig):
         the single golden-side join key. Import deferred to keep this module import-light."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey.from_matmul(self.M, self.N, self.K, self.dtype, dynamic=self.dynamic)
+        return ShapeKey.from_matmul(self.M, self.N, self.K, self.dtype, dynamic=self.dynamic, k_bits=self.k_bits)
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x0:0"] if self.dynamic else []

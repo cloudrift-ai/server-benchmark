@@ -44,26 +44,30 @@
 # EXL3-spelled in-model graph, at M=1 and at prefill M (see
 # `tests/compiler/passes/test_trellis_computed_b.py`).
 #
-# RATE CAVEAT (ordering-protected, like the trans_b layout caveat in MatmulGoldenConfig): the
-# `trellis` dtype class does NOT carry the code rate. Both entries are k_bits=2 / cb=0. An EXL3
-# "optimized" rung allocates bits per tensor by Hessian sensitivity, so the same (M, N, K) can
-# appear at two rates in one checkpoint and they would share this key while wanting different
-# schedules. Until the 992 stamp grows a rate feature, record at most one rate per shape.
+# CODE RATE: `k_bits` is part of the ShapeKey, so a shape holds one entry PER RATE and the
+# 2.25-optimized rung's mixed allocation cannot collide. That matters here concretely — the pinned
+# checkpoint stores `mlp.shared_experts.gate_proj` at 2, 3 AND 4 bits across its layers at one
+# (M, N, K), and q/k/v/o at 4 and 3. Every entry must record the rate it was measured at; both
+# entries below are k_bits=2 / cb=0. The op side stamps `S_trellis_k_bits` off the decode leaves.
 #
-# NO `model:` HEADER YET, deliberately: `eval golden --in-model` traces weight-free serving twins
-# from config.json, and the twin builder has no coded arm — it would build plain f16 linears and
-# report GAP on every entry here (or fail outright). Tag the file once the coded serving carve
-# lands. Until then the deploy check is the per-entry one: compile the entry's own snippet greedy
-# and confirm the golden tier answers MATCH.
+# `model:` HEADER: tagged with the rung's own branch (`<repo>@<revision>`), because the rungs
+# differ in exactly the bit allocation the keys carry — auditing 2.25 goldens against the 2.0
+# checkpoint would key every shape at 2 bits. `eval golden --in-model` builds the weight-free
+# twins from `config.json` + the checkpoint's allocation sidecar and spells the coded contractions
+# with the same speller serving uses, one twin per rate profile. The `pastl2_22016` control shape
+# is NOT a model shape, so it opts out with a per-entry `model: null`.
 #
 # NOT COVERED, with reasons (the full Phase 4 sweep owes these):
 #  * `down` (11008 -> 4096, M=1) — the decode band offers exactly ONE split there (`g16k`), so the
 #    fork has no choice to make and a golden could never be consulted. The narrow split window is
 #    a compiler-side residual, not a seeding one.
 #  * prefill / warp-tier coded matmuls — the fork offers ~3.8k rows; that is a real sweep.
+#  * the attention projections (q/k/v at 4 and 3 bits, o_proj at 4 and 3) — the coded twins now
+#    expose them, nobody has swept them.
 #  * the routed-expert matmuls — they arrive as program inputs and the expert serving programs are
-#    still being built.
+#    still being built, so no twin can spell them yet.
 gpu_name: NVIDIA GeForce RTX 5090
+model: turboderp/GLM-4.5-Air-exl3@2.25bpw
 compute_cap:
   - 12
   - 0
@@ -92,6 +96,7 @@ configs:
   # Reps: 158.10 / 157.72 / 157.76 us (spread 0.24%); greedy 216.0 / 215.5 / 214.4.
   - kernel: matmul
     name: glm45air.pastl2_22016.m1
+    model: null  # a synthetic past-L2 control, not a GLM projection — never audited in-model
     M: 1
     N: 22016
     K: 22016

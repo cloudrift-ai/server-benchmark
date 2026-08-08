@@ -460,11 +460,36 @@ expressible, matchable, benchable and deployable:
   1.1 %) and `glm45air.pastl2_22016.m1` (1x22016x22016) 215.3 → 157.9 µs (1.36x, spread 0.24 %). Both deploy: the
   golden tier answers MATCH and the kernel carries `g32k/coop-t/r16`, on the entry's own snippet AND on the
   EXL3-spelled in-model graph.
-- Residuals for the full sweep: no `model:` header yet (the serving twin builder has no coded arm, so
-  `eval golden --in-model` would GAP or fail on every entry — tag the file once the coded carve lands); the key
-  carries no CODE RATE, so a mixed-allocation rung can collide two tensors at identical extents; `down`
-  (11008→4096, M=1) offers exactly one band width and so has no fork a golden could decide; prefill/warp coded
-  matmuls are a ~3.8k-row pool nobody has swept; expert programs are unbuilt.
+
+**Both enablement gaps CLOSED (2026-08-07), so the real sweep can start:**
+
+- **The key carries the CODE RATE.** `ShapeKey.k_bits`, fed by `MatmulGoldenConfig.k_bits` on the golden side and by
+  a new `S_trellis_k_bits` stamp on the op side (written off the body's `TrellisLoad` leaves, over the same load walk
+  that writes `S_dtype_i16`, so rate and storage class are always present together). `__post_init__` normalizes the
+  rate off every non-trellis class, so no shipped golden's key moves — proved by a kernel-source digest identical
+  across the diff and by a test asserting a stray rate on an uncoded key is dropped. Not theoretical: the pinned
+  checkpoint's allocation sidecar stores `mlp.shared_experts.gate_proj` at 2 bits x 38 layers, 3 x 6 and 4 x 1 at ONE
+  shape, `down_proj` likewise, and q/k/v/o at 4 and 3.
+- **The twin builder has a coded arm**, so `eval golden --in-model` audits coded entries. It asks the loader for the
+  weight-free allocation (`exl3.coded_tensor_storage`: per module the rate and the `trellis`/`suh`/`svh` shapes, read
+  off the small sidecar) and calls the DEPLOYED speller, `_spell_trellis_activation_one` — not a re-implementation,
+  which would drift. One twin per distinct rate profile (`post1@b2`, `pre1@b4`, `pre1@b3`, ...), and the `model:` tag
+  may pin the rung's branch (`turboderp/GLM-4.5-Air-exl3@2.25bpw`) because the rungs differ in exactly the allocation
+  the keys carry. The file is now tagged (the synthetic past-L2 control opts out with a per-entry `model: null`).
+  Audit on the pinned rung: **MATCH 19, DRIFT 0, GAP 317, compile_fail 0** — `glm45air.mlp_gate_up.m1` MATCHes in the
+  `post1@b2` twin at `k_bits=2`, so the seeded entry genuinely deploys in the model graph, not just on its snippet.
+
+Residuals for the full sweep: the GAPs above are the sweep itself (attention q/k/v/o at 4 and 3 bits, the dense MLP at
+every prefill width, and the uncoded fused/norm forks of a model nobody has tuned); prefill/warp coded matmuls are a
+~3.8k-row pool; `down` (11008→4096, M=1) offers exactly one band width and so has no fork a golden could decide. Two
+twin-side limits bound what the audit can see. A coded twin pairs ONE traced layer's structure with one checkpoint
+layer's rates, so where a layer codes only part of the twin (GLM stores layer 0's `o_proj` uncompressed, and its MoE
+layers have no dense MLP) the rest stay f16 and those forks are artifacts of the pairing, not shapes the model runs.
+And there is still no EXPERT twin: the expert weights arrive as program inputs, so a config-only skeleton contains
+nothing coded, and `_build_expert_group` takes checkpoint tensors rather than specs. The path is short now — the
+sidecar already lists every expert's rate and trellis shape, and its four distinct expert signatures (4 / 1 / 38 / 2
+layers) are exactly the four shape groups `from_model` interns — so what is owed is a spec-taking seam in
+`gen_runner`, not new format knowledge.
 
 Seed `emmy/compiler/pipeline/search/goldens/rtx5090_sm120_glm45air.yaml`, following the structure and preamble
 conventions of `rtx5090_sm120_olmoe.yaml` — the closest precedent: a MoE, on this card, whose expert

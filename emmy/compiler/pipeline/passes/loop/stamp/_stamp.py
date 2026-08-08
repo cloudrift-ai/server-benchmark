@@ -77,7 +77,7 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     """Extent-free histogram: stmt-type counts + pointwise/reduce op multisets
     + loop-nest roles/depth + operand dtype multiset."""
     from emmy.compiler.ir.stmt.blocks import Cond  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.leaves import Assign, Mma  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.leaves import Assign, Mma, TrellisLoad  # noqa: PLC0415
 
     feats: Counter[str] = Counter()
     loads = body.loads
@@ -103,6 +103,15 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
             t = graph.buffer(ld.input)
             dt = str(t.dtype) if t is not None else "?"
             feats[f"S_dtype_{dt}"] += 1
+    # The CODE RATE of a trellis-coded (EXL3) operand — bits per weight. Stamped ONLY when the
+    # body actually decodes one, over the same ``body.loads`` walk the dtype multiset uses, so it
+    # is present exactly where ``S_dtype_i16`` (the packed-code carrier ``ShapeKey.dtype_class``
+    # keys on) is, and a body with no decode keeps its feature dict unchanged. It is a key
+    # dimension, not just a prior feature — see ``ShapeKey.k_bits``. ``max`` reduces a
+    # multi-decode body deterministically; the lowering builds one coded operand today.
+    coded = [ld for ld in loads if isinstance(ld, TrellisLoad)]
+    if coded:
+        feats["S_trellis_k_bits"] = max(ld.k_bits for ld in coded)
     return {k: float(v) for k, v in feats.items()}
 
 

@@ -1102,10 +1102,18 @@ codebook id); its snippet is the HAT-BASIS `F.linear(x, trellis_decode(codes))` 
 extents, with the codes minted in a preamble statement so the tracer lifts them as an input (the fp8 arm's trick —
 folded to a constant, the decode would vanish and the entry would record a plain f16 matmul). The hat basis is the
 right basis because the activation-side restore puts `·suh`, both 128-block Hadamards and `·svh` in separate kernels
-on either side of the contraction. Two known blind spots, both ordering-protected like the `trans_b` caveat above:
-the class does not carry the code RATE (one rate per shape, or a mixed-allocation checkpoint's two rungs collide),
-and a coded fork must be kept out of the computed-A cone rebuild in `_fork_shape_key` (its decode fill spells the
-same `d*/sync` transport the rebuild's offer signal keys on).
+on either side of the contraction. One known blind spot remains, and it is a code invariant rather than an
+ordering caveat: a coded fork must be kept out of the computed-A cone rebuild in `_fork_shape_key` (its decode fill
+spells the same `d*/sync` transport the rebuild's offer signal keys on).
+
+**A coded golden's key also carries its code RATE.** `ShapeKey.k_bits` is the EXL3 bits-per-weight, `0` for every
+other storage class (`__post_init__` normalizes it there, so no pre-existing key's identity moves). The rate has to
+key because the codes slab's size and the decode's per-element word math both scale with it, and because an
+"optimized" rung allocates bits per tensor by Hessian sensitivity — the pinned GLM-4.5-Air 2.25 checkpoint stores
+`mlp.shared_experts.gate_proj` at 2, 3 AND 4 bits at one `(M, N, K)`, and q/k/v/o at 4 and 3. Sharing a key, those
+tensors would fight over a single golden. The op side reads `S_trellis_k_bits`, which `992_stamp_structural_features`
+writes off the body's `TrellisLoad` leaves over the same load walk that writes `S_dtype_i16` — so the rate is present
+exactly where the storage class is, and a body with no decode keeps its feature dict unchanged.
 
 **Latencies are recorded in pairs, or not at all.** A MEASURED entry carries `emmy_us` and `cublas_us` (both > 0)
 — the ordinary case, and the only one `ratio` / `golden` / the A/B gates below mean anything for. An UNMEASURED entry
@@ -1133,11 +1141,15 @@ are the fused edges a SERVED model deploys (`.lin` fused twins; the sync compute
 via cp.async on either layout, so the same `d*/sync` spellings realize on both).
 
 **Provenance and the in-model drift audit.** A golden file (or entry) may carry an optional `model:` header — the HF
-model id whose serving graph the shapes came from (`GoldenConfig.model`; pure provenance, never part of any join key).
+model id whose serving graph the shapes came from (`GoldenConfig.model`; pure provenance, never part of any join key),
+optionally pinning a revision as `<repo>@<rev>` (a coded checkpoint's rung lives on a branch, and the rungs differ in
+the bit allocation the keys DO carry). An entry may opt back out with `model: null` — a synthetic control shape the
+model does not run has no in-model form to audit.
 Model-tagged goldens opt into the **in-model drift audit** (`emmy eval golden --in-model`, library `search/audit.py`):
 the model's serving twins are re-traced **weight-free** (`emmy/serving/twins.py` builds a trimmed random-init skeleton
-from `config.json` alone — a trace never reads a weight value) and each tagged card's twins are compiled with the
-golden tier as the only evidence (no tune DB, online file pointed at a nonexistent path, deployable nvcc regime
+from `config.json` alone — a trace never reads a weight value; on an EXL3 checkpoint it also spells the coded
+contractions from its allocation sidecar, one twin per rate profile) and each tagged card's twins are compiled
+with the golden tier as the only evidence (no tune DB, online file pointed at a nonexistent path, deployable nvcc regime
 forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consultation — and the card targeted via
 `Context.from_target`, so verdicts are machine-independent). Each golden-tier consultation yields MATCH (a recorded
 golden realized), DRIFT (shape keyed but nothing realizes — always a defect: the recording claims a µs the deploy can
@@ -1477,8 +1489,10 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
 
 **`S_*`** (FLOAT, `loop/stamp/020_stamp_structural_features`) — the LoopOp's structural features (stmt/op histogram +
-loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
-online prior's feature vector). Skipped by `format_tuning_knobs`.
+loop extents + operand dtypes, plus `S_trellis_k_bits` on a body that decodes a coded weight). Not tunable —
+identity facts that make a knob dict a complete variant identity (the online prior's feature vector). Skipped by
+`format_tuning_knobs`. A feature is stamped only where the body has the thing it describes, so adding one leaves
+every other kernel's dict — and therefore every recorded key — untouched.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
 `lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own

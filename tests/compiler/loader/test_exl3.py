@@ -1052,3 +1052,55 @@ def test_input_spelling_rejects_a_bad_spec():
         spell_trellis_inputs(g, {"w": (0, (4, 16, 32))})  # k_pad 64 != the roundup of 128
     with pytest.raises(ValueError, match="not the weight of exactly one"):
         spell_trellis_inputs(_input_linear_graph(8, 256, 128), {"x": (0, (8, 8, 32))})
+
+
+# ===================================================================
+# The weight-free allocation sidecar
+# ===================================================================
+
+
+def _sidecar(tmp_path: Path, storage: dict, *, method: str = "exl3") -> Path:
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": method, "bits": 2.26}}))
+    (tmp_path / "quantization_config.json").write_text(json.dumps({"quant_method": method, "tensor_storage": storage}))
+    return tmp_path
+
+
+def _coded(base: str, bits: int, *, leaves=("trellis", "suh", "svh")) -> dict:
+    return {"quant_format": "exl3", "bits_per_weight": bits, "stored_tensors": {f"{base}.{leaf}": {"shape": [8]} for leaf in leaves}}
+
+
+def test_coded_tensor_storage_reads_the_allocation_weight_free(tmp_path):
+    """The per-module rate + sibling shapes come from the sidecar, with no shard present — the
+    only way a weight-free serving twin can learn what a module's code rate is."""
+    from emmy.compiler.loader.exl3 import coded_tensor_storage
+
+    root = _sidecar(
+        tmp_path,
+        {
+            "model.layers.0.self_attn.q_proj": _coded("model.layers.0.self_attn.q_proj", 4),
+            "model.layers.0.mlp.gate_proj": _coded("model.layers.0.mlp.gate_proj", 2),
+            "model.embed_tokens": {"stored_tensors": {"model.embed_tokens.weight": {"shape": [32, 8]}}},  # never coded
+        },
+    )
+    got = coded_tensor_storage(str(root))
+    assert sorted(got) == ["model.layers.0.mlp.gate_proj", "model.layers.0.self_attn.q_proj"]
+    assert got["model.layers.0.mlp.gate_proj"]["bits_per_weight"] == 2
+
+
+def test_coded_tensor_storage_skips_a_legacy_packed_sign_module(tmp_path):
+    """No ``suh``/``svh`` means the activation-side spelling cannot be built, so the module is left
+    out — exactly as the checkpoint-driven speller leaves that weight alone."""
+    from emmy.compiler.loader.exl3 import coded_tensor_storage
+
+    root = _sidecar(tmp_path, {"m.proj": _coded("m.proj", 2, leaves=("trellis", "su", "sv"))})
+    assert coded_tensor_storage(str(root)) == {}
+
+
+def test_coded_tensor_storage_is_empty_off_an_exl3_checkpoint(tmp_path):
+    """The scheme gate is what keeps every other model's twin capture from reaching for a sidecar
+    (and, for a hub id, from touching the network at all)."""
+    from emmy.compiler.loader.exl3 import coded_tensor_storage
+
+    root = _sidecar(tmp_path, {"m.proj": _coded("m.proj", 2)}, method="fp8")
+    assert coded_tensor_storage(str(root)) == {}
+    assert coded_tensor_storage(str(tmp_path / "nonexistent")) == {}

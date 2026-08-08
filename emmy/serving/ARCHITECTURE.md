@@ -405,6 +405,38 @@ Recorded follow-ups, in impact order:
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
 
+## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
+
+emmy owns no KV cache. The generative carve runs vLLM's paged `Attention` (and its cache) between the `pre` and
+`post` programs, so the cache dtype is entirely vLLM's: `--kv-cache-dtype fp8_e4m3` is an ordinary passthrough flag
+on both arms of `emmy serve --generate` (nothing in `commands/serve.py` reads it), and it **doubles the KV token
+capacity** out of the same byte budget — the emmy arm's `--gpu-memory-utilization 0.97` needs no adjustment, since
+fp8 halves the bytes per token rather than changing what the budget is. Measured on `Qwen/Qwen3-0.6B` at
+`--max-model-len 4096`, 32 GB RTX 5090: 264 048 tokens out of 28.2 GiB (fp16) → 518 224 out of 27.68 GiB (fp8), i.e.
+exactly 2x per byte. Decode cost is unchanged (TPOT 2.85 → 2.70 ms median at concurrency 4).
+
+The one emmy-side piece of glue is in `EmmyGenModel._attn_aliased` (the A4 alias tail, which reimplements
+`Attention.forward` minus its output allocation). vLLM's own `forward` has two quantization steps around the
+backend call, and the alias tail must agree with it or fall back:
+
+- **query quantization** (`attn.query_quant`, built when `kv_cache_dtype` starts with `fp8` **and** the selected
+  backend advertises `supports_quant_query_input`). Whether it fires is a BACKEND property, not an fp8 property:
+  FlashAttention and Triton say yes on any CUDA device, while FlashInfer — what vLLM auto-selects for fp8 KV on
+  sm_120, FlashAttention having dropped out of the candidate list — additionally requires TRTLLM attention, i.e.
+  SM100. So a 5090 deployment never reaches this, and an SM100 or `VLLM_ATTENTION_BACKEND=TRITON_ATTN` one reaches
+  it on every layer of every step. The tail replicates the quantization rather than bailing (bailing would cost the
+  alias entirely on those backends). The attention OUTPUT keeps the PRE-quant query dtype, which is what the post
+  twin's `attn_out` backing already is — so the backing's dtype check runs against `q` before the quantization, not
+  after.
+- **`calculate_kv_scales`** (`--calculate-kv-scales`, deprecated in vLLM 0.23 and off by default) stays a bail: the
+  flag is one-shot and self-clearing, so the fallback module call computes the scales, clears it, and the alias
+  resumes from the next step. Without it — and without scales in the checkpoint — q/k/v scales are simply **1.0**,
+  i.e. the cache stores fp8 values of k/v directly.
+
+One operational note the A/B surfaced: `--gpu-memory-utilization 0.97` demands ~30.4 of the 5090's 31.3 GiB free at
+startup, so *any* other process on the card (a sibling kernel A/B holding 0.5 GiB was enough) fails the boot on
+vLLM's free-memory check. Nothing to do with fp8 — but an fp8-KV deployment sized against a full card inherits it.
+
 ## Device footprint sets admission capacity (generative)
 
 The generative arm's throughput on long-request batched workloads is set by how many sequences vLLM can

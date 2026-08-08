@@ -389,14 +389,24 @@ class EmmyGenModel(nn.Module):
         """vLLM paged attention writing INTO the M=1 post twin's ``attn_out`` input backing —
         ``Attention.forward`` minus its own output allocation, so ``run_device``'s prefix upload
         self-copy-skips (the seam copy drops out of the captured decode graph). Returns ``None``
-        to fall back to the ordinary module call (m1 twin absent for this layer, or an attention
-        feature this tail doesn't replicate — kv scales / query quant)."""
+        to fall back to the ordinary module call (no tier covers these rows, or the layer still
+        owes its one-shot kv-scale calculation)."""
         attn = self.attn[layer]
-        if attn.calculate_kv_scales or getattr(attn, "query_quant", None) is not None:
+        if attn.calculate_kv_scales:
+            # ONE-SHOT: the fallback module call below runs ``maybe_calc_kv_scales``, which
+            # clears the flag for this layer, so the alias resumes from the next step on.
+            # (Off by default anyway — ``--calculate-kv-scales`` is deprecated in vLLM 0.23;
+            # unless the checkpoint carries q/k/v scales they stay 1.0.)
             return None
         out = self.runner.post_attn_backing(layer, rows=q.shape[0])
         if out is None or out.dtype != q.dtype:
             return None
+        if getattr(attn, "query_quant", None) is not None and attn.impl.supports_quant_query_input:
+            # ``--kv-cache-dtype fp8*``: vLLM statically quantizes the QUERY to the cache dtype
+            # before the backend call. Replicated here (dtype-checking ``out`` against the
+            # PRE-quant q first — the attention output keeps the original query dtype, exactly
+            # as ``Attention.forward``'s ``output_dtype`` does).
+            q, _ = attn.query_quant(q, attn._q_scale)
         query = q.view(-1, attn.num_heads, attn.head_size)
         key = k.view(-1, attn.num_kv_heads, attn.head_size)
         value = v.view(-1, attn.num_kv_heads, attn.head_size_v)

@@ -301,6 +301,29 @@ def test_serve_cmd_generate_honors_explicit_batched_tokens():
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "2048"
 
 
+@pytest.mark.parametrize("flag", [["--kv-cache-dtype", "fp8_e4m3"], ["--kv-cache-dtype=fp8_e4m3"]])
+def test_serve_cmd_generate_kv_cache_dtype_passes_through(flag):
+    """``--kv-cache-dtype`` is vLLM's own flag — emmy adds nothing, it just forwards. Pinned
+    because the quantized-KV deployments depend on it reaching BOTH arms unchanged, and on it
+    not disturbing the generative util default (fp8 KV halves the bytes per token, so the same
+    byte budget buys ~2x the KV tokens — no utilization change is needed or made)."""
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=flag, generate=True)
+    assert cmd[-len(flag) :] == flag
+    assert "--gpu-memory-utilization=0.97" in cmd
+    stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=flag, generate=True)
+    assert stock_cmd[-len(flag) :] == flag
+
+
+def test_serve_kv_cache_dtype_survives_the_remainder_reparse(capsys):
+    # The argparse-REMAINDER re-parse extracts emmy's own flags and forwards the rest; a
+    # vLLM flag emmy does not own must come out the other side intact.
+    args = _parse(["serve", MODEL, "--generate", "--dry-run", "--kv-cache-dtype", "fp8_e4m3"])
+    handle_serve(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert "--kv-cache-dtype fp8_e4m3" in out[0]
+
+
 def test_serve_generate_bench_targets_completions(capsys):
     args = _parse(["serve", MODEL, "--generate", "--bench", "--dry-run"])
     handle_serve(args)

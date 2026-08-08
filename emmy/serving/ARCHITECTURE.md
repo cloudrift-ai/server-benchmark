@@ -76,6 +76,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   blocks boot). Born
   from the 2026-07-29 TinyLlama/4080 incident: a cold deploy served a fused-norm kernel ~150x off the floor (54x
   TPOT gap) with zero boot-time signal.
+  **Two structural blind spots, and a compressed model lands in both.** The audit times ONE layer per attention
+  class, and `MIN_FLOOR_US` drops anything whose weights stream in under 20 µs — so on GLM-4.5-Air at 2.25 bpw it
+  reports on layer 0 alone, and layer 0 is the model's only DENSE layer (it clears the floor only because the
+  quantizer left its `o_proj` uncoded at fp16, 100 MB). Every one of the 45 MoE layers, and the expert programs,
+  sit under the floor and are silent. In the 2026-08-08 golden sweep the one flagged program was 18x over and the
+  UNREPORTED representative MoE layer was 77x — so on a low-bit model treat a quiet audit as no information, and
+  measure the twins directly (`_Program.program.iter_once()` gives the per-kernel split).
 - `sampling.py` — **no vLLM, no CUDA**. Pure-numpy token sampling (`Sampler`: greedy / temperature / top-k / top-p) +
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA

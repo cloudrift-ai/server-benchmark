@@ -1,7 +1,9 @@
 # GLM-4.5-Air-exl3 (trellis-coded / EXL3 weights, decoded inside the kernel) on the RTX 5090 —
-# seeded 2026-08-07 by a manual pinned --ab sweep (no tuner), each entry reproduced 3x. This is the
-# FIRST coded-weight golden file; it covers the decode-phase (M=1) reduce tier only. See the
-# residual notes at the bottom for what the full sweep still owes.
+# seeded 2026-08-07, extended to the full trunk 2026-08-08 by a manual pinned --ab sweep (no
+# tuner), each entry reproduced 3x. This is the FIRST coded-weight golden file. It now covers
+# every DENSE-TRUNK coded projection at the three narrow static widths the generative runner
+# deploys at decode (M = 1 / 8 / 32); see the residual notes at the bottom for what is not here
+# and — more important — for the one width the sweep MEASURED and then deliberately withheld.
 #
 # HOW TO READ — L2 RESIDENCY, and it is load-bearing here more than anywhere else.
 # `run --bench --golden` replays one kernel over one weight slab ~100x. At 2 bits per weight a
@@ -15,40 +17,51 @@
 # A/B this file is seeded from) stay valid; cross-shape and cross-format ones do not. Judge the
 # format end to end — twin / serving latency and the roofline audit — never here.
 #
-# WHY THESE EXIST: the offline prior mis-ranks the decode band's split width on a cold compile.
-# The band partitions the contraction across CTAs (`gNk` = N-way cross-CTA split, `coop-t/r16` =
-# 32 lanes sweeping the output axis over the tile's 16 register rows), and greedy takes a split
-# 2-4x too narrow, leaving 19-27% on the table. The three entries below are exactly that
-# correction.
+# WHY THESE EXIST, part 1 — the decode band's split width (the M=1 entries). The band partitions
+# the contraction across CTAs (`gNk` = N-way cross-CTA split, `coop-t/r16` = 32 lanes sweeping the
+# output axis over the tile's 16 register rows), and greedy takes a split 2-6x too narrow on the
+# long-K shapes, leaving 15-29% on the table. The optimum is NOT simply "the widest": the split's
+# finalize reads a `cta x N` f32 workspace whose bytes over the codes' are `2 / (steps * k_bits)`,
+# so it sits at 8-32 tile steps per CTA and moves with how L2-resident the codes are. The two
+# 11 MB projections peak at 8 steps (`gate_up` g32k, `down` g86k), the 121 MB square at 32 (g43k),
+# and the long-K o_proj at 8 (g96k, 768 tiles / 8).
 #
-# WHAT THE OPTIMUM IS, now that the ladder reaches past the powers of two (`DECODE_BAND_STEPS`):
-# NOT simply "the widest". Wider means more CTAs, but the split's finalize also reads a `cta x N`
-# f32 workspace whose bytes over the codes' are `2 / (steps * k_bits)` — a quarter of the code
-# traffic at 4 tile steps per CTA, an eighth at 8. The measured optimum is at 8-32 steps, and it
-# moves with how L2-resident the codes are: the two 11 MB projections peak at 8 steps (`gate_up`
-# g32k, `down` g86k) while the 121 MB square peaks at 32 (g43k), where the workspace is 3% of the
-# traffic rather than 12%. Both lanes (see the next note) agree on every winner.
+# WHY THESE EXIST, part 2 — the warp tier's OUTPUT TILE (every M > 1 entry), and this is the
+# larger correction. Greedy takes a WIDE fragment tile (`f1x4` / `f1x8`): the right answer for a
+# materialized B, where a wide tile buys operand reuse. A DECODED B has no operand to reuse — the
+# decode is per-element ALU work, ~29 warp-instructions per 2-bit weight — so the tile only costs
+# registers, and the register pressure caps occupancy at 17-25%. The measured answer is the
+# NARROWEST output tile the shape allows (`f1x1`, occasionally `f1x2` / `f2x2` at prefill width)
+# with as many CTAs as the output axis will give: occupancy goes to 58-92% and the kernel runs
+# 1.0-4.9x faster, worst on the narrow-N attention k/v projection (4.9x) and the shared-expert
+# gate/up (4.5x). Split-K cannot help here — it is refused on a computed B (no gmem index to
+# re-index), so CTA count comes from the output axis alone.
 #
 # LANE: measured in the DEFAULT (f32) lane. The f16-pair fold (`EMMY_F16_REDUCE_F32_ACC` / the
-# `FAST_MATH` umbrella, `060_pair_decode_accum`) is 13-18% faster at every entry here and picks
-# the SAME split at every one of them, so one recorded schedule serves both lanes. Its numbers,
-# for reference: 123.2 / 12.3 / 12.9 us against the 142.4 / 15.0 / 15.3 recorded below.
+# `FAST_MATH` umbrella, `060_pair_decode_accum`) is 13-18% faster on the M=1 band entries and
+# picks the SAME split at every one of them; on the warp tier the f16-accumulate atom measured
+# within 0.1% of the f32 one at the winning tile (63.3 vs 63.3 us on gate_up.m32). So one recorded
+# schedule serves both lanes and no `[fm]` sibling entry is warranted.
 #
 # MEASUREMENT METHOD: `emmy run -c "<snippet>" --bench --bench-backends emmy --warmup 10
-# --iters 100 --ab "REDUCE=g32k/coop-t/r16,WORK=t32" --ab ...` over each shape's WHOLE offered
-# ladder (`decode_band_moves(K // 16)` — the wide arm plus the fixed one), 3 reps. `emmy_us` is
-# the SPLIT PAIR's total (partial + finalize), matching the olmoe file.
+# --iters 100 --ab "<row>" --ab ...` over a per-width ladder, 3 reps, the median recorded and the
+# rep min/max in each comment. The M=1 ladder is the shape's WHOLE offered band
+# (`decode_band_moves(K // 16)`); the M > 1 ladders are 9 pinned rows sampling the warp grid
+# (the enumerated pool there is ~3.8k rows, so this is a sample, not an exhaustive search —
+# see the residuals). `emmy_us` is the SPLIT PAIR's total on the band entries (partial +
+# finalize), matching the olmoe file.
 # `--bench-backends emmy` is REQUIRED for a coded shape: the eager reference is the numpy
 # reference decode (`loader/exl3.decode_trellis`), correct but ~0.7 s per call at 4096x11008, so
 # the default eager lane would re-decode once per bench iteration.
 #
 # cublas_us DEVIATES from the usual convention (the live `Eager PyTorch` row of the same
 # `run --bench`), for the reason just given — that row would time the numpy decode. It records
-# instead the torch eager f16 row at the SAME extents with uncompressed weights, measured
-# separately with `run -c "F.linear(randn(M,K,f16), randn(N,K,f16))" --bench`. It answers
+# instead the torch eager f16 row at the SAME extents and layout with uncompressed weights,
+# measured separately (10 warmup + 100 CUDA-event-timed `F.linear` calls, median). It answers
 # "what would this projection cost if we had shipped it in f16", not "what does cuBLAS do with
-# these bytes" — there is no cuBLAS path for coded weights. For reference, emmy's OWN f16 twin
-# at these shapes: 18.6 us (4096->11008) and 580.9 us (22016^2).
+# these bytes" — there is no cuBLAS path for coded weights. Every one of those references is
+# L2-resident, so a coded entry reading SLOWER than its f16 column is the expected reading at
+# these sizes and says nothing about the served model.
 #
 # BASIS: the recorded shape is the HAT-BASIS contraction at the codes grid's 128-padded extents —
 # `F.linear(x, trellis_decode(codes))`, no suh/svh and no Hadamard. That is exactly the
@@ -59,10 +72,18 @@
 # `tests/compiler/passes/test_trellis_computed_b.py`).
 #
 # CODE RATE: `k_bits` is part of the ShapeKey, so a shape holds one entry PER RATE and the
-# 2.25-optimized rung's mixed allocation cannot collide. That matters here concretely — the pinned
-# checkpoint stores `mlp.shared_experts.gate_proj` at 2, 3 AND 4 bits across its layers at one
-# (M, N, K), and q/k/v/o at 4 and 3. Every entry must record the rate it was measured at; all
-# three entries below are k_bits=2 / cb=0. The op side stamps `S_trellis_k_bits` off the decode leaves.
+# 2.25-optimized rung's mixed allocation cannot collide. That is not theoretical here: the pinned
+# checkpoint stores q/k/v at 4 bits on 42 layers and 3 on 4, o_proj at 4 on 41 and 3 on 4 (layer
+# 0's o_proj is left uncoded fp16), the shared experts at 2 / 3 / 4 across 45 layers, and the one
+# dense MLP at 2. Every entry records the rate it was measured at. The op side stamps
+# `S_trellis_k_bits` off the decode leaves.
+#
+# WIDTHS: M is a static width the generative runner deploys — 1 (`EMMY_GEN_M1_TIER`) and 8 / 32
+# (`EMMY_GEN_DECODE_BUCKET`; the pinned serving config uses 32). All three are widths
+# `emmy/serving/twins.py` traces, which is what makes `eval golden --in-model` able to audit them.
+# At every one of them the recorded tile keeps the SAME number of M blocks the shape already had
+# (one), so it changes how the decode is parallelized and not how many times the codes are read.
+# That is the invariant the prefill width broke — see the residuals.
 #
 # `model:` HEADER: tagged with the rung's own branch (`<repo>@<revision>`), because the rungs
 # differ in exactly the bit allocation the keys carry — auditing 2.25 goldens against the 2.0
@@ -71,12 +92,29 @@
 # the same speller serving uses, one twin per rate profile. The `pastl2_22016` control shape is
 # NOT a model shape, so it opts out with a per-entry `model: null`.
 #
-# NOT COVERED, with reasons (the full Phase 4 sweep owes these):
-#  * prefill / warp-tier coded matmuls — the fork offers ~3.8k rows; that is a real sweep.
-#  * the attention projections (q/k/v at 4 and 3 bits, o_proj at 4 and 3) — the coded twins now
-#    expose them, nobody has swept them.
-#  * the routed-expert matmuls — they arrive as program inputs and the expert serving programs are
-#    still being built, so no twin can spell them yet.
+# NOT COVERED, with reasons — read the FIRST one before adding a wide-M entry here:
+#  * PREFILL WIDTH (M=512, the static chunk twin) and M=64: MEASURED and WITHHELD. Both widths
+#    swept clean in isolation (M=512 1.03-1.76x, M=64 2.1-4.5x over greedy) and the M=512 set was
+#    then checked in the real programs, where it INVERTED: layer 1's coded o_proj went 711 -> 1182
+#    us and the whole `post` chunk twin 1334 -> 1818. The isolated bench cannot rank a wide-M tile
+#    here. Both winners cut the CTA's M extent (M=512: 64 rows against greedy's 128, so eight M
+#    blocks instead of four; M=64: 32 against 128), which re-reads the codes slab more times and
+#    narrows the DRAM stripe — free when the whole slab sits in L2 for a hundred replays, not free
+#    against a 29 GB trunk. The M = 1 / 8 / 32 entries do NOT have that property (one M block
+#    either way, verified above), and their in-model gain reproduced: 1.7-2.3x per program. A
+#    prefill golden needs an in-model or past-L2 measurement, not this harness.
+#  * the SYMBOLIC (`.dynM`) coded forks — the masked-tile programs a partial prefill chunk rides.
+#    With `--max-num-batched-tokens` 512 a 512-token prompt is one full chunk and takes the static
+#    twin, so the symbolic path carries only chunk tails; unswept on that ranking, and it would hit
+#    the same wide-M measurement problem.
+#  * the warp grid beyond the 9 sampled rows per width. The pool is ~3.8k rows; the sample was
+#    built from one full exploration on `mlp_gate_up.m32` and the winner reproduced on 13 more
+#    shapes, so the direction is solid but the last few percent is not claimed.
+#  * the UNCODED f16 forks of this model — layer 0's fp16 o_proj (4096x12288, 151.7 us in-model at
+#    M=32 and untouched by this sweep), the norms, the router, and the fused/pointwise glue.
+#  * the M=192 / 256 / 1024 / 2048 / 4096 widths `twins.py` traces for other serving lanes. This
+#    deployment runs none of them, and they are wide-M, so the caveat above applies.
+#  * the `pastl2_22016` control was not re-measured this round; its 2026-08-07 row stands.
 gpu_name: NVIDIA GeForce RTX 5090
 # Tagged by commit sha, not the `2.25bpw` branch name: a branch can be re-cut, and the release
 # pipeline pins `SERVE_REVISION` to a sha, which the coverage gate compares exactly. The sha below
@@ -86,12 +124,259 @@ compute_cap:
   - 12
   - 0
 configs:
-  # ---- dense MLP gate/up projection, decode phase (M=1) ----------------------------------------
-  # GLM-4.5-Air hidden 4096 -> intermediate 10944, stored 128-padded to 11008. Codes 11.3 MB
-  # (L2-resident in this bench — see HOW TO READ). Greedy takes g8k at 18.7 us; g32k is 15.0.
-  # Ladder (3 reps, best): g32k 14.99 / g16k 14.90 / g8k 18.69 — g16k's min is a single outlier
-  # (16.00 / 14.90 / 16.10) against g32k's 15.02 / 14.99 / 15.03, so the stable row is g32k.
-  # Re-measured 2026-08-07 after the one-LOP3 codebook fix (15.8 -> 15.0); split unchanged.
+  # ---- attention q projection, 4 bits (42 of 46 layers) ------------------------------------------------------------
+  # 4096 -> 12288 (96 heads x 128).
+  # m1            g32k   16.70 | greedy          g8k   19.17 = 1.15x | reps 16.65/16.74 (0.57%)
+  # m8    w1x4/f1x1/k8   74.56 | greedy w2x1/f1x4/k8  151.95 = 2.04x | reps 74.47/74.56 (0.12%)
+  # m32   w2x2/f1x1/k8   65.03 | greedy w4x1/f1x8/k8  160.30 = 2.47x | reps 64.90/65.27 (0.56%)
+  - kernel: matmul
+    name: glm45air.q_proj.b4.m1
+    M: 1
+    N: 12288
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 16.7
+    cublas_us: 23.4
+  - kernel: matmul
+    name: glm45air.q_proj.b4.m8
+    M: 8
+    N: 12288
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 74.6
+    cublas_us: 24.8
+  - kernel: matmul
+    name: glm45air.q_proj.b4.m32
+    M: 32
+    N: 12288
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 65.0
+    cublas_us: 55.6
+  # ---- attention q projection, 3 bits (4 of 46 layers) -------------------------------------------------------------
+  # Same extents as the 4-bit twin; the code rate is what keys them apart.
+  # m1            g32k   16.79 | greedy          g8k   19.32 = 1.15x | reps 16.75/16.82 (0.42%)
+  # m8    w1x4/f1x1/k8   72.77 | greedy w2x1/f1x4/k8  152.92 = 2.10x | reps 72.75/72.80 (0.08%)
+  # m32   w2x2/f1x1/k8   63.27 | greedy w4x1/f1x8/k8  153.37 = 2.42x | reps 63.14/63.32 (0.28%)
+  - kernel: matmul
+    name: glm45air.q_proj.b3.m1
+    M: 1
+    N: 12288
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 16.8
+    cublas_us: 23.4
+  - kernel: matmul
+    name: glm45air.q_proj.b3.m8
+    M: 8
+    N: 12288
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 72.8
+    cublas_us: 24.8
+  - kernel: matmul
+    name: glm45air.q_proj.b3.m32
+    M: 32
+    N: 12288
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 63.3
+    cublas_us: 55.6
+  # ---- attention k / v projection, 4 bits (42 of 46 layers, both leaves) -------------------------------------------
+  # 4096 -> 1024 (8 KV heads x 128) — the narrowest coded output in the trunk, and where greedy
+  # misses widest (4.8x at the decode bucket).
+  # m1            g32k    3.98 | greedy         g32k    3.98 = 1.00x | reps 3.97/3.98 (0.23%)  <- greedy already there
+  # m8    w2x2/f1x1/k8   36.73 | greedy w1x1/f1x4/k8  124.96 = 3.40x | reps 36.73/36.75 (0.05%)
+  # m32   w2x1/f1x1/k8   26.05 | greedy w1x1/f1x4/k8  124.36 = 4.77x | reps 26.04/26.07 (0.08%)
+  - kernel: matmul
+    name: glm45air.kv_proj.b4.m1
+    M: 1
+    N: 1024
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.0
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.kv_proj.b4.m8
+    M: 8
+    N: 1024
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 36.7
+    cublas_us: 8.5
+  - kernel: matmul
+    name: glm45air.kv_proj.b4.m32
+    M: 32
+    N: 1024
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x1', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 26.1
+    cublas_us: 8.5
+  # ---- attention k / v projection, 3 bits (4 of 46 layers, both leaves) --------------------------------------------
+  # Same extents as the 4-bit twin.
+  # m1            g32k    4.09 | greedy         g32k    4.09 = 1.00x | reps 4.08/4.10 (0.39%)  <- greedy already there
+  # m8    w2x2/f1x1/k8   37.29 | greedy w1x1/f1x4/k8  126.74 = 3.40x | reps 37.26/37.33 (0.20%)
+  # m32   w2x1/f1x1/k8   25.84 | greedy w1x1/f1x4/k8  126.38 = 4.89x | reps 25.82/25.85 (0.12%)
+  - kernel: matmul
+    name: glm45air.kv_proj.b3.m1
+    M: 1
+    N: 1024
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.1
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.kv_proj.b3.m8
+    M: 8
+    N: 1024
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 37.3
+    cublas_us: 8.5
+  - kernel: matmul
+    name: glm45air.kv_proj.b3.m32
+    M: 32
+    N: 1024
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x1', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 25.8
+    cublas_us: 8.5
+  # ---- attention output projection, 4 bits (41 of 46 layers) -------------------------------------------------------
+  # 12288 -> 4096. Layer 0's o_proj is kept UNCODED fp16 by the quantizer and never keys here.
+  # m1            g96k   16.89 | greedy         g16k   21.85 = 1.29x | reps 16.87/17.03 (0.91%)
+  # m8    w1x4/f1x1/k8  132.26 | greedy w1x1/f1x4/k8  373.64 = 2.82x | reps 132.00/132.68 (0.51%)
+  # m32   w2x2/f1x1/k8  100.92 | greedy w2x1/f1x4/k8  258.34 = 2.56x | reps 100.90/101.05 (0.16%)
+  - kernel: matmul
+    name: glm45air.o_proj.b4.m1
+    M: 1
+    N: 4096
+    K: 12288
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g96k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 16.9
+    cublas_us: 25.0
+  - kernel: matmul
+    name: glm45air.o_proj.b4.m8
+    M: 8
+    N: 4096
+    K: 12288
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 132.3
+    cublas_us: 53.5
+  - kernel: matmul
+    name: glm45air.o_proj.b4.m32
+    M: 32
+    N: 4096
+    K: 12288
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 100.9
+    cublas_us: 39.7
+  # ---- attention output projection, 3 bits (4 of 46 layers) --------------------------------------------------------
+  # Same extents as the 4-bit twin.
+  # m1            g96k   17.44 | greedy         g16k   22.03 = 1.26x | reps 17.39/17.44 (0.28%)
+  # m8    w1x4/f1x1/k8  133.21 | greedy w1x1/f1x4/k8  377.81 = 2.84x | reps 133.21/133.27 (0.04%)
+  # m32   w2x2/f1x1/k8  100.68 | greedy w2x1/f1x4/k8  261.73 = 2.60x | reps 100.62/100.69 (0.08%)
+  - kernel: matmul
+    name: glm45air.o_proj.b3.m1
+    M: 1
+    N: 4096
+    K: 12288
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g96k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 17.4
+    cublas_us: 25.0
+  - kernel: matmul
+    name: glm45air.o_proj.b3.m8
+    M: 8
+    N: 4096
+    K: 12288
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 133.2
+    cublas_us: 53.5
+  - kernel: matmul
+    name: glm45air.o_proj.b3.m32
+    M: 32
+    N: 4096
+    K: 12288
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 100.7
+    cublas_us: 39.7
+  # ---- dense MLP gate / up projection, 2 bits (layer 0 only, both leaves) ------------------------------------------
+  # hidden 4096 -> intermediate 10944, stored 128-padded to 11008. Layer 0 is the model's one
+  # dense layer; every other layer routes.
+  # m1            g32k   14.96 | greedy         g32k   14.96 = 1.00x | reps 13.40/14.96 (10.42%)  <- greedy already there
+  # m8    w1x4/f1x1/k8   67.63 | greedy w2x1/f1x4/k8  139.07 = 2.06x | reps 67.51/67.65 (0.21%)
+  # m32   w2x2/f1x1/k8   63.40 | greedy w4x1/f1x8/k8  137.76 = 2.17x | reps 63.31/63.44 (0.20%)
   - kernel: matmul
     name: glm45air.mlp_gate_up.m1
     M: 1
@@ -103,15 +388,36 @@ configs:
     trans_b: true
     knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
     emmy_us: 15.0
-    cublas_us: 55.0
-  # ---- dense MLP down projection, decode phase (M=1) -------------------------------------------
-  # GLM-4.5-Air intermediate 10944 (128-padded to 11008) -> hidden 4096. The shape the widened
-  # split ladder unlocked: 11008/16 = 688 = 16*43, so the power-of-two ladder stopped at g16k and
-  # this shape offered ONE row — a fork with nothing to decide, and no golden. The wide arm's
-  # g86k (688/8) reaches 11008 CTAs against g16k's 2048.
-  # Ladder (3 reps, best): g86k 15.26 / g43k 15.96 / g16k 19.54. Reps: 15.28 / 15.29 / 15.26
-  # (spread 0.2%). g86k also flips this projection from BEHIND its f16 twin (19.5 vs 18.5) to
-  # 1.21x ahead — the only entry here where the split choice changes the sign of the comparison.
+    cublas_us: 21.1
+  - kernel: matmul
+    name: glm45air.mlp_gate_up.m8
+    M: 8
+    N: 11008
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 67.6
+    cublas_us: 20.9
+  - kernel: matmul
+    name: glm45air.mlp_gate_up.m32
+    M: 32
+    N: 11008
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 63.4
+    cublas_us: 37.4
+  # ---- dense MLP down projection, 2 bits (layer 0 only) ------------------------------------------------------------
+  # 11008 (padded) -> 4096.
+  # m1            g86k   15.25 | greedy         g86k   15.27 = 1.00x | reps 15.18/15.27 (0.58%)  <- greedy already there
+  # m8    w1x4/f1x1/k8  114.13 | greedy w1x1/f1x4/k8  326.52 = 2.86x | reps 114.07/114.27 (0.18%)
+  # m32   w2x2/f1x1/k8   90.57 | greedy w2x1/f1x4/k8  217.20 = 2.40x | reps 90.56/90.77 (0.23%)
   - kernel: matmul
     name: glm45air.mlp_down.m1
     M: 1
@@ -122,18 +428,289 @@ configs:
     cb: 0
     trans_b: true
     knobs: {WORK: 't32', TILE: '', REDUCE: 'g86k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 15.3
-    cublas_us: 59.0
-  # ---- past-L2 reference square, decode phase (M=1) --------------------------------------------
+    emmy_us: 15.2
+    cublas_us: 22.8
+  - kernel: matmul
+    name: glm45air.mlp_down.m8
+    M: 8
+    N: 4096
+    K: 11008
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 114.1
+    cublas_us: 35.0
+  - kernel: matmul
+    name: glm45air.mlp_down.m32
+    M: 32
+    N: 4096
+    K: 11008
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 90.6
+    cublas_us: 35.1
+  # ---- shared-expert gate / up projection, 2 bits (40 of 45 MoE layers, both leaves) -------------------------------
+  # 4096 -> 1408. The SAME extents as every ROUTED expert's gate/up at this rate, so these entries
+  # key the expert programs too — the weights arrive as inputs there, but the contraction is identical (measured:
+  # the `moe.expert.bucket.m32` program went 460 -> 180 us on this seeding, without an expert entry of its own).
+  # m1            g32k    4.64 | greedy         g32k    4.64 = 1.00x | reps 4.64/4.64 (0.14%)  <- greedy already there
+  # m8    w1x4/f1x1/k8   42.00 | greedy w1x1/f1x4/k8  123.22 = 2.93x | reps 41.98/42.00 (0.04%)
+  # m32   w2x2/f1x1/k8   27.15 | greedy w1x1/f1x4/k8  121.63 = 4.48x | reps 27.14/27.16 (0.04%)
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b2.m1
+    M: 1
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.6
+    cublas_us: 10.4
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b2.m8
+    M: 8
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 42.0
+    cublas_us: 12.6
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b2.m32
+    M: 32
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 27.1
+    cublas_us: 10.5
+  # ---- shared-expert gate / up projection, 3 bits (4 of 45 MoE layers, both leaves) --------------------------------
+  # Also the routed experts' 3-bit gate/up shape.
+  # m1            g32k    4.74 | greedy         g32k    4.74 = 1.00x | reps 4.74/4.74 (0.03%)  <- greedy already there
+  # m8    w2x2/f1x1/k8   42.35 | greedy w1x1/f1x4/k8  127.74 = 3.02x | reps 42.28/42.41 (0.31%)
+  # m32   w2x2/f1x1/k8   27.90 | greedy w1x1/f1x4/k8  126.28 = 4.53x | reps 27.90/27.91 (0.03%)
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b3.m1
+    M: 1
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.7
+    cublas_us: 10.4
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b3.m8
+    M: 8
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 42.3
+    cublas_us: 12.6
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b3.m32
+    M: 32
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 27.9
+    cublas_us: 10.5
+  # ---- shared-expert gate / up projection, 4 bits (1 of 45 MoE layers, both leaves) --------------------------------
+  # Also the routed experts' 4-bit gate/up shape.
+  # m1            g32k    4.77 | greedy         g32k    4.77 = 1.00x | reps 4.77/4.77 (0.15%)  <- greedy already there
+  # m8    w2x2/f1x1/k8   42.53 | greedy w1x1/f1x4/k8  125.98 = 2.96x | reps 42.51/42.58 (0.16%)
+  # m32   w2x2/f1x1/k8   28.00 | greedy w1x1/f1x4/k8  124.07 = 4.43x | reps 28.00/28.00 (0.01%)
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b4.m1
+    M: 1
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.8
+    cublas_us: 10.4
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b4.m8
+    M: 8
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 42.5
+    cublas_us: 12.6
+  - kernel: matmul
+    name: glm45air.shared_gate_up.b4.m32
+    M: 32
+    N: 1408
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 28.0
+    cublas_us: 10.5
+  # ---- shared-expert down projection, 2 bits (38 of 45 MoE layers) -------------------------------------------------
+  # 1408 -> 4096. Also the routed experts' 2-bit down shape.
+  # m1            g11k    4.31 | greedy         g11k    4.31 = 1.00x | reps 4.30/4.32 (0.49%)  <- greedy already there
+  # m8    w1x4/f1x1/k8   16.95 | greedy w1x1/f1x4/k8   44.09 = 2.60x | reps 16.95/16.98 (0.18%)
+  # m32   w2x2/f1x1/k8   12.80 | greedy w2x1/f1x4/k8   28.68 = 2.24x | reps 12.80/12.80 (0.05%)
+  - kernel: matmul
+    name: glm45air.shared_down.b2.m1
+    M: 1
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g11k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.3
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.shared_down.b2.m8
+    M: 8
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 17.0
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.shared_down.b2.m32
+    M: 32
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 12.8
+    cublas_us: 8.5
+  # ---- shared-expert down projection, 3 bits (6 of 45 MoE layers) --------------------------------------------------
+  # Also the routed experts' 3-bit down shape.
+  # m1            g11k    4.49 | greedy         g11k    4.49 = 1.00x | reps 4.49/4.49 (0.07%)  <- greedy already there
+  # m8    w1x4/f1x1/k8   17.72 | greedy w1x1/f1x4/k8   45.78 = 2.58x | reps 17.71/17.79 (0.42%)
+  # m32   w2x2/f1x1/k8   12.77 | greedy w2x1/f1x4/k8   30.93 = 2.42x | reps 12.77/12.78 (0.08%)
+  - kernel: matmul
+    name: glm45air.shared_down.b3.m1
+    M: 1
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g11k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.5
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.shared_down.b3.m8
+    M: 8
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 17.7
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.shared_down.b3.m32
+    M: 32
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 3
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 12.8
+    cublas_us: 8.5
+  # ---- shared-expert down projection, 4 bits (1 of 45 MoE layers) --------------------------------------------------
+  # Also the routed experts' 4-bit down shape.
+  # m1            g11k    4.40 | greedy         g11k    4.40 = 1.00x | reps 4.39/4.41 (0.46%)  <- greedy already there
+  # m8    w1x4/f1x1/k8   17.54 | greedy w1x1/f1x4/k8   45.25 = 2.58x | reps 17.54/17.57 (0.19%)
+  # m32   w2x2/f1x1/k8   12.87 | greedy w2x1/f1x4/k8   30.54 = 2.37x | reps 12.87/12.87 (0.03%)
+  - kernel: matmul
+    name: glm45air.shared_down.b4.m1
+    M: 1
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g11k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 4.4
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.shared_down.b4.m8
+    M: 8
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 17.5
+    cublas_us: 8.4
+  - kernel: matmul
+    name: glm45air.shared_down.b4.m32
+    M: 32
+    N: 4096
+    K: 1408
+    dtype: 'trellis'
+    k_bits: 4
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k8', REDUCE: '', STAGE: 'd1/sync', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 12.9
+    cublas_us: 8.5
+  # ---- past-L2 reference square, decode phase (M=1) -------------------------------------------
   # Not a GLM projection: a deliberate 121 MB codes slab (past the 5090's 96 MB L2), the only shape
   # in this file that measures the format the way a 29 GB trunk experiences it. Keep it — it is the
   # control that tells the parity readings above apart from real wins, and it carries the largest
   # correction (greedy 157.3 us -> g43k 142.4).
   # Ladder (3 reps, best): g172k 145.55 / g86k 142.44 / g43k 142.41 / g32k 144.63 / g16k 157.29.
   # Reps: 142.41 / 142.65 / 143.17 us (spread 0.5%). g43k and g86k tie in this lane; g43k is
-  # recorded because the f16-pair lane separates them (122.4 vs 126.7).
-  # Re-measured 2026-08-07 after the one-LOP3 codebook fix and the ladder widening (g32k 157.9 ->
-  # g43k 142.4); the split CHANGED, so this entry supersedes the seeded g32k row.
+  # recorded because the f16-pair lane separates them (122.4 vs 126.7). Measured 2026-08-07 after
+  # the one-LOP3 codebook fix and the ladder widening; NOT re-measured in the 2026-08-08 round.
   - kernel: matmul
     name: glm45air.pastl2_22016.m1
     model: null  # a synthetic past-L2 control, not a GLM projection — never audited in-model

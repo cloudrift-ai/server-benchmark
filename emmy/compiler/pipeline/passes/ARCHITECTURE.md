@@ -585,7 +585,9 @@ resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gat
 (an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
 warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
-so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
+so the depth is measured per shape; the pair is a catalog, `space.sync_stage_moves()`, so a recorded `d1/sync`
+golden is a member the permanence gate can check, exactly as `decode_band_moves` is for the band's split widths),
+crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
 edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
 across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, cheap

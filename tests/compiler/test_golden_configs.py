@@ -277,6 +277,7 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         scalar_tile_moves,
         splitk_moves,
         stage_moves,
+        sync_stage_moves,
         warp_tile_moves,
     )
 
@@ -302,7 +303,10 @@ def test_golden_knobs_are_members_of_the_move_catalog():
             pool = set(warp_tile_moves((plan.atom.name,))) if warp else scalar_moves
             assert plan in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
         stage = g.knobs.get("STAGE", "")
-        assert not stage or Stage.parse(stage) in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
+        # A coded-B entry stages through the compute fill and nothing else — no copy transport can
+        # evaluate the decode cone — so its catalog is the fill's depths, not the transport grid.
+        stage_pool = sync_stage_moves() if g.dtype == "trellis" else stage_moves(warp=warp)
+        assert not stage or Stage.parse(stage) in stage_pool, f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
         red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
         # A coded-B entry's partition comes from the decode band alone (see ``decode_band_moves``),

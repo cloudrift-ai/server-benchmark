@@ -108,6 +108,7 @@ from emmy.compiler.pipeline.search.space import (
     scalar_tile_moves,
     splitk_moves,
     stage_moves,
+    sync_stage_moves,
     twisted_warp_moves,
     warp_tile_moves,
 )
@@ -1059,7 +1060,7 @@ def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     :func:`_legality.resolve_sync_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row."""
     pin = term.pin("STAGE", node)
-    depths = [Stage.parse(pin).depth] if pin else [1, 2]
+    depths = [Stage.parse(pin).depth] if pin else [m.depth for m in sync_stage_moves()]
 
     def resolve(st: Stage) -> Stage | None:
         r = _resolve_stage(term, node, tile, st)

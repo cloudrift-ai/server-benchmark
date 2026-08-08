@@ -453,6 +453,23 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     return [*depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
 
 
+# The COMPUTE-FILL depths — the ``sync`` transport a contraction with a computed operand edge (a
+# fused computed-A cone, or a computed-B trellis decode) stages through. ``d2`` is the asymmetric
+# B-only prefetch ring; a ``d2`` that clamps back under the smem budget spells as ``d1`` and
+# dedupes away. Legality and sizing stay the resolver's (``_legality.resolve_sync_stage``).
+SYNC_STAGE_DEPTHS: tuple[int, ...] = (1, 2)
+
+
+def sync_stage_moves() -> list[Stage]:
+    """The compute-fill ``STAGE`` candidates: :data:`SYNC_STAGE_DEPTHS` as typed :class:`Stage`
+    slices. A computed operand edge takes this list ALONE and never :func:`stage_moves` — a copy
+    transport cannot evaluate a producer cone — and it has no gmem-direct ``None`` sibling either,
+    so a ``STAGE`` pin on such a node can only choose the depth. Named here rather than inline in
+    the scheduler so a recorded golden's ``d1/sync`` is a member of a catalog the permanence gate
+    can check, exactly as :func:`decode_band_moves` does for the band's split widths."""
+    return [Stage(depth=d, transport="sync") for d in SYNC_STAGE_DEPTHS]
+
+
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is
 # the scheduler's.
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)

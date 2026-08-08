@@ -201,6 +201,18 @@ at N=K=22016, K=2 (codes 121 MB — past L2): the compressed matmul beats the sa
 (2.10 vs 2.34 ms) and runs decode-ALU-bound at larger prefill M (1.6–1.7× f16 at M=256–2048) — the per-element
 decode re-runs per M-tile row, which is the standing lever for the fragment-drain follow-up.
 
+Being ALU-bound rather than operand-bound inverts what the output tile is for, and the priors do not know it: a
+materialized B rewards a WIDE register fragment (it buys operand reuse), while a decoded B has no operand to reuse,
+so the fragment only spends registers and the pressure caps occupancy. Across GLM-4.5-Air's fourteen coded trunk
+shapes at decode width the measured answer is always the NARROWEST tile the shape allows with as many CTAs as the
+output axis gives (`w2x2`/`f1x1` on the 5090, 58–92 % occupancy) against the cold pick's `f1x4`/`f1x8` at 17–25 %:
+1.0–4.9× per kernel, worst where N is narrow and the cold pick's CTA count is smallest. `goldens/…_glm45air.yaml`
+records that correction per shape; the general fix is a prior that prices the decode's instruction count instead of
+the operand traffic. The correction is width-scoped, though — it holds only while the tile keeps the shape's M-block
+count, i.e. re-reads the codes slab no more often than the cold pick did. At prefill width the same search picks a
+tile that doubles the M blocks, which an isolated bench cannot see (an 11–25 MB codes slab replays out of L2) and
+the real program can: it measured 1.3–1.8× ahead in isolation and 1.7× BEHIND in the model.
+
 **The decode-phase matvec (the decode band).** At M=1 the contraction demotes to a PLANAR fold, so the decode
 reaches the reduce tier instead, and there the per-element leaf is the wrong granularity: a whole 16x16 weight
 tile has to be touched for each 2-bit weight, which measured 4 bytes of code traffic and ~28 instructions per

@@ -461,8 +461,48 @@ checkpoint, and our decode is exact.
 
 **Hardware**: 5090. **Depends on**: Phase 3.
 
-**STATUS: ENABLEMENT + PROOF-OF-CONCEPT DONE (2026-08-07); the full sweep is still owed.** A trellis golden is now
-expressible, matchable, benchable and deployable:
+**STATUS: THE DECODE-WIDTH SWEEP IS DONE (2026-08-08) — batch-1 TPOT 104.2 → 57.90 ms, 1.80x. Prefill is
+deliberately still owed.** Full write-up in `plans/golden-sweep-glm45air-rtx5090-findings.md`; the short version:
+
+- **What the 17x roofline flag was.** `L0.post.decode.m32` at 18.1x its 64.7 µs floor was not a lowering failure —
+  all three coded projections were on the intended warp tier with the intended `sync` compute fill, carrying the
+  wrong OUTPUT TILE, and so was every coded projection in the model. A wide register fragment is right for a
+  MATERIALIZED B (operand reuse); a DECODED B has no operand to reuse, its cost is the decode's per-element
+  instruction count, so the fragment only spends registers and the pressure caps occupancy at 17-25 %. The measured
+  answer is the narrowest tile the shape allows with as many CTAs as the output axis gives (`w2x2`/`f1x1`/`k8` on 12
+  of 14 shapes, 58-92 % occupancy). Split-K cannot supply CTAs here — it is refused on a computed B — which is why
+  the miss is worst on the narrow-N shapes (k/v_proj 4.9x, shared gate/up 4.5x).
+- **42 entries seeded** — all fourteen coded trunk (shape, rate) pairs at M = 1 / 8 / 32, 3 reps each, spreads
+  ≤ 0.6 %. Per-kernel wins 1.0-4.9x. The rate never changes the winner, only the µs.
+- **Verified on the real model**, which is the part that matters: two full 46-layer runner builds, per-launch timed.
+  `L1.post.decode.m32` 936 → 406 µs (2.30x), `L1.pre` 585 → 349, `L0.post` 1171 → 682 (18.1x → 10.4x the floor).
+  The four `moe.expert.*.bucket.m32` programs improved 2.4-2.6x with **no expert entry of their own** — a routed
+  expert's gate/up and down share the shared expert's extents and rates, so those entries key them. That is the
+  answer to the "no expert twin" limit: covered by shared-expert entries, verified by step time, not by the audit.
+- **The audit is nearly blind here and now says so.** It times ONE layer per attention class above a 20 µs floor, so
+  on this model it reports layer 0 alone — the only DENSE layer, which clears the floor only via its uncoded fp16
+  `o_proj`. The unreported representative MoE layer was 77x. Noted in `emmy/serving/ARCHITECTURE.md`.
+- **Prefill (M=512) and M=64 were swept and WITHHELD.** Both looked clean in isolation (1.03-1.76x / 2.1-4.5x); the
+  M=512 set was checked in-model and INVERTED — layer 1's coded `o_proj` 711 → 1182 µs. Both widths' winners cut the
+  CTA's M extent below the cold pick's, re-reading the codes slab more times, which is free when a 25 MB slab
+  replays out of L2 and is not against a 29 GB trunk. Shipped rule: keep an entry only if its tile reads the codes
+  slab no more often than the pick it replaces, or it was verified in-model. **A prefill golden needs an in-model or
+  past-L2 harness** — that is the remaining Phase 4 work, and TTFT will not move until it lands.
+- **`eval golden --in-model`: MATCH 20 → 40, DRIFT 0, GAP 317 → 297, compile_fail 0.** Every remaining trellis GAP is
+  a width this deployment does not run, or a symbolic fork.
+- Two boot facts for Phase 5, both forced discoveries: `--max-num-seqs 32` is required (vLLM's default 256 OOMs in
+  the post-KV sampler warmup, and its warmup budget alone drops available KV to 0.28 GiB — at 32 the pool is 9,184
+  tokens against the recorded 9,392); and `emmy serve <repo-id>` cannot resolve a branch-only EXL3 repo, because
+  `quantized_checkpoint_dir` reads `config.json` off the DEFAULT branch and `--revision` reaches vLLM but not the
+  runner. Serve the snapshot path until that is fixed.
+- One compiler-side fix rode along: the `sync` compute-fill depths were a literal inside `_schedule`, so a recorded
+  `d1/sync` was not a member of any catalog the golden permanence gate checks — the same defect the decode band's
+  split widths had. They are now `space.sync_stage_moves()`. Emission-neutral (kernel digests identical).
+
+**Still owed by Phase 4**: the prefill/symbolic widths (see above), the ~3.8k-row warp pool beyond the 9 sampled rows
+per width, and the model's uncoded f16 forks (layer 0's fp16 `o_proj` alone is 151.7 µs per decode step).
+
+**Enablement, done 2026-08-07.** A trellis golden is now expressible, matchable, benchable and deployable:
 
 - `ShapeKey.from_matmul` takes the `trellis` dtype spelling (`dtype_class="trellis"`, `is_warp` FORCED — the flag is
   the dtype family, not the deployed tier, which is what makes one key serve the M=1 decode band and the prefill
@@ -507,10 +547,9 @@ expressible, matchable, benchable and deployable:
   Audit on the pinned rung: **MATCH 19, DRIFT 0, GAP 317, compile_fail 0** — `glm45air.mlp_gate_up.m1` MATCHes in the
   `post1@b2` twin at `k_bits=2`, so the seeded entry genuinely deploys in the model graph, not just on its snippet.
 
-Residuals for the full sweep: the GAPs above are the sweep itself (attention q/k/v/o at 4 and 3 bits, the dense MLP at
-every prefill width, and the uncoded fused/norm forks of a model nobody has tuned); prefill/warp coded matmuls are a
-~3.8k-row pool. (`down`'s "one band width, so no fork a golden could decide" residual is CLOSED — the widened ladder
-gives it three rows and it is seeded.) Two twin-side limits bound what the audit can see. A coded twin pairs ONE
+Residuals as of the enablement round — the decode-width half is now CLOSED by the 2026-08-08 sweep above; the prefill
+widths and the uncoded forks are not. Two twin-side limits bound what the audit can see, and both still hold. A coded
+twin pairs ONE
 traced layer's structure with one checkpoint layer's rates, so where a layer codes only part of the twin (GLM stores
 layer 0's `o_proj` uncompressed, and its MoE layers have no dense MLP) the rest stay f16 and those forks are artifacts
 of the pairing, not shapes the model runs. And there is still no EXPERT twin: the expert weights arrive as program
@@ -527,7 +566,9 @@ weights arrive as program inputs.
 - Cover both the routed-expert matmuls and the dense trunk projections, at prefill and decode shapes.
 - Reproduce each entry 2–3× and record the spread; document the measurement method in the preamble.
 - The preamble must carry the L2-residency warning — with a 26.5 GB trunk, absolute microseconds from
-  `run --bench --golden` do not predict in-model step time.
+  `run --bench --golden` do not predict in-model step time. The 2026-08-08 round proved this is not a caveat for the
+  reader but a limit on the METHOD: at prefill width the isolated ranking inverted in the model, so a wide-M entry
+  needs an in-model or past-L2 measurement before it may be recorded.
 
 **Verify**: `emmy eval golden --in-model` on the deployed model; the coverage gate that Phase 5 enforces must pass.
 

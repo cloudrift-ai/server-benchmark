@@ -1148,7 +1148,7 @@ model does not run has no in-model form to audit.
 Model-tagged goldens opt into the **in-model drift audit** (`emmy eval golden --in-model`, library `search/audit.py`):
 the model's serving twins are re-traced **weight-free** (`emmy/serving/twins.py` builds a trimmed random-init skeleton
 from `config.json` alone — a trace never reads a weight value; on an EXL3 checkpoint it also spells the coded
-contractions from its allocation sidecar, one twin per rate profile) and each tagged card's twins are compiled
+contractions from `quantization_config.json`, one twin per rate profile) and each tagged card's twins are compiled
 with the golden tier as the only evidence (no tune DB, online file pointed at a nonexistent path, deployable nvcc regime
 forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consultation — and the card targeted via
 `Context.from_target`, so verdicts are machine-independent). Each golden-tier consultation yields MATCH (a recorded

@@ -188,7 +188,8 @@ codes are the only weight bytes that ever cross DRAM (~8× fewer than f16 at K=2
 usual vectorized `cp.async` fill underneath. Split-K, TMA and the scalar staged tiers decline (a computed B has
 no gmem element layout); the COLLAPSE reading is the reduce-tier fallback. Constant-rooted hat-basis cones fold
 by default and stay in-graph under `EMMY_TRELLIS_EXPAND` (the kernel-path gate, the trellis sibling of
-`EMMY_FP8_EXPAND`); checkpoint-basis cones fold regardless. Measured on the 5090
+`EMMY_FP8_EXPAND`) or under the per-compile `expand=True` argument to `spell_trellis_constants`, which stamps the
+`trellis.expand` graph hint the fold reads; checkpoint-basis cones fold regardless. Measured on the 5090
 at N=K=22016, K=2 (codes 121 MB — past L2): the compressed matmul beats the same-shape f16 matmul at M=128
 (2.10 vs 2.34 ms) and runs decode-ALU-bound at larger prefill M (1.6–1.7× f16 at M=256–2048) — the per-element
 decode re-runs per M-tile row, which is the standing lever for the fragment-drain follow-up.

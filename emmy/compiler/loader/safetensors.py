@@ -136,6 +136,32 @@ def _read_shard(
     return fp8
 
 
+def load_sources_by_path(model_id_or_path: str, paths) -> dict[str, np.ndarray]:
+    """Read the checkpoint tensors ``paths`` names, keyed by the REQUESTED path.
+
+    The path-keyed sibling of :func:`load_constants_from_safetensors`, for callers that hold a
+    plan rather than a graph — the serving trunk binds an ``ExecutionPlan``'s ``WeightSpec``
+    source paths (``serving/gen_runner.py``), and a plan carries no node dtypes to key the
+    raw-bits rule on. Every key reads at its STORED value dtype (fp8 decodes to f32, BF16 reads
+    as f32 — the loader convention; int carriers such as EXL3's ``.trellis`` codes keep their
+    stored words). A path with no matching key is simply absent from the result, so the caller
+    can fall back to a live module for it."""
+    model_dir = _resolve_model_dir(model_id_or_path)
+    index = _build_index(model_dir)
+    by_shard: dict[str, list[str]] = {}
+    resolved: dict[str, str] = {}
+    for path in paths:
+        key = next((c for c in _candidate_keys(path) if c in index), None)
+        if key is None:
+            continue
+        resolved[path] = key
+        by_shard.setdefault(str(index[key]), []).append(key)
+    sources: dict[str, np.ndarray] = {}
+    for shard_path, keys in by_shard.items():
+        _read_shard(shard_path, keys, sources)
+    return {path: sources[key] for path, key in resolved.items() if key in sources}
+
+
 def _record_leaves(record: Graph):
     """Yield ``(source_path, dtype_name)`` for every leaf source a ``source_graph`` bind
     record needs, recursing into nested records."""

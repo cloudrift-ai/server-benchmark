@@ -586,6 +586,7 @@
  "tests/serving/test_gen_runner_gpu.py::test_gen_runner_stitch_matches_eager": 10.59,
  "tests/serving/test_gen_runner_gpu.py::test_layers_share_activation_arena": 10.72,
  "tests/serving/test_gen_runner_gpu.py::test_moe_expert_m256_twin_matches_eager_across_experts": 6.17,
+ "tests/serving/test_gen_runner_gpu.py::test_moe_expert_shape_groups_compile_and_dispatch_per_layer": 23.1,
  "tests/serving/test_gen_runner_gpu.py::test_moe_fixed_slot_combine_matches_routed_oracle": 11.34,
  "tests/serving/test_gen_runner_gpu.py::test_moe_indirect_slot_matches_direct_expert_bit_exact": 11.09,
  "tests/serving/test_generate_gpu.py::test_generate_loop_runs_end_to_end": 3.93,

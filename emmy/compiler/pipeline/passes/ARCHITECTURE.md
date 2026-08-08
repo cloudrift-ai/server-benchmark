@@ -20,7 +20,8 @@ only ever pattern-match plain constants, and later folds compose their transpose
 trellis-coded (EXL3) cone in the CHECKPOINT basis — three constant leaves under a `TrellisDecodeOp(hadamard=True)`,
 spelled by `spell_trellis_constants` — folds unconditionally, since no lowering rule knows that form, while the
 HAT-BASIS form (`hadamard=False` — codes alone, no Hadamard fold) folds by default and stays in-graph under
-`EMMY_TRELLIS_EXPAND`: it lifts to a `LoopOp` of per-element `TrellisLoad` reads
+`EMMY_TRELLIS_EXPAND` — or under the `trellis.expand` GRAPH HINT, which is how a caller that wants the compressed
+lane for ONE compile asks for it (the serving trunk): it lifts to a `LoopOp` of per-element `TrellisLoad` reads
 (`loop/lifting/050_lift_trellis_decode`) and rides the consuming matmul as a computed-B cone. Either way, downstream
 layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`, the `i16` codes
 carrier), decode-trait

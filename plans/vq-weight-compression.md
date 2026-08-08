@@ -391,16 +391,41 @@ Order matters — the fragment path first, or every measurement undersells the f
    the layer's expert store stays compressed (34.9 MB vs 277 MB dequantized, 7.9x). Pack round-trip: cold boot
    127 s → pack-hit boot 22 s with identical accuracy, the trellis plans carrying both `gen` computed constants and
    indirect operands.
-   **RESIDUAL — one expert program set per distinct codes shape (Phase 5 BLOCKER).** EXL3's mixed allocation makes
-   K vary per layer: for gate/up the pinned checkpoint is K=2 on 40 layers, K=3 on 4, K=4 on 1 (down_proj 38/6/1),
-   which the expert `shape_key` now catches as a layer disagreement and raises on. Serving the whole model needs
-   the `expert_sym`/`bucket`/`one`/`m256`/`slots` singletons keyed by shape group (each group its own pointer
-   tables; the selector and partials stay shared, since one layer runs at a time).
-   **RESIDUAL — the serving trunk is not compressed.** `_compile_split` binds trunk constants from
-   `wrapper.named_parameters()`, whose paths are wrapper-relative and never reach the checkpoint index, so the
-   constant speller cannot fire on a serving trunk. At 2.25 bpw the decoded trunk is ~14 GB against ~28 GB of
-   compressed experts — over the 32 GB card. Closing it needs a per-layer wrapper-path → checkpoint-key mapping
-   plus shard-sourced binding in `_compile_split`.
+5. **Both Phase 3.4 residuals CLOSED (2026-08-07)** — the two blockers between here and Phase 5.
+   **Expert shape groups.** `from_model` interns each layer's `shape_key` into a group index and compiles that
+   group's whole tier set (`_build_expert_group`: sym / bucket / one / m256 / the k fixed slots); the layer's `moe`
+   entry carries the index and `_launch_expert` / `_moe_combine_slots` route through it. Group 0 keeps the original
+   pack names, so a single-group model is unchanged. `_ensure_device` builds the indirect pointer tables PER GROUP
+   (offsets within the group); selector and partials stay shared. The fixed-slot tier is all-or-nothing across
+   groups — a whole-step capture records one launch set per layer. Verified on a cut of the pinned checkpoint that
+   deliberately mixes K (source layers 3/1/2/6 → K 2,2,2 / 3,3,3 / 4,4,4 / 2,2,3): 4 groups, every tier + 4 slots
+   per group, expert accuracy rel ≤ 1.3e-3 at M=1/8/256 and fixed-slot-vs-routed ≤ 7.2e-4 on every group.
+   **Compressed serving trunk.** `_compile_split(ckpt=(dir, id_to_key))`: `_retarget_constants` re-addresses each
+   traced constant to its checkpoint key by parameter-tensor identity, `spell_trellis_constants(expand=True)` fires
+   (forcing the compressed lane per compile via the new `trellis.expand` graph hint, which `032` reads beside the
+   env knob), and `_plan_sources` feeds the constants from the shards (`load_sources_by_path`) instead of sweeping
+   `named_parameters`. `load_quantized_split(..., compress_trunk=True)` is the matching lane: coded trunk linears
+   are never decoded and the twin's parameters are uninitialized placeholders, so `_plan_sources` RAISES on any
+   weight the plan cannot source (a linear that fell back to the folded checkpoint-basis cone) rather than running
+   weightless. Verified on a 2-layer and a 5-layer cut: every trunk program carries trellis-decode kernels, the
+   resident constant bytes are the coded footprint exactly (layer 0 post = 100.7 MB fp16 `o_proj` + 34 MB codes =
+   134.6 MB), accuracy vs the decoded eager twin rel ≤ 1.3e-3.
+   **Measured footprint of the pinned 2.25bpw checkpoint** (read off the safetensors index, 46 layers):
+   experts 25.099 GiB (codes 24.922 + suh/svh 0.177) · trunk codes+siblings 2.493 GiB · trunk fp16-kept 1.296 GiB
+   (embed 1.156, the layer-0 fp16 `o_proj` 0.094, routers 0.044, norms/biases) · `lm_head` codes 0.434 GiB.
+   emmy-owned resident = **28.888 GiB**; the decoded-trunk lane would have been 37.3 GiB, over the card. Card is
+   31.843 GiB, so headroom is ~2.95 GiB before vLLM's `lm_head` and the CUDA context.
+   **FULL 46-LAYER BOOT ON THE 5090: SUCCEEDED (2026-08-07).** Cold boot 1123 s (`EMMY_PACK_DIR` set,
+   `EMMY_GEN_M1_TIER=0`, `decode_bucket=8`, `max_tokens=256`); 204 plans written. Measured resident: trunk constants
+   2.592 GiB + expert store 25.099 GiB + embed 1.156 GiB = **28.847 GiB** (torch 26.300 + cupy pool 2.677), and
+   `nvidia-smi` reads **31299 MiB of 32607** at boot — the ~2.3 GiB over the weights is the CUDA context plus the
+   allocators' free blocks. Four expert shape groups covering 4 / 1 / 38 / 2 layers, all 46 pre + 46 post programs
+   built, `has_moe_fixed_slot` true. A 4-token forward through all 46 layers plus the final norm runs finite. Also
+   fixed on the way: `load_quantized_split` held the per-expert dicts alive across the stacking loop, so the store
+   cost 2× at peak (~50 GiB for this checkpoint) — it now pops per layer.
+   **What the boot says about Phase 5's headroom.** 1.28 GiB free at the runner's own boot, before vLLM's `lm_head`
+   and its KV cache. Reclaiming the allocators' free blocks and pinning the arena at the real serving capacity are
+   the first levers; the `lm_head` decision below is the second.
 
 **Deliverable**: GLM-4.5-Air resident on the 5090 at ~26.5 GB with correct output. **Verify**: VRAM occupancy
 matches the checkpoint size; accuracy unchanged from Phase 2; a decode-phase step streams compressed bytes (confirm
@@ -462,8 +487,14 @@ do not improvise. `make serve-config → serve-goldens → serve-warm → serve-
 
 - Create `models/<slug>.env` with the pinned serving config, including the checkpoint revision. **The config seals
   the cache key and cannot change after warming.**
-- Memory headroom is the delicate step here: at ~26.5 GB weights there is very little room. Sweep and pin the
-  largest passing `max_num_batched_tokens` / bucket configuration, and expect the answer to be small.
+- Memory headroom is the delicate step here. Measured budget on the 31.843 GiB card: emmy-owned weights are
+  28.888 GiB (see the Phase 3.4 arithmetic above), leaving ~2.95 GiB for vLLM's `lm_head`, the CUDA context,
+  emmy's activation arena and the KV cache. KV costs 0.180 MiB/token at fp16 and 0.090 MiB/token at
+  `fp8_e4m3` — so the fp8 KV cache is what makes the context budget non-trivial, and the answer is small.
+  Sweep and pin the largest passing `max_num_batched_tokens` / bucket configuration.
+- **`lm_head` is vLLM-owned and has no `.weight` in an EXL3 checkpoint** (only `lm_head.trellis`, 0.434 GiB coded,
+  1.156 GiB decoded). `EmmyGenModel.load_weights` will find nothing to load. Decide before the bake: decode it once
+  at load (costs 1.156 GiB resident, headroom drops to ~1.8 GiB) or give the head to the runner coded.
 - Clear every gate: golden coverage, HF-parity validation, offline zero-recompile verify.
 - **Pause for human approval before `serve-push`.**
 

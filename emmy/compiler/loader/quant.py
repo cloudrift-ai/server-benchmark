@@ -778,7 +778,7 @@ def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int,
     return True
 
 
-def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
+def spell_trellis_constants(graph: Graph, model_id_or_path: str, *, expand: bool | None = None) -> int:
     """Spell every EXL3 trellis-coded weight of ``graph`` as an in-graph decode cone, at birth.
 
     The EXL3 sibling of :func:`spell_quantized_constants`, called from the same post-trace
@@ -789,7 +789,11 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
     field recording the marker-sibling presence, so the markers themselves never enter the
     graph). From that point a quantized weight is just constants + algebra.
 
-    Two spellings, chosen by ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``):
+    Two spellings, chosen by ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``) or, when the
+    caller passes ``expand`` explicitly, by that — the serving trunk asks for the compressed
+    lane per compile rather than per process. An explicit ``expand=True`` also stamps the
+    ``trellis.expand`` graph hint, which is how ``032_fold_constant_subgraphs`` learns to leave
+    the hat-basis cone in-graph without reading the env knob:
 
     - **default, the correctness lane** — :func:`_spell_trellis_one` spells the
       CHECKPOINT-BASIS decode (``hadamard=True``) as a constant-only cone, which
@@ -818,6 +822,10 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
     if _exl3_quant_config(model_dir) is None:
         return 0
     index = _build_index(model_dir)
+    if expand is None:
+        expand = config.trellis_expand()
+    elif expand:
+        graph.hints.set("trellis.expand", True)
 
     spelled = 0
     with ExitStack() as stack:
@@ -842,7 +850,7 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
                 continue
             shapes = {leaf: _shape(base + "." + leaf) for leaf in ("trellis", "suh", "svh")}
             args = {"base": base, "cb": _exl3_codebook(index, base), "shapes": shapes}
-            if config.trellis_expand() and _spell_trellis_activation_one(graph, nid, **args):
+            if expand and _spell_trellis_activation_one(graph, nid, **args):
                 spelled += 1
             elif _spell_trellis_one(graph, nid, **args):
                 spelled += 1

@@ -748,7 +748,7 @@ def _stack_exl3_experts(layer: int, by_name: dict, model) -> dict:
     return out
 
 
-def load_quantized_split(model_dir, dtype):
+def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
     The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss):
@@ -768,19 +768,30 @@ def load_quantized_split(model_dir, dtype):
       unquantized expert weights) as ``dtype`` value tensors. An interleaved gate/up layout
       de-interleaves here — bits, scale and bias alike (:func:`deinterleave_gate_up`).
 
-    EXL3 (``fmt == "exl3"``) follows the same split with the trellis format's own shapes: the
-    dense trunk DECODES to values here (a trunk weight binds off the twin module, which has no
-    checkpoint path, so it cannot stay coded — see ``serving/ARCHITECTURE.md``), while every
-    routed expert keeps its PACKED CODES. Experts arrive as per-expert modules, so each
+    EXL3 (``fmt == "exl3"``) follows the same split with the trellis format's own shapes, while
+    every routed expert keeps its PACKED CODES. Experts arrive as per-expert modules, so each
     ``(layer, projection, leaf)`` triple stacks into one E-leading tensor: ``w_gate`` /
     ``w_up`` / ``w_down`` (int16 codes) plus each one's ``_suh`` (128-blocked) and ``_svh``
     (sliced to the logical out extent) channel vectors — exactly the shapes
     ``spell_trellis_inputs`` declares. Gate and up stay SEPARATE (their ``suh`` differ).
 
+    The dense TRUNK has two lanes, and ``compress_trunk`` picks between them:
+
+    - **default (correctness)** — every coded trunk linear DECODES to values here, so the twin
+      is a self-contained eager reference and any consumer that binds off the module gets real
+      weights. Costs the full decoded footprint (GLM-4.5-Air: ~14 GiB).
+    - **``compress_trunk=True`` (the serving lane)** — a coded trunk linear is left UNDECODED
+      and its twin parameter is an uninitialized placeholder at the declared shape; the trunk
+      keeps its codes and the caller re-sources those constants from the checkpoint itself
+      (``serving/gen_runner.py`` retargets each traced constant to its checkpoint key and lets
+      ``spell_trellis_constants`` fire). Nothing may read those parameters' VALUES — the store's
+      ``"trunk"`` field says which lane produced the twin.
+
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
     ``"codebooks": {layer_index: {input_name: cb}}`` on the EXL3 path (the codebook id the
-    speller stamps on each decode).
+    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory) and
+    ``"trunk"`` (``"values"`` or ``"codes"``).
     """
     from pathlib import Path  # noqa: PLC0415
 
@@ -821,6 +832,7 @@ def load_quantized_split(model_dir, dtype):
     # index and stack once the whole checkpoint is read.
     per_expert: dict[int, dict[str, dict[int, object]]] = {}
     codebooks: dict[int, dict[str, int]] = {}
+    coded_trunk: set[str] = set()  # compress_trunk: the coded trunk weights left undecoded
     fmt: str | None = None
     from contextlib import ExitStack  # noqa: PLC0415
 
@@ -865,6 +877,9 @@ def load_quantized_split(model_dir, dtype):
                     if base + ".suh" not in index or base + ".svh" not in index:
                         logger.warning("EXL3 linear %s: no suh/svh channel vectors; left undecoded", base)
                         continue
+                    if compress_trunk:
+                        coded_trunk.add(base + ".weight")  # placeholder below; the real bytes stay coded
+                        continue
                     w_hat = decode_trellis(f.get_tensor(k).numpy(), _exl3_codebook(index, base))
                     w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
                     state[base + ".weight"] = torch.from_numpy(w).to(dtype)
@@ -882,8 +897,11 @@ def load_quantized_split(model_dir, dtype):
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
                 state[k] = t.to(dtype) if t.is_floating_point() else t
 
-    for layer, by_name in per_expert.items():
-        layers_store.setdefault(layer, {}).update(_stack_exl3_experts(layer, by_name, model))
+    # POP per layer: the stacked tensors are a full second copy of the expert bytes, so holding the
+    # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB
+    # box survives). Dropping each layer's sources as it stacks keeps the peak at one layer over.
+    for layer in sorted(per_expert):
+        layers_store.setdefault(layer, {}).update(_stack_exl3_experts(layer, per_expert.pop(layer), model))
 
     # De-interleave the gate/up family once, so the wrapper's chunk-half split holds.
     trunk = getattr(model, "model", model)
@@ -900,6 +918,17 @@ def load_quantized_split(model_dir, dtype):
                 if name in store:
                     store[name] = deinterleave_gate_up(store[name])
 
+    if coded_trunk:
+        # UNINITIALIZED placeholders, deliberately: the twin needs a real tensor at the declared
+        # shape for the trace, but reading one is a bug (the values live in the checkpoint's
+        # codes). ``torch.empty`` keeps the pages untouched, so a 14 GiB decoded trunk costs no
+        # resident host memory here.
+        declared = model.state_dict()
+        for key in coded_trunk:
+            param = declared.get(key)
+            if param is not None:
+                state[key] = torch.empty(param.shape, dtype=dtype, device="cpu")
+
     _trim_padded_weights(model, state)  # EXL3 pads both dims of every coded linear to 128
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
     if unexpected:
@@ -909,7 +938,13 @@ def load_quantized_split(model_dir, dtype):
         logger.info("quantized split load: %d module tensors not in checkpoint (e.g. %s)", len(missing_dense), missing_dense[0])
     model.tie_weights()
     model.eval()
-    return model, {"fmt": fmt, "layers": layers_store, "codebooks": codebooks}
+    return model, {
+        "fmt": fmt,
+        "layers": layers_store,
+        "codebooks": codebooks,
+        "dir": str(model_dir),
+        "trunk": "codes" if coded_trunk else "values",
+    }
 
 
 def _trim_padded_weights(model, state: dict) -> None:

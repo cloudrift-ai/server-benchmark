@@ -139,7 +139,11 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
     # checkpoint-basis cone folds regardless — no lowering rule knows it.
     trellis_ops = [match.graph.nodes[nid].op for nid in cone if isinstance(match.graph.nodes[nid].op, TrellisDecodeOp)]
     if trellis_ops:
-        if config.trellis_expand() and not any(op.hadamard for op in trellis_ops):
+        # The speller stamps ``trellis.expand`` on graphs it spelled for the kernel path
+        # regardless of the env knob — the serving trunk asks for the compressed lane per
+        # compile, not per process (``serving/gen_runner.py``).
+        expand = config.trellis_expand() or bool(match.graph.hints.get("trellis.expand", False))
+        if expand and not any(op.hadamard for op in trellis_ops):
             raise RuleSkipped("EMMY_TRELLIS_EXPAND on — the hat-basis decode cone stays in-graph for the kernel path")
     elif config.fp8_expand():
         raise RuleSkipped("EMMY_FP8_EXPAND on — the decode cone stays in-graph for the kernel path")

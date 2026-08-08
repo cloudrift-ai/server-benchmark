@@ -480,3 +480,69 @@ def test_load_quantized_split_keeps_exl3_experts_coded(tmp_path):
     for key in ("model.layers.0.self_attn.q_proj.weight", "model.layers.1.mlp.shared_experts.gate_proj.weight"):
         assert not sd[key].is_meta
         torch.testing.assert_close(sd[key], ref[key], rtol=0, atol=0)
+
+
+def test_load_quantized_split_compress_trunk_leaves_the_trunk_coded(tmp_path):
+    """``compress_trunk=True`` is the serving lane: no trunk linear decodes, the twin carries
+    placeholders at the declared shapes (so the trace still works), and the store says which
+    lane produced it plus where the checkpoint lives — the two things the runner needs to
+    re-source those constants from the shards."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    cfg = _tiny_glm4_moe_config(transformers)
+    torch.manual_seed(0)
+    ref = _exl3_moe_checkpoint(tmp_path, cfg)
+    model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True)
+
+    assert store["trunk"] == "codes" and store["dir"] == str(tmp_path)
+    sd = model.state_dict()
+    for key in ("model.layers.0.self_attn.q_proj.weight", "model.layers.1.mlp.shared_experts.gate_proj.weight"):
+        assert not sd[key].is_meta and sd[key].shape == ref[key].shape  # shaped, but NOT decoded
+    # The unquantized trunk tensors still load their real values.
+    torch.testing.assert_close(sd["model.embed_tokens.weight"], ref["model.embed_tokens.weight"], rtol=0, atol=0)
+    _, values_store = load_quantized_split(tmp_path, torch.float16)
+    assert values_store["trunk"] == "values"
+
+
+def test_serving_trunk_constants_retarget_to_checkpoint_keys(tmp_path):
+    """The fit blocker, at its root: a split wrapper's traced constants carry WRAPPER-relative
+    parameter paths (``q_proj.weight``), which never reach the checkpoint index, so the trellis
+    speller cannot fire and the trunk binds decoded values. ``_retarget_constants`` re-addresses
+    them by tensor identity; only then does the speller rewrite the linear into the compressed
+    chain, and every remaining constant names a real checkpoint key."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+    from emmy.compiler.loader.quant import spell_trellis_constants
+    from emmy.compiler.loader.safetensors import _build_index, _candidate_keys
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper, load_quantized_split
+    from emmy.serving.gen_runner import _retarget_constants, trace_split
+
+    cfg = _tiny_glm4_moe_config(transformers)
+    torch.manual_seed(0)
+    _exl3_moe_checkpoint(tmp_path, cfg)
+    model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True)
+    block = model.model.layers[0]
+    pre_w, _post_w = build_attention_split_wrapper(block)
+    example = [torch.zeros(4, cfg.hidden_size, dtype=torch.float16)]
+
+    bare = trace_split(pre_w, example, None)
+    assert spell_trellis_constants(bare, str(tmp_path), expand=True) == 0, "wrapper-relative paths must reach nothing"
+
+    graph = trace_split(pre_w, example, None)
+    id_to_key = {
+        id(t): path for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
+    }
+    _retarget_constants(graph, pre_w, id_to_key)
+    assert spell_trellis_constants(graph, str(tmp_path), expand=True) == 3  # q/k/v
+    assert graph.hints.get("trellis.expand") is True
+    assert sum(isinstance(n.op, TrellisDecodeOp) for n in graph.nodes.values()) == 3
+    index = _build_index(tmp_path)
+    for nid, op in graph.loadable_constants():
+        if op.source_graph is not None:
+            continue  # the shared Hadamard — a COMPUTED constant with no checkpoint key at all
+        assert any(c in index for c in _candidate_keys(op.source_path)), f"{nid}: {op.source_path} is not a checkpoint key"

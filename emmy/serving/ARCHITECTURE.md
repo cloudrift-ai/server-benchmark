@@ -84,7 +84,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
-  golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
+  golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning. On an EXL3
+  (trellis-coded) checkpoint the twins get a **coded arm**: serving spells every trunk linear as the activation-side
+  basis restore around a hat-basis coded contraction, so a plain-f16 twin would key every trunk projection as its
+  uncompressed twin and report GAP on every coded golden. The weight-free inventory — per module, the code rate and
+  the exact `trellis` / `suh` / `svh` shapes — comes from the loader (`loader/exl3.coded_tensor_storage`), and is all
+  the deployed speller (`loader/quant._spell_trellis_activation_one`, called directly so the twin cannot drift from
+  it) needs. Because the rate is part of the `ShapeKey` and an optimized rung allocates bits per tensor, one traced
+  layer does not represent the trunk: a coded twin is emitted **once per distinct rate profile**, named
+  `<twin>@b<rates>` (a hub id may pin the rung's branch as `<repo>@<revision>`, since the rungs differ in exactly that
+  allocation).
+  Where a checkpoint layer codes only some of the traced modules, the rest stay f16 — visible as a GAP, never a
+  wrong MATCH.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
@@ -155,7 +166,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
   `h`. The expert layout (orientation / interleave / bias — gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
-  named inputs. Program count is 2/layer + ONE expert program total — not `E`/layer. MoE layers are
+  named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
+  layers are
   device-resident only (`forward_layer_post` raises on the host path) and are excluded from post→pre chaining (two
   outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`),
   which a whole-step decode capture cannot record — but single-token decode is capture-legal through the fixed-slot
@@ -181,11 +193,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
   **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI
   change is invisible to the schedule search, see the plan section of `emmy/compiler/backend/ARCHITECTURE.md`).
-  Each kernel resolves its weight base pointer in-kernel as `table[sel[slot]]`: `_ensure_device` builds one flat
-  `[n_moe_layers · E]` int64 pointer table per weight kind (entry = the device address of one expert's slice of a
-  layer's 3-D tensor) plus a persistent `[k]` int32 selector and a `[k, H]` partials tensor; slot `j`'s plan
-  stamps `slot=j` (`_plan_with_slot`), and its table/selector/output arrays bind once at boot. The table is
-  layer-invariant — the layer offset rides in the selector VALUES — so per-slot cached graphs and the whole-step
+  Each kernel resolves its weight base pointer in-kernel as `table[sel[slot]]`: `_ensure_device` builds, PER SHAPE
+  GROUP, one flat `[group layers · E]` int64 pointer table per weight kind (entry = the device address of one
+  expert's slice of a layer's 3-D tensor); the `[k]` int32 selector and the `[k, H]` partials tensor are SHARED
+  across groups, since one layer runs at a time. Slot `j`'s plan
+  stamps `slot=j` (`_plan_with_slot`), and its table/selector/output arrays bind once at boot. A table is
+  layer-invariant within its group — the layer offset rides in the selector VALUES — so per-slot cached graphs and
+  the whole-step
   capture both bake fixed pointers. `_moe_combine_slots` then runs the router, writes `indices + sel_off` into
   the selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging;
   the kernels read the E-tensors directly), replays the k slots on the row, and combines the partials with one
@@ -212,9 +226,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
   T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
   card, the rest is vLLM's KV budget.
-  **Trellis-coded experts (EXL3, GLM-4.5-Air):** the same split with the trellis format's own shapes.
-  `load_quantized_split` decodes the DENSE trunk to values — a trunk weight binds off the twin MODULE, whose
-  parameter paths never reach the checkpoint index, so it cannot stay coded through this seam — while every routed
+  **Trellis-coded experts (EXL3, GLM-4.5-Air):** the same split with the trellis format's own shapes, and here
+  BOTH halves stay coded (`load_quantized_split(..., compress_trunk=True)`, the lane `create` takes for EXL3 — see
+  "Compressed serving trunk" below). Every routed
   expert keeps its PACKED CODES. The checkpoint stores experts as per-expert modules, so the loader stacks each
   `(layer, projection, leaf)` triple into one E-leading store tensor. Gate and up stay SEPARATE program inputs
   (`build_moe_split_wrapper(..., split_gate_up=True)` → `expert(x, w_gate, w_up, w_down)`): each coded linear
@@ -225,9 +239,38 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   both RE-MINTS an input at a new shape (a dense weight arg becomes its packed codes) and APPENDS new ones.
   Nine per-expert inputs per layer — three codes plus each one's `suh` (128-blocked) and `svh` (trimmed) — are all
   table-resolved by the fixed-slot tier; the basis-restore Hadamard is a graph CONSTANT shared by all three
-  linears and never enters a table. `shape_key` covers every per-expert tensor's shape and the codebook ids, so
-  EXL3's MIXED bit allocation (K varying per layer) is caught as a shape disagreement rather than mis-served —
-  see the residual note below.
+  linears and never enters a table.
+
+  **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
+  `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
+  `from_model` interns it into a group index, compiles that group's whole tier set on first sight
+  (`_build_expert_group`), and stamps the index on the layer's `moe` entry, which is what `_launch_expert` and
+  `_moe_combine_slots` route through. Homogeneous MoEs (gpt-oss, OLMoE) have exactly one group and group 0 keeps
+  the original pack names (`moe.expert.sym` …), so their packs and plans are unchanged; later groups take a `g<N>`
+  infix. The live driver is EXL3's MIXED bit allocation: bits are spent by Hessian sensitivity, so K varies per
+  layer, so the codes shape does — the pinned GLM-4.5-Air 2.25bpw checkpoint has FOUR distinct expert signatures
+  across its 45 MoE layers (`K(gate,up,down)` = 2/2/2 on 38, 3/3/3 on 4, 2/2/3 on 2, 4/4/4 on 1). Per-tier failure
+  stays per-group (a group's failed twin falls back to that group's symbolic program), but the fixed-slot tier is
+  ALL-OR-NOTHING across groups (`_slots_ok`): a whole-step capture records one launch set for every layer, so a
+  group left on the routed eager path would make the captured step wrong for its layers.
+
+  **Compressed serving trunk (EXL3).** A serving wrapper's traced constants carry WRAPPER-relative parameter paths
+  (`o_proj.weight`), which never reach the checkpoint index — that is why the trunk used to bind decoded values and
+  why a 2-bit checkpoint still did not fit the card. `_compile_split(ckpt=(dir, id_to_key))` closes it:
+  `_retarget_constants` re-addresses every traced constant to its full checkpoint key by parameter-tensor IDENTITY
+  (no naming convention, so it survives any wrapper shape), `spell_trellis_constants(..., expand=True)` then fires
+  on a serving trunk for the first time and rewrites each coded linear into the same activation-side basis chain
+  the experts use, and `_plan_sources` builds the constant feed straight from the shards
+  (`loader.safetensors.load_sources_by_path`) instead of sweeping `named_parameters`. The twin's coded trunk
+  parameters are uninitialized placeholders on this lane, so reading one is a bug: `_plan_sources` raises when any
+  weight has no plan-reproducible source — which is exactly how a linear that fell back to the folded
+  checkpoint-basis cone (a bind record the plan cannot express) shows up, instead of running weightless. Sensitivity
+  -kept fp16 linears (GLM-4.5-Air layer 0's `o_proj`) bind their plain values from the same shard read. The forced
+  `expand` also travels as the `trellis.expand` GRAPH HINT so `032_fold_constant_subgraphs` leaves the hat-basis
+  cone in-graph per compile rather than per process. Measured on the pinned GLM-4.5-Air 2.25bpw checkpoint, all 46
+  layers on one 32 GB 5090: trunk constants 2.592 GiB + expert store 25.099 GiB + embed 1.156 GiB = 28.847 GiB
+  resident (`nvidia-smi` 31299 of 32607 MiB at boot, the rest CUDA context and allocator free blocks), against
+  37.3 GiB for the decoded-trunk lane — which is the whole reason this seam exists.
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
   `sinks=` into each `Attention`, which makes vLLM's backend selection sinks-aware (sm_120 lands on TRITON_ATTN;

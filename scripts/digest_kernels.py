@@ -54,18 +54,19 @@ def matmul(M=512, N=512, K=512, lin=False):
     return g
 
 
-def trellis_matvec(N=1024, K=512, kbits=2, cb=0):
-    """The decode-phase coded linear — the shape the DECODE BAND realizes. Codes are an INPUT (a
-    constant-rooted decode folds away), and the extents are the codes grid's 128-padded ones."""
+def trellis_matvec(N=1024, K=512, kbits=2, cb=0, M=1):
+    """A coded linear. At ``M=1`` this is the shape the DECODE BAND realizes; at a wider M it is
+    the warp tier's computed-B compute fill. Codes are an INPUT (a constant-rooted decode folds
+    away), and the extents are the codes grid's 128-padded ones."""
     g = Graph()
-    _inp(g, "x", (1, K))
+    _inp(g, "x", (M, K))
     _inp(g, "codes", (K // 16, N // 16, 16 * kbits), dt=get("i16"))
     w = g.add_node(
         op=TrellisDecodeOp(cb=cb, out_features=N, in_features=K, hadamard=False),
         inputs=["codes"],
         output=Tensor("w_hat_t", (Dim(N), Dim(K)), dtype=F16),
     )
-    g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor("y", (Dim(1), Dim(N)), dtype=F16), node_id="y")
+    g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor("y", (Dim(M), Dim(N)), dtype=F16), node_id="y")
     g.inputs, g.outputs = ["x", "codes"], ["y"]
     return g
 
@@ -205,6 +206,18 @@ CASES = [
         {"EMMY_F16_REDUCE_F32_ACC": "1"},
     ),
     ("trellis_band_k6", lambda: trellis_matvec(512, 1024, kbits=6), {"REDUCE": "g4k/coop-t/r16", "WORK": "t32"}),
+    # The WARP tier's computed-B compute fill — the decode column at the other producer, at the
+    # narrow output tile the coded goldens deploy and at one wider rate.
+    (
+        "trellis_warp",
+        lambda: trellis_matvec(M=32),
+        {"WORK": "w2x2", "TILE": f"{WARP}/f1x1/k8", "REDUCE": "", "STAGE": "d1/sync"},
+    ),
+    (
+        "trellis_warp_k4",
+        lambda: trellis_matvec(kbits=4, M=32),
+        {"WORK": "w2x2", "TILE": f"{WARP}/f1x1/k8", "REDUCE": "", "STAGE": "d1/sync"},
+    ),
 ]
 
 

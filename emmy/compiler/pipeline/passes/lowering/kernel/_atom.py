@@ -38,7 +38,8 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, TrellisLoad, Write
+from emmy.compiler.ir.stmt.leaves import TRELLIS_TILE
 from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
@@ -572,7 +573,13 @@ def _sync_operands(
                 sigma = Sigma({k_name: BinaryExpr("+", k0, row), n_name: BinaryExpr("+", col_base, col)})
                 return [s.rewrite(lambda nm: nm, sigma) for s in body], out
 
-            b_sync = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
+            # A TRELLIS cone fills DOWN the slab column (:attr:`SyncOperand.row_run`): one weight
+            # tile's 16 k rows at a single output column decode from ONE code fetch, where the
+            # per-cell form re-derives the window and re-reads the stream words for every weight.
+            # The k rows a run covers must sit inside one tile, which the mma K-step gives for
+            # free (``atom_k`` is a multiple of the tile edge), and the guard keeps it a fact.
+            column = TRELLIS_TILE if any(isinstance(s, TrellisLoad) for s in b_body) and not bk_elems % TRELLIS_TILE else 0
+            b_sync = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1], row_run=column)
             sync_ops.append(b_sync)
             drain.append(b_sync)
             continue

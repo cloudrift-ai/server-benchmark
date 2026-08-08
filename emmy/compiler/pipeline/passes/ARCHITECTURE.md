@@ -148,7 +148,10 @@ k-invariant prologue stays full-row in every partition, only the per-cell cone �
 statistic site is a nested site under the same inventory. A COMPUTED `b` edge (the trellis decode cone) is carried
 symmetrically: warp-only over the same mandatory `sync` fill (the fill decodes the B tile into its slab; the ring at
 `d2` then prefetches the materialized A), with no split-K (nothing to σ-reindex) and the COLLAPSE reading as its
-reduce-tier fallback — `computed_b_cover` is the legality twin of `computed_a_cover`. On that reduce-tier fallback
+reduce-tier fallback — `computed_b_cover` is the legality twin of `computed_a_cover`. That fill runs DOWN the slab
+column rather than across a row (`SyncOperand.row_run`), so the run is the same tile column the band's is and the
+same peephole folds it — one code fetch per 16 k rows on both tiers, where a per-cell fill re-derived the window
+for every 2-bit weight (measured 27 → 14 SASS instructions per weight in the fill). On that reduce-tier fallback
 the decode gets a partition of its own, the **decode band**: `_schedule._decode_band_specs` answers a decoded-B fold
 (`_decoded_b` — a `TrellisLoad` at the reduce axis AND a non-unit free axis) with the transposed coop band at
 `reg` = the trellis tile's 16 k rows over a cross-CTA split, and with nothing else wherever it spells. Two facts

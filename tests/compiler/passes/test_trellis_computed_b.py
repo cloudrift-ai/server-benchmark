@@ -334,6 +334,37 @@ def test_trellis_matmul_matches_hat_basis_reference_cuda(m, n, k, kbits):
 @requires_cuda
 @requires_sm90
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("kbits", [2, 3, 4, 6])
+@pytest.mark.parametrize("cb", [0, 1, 2])
+def test_trellis_matmul_warp_column_run_matches_every_rate_and_codebook_cuda(kbits, cb):
+    """The warp tier's B compute fill decodes a whole tile COLUMN per run, so its window
+    arithmetic is the run helper's rather than the scalar leaf's — check it against the numpy
+    reference at every code rate the mixed allocation uses and all three 3INST codebooks."""
+    _run_cuda(32, 128, 128, kbits, _WARP_PINS, cb=cb)
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+def test_warp_compute_fill_decodes_one_column_per_run():
+    """The warp fill's run is a slab COLUMN: one ``emmy_trellis_decode_col`` per run and no
+    scalar decode left, the same run form the M=1 band uses (``055_fuse_trellis_runs`` folds
+    both). Without it the fill re-derives the window per 2-bit weight."""
+    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    g, _ = _trellis_linear_graph(32, 128, 128, 2)
+    with _pinned_knobs(_WARP_PINS):
+        compiled = CudaBackend().compile(g)
+    src = next(s for nd in compiled.nodes.values() if (s := getattr(nd.op, "kernel_source", None)))
+    body = src.split('extern "C"', 1)[1]
+    assert body.count("emmy_trellis_decode_col<2, 0>(") == 1, body
+    assert "emmy_trellis_decode(" not in body, "a per-element decode survived in the compute fill"
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
 def test_trellis_matmul_encode_padding_cuda():
     """Logical dims below the 128-padded codes grid — the decode slices the top-left submatrix."""
     _run_cuda(48, 96, 192, 2, {"TILE": "mma_m16n8k16_f16_f32/f2x3/k2", "WORK": "w1x2", "REDUCE": "", "STAGE": ""})

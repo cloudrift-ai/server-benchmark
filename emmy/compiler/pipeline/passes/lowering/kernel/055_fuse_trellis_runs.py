@@ -30,7 +30,7 @@ re-scan matches nothing and the pass declines.
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Stmt, StridedLoop, TrellisLoad
 from emmy.compiler.ir.stmt.leaves import TRELLIS_TILE
@@ -45,10 +45,28 @@ def _const(expr: Expr) -> int | None:
     return int(lit.value) if isinstance(lit, Literal) and isinstance(lit.value, int) else None
 
 
+def _abstract(expr: Expr) -> Expr:
+    """``expr`` with every maximal subterm that :func:`affine_form` cannot decompose replaced by
+    an OPAQUE coordinate named after the subterm — so a sum whose other terms are affine still
+    splits, and two indices sharing that subterm still compare equal.
+
+    Both producers of a decode column need it. The reduce band's anchor is affine in the loop
+    coordinates outright; the warp tier's compute fill derives its run's anchor row by DIVIDING
+    the flat run index (``(run / cols) * 16``), which is affine in nothing — but it is the same
+    subterm in all 16 of the run's indices, and it carries its own literal tile multiple, which
+    is all the two checks below need."""
+    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-", "*"):
+        return BinaryExpr(expr.op, _abstract(expr.left), _abstract(expr.right))
+    if affine_form(expr, set(expr.free_vars())) is not None:
+        return expr
+    return Var(f"_opaque:{expr.pretty()}")  # planning-only: never rendered, never a real coordinate
+
+
 def _split(expr: Expr) -> tuple[int, dict[str, int]] | None:
-    """``expr`` as ``(constant, {var: coefficient})``, or ``None`` when it is not affine with a
-    literal constant part."""
-    form = affine_form(expr, set(expr.free_vars()))
+    """``expr`` as ``(constant, {coordinate: coefficient})`` over its opaque-abstracted form, or
+    ``None`` when even that is not affine with a literal constant part."""
+    abstracted = _abstract(expr)
+    form = affine_form(abstracted, set(abstracted.free_vars()))
     if form is None:
         return None
     const = _const(form[0])

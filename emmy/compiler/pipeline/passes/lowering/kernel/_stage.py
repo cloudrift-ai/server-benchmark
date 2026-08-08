@@ -378,6 +378,14 @@ class SyncOperand:
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
     # (a plain-``Load`` drain cannot read a swizzled slab).
     swizzle: str = "NONE"
+    # The COLUMN-RUN width: when non-zero, one thread's fill run is this many cells DOWN a slab
+    # COLUMN instead of ``V`` cells across a slab row. Set by an operand whose cone produces
+    # consecutive ROWS more cheaply together than one at a time — the trellis decode, where a
+    # weight tile's 16 k rows at one output column come out of a single code fetch and one window
+    # derivation (``055_fuse_trellis_runs`` folds the emitted per-row leaves into that run leaf).
+    # The trade is the store: a column's cells are strided in the slab, so the run closes with
+    # this many scalar stores rather than one vector store. 0 = the default row run.
+    row_run: int = 0
 
     @property
     def slab(self) -> str:
@@ -447,12 +455,12 @@ class SyncTransport:
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
     @staticmethod
-    def _run_plans(op: SyncOperand, v: int) -> list[str]:
+    def _run_plans(op: SyncOperand, v: int, *, down: bool = False) -> list[str]:
         """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
         ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
-        (col 0 vs col 1; the probe stmts are planning-only, never emitted):
+        (the run's first two cells; the probe stmts are planning-only, never emitted):
 
-        - identical at both cols ⇒ run-INVARIANT (the stat-row loads, whose index is the run's
+        - identical at both cells ⇒ run-INVARIANT (the stat-row loads, whose index is the run's
           row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
           per-cell defs (a dep on a replicated name demotes it back to per-cell);
         - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
@@ -460,11 +468,23 @@ class SyncTransport:
           cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
           ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
-          the slab col — e.g. a col-strided gather)."""
-        probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
-        s0, _ = op.value(probe_k0, probe_row, zero)
-        s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
-        sz, _ = op.value(zero, probe_row, zero)
+          the slab col — e.g. a col-strided gather).
+
+        ``down`` is the COLUMN run (:attr:`SyncOperand.row_run`): the run walks the slab's ROW
+        axis at a fixed column, so the probe advances the ROW and the vector reading is never
+        offered — a column's cells are contiguous neither in the slab nor in a k-indexed source,
+        so there is nothing to merge. Run-invariance still hoists."""
+        probe_k0, zero, one = Var("__sk0"), Literal(0, "int"), Literal(1, "int")
+        if down:
+            probe_col = Var("__scol")
+            s0, _ = op.value(probe_k0, zero, probe_col)
+            s1, _ = op.value(probe_k0, one, probe_col)
+            sz = None
+        else:
+            probe_row = Var("__srow")
+            s0, _ = op.value(probe_k0, probe_row, zero)
+            s1, _ = op.value(probe_k0, probe_row, one)
+            sz, _ = op.value(zero, probe_row, zero)
         ctx = SimplifyCtx.empty()
         plans: list[str] = []
         cell_defs: set[str] = set()
@@ -473,7 +493,7 @@ class SyncTransport:
                 plans.append("hoist")
                 continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
-            anchor = sz[p].index[-1].simplify(ctx) if isinstance(sz[p], Load) else None
+            anchor = sz[p].index[-1].simplify(ctx) if sz is not None and isinstance(sz[p], Load) else None
             if (
                 type(a) is Load  # exact type: a decode leaf (TrellisLoad) must never merge into a plain vector Load
                 and a.is_scalar
@@ -516,19 +536,32 @@ class SyncTransport:
             return out
         for op in self.operands:
             rows, cols = op.shape
-            v = _cp_async_width(cols, self.elem_bytes)
+            # The RUN one thread's iteration covers. By default ``V`` contiguous cells ACROSS a
+            # slab row — the cp.async chunk's shape, closed by one vector store. A ``row_run``
+            # operand walks a slab COLUMN instead, because its cone produces consecutive ROWS
+            # together far more cheaply than one at a time (the trellis decode's tile column: 16 k
+            # rows out of ONE code fetch and one window derivation, folded into the run leaf by
+            # ``055_fuse_trellis_runs``). A column's cells are strided in the slab, so that form
+            # closes with one scalar store per cell instead — the store it adds is small against
+            # the per-element decode it removes.
+            down = op.row_run > 0
+            v = op.row_run if down else _cp_async_width(cols, self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
-            base = _mul(Var(fe.name), _lit(v))
-            row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
-            col = BinaryExpr("%", base, _lit(cols))
-            smem_row = row
-            plans = self._run_plans(op, v)
+            if down:
+                col = BinaryExpr("%", Var(fe.name), _lit(cols))
+                row = _mul(BinaryExpr("/", Var(fe.name), _lit(cols)), _lit(v))  # the run's tile-aligned anchor row
+                coords = [(_add(row, _lit(j)) if j else row, col) for j in range(v)]
+            else:
+                base = _mul(Var(fe.name), _lit(v))
+                row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
+                col = BinaryExpr("%", base, _lit(cols))
+                coords = [(row, _add(col, _lit(j)) if j else col) for j in range(v)]
+            plans = self._run_plans(op, v, down=down)
             body: list[Stmt] = []
             vals: list[str] = []
             cell_stmts: list[list[Stmt]] = []
-            for j in range(v):
-                cell_col = _add(col, _lit(j)) if j else col
-                stmts, val = op.value(k0_cur, row, cell_col)
+            for j, (cell_row, cell_col) in enumerate(coords):
+                stmts, val = op.value(k0_cur, cell_row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(f"{val}__c{j}")
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
@@ -558,7 +591,12 @@ class SyncTransport:
             # vectorizer cannot re-merge them (the run base's ``(fe·V) % cols`` anchor defeats
             # its affine alignment proof). A swizzled slab relocates the whole aligned chunk
             # (the XOR passes intra-chunk bits through), so the vector store stays legal.
-            body.append(Write(output=op.slab, index=(smem_row, col), values=tuple(vals), swizzle=op.swizzle))
+            # A COLUMN run's cells are a slab column, never contiguous, so it stores per cell.
+            if down:
+                cells = zip(coords, vals, strict=True)
+                body += [Write(output=op.slab, index=(r, col), value=nm, swizzle=op.swizzle) for (r, _), nm in cells]
+            else:
+                body.append(Write(output=op.slab, index=(row, col), values=tuple(vals), swizzle=op.swizzle))
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 

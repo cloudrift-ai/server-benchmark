@@ -189,11 +189,16 @@ has a kernel realization: it lifts to a `LoopOp` of per-element `TrellisLoad` re
 (the window is directly addressable in the tile's circular bit stream, so each element decodes independently —
 no carried walk state), loop fusion inlines it into the consuming matmul, and the contraction binder stores it
 as a COMPUTED-B cone. The warp tier then schedules it over the mandatory `sync` compute-fill: the fill decodes
-each B tile straight into the K-major smem slab the ldmatrix drain already reads (one `emmy_trellis_decode`
-helper call per element — window extraction + the 3INST computed codebook, no stored LUT), while the packed
+each B tile straight into the K-major smem slab the ldmatrix drain already reads, while the packed
 codes are the only weight bytes that ever cross DRAM (~8× fewer than f16 at K=2) and the A operand rides its
-usual vectorized `cp.async` fill underneath. Split-K, TMA and the scalar staged tiers decline (a computed B has
-no gmem element layout); the COLLAPSE reading is the reduce-tier fallback. Constant-rooted hat-basis cones fold
+usual vectorized `cp.async` fill underneath. The fill's run is a slab COLUMN, not the usual row of contiguous
+cells (`SyncOperand.row_run`): a weight tile's 16 k rows at one output column share their stream words, so the
+whole column comes out of ONE `emmy_trellis_decode_col` call — the same run leaf the decode band uses, folded by
+the same peephole — where a per-cell fill re-derives the window and re-reads the words for every weight. Measured
+on the 5090 that is 27 → 14 SASS instructions per 2-bit weight inside the fill, 33.8 → 22.1 warp-instructions per
+weight over the whole kernel, and 1.2–1.6× per coded projection at decode width; what it adds back is one strided
+smem store per weight, 2-way bank-conflicted at a 16-column slab. Split-K, TMA and the scalar staged tiers decline
+(a computed B has no gmem element layout); the COLLAPSE reading is the reduce-tier fallback. Constant-rooted hat-basis cones fold
 by default and stay in-graph under `EMMY_TRELLIS_EXPAND` (the kernel-path gate, the trellis sibling of
 `EMMY_FP8_EXPAND`) or under the per-compile `expand=True` argument to `spell_trellis_constants`, which stamps the
 `trellis.expand` graph hint the fold reads; checkpoint-basis cones fold regardless. Measured on the 5090

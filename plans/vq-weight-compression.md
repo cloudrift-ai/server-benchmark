@@ -759,9 +759,24 @@ an order of magnitude lower and for a different reason — launch chain, not adm
 1. **MoE M2 — the per-expert launch chain.** This is now the whole story, at both concurrency and batch 1: 360
    launches per step at c=1 and ~3,645 at c=16, and the step cost tracks that count. Design already exists
    (`plans/moe-m2-dispatch-design.md`). Nothing else on this list changes the shape of the sweep table.
-2. **Phase 4's golden sweep.** Owed in full, and independent of (1): the boot's own roofline audit still flags
-   `L0.post.decode.m32` at **17x** its weight-streaming floor (~67 us), unchanged from the bucket-8 boot. This is
-   the batch-1 TPOT lever.
+2. ~~**Phase 4's golden sweep**~~ — **DONE** (3db92b8b), and re-measured 2026-08-09 after the warp tier's compute
+   fill moved to the run-fused COLUMN decode: the fill now decodes a whole weight-tile column per run — the same
+   run leaf the M=1 band uses, one code fetch and one window derivation for 16 k rows — instead of re-deriving both
+   per element. 27 -> 14 SASS instructions per 2-bit weight in the fill, all 28 coded warp goldens 1.16-1.57x
+   faster, eight of their tiles moved back toward the wide end. What is left on the per-kernel side is small and
+   named: the column's strided smem store (2-way bank-conflicted at a 16-column slab — it needs a padded or N-major
+   computed-B slab, neither of which the sync transport offers) and the decode's f32 round trip through an f16 slab.
+   **The boot audit's `L0.post.decode.m32` flag is gone** — 17x at bucket-8, 10.4x after Phase 4, now under the 10x
+   threshold and no longer logged; the only remaining flag is the PREFILL chunk twin `L0.post.chunk.m512` at 46x
+   (52x before), which has no golden of any width. End to end at c=1 the win lands **entirely on TTFT**
+   (1.924 -> 1.670 s, 1.15x, paired boots on one box) and **not at all on TPOT** (31.04 -> 31.07 ms). That is item
+   (1) restated from the other side: prefill is GPU-bound and takes the kernel win in full, while the decode step is
+   host-dispatch-bound, so faster decode kernels hide entirely behind the per-expert launch chain.
+   Two measurement traps found here and worth carrying: a **pack hit ignores compiler-source and golden changes**
+   (its key is model x GPU x serving shape, and it references cubins by content key, so a stale pack silently
+   re-serves the old kernels — delete the pack when either moves), and the plan's recorded 57.90 ms c=1 TPOT does
+   **not** reproduce on an idle box, which measured 31.04 ms from the identical pack. Host-side framing dominates
+   that number, so it tracks machine load; only paired same-session boots are comparable.
 3. ~~Reclaim vocab-table bytes~~ — the embed table is done (above). The **coded `lm_head` is still owed**: 0.722 GiB,
    about 8,000 more fp8 tokens, and it is now the only vocab-sized item left. Its value changed character, though:
    with the pool no longer binding, those bytes buy headroom (a bigger workspace, a longer context, whole-step

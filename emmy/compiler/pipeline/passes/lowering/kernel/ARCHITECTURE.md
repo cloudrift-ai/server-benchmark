@@ -250,7 +250,14 @@ splices the edge back inline. `_staged` builds a `SyncTransport`
 whose A fill is the producer CONE evaluated per slab cell (compute-fill) — the same `fill`/`commit`/`wait` seam,
 feeding the unchanged `ldmatrix` drain. The compute fill assigns each thread a 16-byte run of CONTIGUOUS slab
 cells (the row/col derivation hoists out of the per-cell code; per-thread gmem reads and smem stores merge into
-wide accesses; the cone replicates per cell with a `__c<j>` SSA suffix). Every **B** fold channel is a plain
+wide accesses; the cone replicates per cell with a `__c<j>` SSA suffix). A cone that produces consecutive slab
+ROWS more cheaply together than one at a time turns the run 90° instead (`SyncOperand.row_run` — the COLUMN run):
+the run walks the slab's row axis at a fixed column and closes with one scalar store per cell rather than one
+vector store. The trellis decode is what asks for it, and the trade is measured — a weight tile's 16 k rows at one
+output column come out of ONE code fetch and one window derivation, so the fill drops from 27 to 14 SASS
+instructions per 2-bit weight while paying one strided store per weight (2-way bank-conflicted at a 16-column
+slab: the k-tile stride is a whole number of bank periods, which only a padded or N-major computed-B slab
+would break). Every **B** fold channel is a plain
 weight copy riding a vectorized `cp.async` issued BEFORE the compute fill, so the hardware copies fly underneath
 it — a canonical B as the K-major `(bk × tile_n)` slab, a transposed B (the serving `F.linear` layout) as the
 N-major `(tile_n × bk)` slab in its own gmem orientation (`Operand.trans`; K stride-1 in gmem and smem, swizzle
@@ -377,9 +384,12 @@ map; halves the staged drains' LSU count, bit-identical; fires on both the
 warp-flash streaming drains and the matmul tier's staged drains — two emitters, one pass, which is why it is a pass);
 `055_fuse_trellis_runs` collapses a body's 16 per-element `TrellisLoad`s over one tile column into the run form of
 that leaf (they are hoistable — a pure read of a kernel input, indexed by coordinates bound outside the body — and
-the anchor must be provably tile-aligned, proved affinely against the enclosing `StridedLoop`'s start and step, or
-the run's element `i` would not be the weight at `k_lo == i`); it is what makes the reduce tier's decode band a single
-code fetch per column instead of two words per weight;
+the anchor must be provably tile-aligned against the enclosing `StridedLoop`'s start and step, or the run's element
+`i` would not be the weight at `k_lo == i`); it serves BOTH producers of a decode column — the reduce tier's decode
+band and the warp tier's column-run compute fill — so each is a single code fetch per column instead of two words
+per weight. The two spell their anchor differently: the band's is affine in the loop coordinates, the fill's derives
+its k-tile by DIVIDING the flat run index, so the alignment proof abstracts any subterm `affine_form` cannot
+decompose to an opaque coordinate (same subterm, same name) and reads the literal tile multiple off what remains;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).

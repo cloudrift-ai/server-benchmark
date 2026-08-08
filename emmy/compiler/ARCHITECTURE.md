@@ -186,13 +186,30 @@ each B tile straight into the K-major smem slab the ldmatrix drain already reads
 helper call per element — window extraction + the 3INST computed codebook, no stored LUT), while the packed
 codes are the only weight bytes that ever cross DRAM (~8× fewer than f16 at K=2) and the A operand rides its
 usual vectorized `cp.async` fill underneath. Split-K, TMA and the scalar staged tiers decline (a computed B has
-no gmem element layout); the COLLAPSE reading is the reduce-tier fallback (per-cell decode — correct, slow).
-Constant-rooted hat-basis cones fold by default and stay in-graph under `EMMY_TRELLIS_EXPAND` (the kernel-path
-gate, the trellis sibling of `EMMY_FP8_EXPAND`); checkpoint-basis cones fold regardless. Measured on the 5090
+no gmem element layout); the COLLAPSE reading is the reduce-tier fallback. Constant-rooted hat-basis cones fold
+by default and stay in-graph under `EMMY_TRELLIS_EXPAND` (the kernel-path gate, the trellis sibling of
+`EMMY_FP8_EXPAND`); checkpoint-basis cones fold regardless. Measured on the 5090
 at N=K=22016, K=2 (codes 121 MB — past L2): the compressed matmul beats the same-shape f16 matmul at M=128
 (2.10 vs 2.34 ms) and runs decode-ALU-bound at larger prefill M (1.6–1.7× f16 at M=256–2048) — the per-element
-decode re-runs per M-tile row, which is the standing lever for the reduce-tier (decode-phase) and
-fragment-drain follow-ups.
+decode re-runs per M-tile row, which is the standing lever for the fragment-drain follow-up.
+
+**The decode-phase matvec (the decode band).** At M=1 the contraction demotes to a PLANAR fold, so the decode
+reaches the reduce tier instead, and there the per-element leaf is the wrong granularity: a whole 16x16 weight
+tile has to be touched for each 2-bit weight, which measured 4 bytes of code traffic and ~28 instructions per
+weight. The **decode band** is the reduce partition that fixes it — the transposed coop band (32 lanes sweeping the
+output axis) with the register level pinned at the tile's 16 k rows, so a lane's register copies walk 16
+CONSECUTIVE k, exactly one tile column, and a kernel-band peephole (`055_fuse_trellis_runs`) rewrites those 16
+per-element leaves into the run form of `TrellisLoad` — one `emmy_trellis_decode_col` call, one code fetch,
+compile-time word indices. Warp-wide blocks cannot fill the card on a matvec grid, so the band always rides a
+cross-CTA split, and the split slice must stay tile-aligned or the run does not fuse. Where the band spells it
+is the ONLY reduce row offered: `ShapeKey` cannot see a decode, so a cold pick would otherwise land on an f16
+matvec's measured plan — hence also `ShapeKey.dtype_class == "trellis"` (read off the `S_dtype_i16` codes
+carrier), which keeps a decoded B's golden / DB rows from joining its f16 twin's in either direction. Measured
+on the 5090 at M=1, K=2, against the same-shape f16 matvec: N=K=22016 (past L2) **214 µs vs 580** — 2.7x ahead,
+and 157 µs at the band's best pinned split; the L2-resident GLM dense projections land at f16 parity (gate/up
+4096→11008: 19.6 vs 18.6; down 11008→4096: 20.5 vs 18.7), where f16 reads its weights out of L2 at 4.9 TB/s and
+the comparison flatters it. NCU puts the residual on instruction issue, not bandwidth: 11.5 warp-instructions
+per decoded weight, SM throughput 69 % against DRAM 35 %.
 
 **Activation-side basis restore.** Only `W_hat` decodes in-kernel, so under the same `EMMY_TRELLIS_EXPAND` gate
 `spell_trellis_constants` rewrites the CONSUMING LINEAR instead of the weight constant, moving the checkpoint's

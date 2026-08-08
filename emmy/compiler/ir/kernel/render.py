@@ -170,18 +170,7 @@ static __device__ __forceinline__ void emmy_cp_async_wait() {
 # 3INST computed codebook follows — no stored LUT anywhere. Exact fp16 arithmetic, widened once
 # to float on return (``loader/exl3.py`` is the bit-exact numpy reference).
 _TRELLIS_PRELUDE = """\
-static __device__ __forceinline__ float emmy_trellis_decode(
-        const unsigned short* __restrict__ codes, int kbits, int cb, int k_lo, int n_lo) {
-    int lane = ((n_lo & 7) << 2) | ((k_lo & 7) >> 1);
-    int j = (k_lo & 1) | (((k_lo >> 3) & 1) << 1) | (((n_lo >> 3) & 1) << 2);
-    int t = (lane << 3) | j;
-    int nbits = kbits << 8;
-    int b0 = ((t + 1) * kbits - 16 + nbits) % nbits;
-    int w = b0 >> 5;
-    int nwords = kbits << 3;
-    const unsigned int* u32 = (const unsigned int*)codes;
-    unsigned long long joined = ((unsigned long long)u32[w] << 32) | (unsigned long long)u32[(w + 1) % nwords];
-    unsigned int x = (unsigned int)(joined >> (48 - (b0 & 31))) & 0xFFFFu;
+static __device__ __forceinline__ float emmy_trellis_value(unsigned int x, int cb) {
     if (cb == 2) {
         x *= 0x83DCD12Du;
         unsigned int s = ((x & 0xFFu) + ((x >> 8) & 0xFFu) + ((x >> 16) & 0xFFu) + (x >> 24) + 0x6400u) & 0xFFFFu;
@@ -192,6 +181,57 @@ static __device__ __forceinline__ float emmy_trellis_decode(
     x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
     return __half2float(__hadd(__ushort_as_half((unsigned short)(x & 0xFFFFu)),
                                __ushort_as_half((unsigned short)(x >> 16))));
+}
+
+static __device__ __forceinline__ int emmy_trellis_step(int kbits, int k_lo, int n_lo) {
+    int lane = ((n_lo & 7) << 2) | ((k_lo & 7) >> 1);
+    int j = (k_lo & 1) | (((k_lo >> 3) & 1) << 1) | (((n_lo >> 3) & 1) << 2);
+    return (lane << 3) | j;
+}
+
+static __device__ __forceinline__ float emmy_trellis_decode(
+        const unsigned short* __restrict__ codes, int kbits, int cb, int k_lo, int n_lo) {
+    int t = emmy_trellis_step(kbits, k_lo, n_lo);
+    int nbits = kbits << 8;
+    int b0 = ((t + 1) * kbits - 16 + nbits) % nbits;
+    int w = b0 >> 5;
+    int nwords = kbits << 3;
+    const unsigned int* u32 = (const unsigned int*)codes;
+    unsigned long long joined = ((unsigned long long)u32[w] << 32) | (unsigned long long)u32[(w + 1) % nwords];
+    return emmy_trellis_value((unsigned int)(joined >> (48 - (b0 & 31))) & 0xFFFFu, cb);
+}
+
+// The TILE-COLUMN run: all 16 k rows of column ``n_lo`` inside ONE 16x16 tile, decoded from a
+// SINGLE code fetch. Their steps are ``tbase + d`` with ``d`` over a compile-time set spanning 27
+// steps, so the whole column lives in a handful of consecutive stream words — the scalar leaf
+// re-fetches two words and redoes the window math per element instead.
+// The word each element reads is a COMPILE-TIME index into the loaded run: the within-word bit
+// offset ``b0 & 31`` takes only two values over ``n_lo`` (it moves by ``4*kbits`` with the column's
+// high bit), so indexing at the smaller of the two and letting the runtime offset ride the funnel
+// shift keeps the window inside the loaded 64-bit pair (the spread is at most 16 bits, and
+// ``31 + 16 <= 48``) while the register array stays statically addressed.
+template <int KBITS, int CB>
+static __device__ __forceinline__ void emmy_trellis_decode_col(
+        const unsigned short* __restrict__ codes, int n_lo, float* out) {
+    const int nbits = KBITS << 8, nwords = KBITS << 3;
+    const int off_a = ((KBITS - 16) % 32 + 32) % 32;      // n_lo < 8
+    const int off_b = ((5 * KBITS - 16) % 32 + 32) % 32;  // n_lo >= 8
+    const int off_min = off_a < off_b ? off_a : off_b;
+    const int nw = ((off_min + KBITS * 27) >> 5) + 2;     // 27 = max step spread over the column
+    const unsigned int* u32 = (const unsigned int*)codes;
+    int tbase = emmy_trellis_step(KBITS, 0, n_lo);
+    int b0 = ((tbase + 1) * KBITS - 16 + nbits) % nbits;
+    int w0 = b0 >> 5, sh = 48 - (b0 & 31);
+    unsigned int W[nw + 1];
+#pragma unroll
+    for (int i = 0; i < nw + 1; i++) W[i] = u32[(w0 + i) % nwords];
+#pragma unroll
+    for (int e = 0; e < 16; e++) {
+        const int d = 8 * ((e & 7) >> 1) + (e & 1) + 2 * ((e >> 3) & 1);
+        const int i = (off_min + KBITS * d) >> 5;
+        unsigned long long joined = ((unsigned long long)W[i] << 32) | (unsigned long long)W[i + 1];
+        out[e] = emmy_trellis_value((unsigned int)(joined >> (sh + 32 * i - KBITS * d)) & 0xFFFFu, CB);
+    }
 }
 """
 

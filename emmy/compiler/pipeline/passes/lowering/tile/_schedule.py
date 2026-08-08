@@ -81,7 +81,7 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, Write
+from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, TrellisLoad, Write
 from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
@@ -98,6 +98,7 @@ from emmy.compiler.pipeline.search.space import (
     REDUCE,
     STAGE,
     TILE,
+    WARP_LANES,
     WORK,
     coop_reduce_moves,
     map_tile_moves,
@@ -229,7 +230,12 @@ def _matvec_b_kstride(term: _Term, carrier) -> int | None:
     along the reduce axis touching no non-unit free axis — A) and a matrix operand indexed by the
     reduce axis AND a non-unit free axis (B); only that two-operand shape is gated. ``1`` means the
     reduce axis is B's fastest-varying dimension (the serving ``F.linear`` N×K layout); ``>1`` is
-    k-major (canonical ``B[k, n]``)."""
+    k-major (canonical ``B[k, n]``).
+
+    A DECODED B (a ``TrellisLoad`` — the element is computed from packed codes, not stored) has no
+    such stride at all: its index is the LOGICAL ``(k, n)`` of the weight while the buffer it reads
+    is the codes grid, so any stride derived from it describes the wrong array. ``None`` there — the
+    layout gate does not apply, and both bands stay offered."""
     nonunit = {a.name for a in term.place.free if not (a.extent.is_static and a.extent.as_static() == 1)}
     k_name = carrier.axis.name
     a_seen = False
@@ -239,6 +245,8 @@ def _matvec_b_kstride(term: _Term, carrier) -> int | None:
         if k_name not in used:
             continue
         if used & nonunit:
+            if isinstance(ld, TrellisLoad):
+                return None
             strides.add(gmem_row_stride(ld, k_name, term.tile.inputs))
         else:
             a_seen = True
@@ -846,11 +854,70 @@ def _pick_coop(extent: int, free: int, *, has_tail: bool = False) -> int:
     return coop if coop >= 2 else 1
 
 
+_DECODE_TILE = 16  # the trellis tile's k rows — the run one band step decodes from one code fetch
+_DECODE_CTAS = (32, 16, 8, 4)  # the decode band's split widths, widest first (option-0 leads)
+_DECODE_MIN_STEPS = 4  # keep at least this many tile steps per CTA — a shorter run is launch-bound
+_DECODE_MIN_CTAS = 2048  # a narrower split leaves the warp-wide blocks short of one full wave
+
+
+def _decoded_b(term: _Term, node) -> bool:
+    """Whether the fold's B is DECODED — a ``TrellisLoad`` read at the reduce axis AND a non-unit
+    free axis. That leaf reads packed codes a whole 16x16 weight tile at a time, so the band below
+    exists; a decode reached only along the reduce axis (no free axis) is not a matrix operand."""
+    nonunit = {a.name for a in term.place.free if not (a.extent.is_static and a.extent.as_static() == 1)}
+    k_name = node.axis.name
+    for ld in _node_loads(term.tile.op):
+        if not isinstance(ld, TrellisLoad) or not ld.index:
+            continue
+        used = set().union(*(e.free_vars() for e in ld.index))
+        if k_name in used and used & nonunit:
+            return True
+    return False
+
+
+def _decode_band_specs(term: _Term, node, k_static, inner, epilogue) -> list[ReducePlan]:
+    """The TILE-COLUMN band a DECODED B offers: the transposed coop band (32 lanes sweeping the
+    output axis, one weight tile per 16 lanes) with ``reg`` fixed at the tile's 16 k rows, so a
+    lane's register copies walk 16 CONSECUTIVE k — one tile column, which the decode reads with a
+    single code fetch instead of one per element (``055_fuse_trellis_runs``). Warp-wide blocks
+    alone cannot fill the card on a matvec grid, so every row pairs with the cross-CTA split, and
+    the WIDEST legal split leads: a decode band with no split is 3–8x off its own floor at the GLM
+    projection shapes. A split whose slice is not tile-aligned is skipped rather than offered —
+    the run would not fuse and the row would be a per-element decode under a transposed band, the
+    worst of both."""
+    if not _decoded_b(term, node) or k_static is None or k_static % _DECODE_TILE:
+        return []
+    warps = max(1, _free_cells(term.place) // WARP_LANES)
+    out: list[ReducePlan] = []
+    for cta in _DECODE_CTAS:
+        if k_static % (_DECODE_TILE * cta) or k_static // (_DECODE_TILE * cta) < _DECODE_MIN_STEPS:
+            continue
+        if out and warps * cta < _DECODE_MIN_CTAS:
+            continue  # the widest legal split always leads; narrower ones only while they fill
+        p = ReducePlan.of(cta=cta, coop=WARP_LANES, coop_transposed=True, reg=_DECODE_TILE)
+        if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
+            continue
+        if not legal.enforce(epilogue, pinned=False) or p in out:
+            continue
+        out.append(p)
+    return out
+
+
 def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     """The reduce-partition candidates for a non-contraction fold — option-0 is the conservative
     heuristic pick (:func:`_pick_coop`, so a cold greedy compile keeps its historical deploy), then
     the legal :func:`coop_reduce_moves` catalog + serial as fork siblings. The catalog rows are what
-    keep the 16- / 32-wide reduce goldens reachable. An env pin is authoritative."""
+    keep the 16- / 32-wide reduce goldens reachable.
+
+    A DECODED B answers with its own band ALONE (:func:`_decode_band_specs`) wherever that band
+    spells: every catalog row decodes per element, re-reading a whole weight tile for one 2-bit
+    weight, which is 2-8x off the decode band at the GLM projection shapes. ``ShapeKey`` cannot tell a
+    decoded B from a stored one, so a golden / prior row measured on an f16 matvec matches here and
+    a cold pick lands on a per-element band — the same cold-poison class ``coop_band_layout``
+    exists for, and the same remedy: state it at the enumeration, the single choke point. Where the
+    decode band does not spell (K not tile-divisible, a non-32-divisible output, a sweeping epilogue)
+    the catalog rows stay, since a per-element decode is then the only realization. An env pin is
+    authoritative."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
         return [ReducePlan.parse(pin, Workers.parse(WORK.raw()))]
@@ -870,10 +937,13 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
         coop = 32
     elif coop > 1 and k_contig is False:
         coop = 1  # the heuristic option-0 is a plain band too — uncoalesced on a k-major B
-    cands = [ReducePlan.of(coop=coop)]
     inner = _inner_free(term.place)
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
     epilogue = legal.coop_band_epilogue(tail)  # term-wide, so it is asked ONCE, not per candidate
+    decode = _decode_band_specs(term, node, k_static, inner, epilogue)
+    if decode:
+        return decode
+    cands = [ReducePlan.of(coop=coop)]
     for p in coop_reduce_moves():
         if not legal.enforce(legal.coop_band_layout(p, k_contig), pinned=False):
             continue

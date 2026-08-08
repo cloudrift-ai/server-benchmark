@@ -294,6 +294,31 @@ Order matters — the fragment path first, or every measurement undersells the f
    `EMMY_TRELLIS_EXPAND` gates the constant-rooted hat-basis cone in-graph; checkpoint-basis cones still fold
    (step 3 owns the basis-restore rewrite that makes real models reach this kernel).
 2. **Reduce/gemv tier, decode phase**: the LUT decode needs a reduce-tier realization. This is where TPOT cashes out.
+   **STATUS: DONE (2026-08-07).** Diagnosis first: at M=1 the schedule was declining every cooperative band, because
+   the B-orientation classifier read a gmem row stride off the CODES grid for a `TrellisLoad` (whose index is the
+   weight's logical `(k, n)`) and answered "k-major", which forces the serial one-thread-per-output fold. NCU on the
+   resulting kernel: 29 warp-instructions and 4 bytes of code traffic per 2-bit weight, a whole 16x16 tile touched
+   per element, and only 16–43 of 170 SMs occupied — the `down` shape's extra 17x-vs-6x badness was purely its
+   smaller output grid (4096 threads = 16 CTAs) over a longer serial K.
+   Landed: (a) the classifier answers `None` on a decode leaf — the layout gate has no meaning for a computed B;
+   (b) the **decode band**, a decoded-B-only reduce partition = transposed coop band (32 lanes sweeping the output
+   axis) at `reg` = the tile's 16 k rows over a cross-CTA split, so a lane's register copies walk one tile COLUMN;
+   (c) `055_fuse_trellis_runs`, the peephole that rewrites those 16 per-element leaves into the run form of
+   `TrellisLoad`, rendered as one `emmy_trellis_decode_col` — one code fetch, compile-time word indices, ~11.5
+   instructions per weight; (d) `ShapeKey.dtype_class == "trellis"` off the `S_dtype_i16` codes carrier, so a
+   decoded B never joins its f16 twin's golden / DB rows (it was joining them, and that is what a Phase 4 seeding
+   would have baked in).
+   Measured on the 5090 at M=1, K=2, greedy vs the same-shape f16 matvec: **N=K=22016 (codes 121 MB, past L2)
+   976 → 214 µs vs f16's 580 — 2.7x ahead** (157 µs at the band's best pinned split, 3.7x); gate/up 4096→11008
+   161 → 19.6 vs 18.6; down 11008→4096 441 → 20.5 vs 18.7. The two L2-resident shapes are at f16 parity and that
+   is the honest reading — f16 streams its weights out of L2 at 4.9 TB/s there, which no 30 GB model sees.
+   Residual, with evidence: NCU on the past-L2 band puts SM throughput at 69 % against DRAM 35 %, so the wall is
+   the decode's own instruction count (11.5 warp-instructions per weight, ~128 µs of pure issue against a 71 µs
+   DRAM floor), not bandwidth. Next levers, in order: fewer instructions per weight (half2 accumulate folded to f32
+   on a cadence, as exllamav3 does), and occupancy (79 registers/thread, 46 % achieved). Second residual: the
+   offline prior does not rank the band's split widths correctly on a cold compile (it takes `g8k`/`g4k` where
+   `g32k` wins, 20–36 % left on the table) — that is what Phase 4's golden seeding is for, and the `trellis`
+   dtype class is what makes such a golden keyable.
 3. **Activation-side Hadamard** as a computed-A-style prologue, if the format requires it at kernel level rather
    than being foldable into the checkpoint.
    **STATUS: DONE (2026-08-07).** Under the same `EMMY_TRELLIS_EXPAND` gate, `spell_trellis_constants` now
@@ -313,6 +338,18 @@ Order matters — the fragment path first, or every measurement undersells the f
    Hadamard tax on the
    5090 at N=K=22016, K=2 (past L2), against the same matmul with no basis restore: **+4.5 % at M=1, +13.4 % at
    M=128**, in 3–4 kernels (the scale multiplies fuse as computed-A cones) — at/under exllamav3's ~14 %.
+   **RE-MEASURED after step 2 (2026-08-07)**: the matvec got 4.6x faster, so the same two Hadamard launches are now
+   a bigger share — **+16.7 % at M=1 past L2** (260 → 303 µs, still 1.9x ahead of f16's 585) and **+77 % at the
+   L2-resident gate/up shape** (31.8 → 56.4 µs), where the two launches are ~12 µs each of essentially pure launch
+   and low-occupancy latency. Checked whether a reduce-tier realization folds them: **not without new machinery, in
+   both directions.** The input-side `H128` would have to ride the decode band's A operand, which means either
+   re-transforming the whole x vector per CTA (11008 CTAs × a 128-block transform — far worse than the launch) or
+   staging the CTA's own k slice as a shared row and transforming it there; the shared-row `Stage` is exactly the
+   mechanism, but `_tile_reduce_axis_transposed` asserts it out ("transposed coop cannot ride shared-row staging"),
+   so the band would need a staged arm plus a 128-block Hadamard prologue on the row. The output-side `H128 · svh`
+   cannot fold into the matvec at all — it groups 128 OUTPUT columns after the reduce, and the reduce's epilogue is
+   per-cell; its natural home is the split's finalize kernel, which already reads the `cta × N` workspace and
+   projects, and would need a blocked-Hadamard projection arm. Both are real follow-ups; neither is a small edit.
    Two defects fixed on the way: `bind_contraction` handed the decode leaf back as a MATERIALIZED B whenever A
    was a computed cone (the staging gates then byte-copied the packed codes into the slab and the decode
    vanished from the kernel — a hang/fault); and the residual below.

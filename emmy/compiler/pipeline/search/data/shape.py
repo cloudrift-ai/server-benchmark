@@ -80,6 +80,10 @@ class ShapeKey:
     # ``dtype_class == "f8"`` forces ``is_warp=True`` in both constructors: the
     # fp8-B contraction is a warp-family kernel, and the op-side dtype-multiset
     # signal is unreliable there (the f32 scale constant flips ``S_dtype_f32`` on).
+    # ``"trellis"`` is the same statement for a trellis-coded (EXL3) B: the operand is
+    # an ``i16`` codes buffer decoded in-kernel, an eighth of the bytes and a wholly
+    # different realization at both tiers (the warp tier's compute fill, the reduce
+    # tier's decode band), so it must not join its f16 twin's rows in either direction.
     dtype_class: str = ""
 
     # Key classes that carry the aspect discriminator (see ``free_max``).
@@ -151,7 +155,9 @@ class ShapeKey:
         dtype names, so fp8 stamps with no stamp-side change) marks the fp8-B storage
         class, which also forces ``is_warp=True`` — the fp8 kernel's f32 scale constant
         would otherwise flip the dtype-multiset signal to scalar, the same hazard the
-        ``"fused"`` kind forces around."""
+        ``"fused"`` kind forces around. ``S_dtype_i16`` marks the trellis class the same
+        way: ``i16`` is the packed-code carrier and nothing else reads one, so the stamp
+        already separates a decoded B from its f16 twin at the same ``(M, N, K)``."""
         n_axes = s.get("S_ext_n_free_axis", 0) + s.get("S_ext_n_reduce_axis", 0) + s.get("S_ext_n_symbolic_axis", 0)
         kind = ""
         if 0 < s.get("S_loop_depth", 0) < n_axes:
@@ -160,6 +166,7 @@ class ShapeKey:
             elif s.get("S_pw_exp", 0):
                 kind = "flash" if s.get("S_n_free_loop", 0) >= 3 else "softmax"
         f8 = any(s.get(f"S_dtype_{t}", 0) for t in ("f8e4m3", "f8e5m2"))
+        trellis = bool(s.get("S_dtype_i16", 0))  # the packed-code carrier — see ``dtype_class``
         return cls(
             free_prod=int(s.get("S_ext_free_prod", 0)),
             reduce_max=int(s.get("S_ext_reduce_max", 0)),
@@ -167,7 +174,7 @@ class ShapeKey:
             is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),
-            dtype_class="f8" if f8 else "",
+            dtype_class="f8" if f8 else ("trellis" if trellis else ""),
         )
 
     def joins(self, golden: ShapeKey) -> bool:

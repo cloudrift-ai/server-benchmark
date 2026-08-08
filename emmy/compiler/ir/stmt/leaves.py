@@ -261,10 +261,17 @@ class Load(Stmt):
         return out_lines
 
 
+TRELLIS_TILE = 16
+"""The EXL3 weight tile's edge — one 16x16 tile is one tail-biting trellis walk, and a whole tile
+COLUMN (its 16 k rows at one output column) is the run :class:`TrellisLoad`'s vector form."""
+
+
 @dataclass(frozen=True, init=False)
 class TrellisLoad(Load):
-    """Read ONE decoded element of a trellis-coded (EXL3) weight — a :class:`Load` whose
-    element is not stored but COMPUTED from the packed codes buffer at read time.
+    """Read decoded elements of a trellis-coded (EXL3) weight — a :class:`Load` whose
+    element is not stored but COMPUTED from the packed codes buffer at read time. Scalar form:
+    one element. VECTOR (run) form: ``names[i]`` is the element at ``k = index[0] + i`` over a
+    whole :data:`TRELLIS_TILE` column, decoded from one code fetch.
 
     ``input`` is the int16 codes buffer (``(k/16, n/16, 16*k_bits)`` — one tail-biting trellis
     walk per 16x16 weight tile) and ``index`` the LOGICAL ``(k, n)`` element coordinates of the
@@ -314,23 +321,36 @@ class TrellisLoad(Load):
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)
-        return [f"{indent}{self.names[0]} = trellis_decode {self.input}[{idx}] cb={self.cb} K={self.k_bits}"]
+        lhs = self.names[0] if self.is_scalar else f"{', '.join(self.names)}"
+        run = "" if self.is_scalar else f" run={len(self.names)}"
+        return [f"{indent}{lhs} = trellis_decode {self.input}[{idx}] cb={self.cb} K={self.k_bits}{run}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
-        assert self.is_scalar, "TrellisLoad decodes one element per binding"
         from emmy.compiler.ir.expr import SimplifyCtx  # noqa: PLC0415
 
         kx = self.index[0].simplify(SimplifyCtx.empty()).render(ctx)
         nx = self.index[1].simplify(SimplifyCtx.empty()).render(ctx)
         words = 16 * self.k_bits
-        nm = self.names[0]
-        ctx.ssa_dtypes[nm] = "f32"
         tile = f"((({kx}) >> 4) * {self.n_tiles} + (({nx}) >> 4)) * {words}"
-        return [
-            f"{pad}float {nm} = emmy_trellis_decode((const unsigned short*){self.input} + ({tile}), "
-            f"{self.k_bits}, {self.cb}, ({kx}) & 15, ({nx}) & 15);"
+        for nm in self.names:
+            ctx.ssa_dtypes[nm] = "f32"
+        if self.is_scalar:
+            return [
+                f"{pad}float {self.names[0]} = emmy_trellis_decode((const unsigned short*){self.input} + ({tile}), "
+                f"{self.k_bits}, {self.cb}, ({kx}) & 15, ({nx}) & 15);"
+            ]
+        # The TILE-COLUMN run: ``names[i]`` is the element at ``k = index[0] + i``, the anchor
+        # tile-aligned (``055_fuse_trellis_runs`` proves it before building this form), so one
+        # code fetch feeds all ``TRELLIS_TILE`` rows.
+        assert len(self.names) == TRELLIS_TILE, f"a trellis run decodes one whole tile column ({TRELLIS_TILE} rows)"
+        buf = f"{self.names[0]}_col"
+        out = [
+            f"{pad}float {buf}[{TRELLIS_TILE}];",
+            f"{pad}emmy_trellis_decode_col<{self.k_bits}, {self.cb}>((const unsigned short*){self.input} + ({tile}), ({nx}) & 15, {buf});",
         ]
+        out.extend(f"{pad}float {nm} = {buf}[{i}];" for i, nm in enumerate(self.names))
+        return out
 
 
 @dataclass(frozen=True)

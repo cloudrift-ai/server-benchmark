@@ -147,7 +147,19 @@ k-invariant prologue stays full-row in every partition, only the per-cell cone �
 statistic site is a nested site under the same inventory. A COMPUTED `b` edge (the trellis decode cone) is carried
 symmetrically: warp-only over the same mandatory `sync` fill (the fill decodes the B tile into its slab; the ring at
 `d2` then prefetches the materialized A), with no split-K (nothing to σ-reindex) and the COLLAPSE reading as its
-reduce-tier fallback — `computed_b_cover` is the legality twin of `computed_a_cover`. The **flash streaming pair** is carried too, and it is why
+reduce-tier fallback — `computed_b_cover` is the legality twin of `computed_a_cover`. On that reduce-tier fallback
+the decode gets a partition of its own, the **decode band**: `_schedule._decode_band_specs` answers a decoded-B fold
+(`_decoded_b` — a `TrellisLoad` at the reduce axis AND a non-unit free axis) with the transposed coop band at
+`reg` = the trellis tile's 16 k rows over a cross-CTA split, and with nothing else wherever it spells. Two facts
+drive that. The lane map: `reg` copies at `k_ways == 1` are CONSECUTIVE, so a lane's 16 copies walk one tile
+column, which `055_fuse_trellis_runs` collapses into a single run leaf — one code fetch instead of sixteen
+per-element fetches of the same tile. And the row set: the B-orientation classifier (`_matvec_b_kstride`) answers
+`None` on a decode leaf, because its index is the weight's logical `(k, n)` while the buffer is the codes grid, so
+the layout gate simply does not apply — but `ShapeKey` is decode-blind for the same reason, and leaving the
+per-element rows offered let a cold pick inherit an f16 matvec's measurement, the cold-poison class
+`coop_band_layout` already exists for. The split widths are enumerated widest-first (option-0 is the widest legal
+one), skipping any whose slice is not tile-aligned (the run would not fuse) or that leaves the warp-wide blocks
+short of a wave. The **flash streaming pair** is carried too, and it is why
 the enumerator recurses: a `_site_values` entry plus legality predicates, with no emitter of its own. A term the
 enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.

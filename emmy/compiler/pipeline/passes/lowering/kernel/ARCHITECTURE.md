@@ -375,6 +375,11 @@ the two apply paths stay distinct on a coop-K contraction.
 col-adjacent canonical pair; equal swizzle modes pair too — the per-lane address XOR commutes with the paired lane
 map; halves the staged drains' LSU count, bit-identical; fires on both the
 warp-flash streaming drains and the matmul tier's staged drains — two emitters, one pass, which is why it is a pass);
+`055_fuse_trellis_runs` collapses a body's 16 per-element `TrellisLoad`s over one tile column into the run form of
+that leaf (they are hoistable — a pure read of a kernel input, indexed by coordinates bound outside the body — and
+the anchor must be provably tile-aligned, proved affinely against the enclosing `StridedLoop`'s start and step, or
+the run's element `i` would not be the weight at `k_lo == i`); it is what makes the reduce tier's decode band a single
+code fetch per column instead of two words per weight;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).

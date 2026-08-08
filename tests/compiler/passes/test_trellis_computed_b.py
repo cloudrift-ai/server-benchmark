@@ -470,3 +470,152 @@ def test_activation_side_real_checkpoint_cuda(tmp_path, monkeypatch):
 
     ref_w = fold_hadamard(decode_trellis(codes, 0), got["suh"], got["svh"][:n_out]).T
     _run_activation_cuda(tmp_path, monkeypatch, 32, n_out, k_in, ref_w)
+
+
+# ===================================================================
+# 3.2 — the reduce/gemv tier: the decode band and its run fusion
+# ===================================================================
+
+
+def _matvec_term(n=11008, k=4096, kbits=2):
+    """The M=1 reading pair for a decoded-B linear — the decode-phase matvec shape."""
+    g, _ = _trellis_linear_graph(1, n, k, kbits)
+    from emmy.compiler.pipeline import TILE_PASSES
+    from emmy.compiler.pipeline.fork import flatten_leaves
+    from emmy.compiler.pipeline.pipeline import Run
+
+    rows: list[dict] = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(g, decide)
+    return rows
+
+
+def test_decoded_b_matvec_offers_the_tile_band_alone():
+    """A decoded B answers the reduce partition with the decode band only: every reduce row is the
+    transposed coop band at the tile's 16 register rows, over a cross-CTA split. The per-element
+    rows are what the pre-3.2 schedule deployed, and they are 2-8x off."""
+    rows = [r for r in _matvec_term() if r.get("REDUCE")]
+    assert rows, "no reduce rows for the M=1 decoded-B matvec"
+    for r in rows:
+        assert r["REDUCE"].endswith("/coop-t/r16"), r
+        assert r["REDUCE"].startswith("g"), r
+        assert r.get("WORK") == "t32", r
+    # Option-0 (the first offered row) is the WIDEST split — the deploy every prior-free path takes.
+    first = next(r for r in _matvec_term() if r.get("REDUCE"))
+    assert first["REDUCE"] == "g32k/coop-t/r16", first
+
+
+def test_decoded_b_declines_the_b_orientation_gate():
+    """``_matvec_b_kstride`` reads a gmem row stride off a STORED B. A ``TrellisLoad``'s index is
+    the logical ``(k, n)`` of the weight while the buffer is the codes grid, so the stride would
+    describe the wrong array — the whole layout gate must answer ``None`` there. Left answering
+    ``False`` (what the codes grid's stride says) the plain band is refused AND option-0 collapses
+    to the serial one-thread-per-output fold, which is 4-20x off at the GLM projection shapes."""
+    from emmy.compiler.ir.stmt import Load
+
+    class _Term:
+        place = type("P", (), {"free": (Axis(name="n", extent=1024),)})()
+        tile = type(
+            "T", (), {"op": None, "inputs": {"codes": Tensor("codes", (32, 64, 32), "i16"), "wbuf": Tensor("wbuf", (512, 1024), "f16")}}
+        )()
+
+    carrier = type("C", (), {"axis": Axis(name="k", extent=512)})()
+    decode = TrellisLoad(name="w", input="codes", index=(Var("k"), Var("n")), cb=0, k_bits=2, n_tiles=64)
+    row = Load(name="xv", input="x", index=(Var("k"),))
+    monkeyed = [decode, row]
+    real = sched._node_loads
+    sched._node_loads = lambda _op: monkeyed
+    try:
+        assert sched._matvec_b_kstride(_Term(), carrier) is None
+        monkeyed = [Load(name="w", input="wbuf", index=(Var("k"), Var("n"))), row]
+        assert sched._matvec_b_kstride(_Term(), carrier) is not None, "a STORED B still classifies"
+    finally:
+        sched._node_loads = real
+
+
+def test_tile_band_fuses_the_column_into_one_run():
+    """``055_fuse_trellis_runs`` turns the band's 16 per-element decodes into ONE tile-column run:
+    the kernel calls ``emmy_trellis_decode_col`` and no scalar decode survives in the body."""
+    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    g, _ = _trellis_linear_graph(1, 1024, 512, 2)
+    with _pinned_knobs({"REDUCE": "g4k/coop-t/r16", "WORK": "t32"}):
+        compiled = CudaBackend().compile(g)
+    partial = next(
+        s for nd in compiled.nodes.values() if (s := getattr(nd.op, "kernel_source", None)) and "__partial" in (nd.op.kernel_name or "")
+    )
+    body = partial.split('extern "C"', 1)[1]
+    assert body.count("emmy_trellis_decode_col<2, 0>(") == 1, body
+    assert "emmy_trellis_decode(" not in body, "a scalar decode survived the run fusion"
+
+
+def test_run_fusion_declines_an_unaligned_anchor():
+    """The run's element ``i`` IS the weight at ``k_lo == i``, so an anchor the pass cannot prove
+    tile-aligned must not fuse."""
+    import importlib
+
+    mod = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.055_fuse_trellis_runs")
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.stmt import StridedLoop
+
+    def column(start: int, step: int) -> Body:
+        loads = tuple(
+            TrellisLoad(
+                name=f"w{i}",
+                input="codes",
+                index=(BinaryExpr("+", Var("kk"), Literal(i, "int")) if i else Var("kk"), Var("n")),
+                cb=0,
+                k_bits=2,
+                n_tiles=4,
+            )
+            for i in range(16)
+        )
+        loop = StridedLoop(axis=Axis(name="kk", extent=512), start=Literal(start, "int"), step=Literal(step, "int"), body=Body(loads))
+        return mod._fuse(Body((loop,)), {})
+
+    fused = column(0, 16)[0].body
+    assert len(fused) == 1 and not fused[0].is_scalar, "an aligned anchor should fuse to one run"
+    for start, step in ((8, 16), (0, 8)):
+        kept = column(start, step)[0].body
+        assert len(kept) == 16, f"start={start} step={step} is not tile-aligned and must not fuse"
+
+
+def test_shape_key_separates_a_decoded_b_from_its_f16_twin():
+    """``ShapeKey`` is layout- and storage-blind unless told: without the trellis class an f16
+    matvec's golden / DB row joins a trellis matvec at the same ``(M, N, K)`` and deploys a plan
+    measured on a wholly different kernel."""
+    from emmy.compiler.pipeline.search.data.shape import ShapeKey
+
+    base = {"S_ext_free_prod": 11008, "S_ext_reduce_max": 4096, "S_ext_free_max": 11008, "S_dtype_f16": 1.0}
+    f16 = ShapeKey.from_s_features(base)
+    coded = ShapeKey.from_s_features({**base, "S_dtype_i16": 1.0})
+    assert f16.dtype_class == "" and coded.dtype_class == "trellis"
+    assert f16 != coded and not coded.joins(ShapeKey.from_matmul(1, 11008, 4096, "fp16"))
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize(("n", "k", "kbits"), [(1024, 512, 2), (512, 1024, 6), (1024, 512, 3)])
+def test_trellis_matvec_matches_hat_basis_reference_cuda(n, k, kbits):
+    """The decode-phase matvec on the greedy deploy — the decode band plus its split finalize."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    rng = np.random.default_rng(5)
+    g, t_shape = _trellis_linear_graph(1, n, k, kbits)
+    codes = _codes(rng, t_shape[0] * 16, t_shape[1] * 16, kbits)
+    x = (rng.standard_normal((1, k)) * 0.05).astype(np.float16)
+    be = CudaBackend()
+    compiled = be.compile(g)
+    sources = [s for nd in compiled.nodes.values() if (s := getattr(nd.op, "kernel_source", None))]
+    assert any("emmy_trellis_decode_col" in s for s in sources), "the matvec did not reach the fused decode band"
+    y = be.run(compiled, input_data={"x": x, "codes": codes})[0].outputs["y"].reshape(1, n).astype(np.float32)
+    ref = _ref(x, codes, 0, n, k)
+    assert float(np.abs(y - ref).max()) / max(float(np.abs(ref).max()), 1e-9) < 2e-3

@@ -134,14 +134,12 @@ A quantized checkpoint never reaches the trace: the trace runs over the bf16 arc
 `loader.quant.spell_quantized_constants` rewrites each fp8-stored weight into in-graph algebra — a bits constant
 (f8 dtype, the weight's source path) + a scale constant + the dequant cone (decode-cast, broadcast-multiply, a
 reshape pair for 2-D block scales) — so from birth a quantized weight is just constants + algebra, with no metadata
-on any shared IR type. The generic `032_fold_constant_subgraphs` decomposition rule then dissolves the algebra as
-early as possible (default): the cone collapses into ONE `ConstantOp` whose `source_graph` bind record the loader
-evaluates through the NumPy backend at bind time (leaf f8 sources read as raw bits, LUT decode, f32 scale multiply,
-one cast into the compute dtype), and every later pass sees a plain constant. `EMMY_FP8_EXPAND` skips the fold: the
-cone stays in-graph and rides the B-operand cone into the kernel (fp8 bits in device memory, decode absorbed by the
-storage dtype at the fragment load, scale hoisted to the epilogue). Scale pairing is the general `<key>_scale` /
-`<key>_scale_inv` rule — it subsumes the `.weight` → `.weight_scale` convention and covers non-`.weight` leaves
-(gpt-oss's 3-D expert params, `…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
+on any shared IR type. Storage-decode cones stay in-graph unconditionally: fp8 bits remain compressed in device
+memory, the dtype decode is absorbed at the fragment load, and a compatible scale is hoisted to the epilogue. The
+generic constant folder deliberately excludes storage-decode cones because materializing them would expand the
+buffer into its compute dtype. Scale pairing is the general `<key>_scale` / `<key>_scale_inv` rule — it subsumes the
+`.weight` → `.weight_scale` convention and covers non-`.weight` leaves (gpt-oss's 3-D expert params,
+`…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
 
 **Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
 expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never
@@ -149,14 +147,12 @@ fire; `loader.quant.spell_quantized_inputs(graph, specs)` is the post-trace twin
 and `graph.inputs` slot but its dtype becomes the f8 storage dtype — the feed binds the raw bit pattern on the uint8
 fp8 bits carrier, the same rule as the constant side (`emmy/serving/gen_runner.py`'s `_compile_split` binds every plan
 input at its own traced dtype for this reason) — and a new `<name>_scale` input is appended, with the same decode-cast
-/ broadcast-multiply cone re-creating the value the trace promised. An input-rooted cone is not a constant subgraph,
-so it stays in-graph unconditionally (no `EMMY_FP8_EXPAND` analog) and the same W8A16 mul-hoist binding absorbs it:
+/ broadcast-multiply cone re-creating the value the trace promised. The same W8A16 mul-hoist binding absorbs it:
 at gpt-oss expert shapes the gate_up matmul streams fp8 bytes with the scale on the accumulator epilogue at both the
 mma and the M=1 coop-reduce tiers. The down matmul's cone instead stays materialized by loop fusion's flash-consumer
 protection (the down projection sum-contracts the exp-bearing SwiGLU activation, which reads as a future
-softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant
-`EMMY_FP8_EXPAND` path, not an input-sourced limitation. Indirect operands compose: bits and scale inputs both
-compile as table-resolved operands for the fixed-slot dispatch.
+softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant path.
+Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` holds the pure numpy decode for the EXL3 (QTIP-class
 trellis-coded) weight format: per-16x16-tile bit-window extraction from the tail-biting code stream, the 3INST
@@ -168,21 +164,20 @@ fp8), the twin carries decoded real weights (`load_dequantized_state_dict` decod
 values; per-expert checkpoint modules pack into the v5 3-D expert params, encode padding — both dims rounded up
 to 128, e.g. GLM-4.5-Air's `intermediate_size` 10944 → 11008 — trimmed back to the declared shapes), and
 `spell_trellis_constants` (the sibling of `spell_quantized_constants`) rewrites each coded `<module>.weight`
-constant at birth into three leaf constants (int16 codes on the `i16` carrier + the f16 channel vectors) joined
-by a `TrellisDecodeOp` (frontend IR; `cb` records the `mcg`/`mul1` marker presence, `out_features`/`in_features`
-slice the encode padding — the reference math, since exllamav3 zero-pads activations in and slices outputs).
-`032_fold_constant_subgraphs` collapses the cone into a bind-time `source_graph` record — this is the
-correctness lane: full value footprint in memory, bind-time decode bit-exact against the direct decode. Not every
-linear is coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0 `o_proj`), and
-those load as ordinary tensors.
+constant at birth into three leaf constants (int16 codes on the `i16` carrier + the f16 channel vectors) and
+format-neutral tensor operations: static ranges, numeric casts and same-width bitcasts, elementwise integer
+arithmetic, gathers/index maps, layouts, and matmuls. Marker presence selects which generic codebook algebra is
+emitted; no format-specific op exists. `032_fold_constant_subgraphs` treats this like any other static computation
+and collapses it into a bind-time `source_graph` record, bit-exact against the direct decode. Not every linear is
+coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0 `o_proj`), and those load
+as ordinary tensors.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), generic elementwise ops, and graph algebra. They may NEVER contain a
 checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or name.
-Scheme-specific types and metadata belong only to checkpoint loading and frontend IR. Frontend decomposition must
-replace them with generic algebra or a regular constant before Loop IR is built. If an optimization cannot cross that
-boundary in generic IR, keep the bind-time constant path instead of extending the downstream dialects. Mechanical
-architecture tests scan the post-decomposition source tree for format-name leaks.
+Scheme-specific types and metadata belong only to checkpoint loading and birth-time spelling. Spelling must emit
+generic algebra, and frontend decomposition must leave only generic tensor IR or a regular constant before Loop IR.
+Mechanical architecture tests scan the post-decomposition source tree for format-name leaks.
 
 ## Op provenance
 

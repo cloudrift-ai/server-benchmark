@@ -796,7 +796,7 @@ def _trim_padded_weights(model, state: dict) -> None:
     EXL3 pads both dims of every quantized linear to multiples of 128 at encode time
     (GLM-4.5-Air: ``intermediate_size`` 10944 → 11008), so a decoded state value can
     overhang the module's parameter. Slicing the leading extents is exactly the reference
-    math (zero-padded activations in, sliced outputs — see ``TrellisDecodeOp``). Guarded
+    math (zero-padded activations in, sliced outputs). Guarded
     tightly: only when every overhanging dim is exactly the declared dim's roundup to 128 —
     anything else stays as-is for ``load_state_dict`` to report."""
     for key, param in model.state_dict().items():

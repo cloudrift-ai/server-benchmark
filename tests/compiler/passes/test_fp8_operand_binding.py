@@ -200,8 +200,7 @@ def test_f8_atoms_are_the_gated_k32_family():
 
 def _fp8_linear_graph(m=32, n=512, k=512):
     """``x:f16 @ (from_f8e4m3(W bits) · s:(N,1))ᵀ`` — the LinearOp over the in-graph decode cone
-    the birth-time speller emits for a per-out-channel fp8 weight (``EMMY_FP8_EXPAND=1`` keeps
-    the cone for the kernel path)."""
+    the birth-time speller emits for a per-out-channel fp8 weight."""
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.frontend.ir import LinearOp
@@ -230,7 +229,7 @@ def _fp8_linear_graph(m=32, n=512, k=512):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_fp8_b_matmul_reaches_warp_tier_cuda(monkeypatch):
+def test_fp8_b_matmul_reaches_warp_tier_cuda():
     """The fragment-convert path (M2b priority 3): under a warp ``TILE`` pin the fp8-B linear
     lands on the mma tier — the gmem-direct B fragment load converts fp8 bytes to f16 per element
     (``emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>``), the per-out-channel scale rides the f32
@@ -242,7 +241,6 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda(monkeypatch):
     from emmy.compiler.dtype import decode_f8
     from emmy.compiler.loader.binder import bind_constants
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(3)
     bits = rng.integers(0, 256, (n, k)).astype(np.uint8)

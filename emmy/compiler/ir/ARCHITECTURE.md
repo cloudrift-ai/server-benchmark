@@ -96,7 +96,7 @@ them.
 |-----------------|--------------------------------------------------------------------------------|
 | `Op`            | Base class. Subclasses implement `infer_output_shape` and `forward` (numpy).   |
 | `InputOp`       | Sentinel: graph input tensor. Value supplied by the executor.                  |
-| `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative (`merge_sibling_linears`' weight concat): `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain. `source_graph` is the N-source bind record (`032_fold_constant_subgraphs`' collapsed constant cone): a constant-only mini-graph whose leaf `ConstantOp`s name source paths — the loader binds each leaf, evaluates through the NumPy backend, then runs the chain. Exactly one of `source_path` / `source_parts` / `source_graph` is set on a loadable constant. |
+| `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative (`merge_sibling_linears`' weight concat): `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain. `source_graph` is the N-source bind record (`032_fold_constant_subgraphs`' collapsed static cone): a mini-graph whose external leaves name source paths and whose scalar leaves carry values — the loader binds/evaluates it through the NumPy backend, then runs the chain. Exactly one of `source_path` / `source_parts` / `source_graph` is set on a loadable constant. |
 | `_keepdim_axis` | Shape helper shared by `ReduceOp` (tensor) and `MeanOp` (frontend).            |
 
 ## `expr.py`
@@ -123,7 +123,6 @@ remain.
 |---------------|-------------------------------------------------------------------------------------------|
 | Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.  |
 | Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, `RmsNormOp`, `LayerNormOp`, `SoftmaxOp` — rewrite to elementwise + reduce chains. |
-| Storage-decode | `TrellisDecodeOp` — the frontend constant-subgraph fold replaces it with a bind-time `source_graph` constant before Loop IR (its numpy `forward` evaluates that record). |
 
 ## `tensor/ir.py`
 
@@ -133,10 +132,16 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`exp`/`sin`/`cos`/…). |
+| `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
+| `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
 | `IndexMapOp` + `IndexSource`         | Unified layout-only op over `Expr`.                            |
+
+`RangeOp`, `CastOp`, and `BitcastOp` are generic value operations, not checkpoint-format operations. Their current
+consumer is static reconstruction algebra, so `032_fold_constant_subgraphs` removes them before Loop lifting. A
+future runtime consumer may add ordinary lifting for the same semantics without changing checkpoint ingestion.
 
 Op metadata (arity / `commutative` / `associative` / `identity` /
 `has_identity` / `selecting` / `semiring_product`) lives on `ElementwiseImpl` in

@@ -17,26 +17,23 @@ architecture-twin construction). Two checkpoint families share the design — FP
   fp8-stored weight ``ConstantOp`` into in-graph algebra — a bits constant
   (f8 dtype) + a scale constant + the decode-cast / broadcast-multiply cone.
   From that point the graph carries NO quantization metadata; a quantized
-  weight is just constants + algebra. By default the generic
-  ``032_fold_constant_subgraphs`` pass then dissolves the cone back into one
-  bind-time-evaluated constant; with ``EMMY_FP8_EXPAND`` the cone stays
-  in-graph for the kernel path.
+  weight is just constants + algebra, unconditionally available to the
+  ordinary lowering and scheduling rules.
 - :func:`spell_quantized_inputs`: the input-sourced twin of the constant
   speller for graphs whose weights are forward-argument ``InputOp``s (the MoE
   serving seam's expert programs). Each named input becomes an fp8 bits input
   (uint8 carrier at the feed) plus a new scale input, with the same dequant
-  cone spelled in-graph; an input-rooted cone is not a constant subgraph, so
-  it stays in-graph unconditionally — no ``EMMY_FP8_EXPAND`` analog.
+  cone spelled in-graph.
 - :func:`load_dequantized_state_dict`: the eager / accuracy twin's state dict,
   every fp8 weight dequantized. Reads config + index directly (loader-band —
   it feeds the architecture twin before any graph exists, and its whole-dict
   semantics, consumed scales dropped, have no graph counterpart).
 - :func:`spell_trellis_constants`: the EXL3 sibling of the constant speller —
-  each trellis-coded weight becomes three leaf constants (int16 codes + the
-  f16 ``suh``/``svh`` channel vectors) joined by a ``TrellisDecodeOp``, which
-  ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph``
-  record. :func:`load_dequantized_state_dict` decodes the same siblings into
-  ``.weight`` values for the eager twin.
+  each trellis-coded weight becomes generic range, cast/bitcast, integer,
+  gather, layout, and matmul algebra over the int16 codes and f16
+  ``suh``/``svh`` vectors. The generic constant folder turns that static cone
+  into one bind record. :func:`load_dequantized_state_dict` decodes the same
+  siblings into ``.weight`` values for the eager twin.
 """
 
 from __future__ import annotations
@@ -430,15 +427,13 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
 
 
 def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
-    """Rewrite the weight constant ``nid`` into its trellis decode cone: three leaf
-    ConstantOps (``{base}.trellis`` int16 codes, ``{base}.suh`` / ``{base}.svh`` f16
-    channel vectors) joined by a ``TrellisDecodeOp``. Returns ``True`` on success.
+    """Rewrite ``nid`` into generic tensor algebra for trellis reconstruction.
 
     The cone's OUTPUT tensor keeps exactly the dtype/shape the trace promised. Sibling
     shapes that do not reproduce the traced weight shape leave the constant alone
     (``False``) — never a compile error.
     """
-    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp  # noqa: PLC0415
+    from emmy.compiler.loader.trellis import spell_reconstruction  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     node = graph.nodes[nid]
@@ -454,8 +449,8 @@ def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: di
     n_pad = svh_shape[0] if len(svh_shape) == 1 else -1
     n, k = shape if len(shape) == 2 else (-1, -1)
     # EXL3 pads both dims to multiples of 128 at encode time; the decode cone slices the
-    # padded weight back to the traced logical shape (exactly the reference math — see
-    # ``TrellisDecodeOp``). The sibling extents must be exactly the traced dims' roundups.
+    # padded weight back to the traced logical shape. The sibling extents must be exactly
+    # the traced dims' roundups.
     pad_ok = (-(-k // 128) * 128, -(-n // 128) * 128) == (k_pad, n_pad) if k > 0 and n > 0 else False
     if len(t_shape) != 3 or not pad_ok or (t_shape[0] * 16, t_shape[1] * 16) != (k_pad, n_pad):
         logger.warning(
@@ -484,30 +479,24 @@ def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: di
         inputs=[],
         output=Tensor(f"{out.name}_svh", svh_shape, "f16"),
     )
-    dec = frag.add_node(
-        op=TrellisDecodeOp(cb=cb, out_features=n, in_features=k),
-        inputs=[codes, suh, svh],
-        output=Tensor(out.name, shape, out.dtype),
-    )
-    frag.outputs = [dec]
+    decoded = spell_reconstruction(frag, codes, suh, svh, cb=cb, shape=(n, k), name=out.name, dtype=out.dtype)
+    frag.outputs = [decoded]
     graph.splice(frag, consumed=[nid], output=nid)
     return True
 
 
 def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
-    """Spell every EXL3 trellis-coded weight of ``graph`` as an in-graph decode cone, at birth.
+    """Spell every EXL3 trellis-coded weight as generic tensor algebra, at birth.
 
     The EXL3 sibling of :func:`spell_quantized_constants`, called from the same post-trace
     site. Source of truth is the CHECKPOINT: ``config.json`` declares ``quant_method:
     "exl3"`` (:func:`_exl3_quant_config`), and the safetensors index supplies the pairing —
     a traced ``<module>.weight`` constant whose module ships ``<module>.trellis`` siblings
-    is rewritten by :func:`_spell_trellis_one` into the codes + ``suh``/``svh`` leaves and a
-    ``TrellisDecodeOp`` (its ``cb`` field recording the marker-sibling presence, so the
-    markers themselves never enter the graph). From that point a quantized weight is just
-    constants + algebra; ``032_fold_constant_subgraphs`` collapses the cone into ONE
-    bind-time ``ConstantOp(source_graph=record)``, evaluated through the reference NumPy
-    backend — full value footprint in memory, the correctness lane (in-kernel decode is
-    later work, so the cone folds even under ``EMMY_FP8_EXPAND``).
+    is rewritten by :func:`_spell_trellis_one` into codes + ``suh``/``svh`` constants and
+    generic range, cast/bitcast, integer, gather, layout, and matmul operations. Marker
+    presence selects which generic codebook algebra is emitted; marker tensors themselves
+    never enter the graph. The generic constant folder evaluates the static cone before
+    Loop IR.
 
     Weights without a trellis sibling (embeddings, norms, routers, biases) load as plain
     tensors. Legacy checkpoints storing packed ``su``/``sv`` sign words instead of
@@ -576,9 +565,8 @@ def spell_quantized_inputs(
     scale feeds reshaped to the interleaved ``(grid, 1)`` layout). The same decode-cast /
     broadcast-multiply cone as the constant speller (:func:`_dequant_cone`) re-creates the
     value tensor the trace promised — dtype, shape and consumers unchanged, so every later
-    pass is unaffected. An input-rooted cone is not a constant subgraph, so
-    ``032_fold_constant_subgraphs`` leaves it in-graph unconditionally and the W8A16
-    mul-hoist binding can absorb it exactly as on the ``EMMY_FP8_EXPAND`` constant path.
+    pass is unaffected. An input-rooted cone is not a constant subgraph, so the W8A16
+    mul-hoist binding can absorb it exactly as on the constant path.
 
     ``inverse`` divides by the scale (the stored scale is the reciprocal multiplier).
     The caller names these inputs explicitly, so any mismatch raises ``ValueError`` instead

@@ -323,7 +323,7 @@ def test_real_tensor_decode_statistics():
 
 
 # ===================================================================
-# Checkpoint ingestion: spell → fold → bind.
+# Checkpoint ingestion: generic spelling → fold → bind.
 # The speller lives in ``loader.quant`` (the one quantization-concept module);
 # its tests sit here because the fixtures and the decode reference are EXL3's.
 # ===================================================================
@@ -403,18 +403,20 @@ def _fold(graph):
     return Pipeline.build(["frontend/decomposition"], select=[_FOLD_RULE]).run(graph)
 
 
-def test_spell_trellis_builds_decode_cone(tmp_path):
+def test_spell_trellis_builds_generic_cone(tmp_path):
     from emmy.compiler.ir.base import ConstantOp
-    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.ir.tensor.ir import BitcastOp, GatherOp, RangeOp
 
     g, _ref = _spelled_exl3(tmp_path)
-    consts = {nn.op.source_path: nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp)}
+    consts = {nn.op.source_path: nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_path is not None}
     assert set(consts) == {"layer.trellis", "layer.suh", "layer.svh"}
     assert consts["layer.trellis"].output.dtype.name == "i16" and consts["layer.trellis"].op.source_dtype == "i16"
     assert consts["layer.suh"].output.dtype.name == "f16"
-    decs = [nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
-    assert len(decs) == 1
-    assert decs[0].op.cb == 0 and decs[0].op.out_features == 256 and decs[0].op.in_features == 128
+    assert any(isinstance(nn.op, RangeOp) for nn in g.nodes.values())
+    assert any(isinstance(nn.op, BitcastOp) for nn in g.nodes.values())
+    assert any(isinstance(nn.op, GatherOp) for nn in g.nodes.values())
+    assert sum(isinstance(nn.op, MatmulOp) for nn in g.nodes.values()) == 2
     # Interface invariance: the cone's output is exactly what the trace promised.
     out = g.nodes[g.outputs[0]].output
     assert out.dtype.name == "f32" and tuple(d.as_static() for d in out.shape) == (256, 128)
@@ -423,11 +425,11 @@ def test_spell_trellis_builds_decode_cone(tmp_path):
 
 @pytest.mark.parametrize("cb", [1, 2])
 def test_spell_trellis_marker_selects_codebook(tmp_path, cb):
-    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+    from emmy.compiler.ir.base import ConstantOp
 
     g, _ref = _spelled_exl3(tmp_path, cb=cb)
-    dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
-    assert dec.op.cb == cb
+    values = {nn.op.value for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.value is not None}
+    assert (0xCBAC1FED if cb == 1 else 0x83DCD12D) in values
 
 
 def test_spell_trellis_is_idempotent(tmp_path):
@@ -489,16 +491,6 @@ def test_spell_trellis_shape_mismatch_left_alone(tmp_path):
 
 
 def test_fold_collapses_trellis_cone(tmp_path):
-    g, _ref = _spelled_exl3(tmp_path)
-    folded = _fold(g)
-    assert set(folded.nodes) == {"p_w"}
-    assert folded.nodes["p_w"].op.source_graph is not None
-
-
-def test_fold_collapses_trellis_cone_under_fp8_expand(tmp_path, monkeypatch):
-    """``EMMY_FP8_EXPAND`` keeps fp8 cones in-graph for the kernel path; a trellis cone has
-    no in-kernel realization, so it must fold regardless."""
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     g, _ref = _spelled_exl3(tmp_path)
     folded = _fold(g)
     assert set(folded.nodes) == {"p_w"}
@@ -667,10 +659,8 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
     records = [op for _nid, op in graph.loadable_constants() if isinstance(op, ConstantOp) and op.source_graph is not None]
     assert not records  # spelled, not yet folded — the fold runs inside the pipeline
-    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
-
-    decs = [nn for nn in graph.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
-    assert len(decs) == 7  # q,k,v,o + gate,up,down
+    coded = [op for _nid, op in graph.loadable_constants() if op.source_path and op.source_path.endswith(".trellis")]
+    assert len(coded) == 7  # q,k,v,o + gate,up,down
     params = dict(wrapper.named_parameters())
     for name, ref in ref_sd.items():
         got = params["model." + name]  # the trace wrapper nests the CausalLM under .model
@@ -680,13 +670,13 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
 @requires_cuda
 def test_exl3_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny EXL3 model through the same seam ``emmy compile`` / ``emmy run`` use, compiled
-    on the CUDA backend with the default fold: every trellis cone dissolves at 032 (bind-time
-    decode), and the output matches the decoded eager reference."""
-    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+    on the CUDA backend: generic reconstruction cones fold at 032, and the output matches the
+    decoded eager reference."""
+    from emmy.compiler.ir.tensor.ir import BitcastOp, RangeOp
 
     from .test_quant import _assert_e2e_gate, _run_e2e
 
     config, ref_sd = _tiny_exl3_checkpoint(tmp_path)
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
-    assert not any(isinstance(nn.op, TrellisDecodeOp) for nn in compiled.nodes.values()), "a trellis op survived the fold"
-    _assert_e2e_gate(emmy_logits, ref_logits, "exl3 fold mode")
+    assert not any(isinstance(nn.op, (BitcastOp, RangeOp)) for nn in compiled.nodes.values())
+    _assert_e2e_gate(emmy_logits, ref_logits, "generic reconstruction fold")

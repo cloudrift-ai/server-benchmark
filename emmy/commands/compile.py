@@ -558,7 +558,7 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     def _stamp(graph: Graph) -> Graph:
         # The checkpoint's quantized weights are spelled as in-graph algebra immediately
         # after trace, before any pass runs — from here on the graph carries no
-        # quantization metadata (the fold pass then dissolves the cones by default).
+        # quantization metadata; generic storage-decode algebra stays available to lowering.
         # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
             from emmy.compiler.loader.quant import spell_quantized_constants, spell_trellis_constants  # noqa: PLC0415

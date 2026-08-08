@@ -106,8 +106,8 @@ def bind_constants(graph: Graph, sources: dict[str, np.ndarray]) -> dict[str, np
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
         if op.source_graph is not None:
-            # Folded constant subgraph (``032_fold_constant_subgraphs``): evaluate the record
-            # over the same per-path sources, then run this constant's own trailing chain.
+            # Folded static computation: evaluate the record over the same per-path
+            # sources, then run this constant's own trailing chain.
             val = evaluate_source_graph(op.source_graph, sources)
             if val is not None:
                 out[nid] = apply_load_ops(val, op.load_ops)

@@ -47,7 +47,7 @@ LN()(torch.randn(64, 2048))"
 Principled compilation stack with six IR stages, each printable on demand via `--ir <stage>`:
 
 1. **Torch IR** — captures the FX graph as a 1:1 mirror of PyTorch's op set (`rmsnorm`, `linear`, `softmax`, ...)
-2. **Tensor IR** — decomposes every Torch op into three primitives: `Elementwise`, `Reduction`, and `IndexMap`
+2. **Tensor IR** — decomposes Torch ops into generic elementwise, reduction, indexing, and value-conversion primitives
 3. **Loop IR** — lifts each primitive to a `LoopOp` and fuses
 4. **Tile IR** — schedules kernels onto GPU
 5. **Kernel IR** — materializes the schedule into framework-agnostic hardware primitives

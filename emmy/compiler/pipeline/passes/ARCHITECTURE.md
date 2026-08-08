@@ -11,20 +11,17 @@ structurally, not a distinct kind.
 
 ## Quantization is not a concept past the decomposition band
 
-A quantized checkpoint is spelled as in-graph algebra at BIRTH (`loader.quant.spell_quantized_constants`, immediately
-post-trace) and dissolved as early as possible: the generic `frontend/decomposition/032_fold_constant_subgraphs` rule
-collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
-(its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
-only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
-`load_ops`. `EMMY_FP8_EXPAND` may leave generic dtype decode and scaling algebra in the graph; a format-specific
-frontend op must fold or decompose into generic algebra before Loop IR.
+A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).
+The scheme may choose different generic algebra, but it may not mint a scheme-specific op. The generic
+`frontend/decomposition/032_fold_constant_subgraphs` rule collapses static computation cones into a bind-time
+`ConstantOp` (`source_graph`) before Loop IR. It deliberately leaves storage-decode cones expanded so compressed
+device storage is preserved, and leaves layout-only cones to the target-specific `050`/`060` load-layout policy.
 
 The boundary is structural, not a naming guideline. Lowering, shared statement and tile dialects, backends, and search
 may contain canonical dtypes, generic ops, and graph algebra. They may NEVER contain a checkpoint format's custom op,
 statement, helper, pass branch, schedule feature, environment gate, comment, or name. A new format belongs in the
-loader and frontend IR; its decomposition must erase the format. If generic IR cannot express the desired
-optimization, retain bind-time decoding rather than extending a downstream dialect. `tests/architecture/test_layering.py`
-scans every post-decomposition Python source file for known format names.
+loader and its birth-time speller must emit only generic algebra. `tests/architecture/test_layering.py` scans every
+post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one inventory, then a product over sites
 

@@ -214,13 +214,12 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_w8a16_staged_bit_identical_to_gmem_direct_cuda(monkeypatch):
+def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     """Staged fp8-B (cp.async and TMA) is BIT-identical to the gmem-direct fragment-convert
     kernel — same per-element convert, same K order, same atoms — and the staged source carries
     the byte-slab machinery (the fp8 slab decl + a byte-gather drain)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(3)
     bits = rng.integers(0, 256, (n, k)).astype(np.uint8)
@@ -241,7 +240,7 @@ def test_w8a16_staged_bit_identical_to_gmem_direct_cuda(monkeypatch):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_canonical_byte_b_and_splitk_compose_cuda(monkeypatch):
+def test_canonical_byte_b_and_splitk_compose_cuda():
     """The CANONICAL (K-major ``B[k, n]``) byte slab — K-strided bytes, so the drain is the
     scalar convert gather — and split-K composed with the staged byte slab. Each staged form is
     bit-identical to the gmem-direct kernel of the SAME reduce plan (split-K reassociates, so
@@ -253,7 +252,6 @@ def test_canonical_byte_b_and_splitk_compose_cuda(monkeypatch):
     from emmy.compiler.ir.frontend.ir import MatmulOp
     from emmy.compiler.ir.tensor.ir import ElementwiseOp
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(5)
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
@@ -289,7 +287,7 @@ def test_canonical_byte_b_and_splitk_compose_cuda(monkeypatch):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_k32_staged_bit_identical_to_gmem_direct_cuda(monkeypatch):
+def test_k32_staged_bit_identical_to_gmem_direct_cuda():
     """Staged W8A8 (the k32 byte repack — raw bytes both slabs) is BIT-identical to the
     gmem-direct ``_b8`` gathers, and the contiguous-K drains ride the vector (u32) loaders."""
     from emmy.commands.run import _pinned_knobs
@@ -297,7 +295,6 @@ def test_k32_staged_bit_identical_to_gmem_direct_cuda(monkeypatch):
 
     from .test_fp8_mma import _bare_f8_linear_graph
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(11)
     abits = ((rng.integers(0, 256, (m, k)).astype(np.uint8)) & 0x87) | 0x30

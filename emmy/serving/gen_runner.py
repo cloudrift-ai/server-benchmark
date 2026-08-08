@@ -33,11 +33,21 @@ logger = logging.getLogger(__name__)
 class _Program:
     """One compiled dynamic-``num_tokens`` split subgraph, run via the host ``rebind`` path."""
 
-    def __init__(self, program, input_names, output_names, const_bytes=0):
+    def __init__(self, program, input_names, output_names, const_bytes=0, input_weight_bytes=0):
         self.program = program
         self.input_names = input_names
         self.output_names = output_names
         self.const_bytes = const_bytes  # deduped bound-constant footprint — the boot roofline audit's floor input
+        # Weight bytes that arrive as INPUTS, not constants (an expert program's per-expert
+        # slices). Same role in the floor: every one is read at least once per forward.
+        self.input_weight_bytes = input_weight_bytes
+
+    @property
+    def weight_bytes(self) -> int:
+        """Bytes this program must read per forward however the weights arrive — the roofline
+        audit's floor input. An expert program holds ZERO constants, so counting only the
+        constant side would give it no floor and audit nothing."""
+        return self.const_bytes + self.input_weight_bytes
 
     def run(self, arrays):
         """arrays: numpy arrays aligned to ``input_names`` (each ``[T, …]``). Returns the
@@ -189,21 +199,26 @@ def _bind_plan_constants(plan, sources, cache):
     program builds — the symbolic and decode/prefill-bucket twins bind the same weights;
     per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
-    wrapper-relative, so a cross-wrapper cache would collide."""
+    wrapper-relative, so a cross-wrapper cache would collide. A weight with no checkpoint key at
+    all — a COMPUTED constant (``WeightSpec.source_op``: the trellis basis-restore Hadamard) —
+    is materialized from the spec itself and cast to its own buffer's dtype."""
     from emmy.compiler.backend.plan import apply_weight_loads
     from emmy.compiler.loader.binder import assemble_source
 
+    buf_dtype = {b.name: b.dtype.np for b in plan.buffers}
     out = {}
     for nid, w in plan.weights.items():
         src = assemble_source(w, sources)
         if src is None or w.load_ops is None:
             continue
+        if w.source_op is not None:
+            src = src.astype(buf_dtype.get(nid, src.dtype), copy=False)
         if cache is None:
             out[nid] = apply_weight_loads(src, w.load_ops)
             continue
         import cupy as cp
 
-        key = (w.source_path, w.source_parts, w.load_ops)
+        key = (w.source_path, w.source_parts, w.source_op, w.load_ops)
         arr = cache.get(key)
         if arr is None:
             arr = cp.asarray(apply_weight_loads(src, w.load_ops))
@@ -229,7 +244,19 @@ def trace_split(wrapper, example_args, argnames):
 
 
 def _compile_split(
-    wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None, plan=None, indirect_inputs=None, quant_specs=None
+    wrapper,
+    example_args,
+    argnames,
+    np_dtype,
+    dev_consts=None,
+    arena=None,
+    capacity=None,
+    plan=None,
+    indirect_inputs=None,
+    quant_specs=None,
+    trellis_specs=None,
+    aux_examples=None,
+    weight_inputs=(),
 ):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
@@ -254,7 +281,14 @@ def _compile_split(
     (the fp8 expert path) feeds ``spell_quantized_inputs`` post-trace: the named weight inputs
     become fp8 bits inputs with appended scale inputs; ``example_args`` then carries the scale
     EXAMPLES as its LAST ``len(quant_specs)`` entries (matching the speller's append order),
-    while only the leading entries are the wrapper's forward args for the trace."""
+    while only the leading entries are the wrapper's forward args for the trace.
+    ``trellis_specs`` (the EXL3 expert path) feeds ``spell_trellis_inputs`` the same way — the
+    named weight inputs become int16 CODES inputs with appended channel-vector inputs — but its
+    extra examples come by NAME in ``aux_examples`` rather than by position, so the build feed
+    is independent of the speller's append order. ``weight_inputs`` names the inputs that carry
+    WEIGHT bytes (an expert program's per-expert slices): they count toward the program's
+    weight-streaming floor in the boot roofline audit, where a constant-free expert program
+    would otherwise report no floor at all."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -270,9 +304,20 @@ def _compile_split(
             from emmy.compiler.loader.quant import spell_quantized_inputs
 
             spell_quantized_inputs(graph, quant_specs)
+        if trellis_specs:
+            from emmy.compiler.loader.quant import spell_trellis_inputs
+
+            spell_trellis_inputs(graph, trellis_specs)
         if indirect_inputs:
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
         plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+
+    if aux_examples:
+        # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
+        # new shape (a dense weight arg becomes its packed codes) and APPENDS new ones, so the
+        # traced positional args no longer describe the build feed.
+        padded = list(example_args) + [None] * (len(plan.inputs) - len(example_args))
+        example_args = [aux_examples.get(n, a) for n, a in zip(plan.inputs, padded, strict=True)]
 
     sources = {}
     for path, t in wrapper.named_parameters(remove_duplicate=False):
@@ -306,6 +351,12 @@ def _compile_split(
             if a.dtype in torch_f8:
                 a = a.view(torch.uint8)
             return a.detach().cpu().numpy().astype(np.uint8, copy=False)
+        if dt is not None and not a.dtype.is_floating_point:
+            # An integer example (an EXL3 expert's packed CODES) binds its stored word pattern;
+            # the f32 round-trip below is a value cast and means nothing for codes. Keyed on the
+            # EXAMPLE's dtype, not the buffer's — a bf16 buffer also carries an integer numpy
+            # dtype (the uint16 bits carrier) but arrives as a float tensor.
+            return a.detach().cpu().numpy().astype(dt.np, copy=False)
         return a.detach().cpu().to(torch.float32).numpy().astype(dt.np if dt is not None else np_dtype, copy=False)
 
     feed = {n: _np_in(n, a) for n, a in zip(plan.inputs, build_args, strict=True)}
@@ -315,7 +366,8 @@ def _compile_split(
     # Deduped by storage: a weight bound under two nids (e.g. gemma's K=V projection reuse) is
     # one physical read stream, and the shared-upload cache aliases arrays across nids.
     const_bytes = sum(a.nbytes for a in {id(a): a for a in const_feed.values()}.values())
-    return _Program(program, list(plan.inputs), list(plan.outputs), const_bytes=const_bytes), plan
+    weight_in = sum(feed[n].nbytes for n in weight_inputs if n in feed)
+    return _Program(program, list(plan.inputs), list(plan.outputs), const_bytes=const_bytes, input_weight_bytes=weight_in), plan
 
 
 def _indirect_covered(plan, names):
@@ -663,7 +715,9 @@ class EmmyGenRunner:
                 import copy
 
                 gate, experts = moe_parts
-                pre_w, post_w, expert_w = build_moe_split_wrapper(block)
+                expert_fmt = (expert_store or {}).get("fmt")
+                trellis = expert_fmt == "exl3"
+                pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=trellis)
                 transposed, interleaved, has_bias = moe_expert_layout(experts)
                 # The per-layer expert INPUT tensors, keyed by the expert program's input
                 # names. A quantized checkpoint supplies them from the shard stream (fp8 bits
@@ -696,9 +750,12 @@ class EmmyGenRunner:
                     if act_fn is not None
                     else f"clamped_swiglu[{getattr(experts, 'alpha', None)},{getattr(experts, 'limit', None)}]"
                 )
+                # Every per-expert tensor's per-layer shape (plus the codebook ids on the EXL3
+                # path) is in the key: the shared program bakes the CODES shape too, and EXL3's
+                # mixed allocation lets K vary per layer.
                 shape_key = (
-                    tuple(einputs["w_gate_up"].shape[1:]),
-                    tuple(einputs["w_down"].shape[1:]),
+                    tuple(sorted((n, tuple(t.shape[1:]), str(t.dtype)) for n, t in einputs.items())),
+                    tuple(sorted(((expert_store or {}).get("codebooks", {}).get(i) or {}).items())),
                     act_tag,
                     transposed,
                     has_bias,
@@ -706,19 +763,50 @@ class EmmyGenRunner:
                 if expert_sym is None:
                     expert_shape_key = shape_key
                     # Forward-arg examples in wrapper-signature order (weights, then biases) at
-                    # the VALUE dtype — the trace is quantization-blind; fp8 bits keep the same
-                    # logical shape. Quantized experts append the scale examples (the speller
-                    # appends the scale inputs after the forward args, in spec order).
-                    w_names = ["w_gate_up", "w_down"] + (["b_gate_up", "b_down"] if has_bias else [])
-                    example_w = [torch.zeros(*einputs[n].shape[1:], dtype=dtype) for n in w_names]
-                    quant_specs = None
-                    fmt = (expert_store or {}).get("fmt")
-                    if fmt is not None and einputs["w_gate_up"].dtype == torch.uint8:
+                    # the VALUE dtype — the trace is quantization-blind; fp8 bits and trellis
+                    # codes alike trace as the dense logical weight. Quantized experts append
+                    # the scale examples (the speller appends the scale inputs after the forward
+                    # args, in spec order); EXL3 passes its channel vectors by NAME instead.
+                    if trellis:
+                        inter, hidden_e = experts.gate_up_proj.shape[1] // 2, experts.gate_up_proj.shape[2]
+                        logical = {"w_gate": (inter, hidden_e), "w_up": (inter, hidden_e), "w_down": (hidden_e, inter)}
+                        w_names = list(logical)
+                    else:
+                        w_names = ["w_gate_up", "w_down"] + (["b_gate_up", "b_down"] if has_bias else [])
+                        logical = {n: tuple(einputs[n].shape[1:]) for n in w_names}
+                    example_w = [torch.zeros(*logical[n], dtype=dtype) for n in w_names]
+                    quant_specs = trellis_specs = aux_examples = None
+                    if expert_fmt is not None and not trellis and einputs["w_gate_up"].dtype == torch.uint8:
                         quant_specs = {
-                            "w_gate_up": (fmt, tuple(einputs["w_gate_up_scale"].shape[1:]), "f32"),
-                            "w_down": (fmt, tuple(einputs["w_down_scale"].shape[1:]), "f32"),
+                            "w_gate_up": (expert_fmt, tuple(einputs["w_gate_up_scale"].shape[1:]), "f32"),
+                            "w_down": (expert_fmt, tuple(einputs["w_down_scale"].shape[1:]), "f32"),
                         }
                         example_w += [torch.zeros(*einputs[f"{n}_scale"].shape[1:], dtype=torch.float32) for n in ("w_gate_up", "w_down")]
+                    if trellis:
+                        cbs = (expert_store or {}).get("codebooks", {}).get(i) or {}
+                        trellis_specs = {n: (int(cbs.get(n, 0)), tuple(einputs[n].shape[1:])) for n in w_names}
+                        # The build feed by NAME: the codes replace their dense trace placeholder
+                        # (the speller re-mints the input at the packed shape) and the channel
+                        # vectors are new inputs. Each takes the store's own per-expert shape.
+                        aux_examples = {
+                            f"{n}{leaf}": torch.zeros(*einputs[f"{n}{leaf}"].shape[1:], dtype=einputs[f"{n}{leaf}"].dtype)
+                            for n in w_names
+                            for leaf in ("", "_suh", "_svh")
+                        }
+                    # EVERY per-expert input, in a stable order: the fixed-slot tier
+                    # table-resolves exactly these, and they are the expert program's whole
+                    # weight-streaming floor (it binds no constants but the shared Hadamard).
+                    ind_names = (
+                        tuple(w_names)
+                        + tuple(f"{n}_scale" for n in quant_specs or ())
+                        + tuple(n for n in aux_examples or () if n not in w_names)
+                    )
+                    expert_kw = {
+                        "quant_specs": quant_specs,
+                        "trellis_specs": trellis_specs,
+                        "aux_examples": aux_examples,
+                        "weight_inputs": ind_names,
+                    }
                     with torch.device("cpu"):
                         expert_sym = build(
                             "moe.expert.sym",
@@ -728,7 +816,7 @@ class EmmyGenRunner:
                             np_dtype,
                             arena=arena,
                             capacity=max_tokens,
-                            quant_specs=quant_specs,
+                            **expert_kw,
                         )
                         # Static expert twins — the decode hot path. Same failure contract as
                         # the per-layer twins: a compile failure drops the tier, the symbolic
@@ -744,7 +832,7 @@ class EmmyGenRunner:
                                     None,
                                     np_dtype,
                                     arena=arena,
-                                    quant_specs=quant_specs,
+                                    **expert_kw,
                                 )
                             except Exception as ex:  # noqa: BLE001 — any compile failure → symbolic fallback
                                 logger.warning("[gen_runner] expert bucket-twin compile failed (%s); experts ride the symbolic program", ex)
@@ -756,7 +844,7 @@ class EmmyGenRunner:
                                 None,
                                 np_dtype,
                                 arena=arena,
-                                quant_specs=quant_specs,
+                                **expert_kw,
                             )
                         except Exception as ex:  # noqa: BLE001 — any compile failure → bucket/symbolic fallback
                             logger.warning("[gen_runner] expert M=1 twin compile failed (%s); single-row experts ride the bucket twin", ex)
@@ -772,7 +860,7 @@ class EmmyGenRunner:
                                     None,
                                     np_dtype,
                                     arena=arena,
-                                    quant_specs=quant_specs,
+                                    **expert_kw,
                                 )
                             except Exception as ex:  # noqa: BLE001 — any compile failure → symbolic fallback
                                 logger.warning(
@@ -781,7 +869,9 @@ class EmmyGenRunner:
                 elif shape_key != expert_shape_key:
                     raise NotImplementedError(
                         f"MoE layers disagree on expert shape/activation (layer {i}: {shape_key} vs {expert_shape_key}) — "
-                        f"the shared expert program assumes uniform experts across layers"
+                        f"the shared expert program assumes uniform experts across layers. An EXL3 checkpoint's MIXED "
+                        f"bit allocation reaches here as a differing codes shape (last dim 16*K): serving it needs one "
+                        f"program set per distinct key, not one shared set"
                     )
             else:
                 pre_w, post_w = build_attention_split_wrapper(block)
@@ -922,10 +1012,11 @@ class EmmyGenRunner:
         expert_slots = None
         moe_top_k = next((m["top_k"] for m in moe_meta if m is not None), 0)
         if expert_m1 is not None and moe_top_k > 0:
-            # EVERY per-expert input resolves through the device tables: weights and biases,
-            # plus the fp8 scale inputs on the quantized path (bits and scale both
-            # table-resolved — the proven fp8×indirect composition).
-            ind_names = tuple(w_names) + (tuple(f"{n}_scale" for n in quant_specs) if quant_specs else ())
+            # EVERY per-expert input resolves through the device tables: weights and biases, the
+            # fp8 scale inputs on the quantized path (bits and scale both table-resolved — the
+            # proven fp8×indirect composition), and the EXL3 codes with their per-expert channel
+            # vectors. ``ind_names`` was built with the tier programs. The shared Hadamard is a
+            # graph CONSTANT, not a per-expert input, so it never enters a table.
             stored_ind = stored("moe.expert.one.ind")
             if stored_ind is not None and not _indirect_covered(stored_ind, ind_names):
                 logger.warning("[gen_runner] stored moe.expert.one.ind plan lacks the indirect-operand encoding (stale pack) — recompiling")
@@ -934,14 +1025,22 @@ class EmmyGenRunner:
                 with torch.device("cpu"):
                     slot_example = [torch.zeros(1, hidden, dtype=dtype), *example_w]
                     slot0, ind_plan = _compile_split(
-                        expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names, quant_specs=quant_specs
+                        expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names, **expert_kw
                     )
                     if not _indirect_covered(ind_plan, ind_names):
                         raise RuntimeError(
                             "indirect twin compile left a weight arg unmarked (the kernel consumes it under a derived buffer name)"
                         )
                     expert_slots = [slot0] + [
-                        _compile_split(expert_w, slot_example, None, np_dtype, plan=_plan_with_slot(ind_plan, j))[0]
+                        _compile_split(
+                            expert_w,
+                            slot_example,
+                            None,
+                            np_dtype,
+                            plan=_plan_with_slot(ind_plan, j),
+                            aux_examples=aux_examples,
+                            weight_inputs=ind_names,
+                        )[0]
                         for j in range(1, moe_top_k)
                     ]
                     plans["moe.expert.one.ind"] = ind_plan
@@ -1209,7 +1308,7 @@ class EmmyGenRunner:
                     first = next(m for m in self._moe if m is not None)
                     k = len(self._expert_slots)
                     h = self._embed_weight.shape[1]
-                    num_e = first["inputs"]["w_gate_up"].shape[0]
+                    num_e = next(iter(first["inputs"].values())).shape[0]  # every per-expert tensor is E-leading
                     tables: dict[str, list[int]] = {n: [] for n in first["inputs"]}
                     for m in self._moe:
                         if m is None:

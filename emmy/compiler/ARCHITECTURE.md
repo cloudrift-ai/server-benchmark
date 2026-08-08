@@ -221,14 +221,37 @@ needs no transpose), which puts the transform on the existing tiers with no new 
 the chain lower correctly and are load-bearing: every layout change (the encode-pad concat, the flat↔block
 reshapes, the output slice) is absorbed by a POINTWISE and never reaches a matmul's activation operand, and the
 `1/sqrt(128)` per side is split as the exact powers of two `1/16` before the weight and `1/8` after, so the
-shared constant is plain ±1 and both intermediates stay below the balanced magnitude. A linear the rewrite
-declines (a weight without exactly one `LinearOp` consumer, symbolic activation dims) falls back to the folded
-checkpoint-basis cone, correct everywhere. Measured on the 5090 at N=K=22016, K=2 (past L2), against the same
-matmul with no basis restore: **+4.5 % at M=1 and +13.4 % at M=128**, the transforms collapsing into 3–4 kernels
+shared constant is plain ±1 and both intermediates stay below the balanced magnitude. Only the CONTRACTION dim has
+to be static — the leading token axes ride through as whatever `Dim`s the trace gave them, so a symbolic-width
+serving program spells the same way a static one does. A linear the rewrite declines (a weight without exactly one
+`LinearOp` consumer) falls back to the folded checkpoint-basis cone, correct everywhere. Measured on the 5090 at
+N=K=22016, K=2 (past L2), against the same matmul with no basis restore: **+4.5 % at M=1 and +13.4 % at M=128**,
+the transforms collapsing into 3–4 kernels
 (the scale multiplies fuse as computed-A cones on the two Hadamard matmuls) — at or under exllamav3's ~14 %
 standalone cost. At L2-resident shapes the ratio is much worse (+36 % / +68 % at M=128 on the GLM dense
 projections) because the compressed matmul is artificially fast there; those absolute microseconds do not
 predict in-model step time.
+
+**Trellis weights as program INPUTS (the MoE expert path).** An expert weight is a forward argument, so the
+constant speller can never fire on it: `spell_trellis_inputs` is its input-rooted twin, sharing the same chain
+builder. Per named weight input it re-mints that input, in place and in its `graph.inputs` slot, as the int16
+CODES buffer and APPENDS two channel-vector inputs — `<name>_suh` declared 128-BLOCKED and `<name>_svh` declared
+at the LOGICAL out extent, so the serving store's per-expert slice is a plain view and the graph carries no
+layout op on either. Gate and up stay separate coded linears: their `suh` differ, so a merged gate_up weight has
+no single activation-side basis. An input-rooted cone is not a constant subgraph, so `032_fold_constant_subgraphs`
+leaves it in-graph unconditionally — no `EMMY_TRELLIS_EXPAND` analog, the codes stay compressed by construction.
+The split that matters for the fixed-slot dispatch: the per-expert tensors (codes, `suh`, `svh`) are table-resolved
+indirect operands, while the basis-restore Hadamard is a shared graph CONSTANT and never enters a table.
+
+**Computed constants in the plan.** The Hadamard has no checkpoint key at all — it rides a zero-leaf
+`source_graph` bind record, which the plan used to project as `source_path=None`, making `assemble_source` answer
+`None` and the weight vanish from the bound feed (silently, on a fresh compile as much as on a pack hit).
+`WeightSpec.source_op` is the plan's third pre-chain source form, `("hadamard", (128,))`, rebuilt by
+`build_source_op` with no IR involved; `assemble_source` answers it for both spec kinds. A bind record the plan
+CANNOT reproduce now marks the weight `load_ops=None`, so the pack save refuses loudly instead of writing a pack
+that boots weightless. The load-op vocabulary also grew a `("slice", spans)` form for the single-source affine
+`IndexMapOp` a folded `SliceOp` leaves behind (the N-padded `svh[:n]` trim), which previously disabled pack
+writing for a whole program set.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph

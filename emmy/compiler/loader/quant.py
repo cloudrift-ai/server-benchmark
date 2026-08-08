@@ -41,6 +41,11 @@ architecture-twin construction). Two checkpoint families share the design — FP
   restore moved onto the activations around a hat-basis decode — the form the
   warp tier decodes in-kernel. :func:`load_dequantized_state_dict` decodes the
   same siblings into ``.weight`` values for the eager twin.
+- :func:`spell_trellis_inputs`: the input-sourced twin of that kernel-path
+  spelling, for the MoE serving seam's expert programs. Each named weight input
+  becomes the int16 codes input plus two appended channel-vector inputs, with
+  the same activation-side chain; input-rooted, so it never folds and needs no
+  ``EMMY_TRELLIS_EXPAND`` analog.
 """
 
 from __future__ import annotations
@@ -571,15 +576,31 @@ def _multiply(frag: Graph, src: str, factor: str, *, shape: tuple, dtype, name: 
     return frag.add_node(op=ElementwiseOp(op="multiply"), inputs=[src, bc], output=Tensor(name, shape, dtype))
 
 
-def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
-    """Rewrite the LINEAR consuming trellis weight ``nid`` into the activation-side basis form.
+def _trellis_linear_chain(
+    frag: Graph,
+    x_id: str,
+    *,
+    had: str,
+    codes: str,
+    suh: str,
+    svh: str,
+    bias: str | None,
+    cb: int,
+    dims: tuple[int, int, int, int],
+    lead: tuple[int, ...],
+    dtype,
+    pre: str,
+    out_name: str,
+) -> str:
+    """Spell ``y = x @ W`` with the EXL3 basis restore moved onto the activations. Shared by
+    both trellis spellers; returns the fragment's output node id.
 
     The checkpoint stores ``W = diag(suh) · H · W_hat · H · diag(svh)`` in ``(in, out)``
     orientation, with ``H`` the 128-block Sylvester Hadamard scaled ``1/sqrt(128)`` per side.
-    Only ``W_hat`` — the raw per-tile decode — has an in-kernel realization, so ``y = x @ W``
-    is re-spelled with the basis restore moved onto the activations:
+    Only ``W_hat`` — the raw per-tile decode — has an in-kernel realization, so the linear is
+    re-spelled as:
 
-        x → [pad to k_pad] → ·suh → H → ·1/16 → **@ W_hat** → ·1/8 → H → ·svh → [slice] → [+bias]
+        x → [pad to k_pad] → ·suh → H → ·1/16 → **@ W_hat** → ·1/8 → H → ·svh → [+bias]
 
     Everything but the ``@ W_hat`` step is plain graph algebra — broadcast multiplies and two
     128x128 matmuls — so it rides the existing tiers with no new kernel machinery. The middle
@@ -598,75 +619,26 @@ def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int,
 
     Encode padding is exactly the reference math: the Hadamard mixes within each 128-block, so a
     K-side pad must be zeros on the activation (the weight-side fold's own row slice), and an
-    N-side pad is contracted and then sliced off.
-
-    Returns ``False`` — never a compile error — when the weight is not consumed by exactly one
-    ``LinearOp``, or when the activation carries symbolic dims; the caller then falls back to
-    the folded checkpoint-basis cone, which is correct everywhere.
+    N-side pad is contracted and then sliced off. Leaf contract: ``suh`` arrives already
+    128-BLOCKED (``(k_pad/128, 128)``) and ``svh`` already sliced to the logical ``(n,)`` — each
+    speller supplies them in the form its root admits (a load-op chain on a constant, the
+    declared input shape on an input).
     """
-    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import CatOp, LinearOp, ReshapeOp, SliceOp, TrellisDecodeOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
-    dims = _trellis_dims(graph, nid, shapes)
-    if dims is None:
-        return False
     n, k, n_pad, k_pad = dims
-    op = graph.nodes[nid].op
-
-    users = graph.consumers(nid)
-    if len(users) != 1:
-        return False
-    lin = graph.nodes[users[0]]
-    if not isinstance(lin.op, LinearOp) or len(lin.inputs) < 2 or lin.inputs[1] != nid or lin.inputs[0] == nid:
-        return False
-    x_t, y_t = graph.nodes[lin.inputs[0]].output, lin.output
-    if any(not d.is_static for d in x_t.shape) or len(x_t.shape) < 2:
-        return False
-    x_shape = tuple(d.as_static() for d in x_t.shape)
-    if x_shape[-1] != k:
-        return False
-    dtype, pre, lead = x_t.dtype, y_t.name, x_shape[:-1]
     pad_shape, out_shape, final_shape = (*lead, k_pad), (*lead, n_pad), (*lead, n)
     in_blk, out_blk = (*lead, k_pad // HAD_BLOCK, HAD_BLOCK), (*lead, n_pad // HAD_BLOCK, HAD_BLOCK)
-    had = _hadamard_constant(graph, dtype)
-
-    frag = Graph()
-    for alias in (lin.inputs[0], had, *lin.inputs[2:]):
-        t = graph.nodes[alias].output
-        frag.add_node(op=InputOp(), inputs=[], output=Tensor(alias, t.shape, t.dtype), node_id=alias)
-    codes = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_trellis", source_path=base + ".trellis", source_shape=shapes["trellis"], source_dtype="i16"),
-        inputs=[],
-        output=Tensor(f"{pre}_trellis", shapes["trellis"], "i16"),
-    )
-    # ``suh`` binds already 128-blocked (a reshape in the load chain, the pack vocabulary's own
-    # form) so it broadcasts straight onto the blocked activation.
-    suh = frag.add_node(
-        op=ConstantOp(
-            name=f"{op.name}_suh",
-            source_path=base + ".suh",
-            source_shape=(k_pad,),
-            source_dtype="f16",
-            load_ops=(ReshapeOp(shape=in_blk[-2:]),),
-        ),
-        inputs=[],
-        output=Tensor(f"{pre}_suh", in_blk[-2:], dtype),
-    )
-    svh = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_svh", source_path=base + ".svh", source_shape=(n_pad,), source_dtype="f16"),
-        inputs=[],
-        output=Tensor(f"{pre}_svh", (n_pad,), dtype),
-    )
     scale = {
         s: frag.add_node(op=ConstantOp(name=f"{pre}_r{s}", value=2.0**-s), inputs=[], output=Tensor(f"{pre}_r{s}", (1,), dtype))
         for s in (4, 3)
     }
 
     # --- input side: zero-pad to the encode extent, apply suh, Hadamard ---
-    cur = lin.inputs[0]
+    cur = x_id
     if k_pad != k:
         zero = frag.add_node(op=ConstantOp(name=f"{pre}_zero", value=0.0), inputs=[], output=Tensor(f"{pre}_zero", (1,), dtype))
         dim = frag.add_node(op=ConstantOp(name=f"{pre}_catdim", value=-1.0), inputs=[], output=Tensor(f"{pre}_catdim", (1,), "i32"))
@@ -689,19 +661,119 @@ def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int,
     # --- output side: Hadamard, apply svh, drop the encode padding, then bias ---
     # The LAST stage carries the traced output tensor's own name, so the spliced chain hands
     # the linear's consumers a buffer named exactly as before.
-    biased = lin.op.has_bias
     cur = frag.add_node(op=ReshapeOp(shape=out_blk), inputs=[cur], output=Tensor(f"{pre}_zblk", out_blk, dtype))
     cur = _multiply(frag, cur, scale[3], shape=out_blk, dtype=dtype, name=f"{pre}_zr")
     cur = _had_blocks(frag, cur, had, shape=out_blk, dtype=dtype, name=f"{pre}_zh")
     cur = frag.add_node(op=ReshapeOp(shape=out_shape), inputs=[cur], output=Tensor(f"{pre}_zhf", out_shape, dtype))
     if n_pad != n:
         cur = frag.add_node(op=SliceOp(shape=final_shape, dim=-1, start=0), inputs=[cur], output=Tensor(f"{pre}_yc", final_shape, dtype))
+    cur = _multiply(frag, cur, svh, shape=final_shape, dtype=dtype, name=f"{pre}_ys" if bias is not None else out_name)
+    if bias is not None:
+        bc = broadcast_to(frag, bias, final_shape)
+        cur = frag.add_node(op=ElementwiseOp(op="add"), inputs=[cur, bc], output=Tensor(out_name, final_shape, dtype))
+    return cur
+
+
+def _lead_dims(x_t) -> tuple:
+    """The activation's leading (non-contraction) extents, static ones as plain ints — a static
+    ``Dim`` in a shape reaches numpy through the reference backend's reshape and is not an int."""
+    return tuple(d.as_static() if d.is_static else d for d in x_t.shape[:-1])
+
+
+def _linear_consumer(graph: Graph, nid: str):
+    """The single ``LinearOp`` node consuming ``nid`` as its WEIGHT, else ``None``.
+
+    Only the activation's CONTRACTION dim has to be static — the chain contracts and re-blocks
+    that axis, while the leading (token) axes ride through as whatever ``Dim``s the trace gave
+    them, so a symbolic-width program spells the same way a static one does."""
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+
+    users = graph.consumers(nid)
+    if len(users) != 1:
+        return None
+    lin = graph.nodes[users[0]]
+    if not isinstance(lin.op, LinearOp) or len(lin.inputs) < 2 or lin.inputs[1] != nid or lin.inputs[0] == nid:
+        return None
+    x_t = graph.nodes[lin.inputs[0]].output
+    if len(x_t.shape) < 2 or not x_t.shape[-1].is_static:
+        return None
+    return lin
+
+
+def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
+    """Rewrite the LINEAR consuming trellis weight CONSTANT ``nid`` into the activation-side
+    basis form (:func:`_trellis_linear_chain`), with the codes / channel vectors as checkpoint
+    constants.
+
+    Returns ``False`` — never a compile error — when the weight is not consumed by exactly one
+    ``LinearOp`` (or its contraction dim is symbolic); the caller then falls back to the folded
+    checkpoint-basis cone, which is correct everywhere.
+    """
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    dims = _trellis_dims(graph, nid, shapes)
+    if dims is None:
+        return False
+    n, k, n_pad, k_pad = dims
+    op = graph.nodes[nid].op
+
+    lin = _linear_consumer(graph, nid)
+    if lin is None:
+        return False
+    x_t, y_t = graph.nodes[lin.inputs[0]].output, lin.output
+    if x_t.shape[-1].as_static() != k:
+        return False
+    dtype, pre, lead = x_t.dtype, y_t.name, _lead_dims(x_t)
+    in_blk = (k_pad // HAD_BLOCK, HAD_BLOCK)
+    had = _hadamard_constant(graph, dtype)
+
+    frag = Graph()
+    for alias in (lin.inputs[0], had, *lin.inputs[2:]):
+        t = graph.nodes[alias].output
+        frag.add_node(op=InputOp(), inputs=[], output=Tensor(alias, t.shape, t.dtype), node_id=alias)
+    codes = frag.add_node(
+        op=ConstantOp(name=f"{op.name}_trellis", source_path=base + ".trellis", source_shape=shapes["trellis"], source_dtype="i16"),
+        inputs=[],
+        output=Tensor(f"{pre}_trellis", shapes["trellis"], "i16"),
+    )
+    # ``suh`` binds already 128-blocked (a reshape in the load chain, the pack vocabulary's own
+    # form) so it broadcasts straight onto the blocked activation.
+    suh = frag.add_node(
+        op=ConstantOp(
+            name=f"{op.name}_suh",
+            source_path=base + ".suh",
+            source_shape=(k_pad,),
+            source_dtype="f16",
+            load_ops=(ReshapeOp(shape=in_blk),),
+        ),
+        inputs=[],
+        output=Tensor(f"{pre}_suh", in_blk, dtype),
+    )
+    svh = frag.add_node(
+        op=ConstantOp(name=f"{op.name}_svh", source_path=base + ".svh", source_shape=(n_pad,), source_dtype="f16"),
+        inputs=[],
+        output=Tensor(f"{pre}_svh", (n_pad,), dtype),
+    )
+    if n_pad != n:  # the N-side encode pad is contracted and then sliced off, channel vector too
         svh = frag.add_node(op=SliceOp(shape=(n,), dim=0, start=0), inputs=[svh], output=Tensor(f"{pre}_svhc", (n,), dtype))
-    cur = _multiply(frag, cur, svh, shape=final_shape, dtype=dtype, name=f"{pre}_ys" if biased else y_t.name)
-    if biased:
-        bias = broadcast_to(frag, lin.inputs[2], final_shape)
-        cur = frag.add_node(op=ElementwiseOp(op="add"), inputs=[cur, bias], output=Tensor(y_t.name, final_shape, dtype))
-    frag.outputs = [cur]
+    out = _trellis_linear_chain(
+        frag,
+        lin.inputs[0],
+        had=had,
+        codes=codes,
+        suh=suh,
+        svh=svh,
+        bias=lin.inputs[2] if lin.op.has_bias else None,
+        cb=cb,
+        dims=dims,
+        lead=lead,
+        dtype=dtype,
+        pre=pre,
+        out_name=y_t.name,
+    )
+    frag.outputs = [out]
     graph.splice(frag, consumed=[nid, lin.id], output=lin.id)
     return True
 
@@ -863,4 +935,102 @@ def spell_quantized_inputs(
         graph.replace_node(tmp, final)  # the original consumers now read the cone's value
         graph.remove_node(tmp)
         out_map[name] = sid
+    return out_map
+
+
+def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ...]]]) -> dict[str, tuple[str, str]]:
+    """Spell named graph INPUTS as EXL3 codes + channel-vector inputs, the basis restore in-graph.
+
+    The input-sourced twin of :func:`spell_trellis_constants`' expand spelling, for graphs whose
+    weights are forward-argument ``InputOp``s — the MoE serving seam's expert programs, where
+    every routed expert feeds its own weight slices into ONE compiled program and the constant
+    speller can never fire. ``specs`` maps a weight input's node id to ``(cb, codes_shape)``:
+    the codebook id (marker-sibling presence in the checkpoint index) and the packed codes'
+    stored shape ``(k_pad/16, n_pad/16, 16*K)``, which is where the encode-padded extents and K
+    come from; the logical ``(n, k)`` come from the input's own declared shape.
+
+    Each named input keeps its node id and its ``graph.inputs`` slot, but becomes the int16
+    CODES input at the stored codes shape; two channel-vector inputs are APPENDED to
+    ``graph.inputs`` per spec, in spec order and ``suh`` before ``svh``:
+
+    - ``<name>_suh`` at the 128-BLOCKED shape ``(k_pad/128, 128)`` — the feed reshapes its
+      stored ``(k_pad,)`` vector, which is free (a view), and the blocked declaration is what
+      lets it broadcast straight onto the blocked activation with no in-graph layout op.
+    - ``<name>_svh`` at the LOGICAL ``(n,)`` — the N-side encode pad is sliced off at the feed
+      (the stored vector's leading ``n`` entries, contiguous from the same base pointer), so
+      an indirect operand's table entry is unchanged and the graph carries no slice.
+
+    The consuming ``LinearOp`` is rewritten into :func:`_trellis_linear_chain` exactly as on
+    the constant path, sharing the graph-wide Hadamard constant. That constant is NOT
+    per-expert: it stays a plain constant so the fixed-slot dispatch table-resolves only the
+    per-expert operands. An input-rooted decode cone is not a constant subgraph, so
+    ``032_fold_constant_subgraphs`` leaves it in-graph unconditionally — no
+    ``EMMY_TRELLIS_EXPAND`` analog, the codes stay compressed by construction.
+
+    The caller names these inputs explicitly, so any mismatch raises ``ValueError`` instead of
+    the constant speller's skip-and-continue. Returns ``{input id: (suh id, svh id)}``.
+    """
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    out_map: dict[str, tuple[str, str]] = {}
+    for name, (cb, codes_shape) in specs.items():
+        codes_shape = tuple(int(d) for d in codes_shape)
+        node = graph.nodes.get(name)
+        if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
+            raise ValueError(f"spell_trellis_inputs: {name!r} is not a graph input")
+        out = node.output
+        if any(not d.is_static for d in out.shape) or len(out.shape) != 2:
+            raise ValueError(f"spell_trellis_inputs: input {name!r} must be a static 2-D (out, in) weight")
+        n, k = (d.as_static() for d in out.shape)
+        if len(codes_shape) != 3 or codes_shape[2] % 16:
+            raise ValueError(f"spell_trellis_inputs: {name!r} codes shape {codes_shape} is not (k_pad/16, n_pad/16, 16*K)")
+        k_pad, n_pad = codes_shape[0] * 16, codes_shape[1] * 16
+        if (k_pad, n_pad) != (-(-k // HAD_BLOCK) * HAD_BLOCK, -(-n // HAD_BLOCK) * HAD_BLOCK):
+            raise ValueError(f"spell_trellis_inputs: {name!r} codes shape {codes_shape} does not pad weight shape {(n, k)}")
+        lin = _linear_consumer(graph, name)
+        if lin is None:
+            raise ValueError(f"spell_trellis_inputs: input {name!r} is not the weight of exactly one static LinearOp")
+        x_t, y_t = graph.nodes[lin.inputs[0]].output, lin.output
+        if x_t.shape[-1].as_static() != k:
+            raise ValueError(f"spell_trellis_inputs: activation trailing dim {x_t.shape[-1]} != in_features {k} for {name!r}")
+        dtype, pre, lead = x_t.dtype, y_t.name, _lead_dims(x_t)
+        had = _hadamard_constant(graph, dtype)
+
+        # Rewire order mirrors :func:`spell_quantized_inputs`: park the traced weight input under
+        # a temporary id, re-mint ``name`` as the codes input in the SAME ``graph.inputs`` slot,
+        # append the two channel-vector inputs, then splice the chain over the parked node and
+        # its consuming linear — every step through the index-consistent Graph mutators.
+        tmp = f"{name}__tr_src"
+        graph.rename_node(name, tmp)
+        codes = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, codes_shape, "i16"), node_id=name)
+        graph.inputs = [codes if i == tmp else i for i in graph.inputs]
+        suh = graph.add_node(
+            op=InputOp(), inputs=[], output=Tensor(f"{name}_suh", (k_pad // HAD_BLOCK, HAD_BLOCK), dtype), node_id=f"{name}_suh"
+        )
+        svh = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_svh", (n,), dtype), node_id=f"{name}_svh")
+        graph.inputs += [suh, svh]
+
+        frag = Graph()
+        for alias in (lin.inputs[0], had, codes, suh, svh, *lin.inputs[2:]):
+            t = graph.nodes[alias].output
+            frag.add_node(op=InputOp(), inputs=[], output=Tensor(alias, t.shape, t.dtype), node_id=alias)
+        final = _trellis_linear_chain(
+            frag,
+            lin.inputs[0],
+            had=had,
+            codes=codes,
+            suh=suh,
+            svh=svh,
+            bias=lin.inputs[2] if lin.op.has_bias else None,
+            cb=cb,
+            dims=(n, k, n_pad, k_pad),
+            lead=lead,
+            dtype=dtype,
+            pre=pre,
+            out_name=y_t.name,
+        )
+        frag.outputs = [final]
+        graph.splice(frag, consumed=[tmp, lin.id], output=lin.id)
+        out_map[name] = (suh, svh)
     return out_map

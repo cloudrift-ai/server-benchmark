@@ -56,12 +56,19 @@ def apply_load_ops(source: np.ndarray, load_ops: tuple, dtype: str | None = None
 
 def assemble_source(op, sources: dict[str, np.ndarray]) -> np.ndarray | None:
     """Assemble a constant's raw pre-chain source array from ``sources``: the single
-    ``source_path`` lookup, or the axis-0 concat of its ``source_parts`` (the
-    ``merge_sibling_linears`` weight concat). ``None`` when any source is missing.
-    Duck-typed over ``ConstantOp`` — anything with ``source_path`` / ``source_parts``.
+    ``source_path`` lookup, the axis-0 concat of its ``source_parts`` (the
+    ``merge_sibling_linears`` weight concat), or — on a plan's ``WeightSpec`` — the COMPUTED
+    constant its ``source_op`` names (``("hadamard", (128,))``; no checkpoint key at all).
+    ``None`` when any source is missing. Duck-typed over ``ConstantOp`` and
+    ``backend.plan.WeightSpec`` alike — anything with ``source_path`` / ``source_parts``.
     ``source_graph`` bind records are the loaders' own business (:func:`evaluate_source_graph`)
     — this helper answers ``None`` for them (``sources`` holds per-path arrays, and a record
-    has no single path)."""
+    has no single path); the plan projects the zero-leaf ones to ``source_op`` instead."""
+    source_op = getattr(op, "source_op", None)
+    if source_op is not None:
+        from emmy.compiler.backend.plan import build_source_op  # noqa: PLC0415
+
+        return build_source_op(source_op)
     if op.source_parts:
         parts = [sources.get(path) for path, _shape in op.source_parts]
         if any(p is None for p in parts):

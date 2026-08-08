@@ -352,3 +352,131 @@ def test_gptoss_pre_carries_attention_biases():
     assert torch.allclose(k, k_ref, atol=1e-6)
     assert torch.allclose(v, v_ref, atol=1e-6)
     assert q.shape == (t, cfg.num_attention_heads * cfg.head_dim)
+
+
+# ===================================================================
+# EXL3 (trellis-coded) experts: the checkpoint's per-expert MODULES, gate/up kept SEPARATE
+# (each coded linear carries its own input-side channel vector), and the E-stacked store the
+# expert programs feed from.
+# ===================================================================
+
+
+def test_expert_slot_maps_both_expert_layouts():
+    """The v5 E-stacked params and the per-expert-module (EXL3) lineage land on the same input
+    names; a shared expert is NOT a routed expert tensor."""
+    from emmy.compiler.trace.huggingface import _expert_slot
+
+    assert _expert_slot("model.layers.3.mlp.experts.gate_up_proj") == (3, "w_gate_up", None)
+    assert _expert_slot("model.layers.3.mlp.experts.7.gate_proj.trellis") == (3, "w_gate", 7)
+    assert _expert_slot("model.layers.3.mlp.experts.7.up_proj.suh") == (3, "w_up_suh", 7)
+    assert _expert_slot("model.layers.3.mlp.experts.7.down_proj.svh") == (3, "w_down_svh", 7)
+    assert _expert_slot("model.layers.3.mlp.shared_experts.gate_proj.trellis") is None
+    assert _expert_slot("model.layers.3.self_attn.q_proj.trellis") is None
+
+
+def test_split_gate_up_expert_wrapper_matches_the_merged_form():
+    """``split_gate_up`` takes gate and up as separate forward args — the EXL3 shape, where the
+    merged weight has no single activation-side basis. Same math as the chunk-half form."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeDecoderLayer
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper, moe_block_parts
+
+    torch.manual_seed(0)
+    cfg = _tiny_glm4_moe_config(transformers)
+    block = Glm4MoeDecoderLayer(cfg, layer_idx=1).eval()
+    for p in block.parameters():
+        torch.nn.init.normal_(p, std=0.2)
+    _, _, merged = build_moe_split_wrapper(block)
+    _, _, split = build_moe_split_wrapper(block, split_gate_up=True)
+    _gate, experts = moe_block_parts(block.mlp)
+
+    x = torch.randn(5, cfg.hidden_size)
+    w_gate_up, w_down = experts.gate_up_proj[0], experts.down_proj[0]
+    w_gate, w_up = w_gate_up.chunk(2, dim=0)
+    with torch.no_grad():
+        torch.testing.assert_close(split(x, w_gate, w_up, w_down), merged(x, w_gate_up, w_down))
+
+
+def _exl3_moe_checkpoint(dirpath, cfg):
+    """A tiny GLM-MoE EXL3 checkpoint: every layer linear trellis-coded (the routed experts as
+    per-expert modules, the way the real checkpoint stores them), norms / router / embeddings
+    fp16. Returns the decoded reference state dict, keyed as the checkpoint stores it."""
+    import json
+
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+    from transformers import AutoModelForCausalLM
+
+    from tests.compiler.loader.test_exl3 import _exl3_linear_tensors
+
+    model = AutoModelForCausalLM.from_config(cfg).to(torch.float16).eval()
+    tensors: dict = {}
+    ref: dict = {}
+    for name, t in model.state_dict().items():
+        t = t.detach().cpu()
+        if name.endswith(".weight") and t.ndim == 2 and ".layers." in name and "mlp.gate.weight" not in name:
+            n, k = t.shape
+            coded, dec = _exl3_linear_tensors(name[: -len(".weight")], n, k)
+            tensors.update(coded)
+            ref[name] = torch.from_numpy(np.ascontiguousarray(dec))
+        else:
+            tensors[name] = t
+            ref[name] = t
+    # The v5 3-D expert params never appear in an EXL3 checkpoint — it stores per-expert modules.
+    per_expert = {}
+    for key in [k for k in tensors if ".experts." in k and k.split(".")[-2].endswith("_proj")]:
+        per_expert[key] = tensors.pop(key)
+    for key in [k for k in list(tensors) + list(ref) if ".experts." in k and k.endswith(("gate_up_proj", "down_proj"))]:
+        tensors.pop(key, None)
+        ref.pop(key, None)
+    for e in range(cfg.n_routed_experts):
+        for layer in range(cfg.first_k_dense_replace, cfg.num_hidden_layers):
+            for proj, (n, k) in (
+                ("gate_proj", (cfg.moe_intermediate_size, cfg.hidden_size)),
+                ("up_proj", (cfg.moe_intermediate_size, cfg.hidden_size)),
+                ("down_proj", (cfg.hidden_size, cfg.moe_intermediate_size)),
+            ):
+                base = f"model.layers.{layer}.mlp.experts.{e}.{proj}"
+                coded, dec = _exl3_linear_tensors(base, n, k)
+                tensors.update(coded)
+                ref[base + ".weight"] = torch.from_numpy(np.ascontiguousarray(dec))
+    save_file({k: v.clone() for k, v in tensors.items()}, str(dirpath / "model.safetensors"))
+    cfg_dict = cfg.to_dict()
+    cfg_dict["quantization_config"] = {"quant_method": "exl3", "version": "0.0.5", "bits": 2.0}
+    (dirpath / "config.json").write_text(json.dumps(cfg_dict))
+    return ref
+
+
+def test_load_quantized_split_keeps_exl3_experts_coded(tmp_path):
+    """The serving load: the dense trunk DECODES to values on the twin (it binds off the module,
+    which has no checkpoint path), while each routed expert keeps its packed codes — stacked
+    E-leading, with ``suh`` 128-blocked and ``svh`` trimmed, the shapes the speller declares."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    cfg = _tiny_glm4_moe_config(transformers)
+    torch.manual_seed(0)
+    ref = _exl3_moe_checkpoint(tmp_path, cfg)
+    model, store = load_quantized_split(tmp_path, torch.float16)
+
+    assert store["fmt"] == "exl3"
+    assert store["codebooks"] == {1: {"w_gate": 0, "w_up": 0, "w_down": 0}}
+    layer = store["layers"][1]
+    e, h, i = cfg.n_routed_experts, cfg.hidden_size, cfg.moe_intermediate_size
+    # Both extents are under one Hadamard block here, so the codes sit at the 128-padded shape.
+    assert tuple(layer["w_gate"].shape) == (e, 8, 8, 32) and layer["w_gate"].dtype == torch.int16
+    assert tuple(layer["w_gate_suh"].shape) == (e, 1, 128)  # k_pad 128 → one Hadamard block
+    assert tuple(layer["w_gate_svh"].shape) == (e, i)  # trimmed to the logical out extent
+    assert tuple(layer["w_down"].shape) == (e, 8, 8, 32)
+    assert tuple(layer["w_down_svh"].shape) == (e, h)
+    assert model.model.layers[1].mlp.experts.gate_up_proj.is_meta  # experts never load onto the twin
+
+    sd = model.state_dict()
+    for key in ("model.layers.0.self_attn.q_proj.weight", "model.layers.1.mlp.shared_experts.gate_proj.weight"):
+        assert not sd[key].is_meta
+        torch.testing.assert_close(sd[key], ref[key], rtol=0, atol=0)

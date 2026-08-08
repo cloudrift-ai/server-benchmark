@@ -66,9 +66,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   batches (index 0 always opens a span; overlong spans are chopped).
 - `roofline.py` — **boot roofline audit**. `EmmyGenRunner.from_model` event-times each STATIC twin (one layer per
   attention class; symbolic programs skipped — they sit at capacity shape at boot) against its **weight-streaming
-  floor** (`const_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy — no per-card table) and logs a loud
-  WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction (the weight
-  floor is a true lower bound and copy bw undershoots peak), advisory only (never raises, never blocks boot). Born
+  floor** (`weight_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy — no per-card table). `weight_bytes`
+  counts bound constants PLUS the weight INPUTS a program takes per launch: a MoE expert program binds no weights
+  at all (its per-expert slices arrive as inputs), so a constants-only floor would be zero and audit nothing. A
+  floor under `MIN_FLOOR_US` is still skipped as timer noise, which at low bit rates an expert launch can be — a
+  2.25 bpw GLM expert streams ~4 MB — so read the expert tiers' silence as "below the noise floor", not "clean".
+  Logs a loud WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction
+  (the weight floor is a true lower bound and copy bw undershoots peak), advisory only (never raises, never
+  blocks boot). Born
   from the 2026-07-29 TinyLlama/4080 incident: a cold deploy served a fused-norm kernel ~150x off the floor (54x
   TPOT gap) with zero boot-time signal.
 - `sampling.py` — **no vLLM, no CUDA**. Pure-numpy token sampling (`Sampler`: greedy / temperature / top-k / top-p) +
@@ -207,6 +212,22 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
   T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
   card, the rest is vLLM's KV budget.
+  **Trellis-coded experts (EXL3, GLM-4.5-Air):** the same split with the trellis format's own shapes.
+  `load_quantized_split` decodes the DENSE trunk to values — a trunk weight binds off the twin MODULE, whose
+  parameter paths never reach the checkpoint index, so it cannot stay coded through this seam — while every routed
+  expert keeps its PACKED CODES. The checkpoint stores experts as per-expert modules, so the loader stacks each
+  `(layer, projection, leaf)` triple into one E-leading store tensor. Gate and up stay SEPARATE program inputs
+  (`build_moe_split_wrapper(..., split_gate_up=True)` → `expert(x, w_gate, w_up, w_down)`): each coded linear
+  carries its own input-side channel vector, so the merged gate_up weight has no single activation-side basis to
+  restore, and spelling it merged would only add a concat the activation's chunk split undoes. `from_model` passes
+  `trellis_specs` (`(codebook, codes shape)` per weight input) to `_compile_split`, which applies
+  `spell_trellis_inputs` post-trace; the extra build examples come by NAME (`aux_examples`), because that speller
+  both RE-MINTS an input at a new shape (a dense weight arg becomes its packed codes) and APPENDS new ones.
+  Nine per-expert inputs per layer — three codes plus each one's `suh` (128-blocked) and `svh` (trimmed) — are all
+  table-resolved by the fixed-slot tier; the basis-restore Hadamard is a graph CONSTANT shared by all three
+  linears and never enters a table. `shape_key` covers every per-expert tensor's shape and the codebook ids, so
+  EXL3's MIXED bit allocation (K varying per layer) is caught as a shape disagreement rather than mis-served —
+  see the residual note below.
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
   `sinks=` into each `Attention`, which makes vLLM's backend selection sinks-aware (sm_120 lands on TRITON_ATTN;

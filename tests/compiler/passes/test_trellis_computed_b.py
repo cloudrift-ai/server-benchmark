@@ -619,3 +619,248 @@ def test_trellis_matvec_matches_hat_basis_reference_cuda(n, k, kbits):
     y = be.run(compiled, input_data={"x": x, "codes": codes})[0].outputs["y"].reshape(1, n).astype(np.float32)
     ref = _ref(x, codes, 0, n, k)
     assert float(np.abs(y - ref).max()) / max(float(np.abs(ref).max()), 1e-9) < 2e-3
+
+
+# ===================================================================
+# 3.4 — the expert / serving path: weights as program INPUTS
+# ===================================================================
+
+
+def _coded_expert(rng, hidden, inter, kbits):
+    """One EXL3 expert's three coded linears: the per-input feed plus the decoded reference
+    weights in the traced ``(out, in)`` orientation."""
+    from emmy.compiler.loader.exl3 import fold_hadamard
+
+    feed, ref, specs = {}, {}, {}
+    for name, (n, k) in (("w_gate", (inter, hidden)), ("w_up", (inter, hidden)), ("w_down", (hidden, inter))):
+        k_pad, n_pad = -(-k // 128) * 128, -(-n // 128) * 128
+        codes = _codes(rng, k_pad, n_pad, kbits)
+        suh = (rng.standard_normal(k_pad) * 0.012).astype(np.float16)
+        svh = np.sign(rng.standard_normal(n_pad)).astype(np.float16)
+        feed[name] = codes
+        feed[f"{name}_suh"] = suh.reshape(k_pad // 128, 128)
+        feed[f"{name}_svh"] = np.ascontiguousarray(svh[:n])
+        ref[name] = fold_hadamard(decode_trellis(codes, 0), suh, svh).T[:n, :k]
+        specs[name] = (0, codes.shape)
+    return feed, ref, specs
+
+
+def _expert_graph(m, hidden, inter):
+    """``down(silu(gate(x)) * up(x))`` with all three weights as forward-argument INPUTS — the
+    shape ``build_moe_split_wrapper(..., split_gate_up=True)`` traces to."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, hidden), "f16"), node_id="x")
+    for name, (n, k) in (("w_gate", (inter, hidden)), ("w_up", (inter, hidden)), ("w_down", (hidden, inter))):
+        g.add_node(InputOp(), [], Tensor(name, (n, k), "f16"), node_id=name)
+    g.add_node(LinearOp(), ["x", "w_gate"], Tensor("gate", (m, inter), "f16"), node_id="gate")
+    g.add_node(LinearOp(), ["x", "w_up"], Tensor("up", (m, inter), "f16"), node_id="up")
+    g.add_node(ElementwiseOp(op="silu"), ["gate"], Tensor("act", (m, inter), "f16"), node_id="act")
+    g.add_node(ElementwiseOp(op="multiply"), ["act", "up"], Tensor("glu", (m, inter), "f16"), node_id="glu")
+    g.add_node(LinearOp(), ["glu", "w_down"], Tensor("y", (m, hidden), "f16"), node_id="y")
+    g.inputs = ["x", "w_gate", "w_up", "w_down"]
+    g.outputs = ["y"]
+    return g
+
+
+def _assert_expert_close(y, x, ref):
+    """Against the decoded reference in f32. The bar is looser than the single-linear one (2e-3)
+    because the program chains THREE f16 matmuls through a SiLU, and the synthetic codes give a
+    near-zero output scale where that rounding is worst — the real-checkpoint accuracy numbers
+    live in the serving probe, not here."""
+    expected = _expert_reference(x, ref)
+    assert float(np.abs(y - expected).max()) / max(float(np.abs(expected).max()), 1e-9) < 1e-2
+
+
+def _expert_reference(x, ref):
+    gate = x.astype(np.float32) @ ref["w_gate"].astype(np.float32).T
+    up = x.astype(np.float32) @ ref["w_up"].astype(np.float32).T
+    return (gate / (1.0 + np.exp(-gate)) * up) @ ref["w_down"].astype(np.float32).T
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("m", [1, 8, 64])
+def test_input_rooted_expert_program_cuda(m):
+    """The MoE expert program with its weights kept COMPRESSED: three input-rooted trellis
+    cones in one program (gate/up/down), decoded in-kernel, against the decoded reference.
+    M=1 is the fixed-slot decode shape, 8 the decode bucket, 64 a prefill chunk."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    hidden, inter = 256, 128
+    rng = np.random.default_rng(3)
+    feed, ref, specs = _coded_expert(rng, hidden, inter, 2)
+    g = _expert_graph(m, hidden, inter)
+    spell_trellis_inputs(g, specs)
+
+    be = CudaBackend()
+    compiled = be.compile(g)
+    sources = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
+    assert sum("emmy_trellis_decode" in s for s in sources) >= 3, "each coded linear decodes in-kernel"
+    x = rng.standard_normal((m, hidden)).astype(np.float16) * 0.2
+    result, _ = be.run(compiled, input_data={"x": x, **feed, **bind_constants(compiled, {})})
+    y = np.asarray(result.outputs["y"]).reshape(m, hidden).astype(np.float32)
+    _assert_expert_close(y, x, ref)
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+def test_trellis_expert_program_round_trips_through_a_pack(tmp_path):
+    """The Phase-5 gate: a trellis serving program SAVES to a pack, reloads, and rebuilds with
+    the same output. Two things have to hold — the load-op chains stay inside the pack
+    vocabulary (one that does not disables pack writing for the WHOLE program set), and the
+    basis-restore Hadamard, which has no checkpoint key at all, rebinds from the plan alone."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.pack import load_pack, save_pack
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+    from emmy.serving.gen_runner import _bind_plan_constants
+
+    hidden, inter, m = 256, 128, 8
+    rng = np.random.default_rng(5)
+    feed, ref, specs = _coded_expert(rng, hidden, inter, 2)
+    g = _expert_graph(m, hidden, inter)
+    spell_trellis_inputs(g, specs)
+    plan = plan_from_graph(CudaBackend().compile(g))
+    assert all(w.load_ops is not None for w in plan.weights.values()), "a chain outside the pack vocabulary"
+    assert any(w.source_op is not None for w in plan.weights.values()), "the Hadamard must project as a computed constant"
+
+    key = {"kind": "trellis-expert-test"}
+    save_pack(tmp_path, {"moe.expert.bucket": plan}, key=key)
+    stored = load_pack(tmp_path, key=key)["moe.expert.bucket"]
+
+    x = rng.standard_normal((m, hidden)).astype(np.float16) * 0.2
+    with gpu_lock():
+        # No ``sources``: every weight this program binds is computed, not read from a module.
+        const_feed = _bind_plan_constants(stored, {}, None)
+        program = CompiledProgram.build_from_plan(stored, {**const_feed, "x": x, **feed})
+        program.run_once()
+        y = np.asarray(program.outputs()["y"]).reshape(m, hidden).astype(np.float32)
+    _assert_expert_close(y, x, ref)
+
+
+# ===================================================================
+# 4 — the golden-side spelling: key agreement and the coded snippet
+# ===================================================================
+
+
+def _deploy_keys(graph) -> list:
+    """Every deploy-time :class:`ShapeKey` a greedy resolve of ``graph`` would build — the key
+    ``_golden_pick`` looks a golden up by, reconstructed off the same fork rows and base stamps
+    (no CUDA: this is the lowering's fork structure, not a compile)."""
+    from emmy.compiler.pipeline import TILE_PASSES
+    from emmy.compiler.pipeline.fork import flatten_leaves
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key
+
+    keys: list = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        rows = [dict(getattr(leaf, "knobs", None) or {}) for leaf in leaves]
+        keys.append(_fork_shape_key(rows, base={**fp.ctx.features(), **dict(fp.root_op.knobs)}))
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, decide)
+    return keys
+
+
+def _spelled_linear_graph(tmp_path, m: int, n: int, k: int, kbits: int) -> Graph:
+    """The IN-MODEL form: a plain f16 constant-weight linear rewritten by the EXL3 speller into
+    codes + ``suh``/``svh`` under the activation-side basis restore (Phase 3.3)."""
+    from safetensors.numpy import save_file
+
+    from emmy.compiler.loader.quant import spell_trellis_constants
+
+    rng = np.random.default_rng(0)
+    save_file(
+        {
+            "m.proj.trellis": _codes(rng, k, n, kbits),
+            "m.proj.suh": (rng.standard_normal(k) * 0.012).astype(np.float16),
+            "m.proj.svh": np.sign(rng.standard_normal(n)).astype(np.float16),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    (tmp_path / "config.json").write_text('{"quantization_config": {"quant_method": "exl3"}}')
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k), "f16"), node_id="x")
+    g.add_node(
+        ConstantOp(name="w", source_path="m.proj.weight", source_shape=(n, k), source_dtype="f16"),
+        [],
+        Tensor("w", (n, k), "f16"),
+        node_id="w",
+    )
+    g.add_node(LinearOp(), ["x", "w"], Tensor("y", (m, n), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    assert spell_trellis_constants(g, str(tmp_path)) == 1
+    return g
+
+
+def test_trellis_shape_key_agrees_across_both_constructors():
+    """``from_matmul("trellis")`` must produce the key ``from_s_features`` builds off the stamped
+    op — the golden ↔ measured join. ``is_warp`` is FORCED on both sides: it names the dtype family
+    (fp32 scalar tier vs the 16-bit world), not the deployed tier, so it holds for the M=1 decode
+    band as much as for the prefill mma — and forcing it makes the two sides agree even when the
+    basis-restore chain puts an f32 constant on the contraction's A cone."""
+    from emmy.compiler.pipeline.search.data.shape import ShapeKey
+
+    base = {"S_ext_free_prod": 11008, "S_ext_reduce_max": 4096, "S_ext_free_max": 11008, "S_dtype_i16": 1.0}
+    golden = ShapeKey.from_matmul(1, 11008, 4096, "trellis")
+    assert golden.dtype_class == "trellis" and golden.is_warp
+    assert ShapeKey.from_s_features(base).joins(golden)
+    # An f32 leaf in the cone must not flip the op side off the golden's key.
+    assert ShapeKey.from_s_features({**base, "S_dtype_f32": 2.0}).joins(golden)
+
+
+@pytest.mark.parametrize(("m", "n", "k"), [(1, 11008, 4096), (32, 1024, 512), (256, 512, 512)])
+def test_golden_snippet_key_joins_the_in_model_key(tmp_path, monkeypatch, m, n, k):
+    """The Phase 4 enablement bar, at BOTH tiers (M=1 decode band, prefill mma): the key a golden
+    records (``MatmulGoldenConfig.shape_key`` → ``from_matmul``), the key its own torch snippet
+    lowers to, and the key the EXL3-SPELLED in-model graph lowers to must all be one key. A golden
+    whose snippet keys differently from the deployed program is the "matched but never deploys"
+    failure this repo has hit repeatedly."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+
+    monkeypatch.setenv("EMMY_TRELLIS_EXPAND", "1")
+    cfg = MatmulGoldenConfig(name="probe", M=m, N=n, K=k, dtype="trellis", trans_b=True, k_bits=2, cb=0)
+    golden = cfg.shape_key()
+
+    snippet_graph, _, _ = graph_from_code(cfg.snippet())
+    snippet_keys = _deploy_keys(snippet_graph)
+    assert any(key.joins(golden) for key in snippet_keys), f"{golden} not in {snippet_keys}"
+
+    in_model_keys = _deploy_keys(_spelled_linear_graph(tmp_path, m, n, k, 2))
+    assert any(key.joins(golden) for key in in_model_keys), f"{golden} not in {in_model_keys}"
+
+
+def test_coded_prefill_fork_is_not_rekeyed_as_a_computed_a_cone():
+    """``_fork_shape_key`` rebuilds a ``d*/sync``-offering fork as ``kind="fused"`` because only a
+    computed-A cone used to spell that transport. The trellis compute fill spells it too, so a
+    prefill coded contraction must be excluded — left in, every one of them re-keyed to ``fused``
+    AND dropped its storage class, colliding with real RMSNorm→linear goldens of equal extents."""
+    g, _ = _trellis_linear_graph(256, 512, 512, 2)
+    keys = [key for key in _deploy_keys(g) if key.dtype_class == "trellis"]
+    assert keys, "the coded contraction's fork lost its storage class"
+    assert all(key.kind == "" for key in keys), keys
+
+
+def test_coded_snippet_traces_to_the_in_kernel_decode():
+    """The snippet's codes must reach the graph as an INPUT under a hat-basis ``TrellisDecodeOp``
+    — minted in a preamble statement exactly like the fp8 arm's weight. Folded to a constant
+    instead (``032``), the decode would vanish and the entry would record a plain f16 matmul."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline.search.golden import matmul_snippet
+
+    graph, _, _ = graph_from_code(matmul_snippet(1, 1024, 512, "trellis", True, k_bits=2, cb=0))
+    decodes = [nd for nd in graph.nodes.values() if isinstance(nd.op, TrellisDecodeOp)]
+    assert len(decodes) == 1 and not decodes[0].op.hadamard
+    assert (decodes[0].op.cb, decodes[0].op.out_features, decodes[0].op.in_features) == (0, 1024, 512)
+    assert graph.nodes["codes"].output.dtype.name == "i16" and "codes" in graph.inputs

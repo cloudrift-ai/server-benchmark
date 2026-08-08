@@ -448,7 +448,7 @@ def deinterleave_gate_up(t):
     return torch.cat([t[..., 0::2], t[..., 1::2]], dim=-1).contiguous()
 
 
-def build_moe_split_wrapper(block):
+def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
     - ``pre`` — the same q/k/v carve as :func:`build_attention_split_wrapper`.
@@ -469,7 +469,10 @@ def build_moe_split_wrapper(block):
       ``up.clamp(±limit)``, ``glu = gate·σ(α·gate)``, ``out = (up + 1)·glu`` with the module's
       ``alpha``/``limit``). Both spell the gate/up split as ``chunk(2, dim=-1)``: an interleaved
       checkpoint (gpt-oss) is de-interleaved once at load (:func:`deinterleave_gate_up`), never
-      strided in-graph.
+      strided in-graph. ``split_gate_up`` takes gate and up as SEPARATE forward args instead
+      (``expert(x, w_gate, w_up, w_down)``) — the EXL3 form, where each coded linear carries its
+      own input-side channel vector, so the merged weight has no single basis to restore and the
+      merged spelling would only add a concat the activation split undoes.
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
@@ -520,7 +523,25 @@ def build_moe_split_wrapper(block):
             "(alpha/limit) contract — the expert activation cannot be spelled"
         )
 
-    if transposed and has_bias and clamped:
+    if split_gate_up:
+        if transposed or has_bias or act_fn is None:
+            raise NotImplementedError(
+                f"build_moe_split_wrapper: split gate/up experts need the F.linear, biasless, act_fn form "
+                f"(got transposed={transposed}, has_bias={has_bias}, act_fn={act_fn})"
+            )
+
+        class ExpertFFN(nn.Module):
+            # EXL3: gate/up are separate coded linears, each with its own channel vectors.
+            def __init__(self) -> None:
+                super().__init__()
+                self.act_fn = act_fn
+
+            def forward(self, x, w_gate, w_up, w_down):
+                gate = nn.functional.linear(x, w_gate)
+                up = nn.functional.linear(x, w_up)
+                return nn.functional.linear(self.act_fn(gate) * up, w_down)
+
+    elif transposed and has_bias and clamped:
         alpha, limit = float(experts.alpha), float(experts.limit)
 
         class ExpertFFN(nn.Module):
@@ -662,16 +683,69 @@ _EXPERT_LEAVES = {
     "down_proj_bias": "b_down",
 }
 
+# EXL3 lineage: each expert is its own MODULE (``…experts.E.{gate,up,down}_proj.<leaf>``), and
+# gate/up stay SEPARATE program inputs — their ``suh`` channel vectors differ, so the merged
+# gate_up weight has no single activation-side basis to restore (see ``spell_trellis_inputs``).
+_EXL3_EXPERT_PROJ = {"gate_proj": "w_gate", "up_proj": "w_up", "down_proj": "w_down"}
+_EXL3_EXPERT_LEAF = {"trellis": "", "suh": "_suh", "svh": "_svh"}
+
 
 def _expert_slot(key: str):
-    """``(layer_index, program_input_name)`` when ``key`` is a per-expert tensor of a MoE
-    layer's experts module, else ``None``."""
-    if ".experts." not in key:
+    """``(layer_index, program_input_name, expert_index)`` when ``key`` is a per-expert tensor of
+    a MoE layer's experts module, else ``None``. ``expert_index`` is ``None`` for the
+    transformers-v5 E-STACKED 3-D params (already one tensor per layer) and an int for the
+    per-expert-module lineage (EXL3 trellis siblings), which the loader stacks itself."""
+    if ".experts." not in key or ".layers." not in key:
         return None
-    name = _EXPERT_LEAVES.get(key.rsplit(".", 1)[1])
-    if name is None or ".layers." not in key:
-        return None
-    return int(key.split(".layers.")[1].split(".")[0]), name
+    layer = int(key.split(".layers.")[1].split(".")[0])
+    tail = key.split(".experts.", 1)[1].split(".")
+    if len(tail) == 1 and (name := _EXPERT_LEAVES.get(tail[0])) is not None:
+        return layer, name, None
+    if len(tail) == 3 and tail[0].isdigit() and tail[1] in _EXL3_EXPERT_PROJ and tail[2] in _EXL3_EXPERT_LEAF:
+        return layer, _EXL3_EXPERT_PROJ[tail[1]] + _EXL3_EXPERT_LEAF[tail[2]], int(tail[0])
+    return None
+
+
+def _expert_logical_dims(model, layer: int) -> dict[str, tuple[int, int]]:
+    """``{input_name: (out_features, in_features)}`` for one MoE layer's EXL3 expert linears,
+    read off the twin's E-stacked params — ``gate_up_proj`` ``(E, 2*I, H)`` and ``down_proj``
+    ``(E, H, I)`` give the logical extents the checkpoint's 128-padded codes sit inside."""
+    trunk = getattr(model, "model", model)
+    trunk = getattr(trunk, "language_model", trunk)
+    experts = trunk.layers[layer].mlp.experts
+    inter, hidden = experts.gate_up_proj.shape[1] // 2, experts.gate_up_proj.shape[2]
+    return {"w_gate": (inter, hidden), "w_up": (inter, hidden), "w_down": (hidden, inter)}
+
+
+def _stack_exl3_experts(layer: int, by_name: dict, model) -> dict:
+    """Stack one MoE layer's per-expert EXL3 tensors into the E-leading program inputs.
+
+    Expert order is the checkpoint's own index and must be gapless (a hole is a broken
+    checkpoint, not a layout to guess at). The channel vectors come out in the shapes
+    ``spell_trellis_inputs`` declares — ``suh`` 128-BLOCKED and ``svh`` trimmed to the logical
+    out extent (its leading entries; the N-side encode pad is contracted then dropped) — so the
+    per-expert slice a launch feeds is a plain view of the stack with no reshape at dispatch."""
+    import torch  # noqa: PLC0415
+
+    from emmy.compiler.loader.exl3 import HAD_BLOCK  # noqa: PLC0415
+
+    dims = _expert_logical_dims(model, layer)
+    order = {name: sorted(d) for name, d in by_name.items()}
+    n_e = len(next(iter(order.values())))
+    out = {}
+    for name, indices in order.items():
+        if indices != list(range(n_e)):
+            raise ValueError(f"expert store: layer {layer} input {name!r} covers experts {indices[:4]}... — expected 0..{n_e - 1}")
+        stacked = torch.stack([by_name[name][e] for e in indices], dim=0)
+        n, k = dims[name.removesuffix("_suh").removesuffix("_svh")]
+        if name.endswith("_suh"):
+            stacked = stacked[:, : -(-k // HAD_BLOCK) * HAD_BLOCK].reshape(n_e, -1, HAD_BLOCK)
+        elif name.endswith("_svh"):
+            stacked = stacked[:, :n]
+        elif (stacked.shape[1] * 16, stacked.shape[2] * 16) != (-(-k // HAD_BLOCK) * HAD_BLOCK, -(-n // HAD_BLOCK) * HAD_BLOCK):
+            raise ValueError(f"expert store: layer {layer} {name!r} codes {tuple(stacked.shape[1:])} do not pad the twin's {(n, k)}")
+        out[name] = stacked.contiguous()
+    return out
 
 
 def load_quantized_split(model_dir, dtype):
@@ -694,8 +768,19 @@ def load_quantized_split(model_dir, dtype):
       unquantized expert weights) as ``dtype`` value tensors. An interleaved gate/up layout
       de-interleaves here — bits, scale and bias alike (:func:`deinterleave_gate_up`).
 
-    Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | None,
-    "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized).
+    EXL3 (``fmt == "exl3"``) follows the same split with the trellis format's own shapes: the
+    dense trunk DECODES to values here (a trunk weight binds off the twin module, which has no
+    checkpoint path, so it cannot stay coded — see ``serving/ARCHITECTURE.md``), while every
+    routed expert keeps its PACKED CODES. Experts arrive as per-expert modules, so each
+    ``(layer, projection, leaf)`` triple stacks into one E-leading tensor: ``w_gate`` /
+    ``w_up`` / ``w_down`` (int16 codes) plus each one's ``_suh`` (128-blocked) and ``_svh``
+    (sliced to the logical out extent) channel vectors — exactly the shapes
+    ``spell_trellis_inputs`` declares. Gate and up stay SEPARATE (their ``suh`` differ).
+
+    Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | "exl3" | None,
+    "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
+    ``"codebooks": {layer_index: {input_name: cb}}`` on the EXL3 path (the codebook id the
+    speller stamps on each decode).
     """
     from pathlib import Path  # noqa: PLC0415
 
@@ -703,7 +788,15 @@ def load_quantized_split(model_dir, dtype):
     from safetensors import safe_open  # noqa: PLC0415
     from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
 
-    from emmy.compiler.loader.quant import _fp8_quant_config, _is_skipped, dequantize  # noqa: PLC0415
+    from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard  # noqa: PLC0415
+    from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        _EXL3_SIBLING_LEAVES,
+        _exl3_codebook,
+        _exl3_quant_config,
+        _fp8_quant_config,
+        _is_skipped,
+        dequantize,
+    )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
     model_dir = Path(model_dir)
@@ -715,6 +808,7 @@ def load_quantized_split(model_dir, dtype):
 
     qc = _fp8_quant_config(model_dir) or {}
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -723,6 +817,10 @@ def load_quantized_split(model_dir, dtype):
     torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
     state: dict = {}
     layers_store: dict[int, dict] = {}
+    # EXL3: per-expert tensors arrive one module at a time, so collect them keyed by expert
+    # index and stack once the whole checkpoint is read.
+    per_expert: dict[int, dict[str, dict[int, object]]] = {}
+    codebooks: dict[int, dict[str, int]] = {}
     fmt: str | None = None
     from contextlib import ExitStack  # noqa: PLC0415
 
@@ -735,21 +833,41 @@ def load_quantized_split(model_dir, dtype):
                 h = handles[path] = stack.enter_context(safe_open(path, framework="pt"))
             return h
 
+        def _sibling(key: str):
+            return _open(str(index[key])).get_tensor(key)
+
         for shard_path in sorted(by_shard):
             f = _open(shard_path)
             for k in sorted(by_shard[shard_path]):
                 slot = _expert_slot(k)
                 if slot is not None:
-                    layer, name = slot
+                    layer, name, expert = slot
                     t = f.get_tensor(k)
                     if t.dtype in torch_f8:
                         fmt = "f8e4m3" if t.dtype == torch.float8_e4m3fn else "f8e5m2"
                         t = t.view(torch.uint8)
                     elif name.endswith("_scale"):
                         t = t.float()  # bf16-stored scales read as f32 values (the loader convention)
-                    else:
+                    elif t.dtype != torch.int16:  # trellis codes carry raw int16 words
                         t = t.to(dtype)
-                    layers_store.setdefault(layer, {})[name] = t
+                    if expert is None:
+                        layers_store.setdefault(layer, {})[name] = t
+                    else:
+                        fmt = "exl3"
+                        per_expert.setdefault(layer, {}).setdefault(name, {})[expert] = t
+                        if t.dtype == torch.int16:
+                            codebooks.setdefault(layer, {})[name] = _exl3_codebook(index, k[: -len(".trellis")])
+                    continue
+                if exl3 and k.rsplit(".", 1)[-1] in _EXL3_SIBLING_LEAVES and k[: k.rfind(".")] + ".trellis" in index:
+                    continue  # channel vectors + codebook markers: consumed by their module's trellis decode
+                if exl3 and k.endswith(".trellis"):
+                    base = k[: -len(".trellis")]
+                    if base + ".suh" not in index or base + ".svh" not in index:
+                        logger.warning("EXL3 linear %s: no suh/svh channel vectors; left undecoded", base)
+                        continue
+                    w_hat = decode_trellis(f.get_tensor(k).numpy(), _exl3_codebook(index, base))
+                    w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
+                    state[base + ".weight"] = torch.from_numpy(w).to(dtype)
                     continue
                 if k.endswith(("_scale", "_scale_inv")) and k[: k.rfind("_scale")] in index:
                     continue  # consumed by its base weight's dequant
@@ -763,6 +881,9 @@ def load_quantized_split(model_dir, dtype):
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
                 state[k] = t.to(dtype) if t.is_floating_point() else t
+
+    for layer, by_name in per_expert.items():
+        layers_store.setdefault(layer, {}).update(_stack_exl3_experts(layer, by_name, model))
 
     # De-interleave the gate/up family once, so the wrapper's chunk-half split holds.
     trunk = getattr(model, "model", model)
@@ -779,6 +900,7 @@ def load_quantized_split(model_dir, dtype):
                 if name in store:
                     store[name] = deinterleave_gate_up(store[name])
 
+    _trim_padded_weights(model, state)  # EXL3 pads both dims of every coded linear to 128
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
     if unexpected:
         logger.warning("quantized split load: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
@@ -787,7 +909,7 @@ def load_quantized_split(model_dir, dtype):
         logger.info("quantized split load: %d module tensors not in checkpoint (e.g. %s)", len(missing_dense), missing_dense[0])
     model.tie_weights()
     model.eval()
-    return model, {"fmt": fmt, "layers": layers_store}
+    return model, {"fmt": fmt, "layers": layers_store, "codebooks": codebooks}
 
 
 def _trim_padded_weights(model, state: dict) -> None:

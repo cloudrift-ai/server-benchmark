@@ -863,13 +863,17 @@ def test_activation_spelling_falls_back_without_a_linear_consumer(tmp_path, monk
     assert dec.op.hadamard is True
 
 
-def test_activation_spelling_falls_back_on_symbolic_activation(tmp_path, monkeypatch):
-    """A symbolic row count leaves the 128-block reshapes unsizable — folded lane."""
+def test_activation_spelling_handles_a_symbolic_row_count(tmp_path, monkeypatch):
+    """A symbolic row count still spells the kernel path: the chain re-blocks the CONTRACTION
+    axis, which is static, and the token axis rides through as its ``Dim`` — the symbolic-width
+    serving programs need exactly that."""
     from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
 
     g, _ref, _b = _spelled_linear(tmp_path, monkeypatch, symbolic=True)
     dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
-    assert dec.op.hadamard is True
+    assert dec.op.hadamard is False
+    out = g.nodes[g.outputs[0]].output
+    assert not out.shape[0].is_static and out.shape[1].as_static() == 256
 
 
 def test_hadamard_constant_is_shared_across_linears(tmp_path, monkeypatch):
@@ -904,3 +908,147 @@ def test_hadamard_constant_is_shared_across_linears(tmp_path, monkeypatch):
     hads = [nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_graph is not None]
     assert len(hads) == 1
     assert any(isinstance(rn.op, HadamardOp) for rn in hads[0].op.source_graph.nodes.values())
+
+
+# ===================================================================
+# The expert / serving path (VQ Phase 3.4): the INPUT-rooted speller.
+# Expert weights arrive as forward arguments, so the constant speller
+# can never fire; ``spell_trellis_inputs`` re-mints the weight input as
+# its packed codes and appends the two channel-vector inputs.
+# ===================================================================
+
+
+def _input_linear_graph(m, n, k, *, dtype="f16", symbolic=False):
+    """``y = x @ W.T`` with ``W`` a forward-argument INPUT — the expert program's shape."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+
+    rows = Dim("num_tokens") if symbolic else m
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (rows, k), dtype), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("w", (n, k), dtype), node_id="w")
+    g.add_node(op=LinearOp(), inputs=["x", "w"], output=Tensor("y", (rows, n), dtype), node_id="y")
+    g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def _spelled_input_linear(*, m=8, n=256, k=128, K=2, cb=0, symbolic=False):
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    tensors, ref = _exl3_linear_tensors("layer", n, k, K=K, cb=cb)
+    g = _input_linear_graph(m, n, k, symbolic=symbolic)
+    aux = spell_trellis_inputs(g, {"w": (cb, tuple(tensors["layer.trellis"].shape))})
+    g.validate()
+    return g, tensors, ref, aux
+
+
+def _expert_feed(tensors, n, k):
+    """The per-expert feed the serving store hands a launch: codes, 128-blocked ``suh``, and
+    ``svh`` sliced to the logical out extent."""
+    k_pad = -(-k // 128) * 128
+    return {
+        "w": tensors["layer.trellis"].numpy(),
+        "w_suh": np.ascontiguousarray(tensors["layer.suh"].numpy()).reshape(k_pad // 128, 128),
+        "w_svh": np.ascontiguousarray(tensors["layer.svh"].numpy()[:n]),
+    }
+
+
+def test_input_spelling_declares_the_codes_and_channel_inputs():
+    """The weight input keeps its id and slot but becomes the int16 CODES buffer; the two
+    channel vectors are appended at the shapes the serving store feeds."""
+    g, tensors, _ref, aux = _spelled_input_linear(n=256, k=128)
+    assert g.inputs == ["x", "w", "w_suh", "w_svh"]
+    assert aux == {"w": ("w_suh", "w_svh")}
+    shapes = {nid: (tuple(d.as_static() for d in g.nodes[nid].output.shape), g.nodes[nid].output.dtype.name) for nid in g.inputs}
+    assert shapes["w"] == (tuple(tensors["layer.trellis"].shape), "i16")
+    assert shapes["w_suh"] == ((1, 128), "f16")  # k_pad 128 → one Hadamard block
+    assert shapes["w_svh"] == ((256,), "f16")
+
+
+def test_input_spelling_uses_the_hat_basis_decode():
+    from emmy.compiler.ir.frontend.ir import LinearOp, TrellisDecodeOp
+
+    g, _t, _ref, _aux = _spelled_input_linear(n=200, k=300)
+    dec = [nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
+    assert len(dec) == 1 and dec[0].op.hadamard is False
+    assert (dec[0].op.out_features, dec[0].op.in_features) == (256, 384)  # the PADDED extents
+    assert len([nn for nn in g.nodes.values() if isinstance(nn.op, LinearOp)]) == 3  # two Hadamards + the weight
+
+
+@pytest.mark.parametrize(
+    ("m", "n", "k", "K", "cb"),
+    [
+        (8, 256, 128, 2, 0),  # no padding — the GLM expert shape class
+        (1, 512, 128, 2, 0),  # decode M=1
+        (4, 200, 128, 2, 0),  # n padded: contract, then slice
+        (4, 256, 200, 2, 0),  # k padded: zero-pad the activation
+        (2, 200, 300, 3, 1),  # both padded, K=3, mcg codebook
+        (2, 128, 128, 6, 2),  # the lm_head rung, mul1 codebook
+    ],
+)
+def test_input_spelling_matches_the_checkpoint_basis(tmp_path, m, n, k, K, cb):
+    """The bar, same as the constant path: ``x @ W`` against the CHECKPOINT-BASIS reference to
+    f16 matmul tolerance, with the weight fed as packed codes."""
+    from emmy.compiler.backend.base import Backend
+    from emmy.compiler.loader.binder import bind_constants
+
+    class _Interp(Backend):
+        def compile(self, graph):
+            return graph
+
+    g, tensors, ref_w, _aux = _spelled_input_linear(m=m, n=n, k=k, K=K, cb=cb)
+    x = rng.standard_normal((m, k)).astype(np.float16)
+    consts = bind_constants(g, {})  # the zero-leaf Hadamard record
+    result, _ = _Interp().run(g, input_data={"x": x, **_expert_feed(tensors, n, k), **consts})
+    got = np.asarray(result.outputs["y"]).astype(np.float32)
+    ref = x.astype(np.float32) @ ref_w.astype(np.float32).T
+    assert np.abs(got - ref).max() / max(np.abs(ref).max(), 1e-9) < 2e-3
+
+
+def test_input_spelling_handles_a_symbolic_row_count():
+    """The symbolic-width expert program spells the same way: only the CONTRACTION dim has to
+    be static, the token axis rides through as its ``Dim``."""
+    from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+
+    g, _t, _ref, _aux = _spelled_input_linear(symbolic=True)
+    assert any(isinstance(nn.op, TrellisDecodeOp) for nn in g.nodes.values())
+    out = g.nodes[g.outputs[0]].output
+    assert not out.shape[0].is_static and out.shape[1].as_static() == 256
+
+
+def test_input_spelling_shares_one_hadamard_across_weights():
+    """gate/up/down are three separate coded linears in one expert program — one Hadamard
+    constant serves all of them, and it is NOT a per-expert input (so the fixed-slot dispatch
+    never table-resolves it)."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (8, 128), "f16"), node_id="x")
+    specs = {}
+    for name in ("w_gate", "w_up"):
+        tensors, _ref = _exl3_linear_tensors(name, 256, 128)
+        g.add_node(op=InputOp(), inputs=[], output=Tensor(name, (256, 128), "f16"), node_id=name)
+        g.add_node(op=LinearOp(), inputs=["x", name], output=Tensor(f"y_{name}", (8, 256), "f16"), node_id=f"y_{name}")
+        specs[name] = (0, tuple(tensors[f"{name}.trellis"].shape))
+    g.inputs, g.outputs = ["x", "w_gate", "w_up"], ["y_w_gate", "y_w_up"]
+    spell_trellis_inputs(g, specs)
+    hads = [nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_graph is not None]
+    assert len(hads) == 1
+    assert not any(nid.startswith("_had") for nid in g.inputs)
+
+
+def test_input_spelling_rejects_a_bad_spec():
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    g = _input_linear_graph(8, 256, 128)
+    with pytest.raises(ValueError, match="not a graph input"):
+        spell_trellis_inputs(g, {"nope": (0, (8, 16, 32))})
+    with pytest.raises(ValueError, match="does not pad weight shape"):
+        spell_trellis_inputs(g, {"w": (0, (4, 16, 32))})  # k_pad 64 != the roundup of 128
+    with pytest.raises(ValueError, match="not the weight of exactly one"):
+        spell_trellis_inputs(_input_linear_graph(8, 256, 128), {"x": (0, (8, 8, 32))})

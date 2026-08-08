@@ -6,8 +6,9 @@ surfaced it; the server booted clean and was simply slow. Root-causing it took a
 session. This audit turns that class of failure into one boot log line.
 
 Mechanism: each STATIC twin program is event-timed once at boot and compared against its
-**weight-streaming floor** — every bound constant must be read at least once per forward, so
-``floor = const_bytes / dram_bw``. Bandwidth is self-calibrated with a device-to-device copy (no
+**weight-streaming floor** — every weight must be read at least once per forward, whether it is a
+bound constant or a per-launch weight INPUT (a MoE expert program holds no constants at all), so
+``floor = weight_bytes / dram_bw``. Bandwidth is self-calibrated with a device-to-device copy (no
 per-card peak table to maintain). The comparison is conservative by construction: the weight floor is a
 true lower bound (compute-bound programs sit above it) and copy bandwidth undershoots peak DRAM
 bandwidth, so real ratios read LOW — a program flagged ``>10x`` is never a healthy program. Symbolic
@@ -67,12 +68,12 @@ def time_program_us(program, *, reps: int = 3) -> float:
     return sorted(times)[len(times) // 2]
 
 
-def flag_ratio(measured_us: float, const_bytes: int, bw_bytes_per_s: float) -> tuple[float, float] | None:
+def flag_ratio(measured_us: float, weight_bytes: int, bw_bytes_per_s: float) -> tuple[float, float] | None:
     """``(floor_us, ratio)`` when the measurement warrants a warning, else ``None``.
     Pure decision logic — unit-testable without CUDA."""
-    if const_bytes <= 0 or bw_bytes_per_s <= 0:
+    if weight_bytes <= 0 or bw_bytes_per_s <= 0:
         return None
-    floor_us = const_bytes / bw_bytes_per_s * 1e6
+    floor_us = weight_bytes / bw_bytes_per_s * 1e6
     if floor_us < MIN_FLOOR_US:
         return None
     ratio = measured_us / floor_us
@@ -84,7 +85,8 @@ def flag_ratio(measured_us: float, const_bytes: int, bw_bytes_per_s: float) -> t
 def audit_boot_programs(named_programs) -> None:
     """Time each ``(label, _Program)`` against its weight-streaming floor and warn on outliers.
     ``_Program`` here is the serving wrapper (``gen_runner._Program``): ``.program`` is the
-    ``CompiledProgram`` and ``.const_bytes`` the deduped bound-constant footprint. Never raises."""
+    ``CompiledProgram`` and ``.weight_bytes`` the per-forward weight footprint — bound constants
+    plus the weight INPUTS an expert program takes per launch. Never raises."""
     try:
         from emmy.compiler.backend.gpu_lock import gpu_lock
 
@@ -92,7 +94,7 @@ def audit_boot_programs(named_programs) -> None:
             bw = measure_copy_bw()
             flagged = []
             for label, prog in named_programs:
-                verdict = flag_ratio(time_program_us(prog.program), prog.const_bytes, bw)
+                verdict = flag_ratio(time_program_us(prog.program), prog.weight_bytes, bw)
                 if verdict is not None:
                     floor_us, ratio = verdict
                     flagged.append((label, floor_us, ratio))

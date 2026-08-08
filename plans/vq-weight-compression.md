@@ -366,6 +366,41 @@ Order matters — the fragment path first, or every measurement undersells the f
    Extend the vocabulary before Phase 5 bakes an image.
 4. Expert-path integration: the routed expert FFN matmuls are the bulk of the bytes; confirm indirect operands and
    the compute fill compose.
+   **STATUS: DONE (2026-08-07).** `spell_trellis_inputs` (loader/quant.py) is the input-rooted twin of the 3.3
+   speller, sharing one chain builder: it re-mints each named weight input as the int16 CODES buffer in place and
+   appends `<name>_suh` (128-blocked) / `<name>_svh` (logical out extent) — the shapes the serving store feeds, so
+   a per-expert slice is a plain view. Gate and up stay SEPARATE program inputs
+   (`build_moe_split_wrapper(..., split_gate_up=True)`): their `suh` differ, measured on the real checkpoint, so a
+   merged gate_up weight has no single activation-side basis. `load_quantized_split` grew the EXL3 arms — the dense
+   trunk decodes to values (a trunk weight binds off the twin MODULE, which has no checkpoint path; see the
+   residual), the routed experts keep their codes, stacked E-leading per `(layer, projection, leaf)`. The indirect
+   split the brief flagged holds as designed: the nine per-expert tensors are table-resolved, the shared Hadamard
+   stays a graph CONSTANT. The chain also had to accept a SYMBOLIC leading dim (the `moe.expert.sym` program) —
+   only the contraction dim needs to be static, and 3.3's constant path now spells symbolic traces too.
+   **Pack vocabulary CLOSED.** `WeightSpec.source_op` is the plan's third pre-chain source form
+   (`("hadamard", (128,))`, rebuilt by `build_source_op`): without it the Hadamard's zero-leaf `source_graph`
+   record projected to `source_path=None` and the weight vanished from the bound feed — on a fresh compile as much
+   as on a pack hit. A record the plan cannot reproduce now sets `load_ops=None`, so the pack save refuses loudly.
+   `_encode_load_ops` also grew `("slice", spans)` for the affine single-source `IndexMapOp` a folded `SliceOp`
+   leaves (3.3's N-padded `svh` residual). Roofline: `weight_bytes` now counts weight INPUTS, so an expert program
+   has a real floor instead of zero (still under `MIN_FLOOR_US` at 2.25 bpw — ~4 MB/launch).
+   Verified on a config-truncated cut of the pinned 2.25bpw checkpoint (2 layers, 8 experts, vocab 2048 — a full
+   46-layer boot does not fit this box): all four `moe.expert.*` tiers plus 8 fixed slots compile; per-tier
+   accuracy against a torch eager reference built from the DECODED expert weights is rel 1.0e-3 (M=1), 9.4e-4
+   (decode bucket 8), 6.9e-4 (M=256); the indirect fixed-slot T=1 combine matches the routed oracle at rel 6.1e-4;
+   the layer's expert store stays compressed (34.9 MB vs 277 MB dequantized, 7.9x). Pack round-trip: cold boot
+   127 s → pack-hit boot 22 s with identical accuracy, the trellis plans carrying both `gen` computed constants and
+   indirect operands.
+   **RESIDUAL — one expert program set per distinct codes shape (Phase 5 BLOCKER).** EXL3's mixed allocation makes
+   K vary per layer: for gate/up the pinned checkpoint is K=2 on 40 layers, K=3 on 4, K=4 on 1 (down_proj 38/6/1),
+   which the expert `shape_key` now catches as a layer disagreement and raises on. Serving the whole model needs
+   the `expert_sym`/`bucket`/`one`/`m256`/`slots` singletons keyed by shape group (each group its own pointer
+   tables; the selector and partials stay shared, since one layer runs at a time).
+   **RESIDUAL — the serving trunk is not compressed.** `_compile_split` binds trunk constants from
+   `wrapper.named_parameters()`, whose paths are wrapper-relative and never reach the checkpoint index, so the
+   constant speller cannot fire on a serving trunk. At 2.25 bpw the decoded trunk is ~14 GB against ~28 GB of
+   compressed experts — over the 32 GB card. Closing it needs a per-layer wrapper-path → checkpoint-key mapping
+   plus shard-sourced binding in `_compile_split`.
 
 **Deliverable**: GLM-4.5-Air resident on the 5090 at ~26.5 GB with correct output. **Verify**: VRAM occupancy
 matches the checkpoint size; accuracy unchanged from Phase 2; a decode-phase step streams compressed bytes (confirm

@@ -99,14 +99,24 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   module (a plain dense MLP over the same normed `xn`) folds INTO `post_attn`'s returned `h`, so the combine
   stays `h + Σ w_e · expert_e(xn)` with no runner change; Qwen-MoE's GATED shared expert (`shared_expert_gate`)
   and Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+  `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
+  coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
+  activation-side basis to restore and the merged spelling would only add a concat the chunk split undoes.
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
   trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
   (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
   and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
-  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. Never the whole dict at
-  once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
+  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An EXL3 checkpoint takes the
+  same split at the trellis format's own shapes (`fmt == "exl3"`): the dense trunk DECODES to values here — a
+  trunk weight binds off the twin module, which has no checkpoint path, so it cannot stay coded through this seam
+  — while every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
+  reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
+  E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the
+  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. The store also carries
+  `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode. Never the
+  whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
   whole-dict eager/accuracy twin for models small enough to hold (fp8 and EXL3 checkpoints alike); on the way in
   it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
   round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,

@@ -115,13 +115,17 @@ class WeightSpec:
     ``apply_weight_loads``). ``load_ops`` is ``None`` when the graph carried a load op the
     grammar can't express — such a plan still runs, but can't rebind weights from a pack.
     ``source_parts`` mirrors ``ConstantOp.source_parts`` — ``(path, shape)`` pairs the binder
-    concatenates along axis 0 before the chain (``merge_sibling_linears``' weight concat);
-    exactly one of ``source_path`` / ``source_parts`` is set. Assemble the pre-chain source
-    via ``loader.binder.assemble_source`` (duck-typed over both specs)."""
+    concatenates along axis 0 before the chain (``merge_sibling_linears``' weight concat).
+    ``source_op`` is the third pre-chain source form: a COMPUTED constant with no checkpoint
+    key at all (``("hadamard", (128,))`` — the trellis basis-restore matrix), projected from a
+    zero-leaf ``ConstantOp.source_graph`` bind record and rebuilt by :func:`build_source_op`.
+    Exactly one of the three is set. Assemble the pre-chain source via
+    ``loader.binder.assemble_source`` (duck-typed over both specs)."""
 
     source_path: str | None
     load_ops: tuple[tuple, ...] | None = ()
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    source_op: tuple[str, tuple] | None = None
 
 
 @dataclass
@@ -203,10 +207,19 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
 
     weights: dict[str, WeightSpec] = {}
     for nid, op in graph.loadable_constants():
+        source_op = _encode_source_op(op.source_graph) if op.source_graph is not None else None
+        load_ops = _encode_load_ops(op.load_ops)
+        if op.source_graph is not None and source_op is None:
+            # A bind record the plan cannot reproduce: the weight has no checkpoint key either,
+            # so a plan-side bind would silently drop it. Mark it unbindable — the pack save
+            # refuses (see ``_save_pack``) instead of writing a pack that boots weightless.
+            logger.warning("plan: constant %r rides a bind record outside the plan vocabulary; weight will not rebind from a pack", nid)
+            load_ops = None
         weights[nid] = WeightSpec(
             source_path=op.source_path,
-            load_ops=_encode_load_ops(op.load_ops),
+            load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
+            source_op=source_op,
         )
 
     return ExecutionPlan(
@@ -248,12 +261,55 @@ def _normalize_spec(spec) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def _encode_index_map(op) -> tuple | None:
+    """Encode a single-source ``IndexMapOp`` as ``("slice", (start, step, extent, ...))`` when
+    it is a per-axis affine read of its input — the form a folded ``SliceOp`` takes (the trellis
+    speller's ``svh[:n]`` N-pad trim). ``None`` for anything richer (a cat's ``select``, an axis
+    permutation, a coord that mixes axes).
+
+    Detection is by CONSTRUCTION, not by sampling: each output axis' coord expression must be
+    affine in its OWN placeholder alone, which is checked by substituting the other axes' vars
+    away and requiring the residual to evaluate to ``a·i + b`` at every i in range."""
+    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
+
+    if len(op.sources) != 1 or op.sources[0].select is not None:
+        return None
+    shape = [d.as_static() if d.is_static else None for d in op.out_shape]
+    if any(d is None for d in shape) or len(op.sources[0].coord_map) != len(shape):
+        return None
+    spans: list[int] = []
+    for axis, coord in enumerate(op.sources[0].coord_map):
+        env = {f"{PLACEHOLDER_PREFIX}{i}": 0 for i in range(len(shape))}
+        try:
+            base = int(coord.eval(env))
+            env[f"{PLACEHOLDER_PREFIX}{axis}"] = 1
+            step = int(coord.eval(env)) - base if shape[axis] > 1 else 1
+            for i in range(shape[axis]):
+                env[f"{PLACEHOLDER_PREFIX}{axis}"] = i
+                if int(coord.eval(env)) != base + step * i:
+                    return None
+            # Independence from the other axes: a mixing coord (a reshape/transpose) is not a slice.
+            for other in range(len(shape)):
+                if other == axis or shape[other] < 2:
+                    continue
+                probe = dict(env, **{f"{PLACEHOLDER_PREFIX}{axis}": 0, f"{PLACEHOLDER_PREFIX}{other}": shape[other] - 1})
+                if int(coord.eval(probe)) != base:
+                    return None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+        if step < 1:
+            return None
+        spans += [base, step, shape[axis]]
+    return ("slice", tuple(spans))
+
+
 def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
     """Encode a ``ConstantOp.load_ops`` chain into the plan's vocabulary
-    (``("transpose", axes)`` / ``("reshape", shape)``), or ``None`` when a chain member isn't
-    expressible — the plan still runs (binding came from the live module), it just can't rebind
-    that weight from a pack."""
+    (``("transpose", axes)`` / ``("reshape", shape)`` / ``("slice", spans)``), or ``None`` when a
+    chain member isn't expressible — the plan still runs (binding came from the live module), it
+    just can't rebind that weight from a pack."""
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import IndexMapOp  # noqa: PLC0415
 
     out: list[tuple] = []
     for op in load_ops:
@@ -261,10 +317,39 @@ def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
             out.append(("transpose", tuple(int(a) for a in op.axes)))
         elif isinstance(op, ReshapeOp) and all(isinstance(d, int) for d in op.shape):
             out.append(("reshape", tuple(op.shape)))
+        elif isinstance(op, IndexMapOp) and (enc := _encode_index_map(op)) is not None:
+            out.append(enc)
         else:
             logger.warning("plan: load op %r not expressible in the pack vocabulary; weight will not rebind from a pack", op)
             return None
     return tuple(out)
+
+
+def _encode_source_op(record) -> tuple[str, tuple] | None:
+    """Encode a zero-leaf ``ConstantOp.source_graph`` bind record as a ``WeightSpec.source_op``
+    pair, or ``None`` when the record reads checkpoint leaves (its sources have no plan form) or
+    computes something outside the vocabulary.
+
+    One kind today: ``("hadamard", (size,))`` — the 128-block ±1 Sylvester matrix every
+    trellis-coded linear's basis restore contracts against. It has no checkpoint key, so without
+    this the constant projects to ``source_path=None`` and vanishes from the bound feed."""
+    from emmy.compiler.ir.frontend.ir import HadamardOp  # noqa: PLC0415
+
+    nodes = list(record.nodes.values())
+    if len(nodes) != 1 or not isinstance(nodes[0].op, HadamardOp):
+        return None
+    return ("hadamard", (int(nodes[0].op.size),))
+
+
+def build_source_op(source_op: tuple[str, tuple]) -> np.ndarray:
+    """Materialize a ``WeightSpec.source_op`` computed constant — the plan-side counterpart of
+    evaluating its bind record (``loader.binder.evaluate_source_graph``), with no IR involved."""
+    kind, params = source_op
+    if kind == "hadamard":
+        from emmy.compiler.loader.exl3 import sylvester_hadamard  # noqa: PLC0415
+
+        return sylvester_hadamard(int(params[0]))
+    raise ValueError(f"build_source_op: unknown computed-constant kind {kind!r}")
 
 
 def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.ndarray:
@@ -277,6 +362,9 @@ def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.nd
             a = np.swapaxes(a, arg[0] % a.ndim, arg[1] % a.ndim) if len(arg) == 2 else np.transpose(a, arg)
         elif kind == "reshape":
             a = a.reshape(arg)
+        elif kind == "slice":
+            spans = [tuple(arg[i : i + 3]) for i in range(0, len(arg), 3)]
+            a = a[tuple(slice(start, start + step * extent, step) for start, step, extent in spans)]
         else:
             raise ValueError(f"apply_weight_loads: unknown load op kind {kind!r}")
     return np.ascontiguousarray(a)
@@ -396,6 +484,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             nid: {
                 **({"path": w.source_path} if w.source_path is not None else {}),
                 **({"parts": [[p, list(s)] for p, s in w.source_parts]} if w.source_parts else {}),
+                **({"gen": [w.source_op[0], list(w.source_op[1])]} if w.source_op is not None else {}),
                 **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {}),
             }
             for nid, w in plan.weights.items()
@@ -457,6 +546,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 source_path=w.get("path"),
                 load_ops=tuple((k, tuple(a)) for k, a in w["ops"]) if "ops" in w else None,
                 source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in w.get("parts", ())),
+                source_op=(w["gen"][0], tuple(w["gen"][1])) if "gen" in w else None,
             )
             for nid, w in d.get("weights", {}).items()
         },

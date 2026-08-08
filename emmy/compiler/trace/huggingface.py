@@ -1009,6 +1009,60 @@ def _pack_expert_state(model, state: dict) -> None:
         state[key] = packed
 
 
+def _trim_padded_weights(model, state: dict) -> None:
+    """Slice encode-padded weight values back to the module's declared shape, in place.
+
+    EXL3 pads both dims of every quantized linear to multiples of 128 at encode time
+    (GLM-4.5-Air: ``intermediate_size`` 10944 → 11008), so a decoded state value can
+    overhang the module's parameter. Slicing the leading extents is exactly the reference
+    math (zero-padded activations in, sliced outputs). Guarded
+    tightly: only when every overhanging dim is exactly the declared dim's roundup to 128 —
+    anything else stays as-is for ``load_state_dict`` to report."""
+    for key, param in model.state_dict().items():
+        t = state.get(key)
+        if t is None or t.shape == param.shape or t.dim() != param.dim():
+            continue
+        if all(td == -(-pd // 128) * 128 or td == pd for td, pd in zip(t.shape, param.shape, strict=True)):
+            state[key] = t[tuple(slice(0, pd) for pd in param.shape)].contiguous()
+
+
+def _pack_expert_state(model, state: dict) -> None:
+    """Pack per-expert checkpoint weights into the transformers-v5 3-D expert params, in place.
+
+    The DeepSeek/GLM checkpoint lineage stores each expert as its own module
+    (``…experts.E.{gate,up,down}_proj.weight``), while the v5 experts module declares the
+    E-stacked 3-D params (``…experts.gate_up_proj`` ``(E, 2*I, H)`` / ``…experts.down_proj``
+    ``(E, H, I)``) — ``from_pretrained`` applies the hub conversion mapping, but a state dict
+    built by the loaders must pack here. Per-expert ``nn.Linear`` weights are the ``(out,
+    in)`` orientation by construction, so the packing is deterministic: stack, with gate/up
+    concatenated along the out axis (the ``chunk(2)`` halves). Fires only when the model
+    expects a packed param whose per-expert sources are all present in ``state``; a shape
+    mismatch raises rather than loading a silently wrong twin."""
+    import torch  # noqa: PLC0415
+
+    for key, param in model.state_dict().items():
+        m = re.match(r"(.*\.experts)\.(gate_up_proj|down_proj)$", key)
+        if m is None or key in state:
+            continue
+        base, leaf = m.groups()
+        n_experts = param.shape[0]
+        parts = []
+        consumed: list[str] = []
+        for e in range(n_experts):
+            names = [f"{base}.{e}.{p}.weight" for p in (("gate_proj", "up_proj") if leaf == "gate_up_proj" else ("down_proj",))]
+            halves = [state.get(nm) for nm in names]
+            consumed += names
+            parts.append(None if any(h is None for h in halves) else halves[0] if len(halves) == 1 else torch.cat(halves, dim=0))
+        if any(p is None for p in parts):
+            continue  # not the per-expert layout (or an incomplete checkpoint) — leave for load_state_dict to report
+        packed = torch.stack(parts, dim=0)
+        if packed.shape != param.shape:
+            raise ValueError(f"expert packing for {key}: packed shape {tuple(packed.shape)} != expected {tuple(param.shape)}")
+        for nm in consumed:
+            del state[nm]
+        state[key] = packed
+
+
 def load_quantized_twin(model_dir, dtype):
     """Architecture twin of a quantized checkpoint, carrying the DEQUANTIZED real weights.
 

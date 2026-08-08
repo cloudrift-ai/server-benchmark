@@ -356,12 +356,23 @@ def test_real_tensor_decode_statistics():
 
 
 # ===================================================================
-# Checkpoint ingestion: spell → fold → bind (the Phase-2 correctness lane).
+# Checkpoint ingestion: spell → fold → bind (the Phase-2 correctness lane), in BOTH
+# folded spellings (``EMMY_TRELLIS_SPELLING``), then the kernel lane below.
 # The speller lives in ``loader.quant`` (the one quantization-concept module);
 # its tests sit here because the fixtures and the decode reference are EXL3's.
 # ===================================================================
 
 _FOLD_RULE = "032_fold_constant_subgraphs"
+
+
+@pytest.fixture
+def generic_spelling(monkeypatch):
+    """Select ``loader/trellis.py``'s generic-algebra spelling of the folded lane.
+
+    Two spellings of that lane coexist (``EMMY_TRELLIS_SPELLING``, see
+    ``loader.quant.spell_trellis_constants``); the unmarked tests below cover the default
+    ``TrellisDecodeOp`` one, and the tests taking this fixture cover the generic one."""
+    monkeypatch.setenv("EMMY_TRELLIS_SPELLING", "generic")
 
 
 def _exl3_linear_tensors(base: str, n: int, k: int, K: int = 2, cb: int = 0):
@@ -454,6 +465,29 @@ def test_spell_trellis_builds_decode_cone(tmp_path):
     assert g.outputs == ["p_w"]
 
 
+def test_generic_spelling_builds_generic_cone(tmp_path, generic_spelling):
+    """``EMMY_TRELLIS_SPELLING=generic`` spells the SAME folded lane with no ``TrellisDecodeOp``
+    at all — range / bitcast / gather / two Hadamard matmuls over the same three leaves."""
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp, TrellisDecodeOp
+    from emmy.compiler.ir.tensor.ir import BitcastOp, GatherOp, RangeOp
+
+    g, _ref = _spelled_exl3(tmp_path)
+    consts = {nn.op.source_path: nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_path is not None}
+    assert set(consts) == {"layer.trellis", "layer.suh", "layer.svh"}
+    assert consts["layer.trellis"].output.dtype.name == "i16" and consts["layer.trellis"].op.source_dtype == "i16"
+    assert consts["layer.suh"].output.dtype.name == "f16"
+    assert any(isinstance(nn.op, RangeOp) for nn in g.nodes.values())
+    assert any(isinstance(nn.op, BitcastOp) for nn in g.nodes.values())
+    assert any(isinstance(nn.op, GatherOp) for nn in g.nodes.values())
+    assert sum(isinstance(nn.op, MatmulOp) for nn in g.nodes.values()) == 2
+    assert not any(isinstance(nn.op, TrellisDecodeOp) for nn in g.nodes.values())
+    # Interface invariance: the cone's output is exactly what the trace promised.
+    out = g.nodes[g.outputs[0]].output
+    assert out.dtype.name == "f32" and tuple(d.as_static() for d in out.shape) == (256, 128)
+    assert g.outputs == ["p_w"]
+
+
 @pytest.mark.parametrize("cb", [1, 2])
 def test_spell_trellis_marker_selects_codebook(tmp_path, cb):
     from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
@@ -461,6 +495,17 @@ def test_spell_trellis_marker_selects_codebook(tmp_path, cb):
     g, _ref = _spelled_exl3(tmp_path, cb=cb)
     dec = next(nn for nn in g.nodes.values() if isinstance(nn.op, TrellisDecodeOp))
     assert dec.op.cb == cb
+
+
+@pytest.mark.parametrize("cb", [1, 2])
+def test_generic_spelling_marker_selects_codebook(tmp_path, cb, generic_spelling):
+    """The generic spelling has no ``cb`` field to carry — the marker's PRESENCE picks which
+    codebook multiplier the emitted integer algebra literally contains."""
+    from emmy.compiler.ir.base import ConstantOp
+
+    g, _ref = _spelled_exl3(tmp_path, cb=cb)
+    values = {nn.op.value for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.value is not None}
+    assert (0xCBAC1FED if cb == 1 else 0x83DCD12D) in values
 
 
 def test_spell_trellis_is_idempotent(tmp_path):
@@ -528,10 +573,9 @@ def test_fold_collapses_trellis_cone(tmp_path):
     assert folded.nodes["p_w"].op.source_graph is not None
 
 
-def test_fold_collapses_trellis_cone_under_fp8_expand(tmp_path, monkeypatch):
-    """``EMMY_FP8_EXPAND`` keeps fp8 cones in-graph for the kernel path; a trellis cone has
-    no in-kernel realization, so it must fold regardless."""
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+def test_generic_spelling_folds_to_the_same_constant(tmp_path, generic_spelling):
+    """The generic cone collapses at 032 exactly as the op cone does — one bind record, no
+    surviving construction algebra."""
     g, _ref = _spelled_exl3(tmp_path)
     folded = _fold(g)
     assert set(folded.nodes) == {"p_w"}
@@ -543,6 +587,19 @@ def test_loader_binds_folded_trellis_weight_exact(tmp_path, n, k, K, cb):
     """spell → fold → bind reproduces the direct decode exactly (the fp16 decode cast to the
     traced f32 — one widening, bit-preserving). ``n=192`` exercises the encode padding slice;
     ``K=6`` is the lm_head rung."""
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    g, ref = _spelled_exl3(tmp_path, n=n, k=k, K=K, cb=cb)
+    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
+    assert out["p_w"].dtype == np.float32 and out["p_w"].shape == (n, k)
+    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32))
+
+
+@pytest.mark.parametrize(("n", "k", "K", "cb"), [(256, 128, 2, 0), (192, 128, 3, 1), (128, 128, 6, 2)])
+def test_generic_spelling_binds_exactly_like_the_direct_decode(tmp_path, n, k, K, cb, generic_spelling):
+    """The generic spelling's whole point: reconstruct from generic algebra alone and still land
+    on the numpy reference bit for bit. Same rows as the op spelling above, so the two folded
+    spellings are pinned to ONE value — which is what makes the choice between them free."""
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 
     g, ref = _spelled_exl3(tmp_path, n=n, k=k, K=K, cb=cb)
@@ -704,6 +761,8 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
 
     decs = [nn for nn in graph.nodes.values() if isinstance(nn.op, TrellisDecodeOp)]
     assert len(decs) == 7  # q,k,v,o + gate,up,down
+    coded = [op for _nid, op in graph.loadable_constants() if op.source_path and op.source_path.endswith(".trellis")]
+    assert len(coded) == 7  # the same seven, seen from their checkpoint leaves (spelling-agnostic)
     params = dict(wrapper.named_parameters())
     for name, ref in ref_sd.items():
         got = params["model." + name]  # the trace wrapper nests the CausalLM under .model
@@ -714,14 +773,17 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
 def test_exl3_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny EXL3 model through the same seam ``emmy compile`` / ``emmy run`` use, compiled
     on the CUDA backend with the default fold: every trellis cone dissolves at 032 (bind-time
-    decode), and the output matches the decoded eager reference."""
+    decode) whichever folded spelling produced it, and the output matches the decoded eager
+    reference."""
     from emmy.compiler.ir.frontend.ir import TrellisDecodeOp
+    from emmy.compiler.ir.tensor.ir import BitcastOp, RangeOp
 
     from .test_quant import _assert_e2e_gate, _run_e2e
 
     config, ref_sd = _tiny_exl3_checkpoint(tmp_path)
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
-    assert not any(isinstance(nn.op, TrellisDecodeOp) for nn in compiled.nodes.values()), "a trellis op survived the fold"
+    survivors = (TrellisDecodeOp, BitcastOp, RangeOp)
+    assert not any(isinstance(nn.op, survivors) for nn in compiled.nodes.values()), "reconstruction algebra survived the fold"
     _assert_e2e_gate(emmy_logits, ref_logits, "exl3 fold mode")
 
 

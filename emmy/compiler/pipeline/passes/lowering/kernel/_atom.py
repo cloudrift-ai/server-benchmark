@@ -4,7 +4,7 @@ r"""The per-atom codegen strategies — the one seam every tiled contraction dis
 node and asks this module for the two codegen halves: :func:`reduce_codegen` (the sink-agnostic
 ``(state_decls, reduce_region)`` — the accumulator/operand decls + the shared :func:`_contract_kloop`
 K-loop) and :func:`store_sink` (the per-cell matmul sink). Both resolve through :func:`_atom_ops` to
-one of the two concrete strategies — :class:`_MmaOps` (tensor-core ``ldmatrix`` + ``mma.sync``, a
+one of the two concrete strategies — :class:`_MmaOps` (tensor-core fragment loads + ``mma.sync``, a
 ``RegStore`` sink) or :class:`_ScalarOps` (plain ``Load``\ s + an ``fma`` cell, the replicated-
 ``epilogue`` sink). The K-loop itself is ONE driver on the base strategy (:meth:`_AtomOps.reduce`),
 deciding nothing: the **scheduler-resolved** ``stage`` (eligibility + sizing ran once in
@@ -47,6 +47,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
     Operand,
+    SyncCopyTransport,
     SyncOperand,
     SyncTransport,
     TmaTransport,
@@ -173,7 +174,7 @@ def _warp_epilogue(
 
 
 # ---- operand staging (smem slab + ldmatrix drain) ---------------------------------------------- #
-# The warp tier's smem operand pipeline, driven off the node's :class:`Stage`. cp.async and TMA
+# The warp tier's smem operand pipeline, driven off the node's :class:`Stage`. Synchronous copy, cp.async, and TMA
 # share the slab + the staged-``LdmatrixLoad`` drain (:func:`_staged_inner_atom_loop`) AND the
 # slab swizzle modes (:meth:`_MmaOps.slab_swizzles`); only who applies the fill-side permutation
 # differs — TMA swizzles in hardware during the box copy, a cp.async fill XORs its destination
@@ -234,15 +235,16 @@ def _staged_inner_atom_loop(
     byte_slabs=None,
     pads=None,
 ) -> list[Stmt]:
-    """The inner atom-K drain shared by the cp.async and TMA staged paths: read the A/B ``slabs`` via
-    ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. ``slabs`` is ``(A, B…)`` — one B slab per fold
+    """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
+    ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
+    or the Volta cooperative shared gather according to the atom fragment layout. ``slabs`` is ``(A, B…)`` — one B slab per fold
     channel (one for the ordinary matmul; N for the multi-B gate/up node, whose ONE ldmatrix'd A
     fragment feeds a per-channel mma chain into a per-channel C fragment). Slab-local indices —
     A[tile_m][bk_elems] (ldm=bk_elems), B[bk_elems][tile_n] (ldm=tile_n) — independent of which
     producer filled the (plain row-major, NONE-swizzle) slab; ``mn`` is the ``(m, n)`` :class:`Side`
     pair.
 
-    ``reg_depth == 1`` (default): one ``StridedLoop`` over the ``bk`` atom-K steps, ldmatrix-then-mma
+    ``reg_depth == 1`` (default): one ``StridedLoop`` over the ``bk`` atom-K steps, fragment-load-then-mma
     inline (the operand fragments ``_a{i}``/``_b{j}`` reused every step). ``reg_depth >= 2`` (the
     ``STAGE`` ``/p<n>`` smem→register double-buffer): the loop is **fully unrolled** into a software
     pipeline that ldmatrixes the next atom-K step into an alternate fragment slot (``_a{i}_s{slot}``)
@@ -310,6 +312,7 @@ def _staged_inner_atom_loop(
                         swizzle=swz,
                         b_trans=role == "b" and is_row,
                         byte_slab=b8,
+                        fragment_layout=atom.fragment_layout,
                     )
                 )
         return reads
@@ -320,7 +323,7 @@ def _staged_inner_atom_loop(
                 c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
                 a_frag=f"_a{i}{suffix}",
                 b_frag=f"{_fold_frag(f'_b{j}', f)}{suffix}",
-                shape=atom.shape,
+                shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
             )
@@ -329,7 +332,7 @@ def _staged_inner_atom_loop(
             for j in range(n.reg)
         ]
 
-    if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline ldmatrix→mma loop
+    if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
         body = ldms(Var(ki), "") + mmas("")
         return [
             StridedLoop(
@@ -605,7 +608,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     """The **one** STAGED K-loop driver, atom-agnostic — build the ``(A, B)`` operand pair, the
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
     :func:`staged_kloop`; the atom supplies only the slab drain leaf (:meth:`_AtomOps.staged_drain`
-    — ``ldmatrix`` + ``mma.sync`` vs plain-``Load`` fma) and the slab element dtype. ``ops.stage``
+    — fragment load + ``mma.sync`` vs plain-``Load`` fma) and the slab element dtype. ``ops.stage``
     is the **scheduler-RESOLVED** stage (the scheduler
     ran eligibility + sizing once) — its ``transport`` / ``bk_elems`` / ``depth`` / ``reg_depth``
     are applied verbatim, no decision here. A pure perf transform, numerically identical to
@@ -618,7 +621,28 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    if stage.transport == "sync":
+    if stage.transport == "sync" and tile.atom.sync_copy_staging:
+        assert isinstance(c.a, Load) and isinstance(c.b, Load), "sync-copy staging requires materialized A and B edges"
+        assert len(ops.channels) == 1, "sync-copy staging is single-fold"
+        elems = ops.slab_elems()
+        operands = _slab_operands(
+            index_srcs=(c.a.index, c.b.index),
+            bufs=(c.a.input, c.b.input),
+            mn=mn,
+            k_axis=k_axis,
+            bk_elems=stage.bk_elems,
+            base=_tile_base(mn),
+            swizzles=ops.slab_swizzles(mn, elem.nbytes),
+            elems=elems,
+            b_trans=c.b_trans,
+        )
+        transport = SyncCopyTransport(
+            operands=operands,
+            slab_dtype=cuda_name(elem),
+            elem_bytes=elem.nbytes,
+            cta=cta,
+        )
+    elif stage.transport == "sync":
         # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone);
         # every B (canonical K-major, or transposed staged N-major) rides a vectorized cp.async
         # that flies UNDER the compute fill — the mma
@@ -877,7 +901,7 @@ class _AtomOps:
 
 
 class _MmaOps(_AtomOps):
-    """Tensor-core atom — ``ldmatrix`` fragment reads + ``mma.sync``, a ``RegStore`` sink."""
+    """Tensor-core atom — layout-aware fragment reads + ``mma.sync``, a ``RegStore`` sink."""
 
     def slab_elem(self):
         """The slab element dtype — the mma A/B operand dtype (f16/bf16 fragments; the fp8
@@ -898,7 +922,7 @@ class _MmaOps(_AtomOps):
         return tuple(out)
 
     def staged_drain(self, operands, slot, cells, offset, mn):
-        """The mma slab drain — the ``ldmatrix`` + ``mma.sync`` leaf reading ring ``slot``
+        """The mma slab drain — the fragment-load + ``mma.sync`` leaf reading ring ``slot``
         (:func:`_staged_inner_atom_loop`; the cells ride ``mn``'s reg counts, so ``cells`` /
         ``offset`` are unused here). Each slab's swizzle mode rides its operand (``NONE`` on the
         sync transport's :class:`SyncOperand`, which has no swizzle field); a 1-byte operand slab
@@ -939,6 +963,8 @@ class _MmaOps(_AtomOps):
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
+        if self.tile.atom.fragment_layout == "m8n8k4":
+            return ("NONE", "NONE")
         b_inner = self.stage.bk_elems if self.c.b_trans else mn[1].tile
         return tuple(
             "NONE" if e.nbytes == 1 else pick_swizzle_atom(inner, e.nbytes)[1]
@@ -960,15 +986,34 @@ class _MmaOps(_AtomOps):
         # shared-A / per-channel-accumulate drain).
         n_folds = len(self.channels)
         decls: list[Stmt] = [
-            RegFragment(name=nm, role="a", shape=atom.shape, dtype=atom.operand_dtype("a")) for nm in frags(lambda i: f"_a{i}", m.reg)
+            RegFragment(
+                name=nm,
+                role="a",
+                shape=atom.ptx_shape,
+                dtype=atom.operand_dtype("a"),
+                nregs=atom.fragment_nregs("a"),
+            )
+            for nm in frags(lambda i: f"_a{i}", m.reg)
         ]
         for f in range(n_folds):
             decls += [
-                RegFragment(name=nm, role="b", shape=atom.shape, dtype=atom.operand_dtype("b"))
+                RegFragment(
+                    name=nm,
+                    role="b",
+                    shape=atom.ptx_shape,
+                    dtype=atom.operand_dtype("b"),
+                    nregs=atom.fragment_nregs("b"),
+                )
                 for nm in frags(lambda i, ff=f: _fold_frag(f"_b{i}", ff), n.reg)
             ]
         decls += [
-            RegFragment(name=_fold_frag(_mma_c_base(atom, i, j), f), role="c", shape=atom.shape, dtype=atom.operand_dtype("c"))
+            RegFragment(
+                name=_fold_frag(_mma_c_base(atom, i, j), f),
+                role="c",
+                shape=atom.ptx_shape,
+                dtype=atom.operand_dtype("c"),
+                nregs=atom.fragment_nregs("c"),
+            )
             for f in range(n_folds)
             for i in range(m.reg)
             for j in range(n.reg)
@@ -1026,6 +1071,7 @@ class _MmaOps(_AtomOps):
                     staged=False,
                     gmem_guard=_guard(m, cell),
                     k_zero=k_zero,
+                    fragment_layout=atom.fragment_layout,
                 )
             ]
 
@@ -1043,6 +1089,7 @@ class _MmaOps(_AtomOps):
                     b_trans=b_trans,
                     gmem_guard=_guard(n, cell),
                     k_zero=k_zero,
+                    fragment_layout=atom.fragment_layout,
                 )
             ]
 
@@ -1052,7 +1099,7 @@ class _MmaOps(_AtomOps):
                     c_frag=_mma_c_base(atom, i, j),
                     a_frag=f"_a{i}",
                     b_frag=f"_b{j}",
-                    shape=atom.shape,
+                    shape=atom.ptx_shape,
                     ab_dtype=atom.ab_dtype,
                     c_dtype=atom.operand_dtype("c").name,
                 )
@@ -1106,6 +1153,7 @@ class _MmaOps(_AtomOps):
                     m_guard=_guard(m, mcell),
                     n_guard=_guard(n, ncell),
                     atomic=by_acc[acc].atomic,
+                    fragment_layout=atom.fragment_layout,
                 )
                 for acc, frag in zip(accs, frags, strict=True)
             ]
@@ -1123,6 +1171,7 @@ class _MmaOps(_AtomOps):
                 m_guard=_guard(m, mcell),
                 n_guard=_guard(n, ncell),
                 atomic=write.atomic,
+                fragment_layout=atom.fragment_layout,
             )
         ]
 

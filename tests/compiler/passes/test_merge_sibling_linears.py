@@ -196,10 +196,8 @@ def test_no_merge_with_folded_load_ops():
 
 
 def test_no_merge_with_folded_constant_subgraphs():
-    """A folded constant subgraph (``source_graph`` bind record — how a quantized weight
-    reaches 035 after ``032_fold_constant_subgraphs``) is not pristine: its evaluation has no
-    concat-of-paths spelling, so it must fail the parameter check naturally (no ``source_path``
-    / ``source_parts``) and the siblings stay unmerged."""
+    """A generic ``source_graph`` bind record is not pristine: its evaluation has no
+    concat-of-paths spelling, so the siblings stay unmerged."""
     from dataclasses import replace
 
     g = _sibling_graph()

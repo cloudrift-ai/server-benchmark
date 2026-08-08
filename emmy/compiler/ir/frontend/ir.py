@@ -13,14 +13,17 @@ Three groups:
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
    ``MeanOp``. Rewritten to elementwise/reduce chains (sometimes with
    inserted ``IndexMapOp`` unsqueezes so the broadcast contraction works).
-3. **Storage-decode ops** — ``TrellisDecodeOp``, ``HadamardOp``. ``TrellisDecodeOp``'s full
-   (``hadamard=True``) form is not decomposed: it only ever appears inside a constant-only cone
-   that ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph`` record,
-   where its numpy ``forward`` runs through the reference NumPy backend. The HAT-BASIS form
-   (``hadamard=False``) has a kernel realization: it lifts to a ``LoopOp`` of per-element
-   ``TrellisLoad`` reads (``loop/lifting/050_lift_trellis_decode``) so loop fusion can inline
-   it into its consuming matmul as a computed-B cone. ``HadamardOp`` is a zero-input generator
-   that only ever lives inside such a bind record.
+3. **Storage-decode ops** — ``TrellisDecodeOp``, ``HadamardOp``. These are the ONE exception to
+   "static construction is spelled with generic tensor IR and folded before Loop IR, and a
+   checkpoint format adds no frontend op class" — the rule ``loader/trellis.py`` still follows.
+   ``TrellisDecodeOp``'s full (``hadamard=True``) form is not decomposed: it only ever appears
+   inside a constant-only cone that ``032_fold_constant_subgraphs`` collapses into a bind-time
+   ``source_graph`` record, where its numpy ``forward`` runs through the reference NumPy
+   backend. The HAT-BASIS form (``hadamard=False``) is why the op exists at all: it has a
+   KERNEL realization, lifting to a ``LoopOp`` of per-element ``TrellisLoad`` reads
+   (``loop/lifting/050_lift_trellis_decode``) so loop fusion can inline it into its consuming
+   matmul as a computed-B cone and the packed codes are the only weight bytes crossing DRAM.
+   ``HadamardOp`` is a zero-input generator that only ever lives inside such a bind record.
 """
 
 from __future__ import annotations

@@ -11,27 +11,43 @@ structurally, not a distinct kind.
 
 ## Quantization is not a concept past the decomposition band
 
-A quantized checkpoint is spelled as in-graph algebra at BIRTH (`loader.quant.spell_quantized_constants`, immediately
-post-trace) and dissolved as early as possible: the generic `frontend/decomposition/032_fold_constant_subgraphs` rule
-collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
-(its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
-only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
-`load_ops`. `EMMY_FP8_EXPAND` skips the fold for fp8 cones, leaving them in-graph for the kernel path; a
-trellis-coded (EXL3) cone in the CHECKPOINT basis — three constant leaves under a `TrellisDecodeOp(hadamard=True)`,
-spelled by `spell_trellis_constants` — folds unconditionally, since no lowering rule knows that form, while the
-HAT-BASIS form (`hadamard=False` — codes alone, no Hadamard fold) folds by default and stays in-graph under
-`EMMY_TRELLIS_EXPAND` — or under the `trellis.expand` GRAPH HINT, which is how a caller that wants the compressed
-lane for ONE compile asks for it (the serving trunk): it lifts to a `LoopOp` of per-element `TrellisLoad` reads
-(`loop/lifting/050_lift_trellis_decode`) and rides the consuming matmul as a computed-B cone. Either way, downstream
-layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`, the `i16` codes
-carrier), decode-trait
-ops/leaves (`ElementwiseImpl.decodes`, the `TrellisDecodeOp` class, the `TrellisLoad` stmt), and graph/loop
-algebra. They may NEVER know checkpoint formats, scheme names,
-scale pairing, or any quantization metadata — there is none: no shared IR type carries a quant field. The frontend
-band (the birth-time speller + the fold rule + the loader) is the only place quantization-as-a-concept exists, and a
-mechanical gate (`tests/compiler/loader/test_quant.py`) greps the tree for concept leaks. `032`'s decode-trait scope
-is the conservative first instantiation of a general constant-subgraph fold — widening it (folding decode-free
-constant cones that exist in today's models) is gated on kernel-source digest evidence.
+A quantized checkpoint is spelled as in-graph algebra at BIRTH (`loader.quant`, immediately post-trace) and dissolved
+as early as possible: the generic `frontend/decomposition/032_fold_constant_subgraphs` rule collapses each maximal
+static computation cone into one bind-time-evaluated `ConstantOp` (its `source_graph` bind record), BEFORE `035`'s
+sibling merge and the `050`/`060` layout folds — so those passes only ever pattern-match plain constants, and later
+folds compose their transposes onto the collapsed constant's `load_ops`. `032` deliberately leaves STORAGE-DECODE
+cones expanded, so an fp8 checkpoint's compressed device storage reaches the ordinary lowering and scheduling rules
+with no format flag; layout-only cones are left to the target-specific `050`/`060` load-layout policy.
+
+The boundary is structural, not a naming guideline. Lowering, the shared statement and tile dialects, backends and
+search may contain canonical dtypes, generic ops and graph algebra. They may NEVER contain a checkpoint format's
+scheme name, scale pairing, sibling-tensor keys or any quantization metadata — there is none: no shared IR type
+carries a quant field. The frontend band (the birth-time speller + the fold rule + the loader) is the only place
+quantization-as-a-concept exists, and two mechanical gates enforce it —
+`tests/compiler/loader/test_quant.py` greps for concept leaks, and `tests/architecture/test_layering.py` scans every
+post-decomposition source file for known format names.
+
+### The one exception: the in-kernel trellis decode
+
+Trellis-coded (EXL3) weights are the single deliberate breach of "no format-specific op past decomposition", and it
+is a breach of the *op* rule only — the format itself (sibling keys, the safetensors index, code-rate allocation)
+still stops at the loader. `loader.quant.spell_trellis_constants` has two lanes:
+
+- **folded, the default** — the checkpoint-basis decode as a constant-only cone that `032` dissolves into one bind
+  record. Two spellings of it exist (`EMMY_TRELLIS_SPELLING`): three leaves under a `TrellisDecodeOp(hadamard=True)`,
+  or `loader/trellis.py`'s pure range / cast / bitcast / gather / index-map / matmul algebra, which mints no op class
+  at all. They fold to the same constant; the repo has not yet picked one, and the knob is how they get compared.
+- **the kernel lane** — `EMMY_TRELLIS_EXPAND`, or the `trellis.expand` GRAPH HINT, which is how a caller that wants
+  the compressed lane for ONE compile asks for it (the serving trunk). The consuming LINEAR is re-spelled with the
+  basis restore moved onto the activations around a HAT-BASIS `TrellisDecodeOp(hadamard=False)`; `032` treats that
+  form as storage decode and leaves it in-graph, so it lifts to a `LoopOp` of per-element `TrellisLoad` reads
+  (`loop/lifting/050_lift_trellis_decode`) and rides the consuming matmul as a computed-B cone. The packed codes are
+  then the only weight bytes crossing DRAM, which is what makes a 2.25 bpw GLM-4.5-Air fit a 32 GB card at all.
+
+Downstream layers therefore know exactly three format-adjacent things: canonical dtypes (`f8e4m3`, the `i16` codes
+carrier), decode-trait ops/leaves (`ElementwiseImpl.decodes`, `TrellisDecodeOp`, the `TrellisLoad` stmt), and graph /
+loop algebra. `tests/architecture/test_layering.py` enumerates, file by file with a reason, every downstream file the
+kernel lane's names are allowed into, and fails on a stale entry — so the exception can only shrink.
 
 ## The tile scheduler: one inventory, then a product over sites
 
@@ -563,6 +579,17 @@ is the plain scalar fma cell). The contraction binder (`bind_contraction`) is lo
 reuse it on flash's nested QK^T / PV; flash's score IS a role=CONTRACTION **fold** on a hoisted operand edge of the
 kv stream (its PV twin synthesized in the derived blocked evaluation), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
+
+An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
+16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It accepts only materialized A/B edges:
+SM70 has no `ldmatrix`, but materialized f16 A/B edges may use synchronous-copy staging: ordinary vector global loads
+and shared stores fill the existing slab ring, and the same cooperative m8n8k4 lane map gathers fragments from shared
+memory. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>` register-fragment pipelining;
+blocking copies make deeper shared rings correct but do not promise copy/compute overlap. Computed operand edges,
+C-to-A repacking, and flash still decline this atom. Target capability predicates select this family below SM80 and
+the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
+lowering through instructions the target cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order; the historical acc-unspecified

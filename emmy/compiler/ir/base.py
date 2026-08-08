@@ -193,7 +193,7 @@ class ConstantOp(Op):
     """
 
     name: str
-    value: float | None = None  # a STATIC scalar (None ⇒ not a static constant)
+    value: float | int | None = None  # a STATIC scalar (None ⇒ not a static constant)
     context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
@@ -206,8 +206,8 @@ class ConstantOp(Op):
     # evaluates the graph through the reference NumPy backend, and only THEN
     # runs this constant's ``load_ops`` chain — so later layout folds
     # (``050``/``060``) compose onto a folded constant exactly as onto a plain
-    # one. Produced by ``032_fold_constant_subgraphs`` when it collapses a
-    # constant-only cone; ``None`` for every ordinary constant.
+    # one. Produced by the generic constant folder when it collapses a static
+    # computation cone; ``None`` for every ordinary source constant.
     # ``source_shape`` / ``source_dtype`` describe the EVALUATED (pre-chain)
     # result. ``fold_into_constant`` rebuilds constants via
     # ``dataclasses.replace``, so the field propagates through the layout-fold

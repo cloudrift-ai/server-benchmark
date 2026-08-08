@@ -41,9 +41,13 @@ def compiled_matmul():
     # live card has repo-shipped goldens the default lane deploys a golden
     # trajectory whose offer site already carries every S_* stamp — making the
     # pre-descent-vs-terminal digest assertions trajectory-dependent. One
-    # pinned lane keeps a bare ``pytest`` run identical to ``make test``.
+    # pinned lane keeps a bare ``pytest`` run identical to ``make test``. Pin the
+    # target too: a GPU-less host resolves to cc 0.0, where target-aware atom
+    # enumeration correctly declines MMA and takes a scalar trajectory that adds no
+    # descent-only structural stamp.
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     with config.nvcc_flags_override("-Xcicc -O1"):
-        return Pipeline.build(CUDA_PASSES).run(graph)
+        return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
 
 
 def _fake_bench(n_launches: int = 1, time_ms: float = 0.5) -> SimpleNamespace:

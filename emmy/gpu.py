@@ -273,6 +273,7 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         sm_count=80,
         smem_per_sm=98304,
         vram_mib=32768,
+        aliases=("Tesla V100-SXM3-32GB",),
     ),
     # --- AMD (no CUDA compute capability) --------------------------------
     GpuSpec(name="AMD Instinct MI350X", pci_device_ids=("75b0",), vendor="AMD", short_name="mi350x", vram_mib=294912),

@@ -26,9 +26,24 @@ from emmy.compiler.pipeline.search.golden import (
     RmsNormGoldenConfig,
     RopeGoldenConfig,
     SoftmaxGoldenConfig,
+    _live_gpu_key,
     _load_goldens,
     matmul_snippet,
 )
+from emmy.gpu import by_name
+
+
+def test_v100_reported_name_canonicalizes_live_golden_key(monkeypatch):
+    """The V100 CUDA runtime spelling must join the canonical per-GPU golden header."""
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "Tesla V100-SXM3-32GB")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (7, 0))
+
+    gpu = by_name("Tesla V100-SXM3-32GB")
+    assert gpu is not None and gpu.name == "NVIDIA Tesla V100 SXM3 32GB"
+    assert _live_gpu_key() == ("NVIDIA Tesla V100 SXM3 32GB", (7, 0))
 
 
 def test_matmul_snippet_fp32_has_no_dtype_kwarg():

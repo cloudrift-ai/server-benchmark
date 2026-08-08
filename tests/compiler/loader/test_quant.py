@@ -1,8 +1,4 @@
-"""FP8 checkpoint ingestion under the dissolve-early design (``loader.quant`` + the safetensors
-loader): LUT decode against torch's float8 ground truth, block-derived scale application, the
-birth-time spelling of the dequant algebra (``spell_quantized_constants``), the generic
-constant-subgraph fold's bind-time evaluation, and end-to-end binding — plus the mechanical
-gate for the invariant that quantization is not a concept past the decomposition band."""
+"""FP8 checkpoint ingestion: LUT decode, scale algebra, birth-time spelling, and binding."""
 
 from __future__ import annotations
 
@@ -13,11 +9,10 @@ import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
+from emmy.compiler.ir.frontend.ir import ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-from emmy.compiler.pipeline import Pipeline
 
 from ..conftest import requires_cuda
 
@@ -26,7 +21,6 @@ torch = pytest.importorskip("torch")
 rng = np.random.default_rng(11)
 
 _TORCH_F8 = {"f8e4m3": torch.float8_e4m3fn, "f8e5m2": torch.float8_e5m2}
-_FOLD_RULE = "032_fold_constant_subgraphs"
 
 # ===================================================================
 # LUT decode vs torch float8 ground truth
@@ -354,9 +348,7 @@ def test_spell_pairs_non_weight_leaf_scale(tmp_path):
 
 
 # ===================================================================
-# Loader: spell → fold → bind vs the torch dequant reference (the pre-migration
-# M1 bind-time dequant's recorded expectation — bit-for-bit, same LUT, same f32
-# multiply, same single cast into the compute dtype)
+# Loader: bind the expanded generic algebra and evaluate it against torch.
 # ===================================================================
 
 
@@ -371,8 +363,12 @@ def _torch_ref(bits, scale_np, *, fmt="f8e4m3", inverse=False):
     return vals / s if inverse else vals * s
 
 
-def _fold(graph: Graph) -> Graph:
-    return Pipeline.build(["frontend/decomposition"], select=[_FOLD_RULE]).run(graph)
+def _run_spelled(graph: Graph, model_dir: str) -> np.ndarray:
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    data = load_constants_from_safetensors(graph, model_dir)
+    result, _ = NumpyBackend().run(graph, input_data=data)
+    return result.outputs[graph.outputs[0]]
 
 
 @pytest.mark.parametrize(
@@ -380,36 +376,20 @@ def _fold(graph: Graph) -> Graph:
     [((), False), ((8, 1), False), ((2, 4), False), ((8, 1), True)],
     ids=["per-tensor", "per-channel", "block", "inverse"],
 )
-def test_loader_binds_folded_weight_bit_identical_to_m1(tmp_path, scale_shape, inverse):
+def test_loader_binds_expanded_weight_bit_identical_to_torch(tmp_path, scale_shape, inverse):
     g, bits, scale = _spelled(tmp_path, scale_shape=scale_shape, inverse=inverse)
-    folded = _fold(g)
-    assert set(folded.nodes) == {"p_w"}  # the whole cone collapsed into one constant
-    assert folded.nodes["p_w"].op.source_graph is not None
-    out = load_constants_from_safetensors(folded, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale, inverse=inverse))
-    assert out["p_w"].dtype == np.float32
+    assert _f8_constants(g)
+    assert all(op.source_graph is None for _nid, op in g.loadable_constants())
+    out = _run_spelled(g, str(tmp_path))
+    np.testing.assert_array_equal(out, _torch_ref(bits, scale, inverse=inverse))
+    assert out.dtype == np.float32
 
 
 def test_loader_casts_to_traced_compute_dtype(tmp_path):
     g, bits, scale = _spelled(tmp_path, scale_shape=(1, 1), dtype="f16")
-    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
-    assert out["p_w"].dtype == np.float16
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale).astype(np.float16))
-
-
-def test_loader_applies_trailing_load_ops_after_the_record(tmp_path):
-    """A layout chain folded onto the constant AFTER the record (what ``050``/``060`` append)
-    runs on the EVALUATED result — a per-channel scale applied after the transpose would
-    mis-broadcast."""
-    from dataclasses import replace
-
-    g, bits, scale = _spelled(tmp_path, scale_shape=(8, 1))
-    folded = _fold(g)
-    node = folded.nodes["p_w"]
-    node.op = replace(node.op, load_ops=(TransposeOp(axes=(1, 0)),))
-    node.outputs = (Tensor("p_w", (16, 8), "f32"),)
-    out = load_constants_from_safetensors(folded, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale).T)
+    out = _run_spelled(g, str(tmp_path))
+    assert out.dtype == np.float16
+    np.testing.assert_array_equal(out, _torch_ref(bits, scale).astype(np.float16))
 
 
 @pytest.mark.parametrize("fmt", ["f8e4m3", "f8e5m2"])
@@ -427,8 +407,8 @@ def test_loader_reads_fp8_at_value_dtype_as_plain_values(tmp_path, fmt):
 @pytest.mark.parametrize("fmt", ["f8e4m3", "f8e5m2"])
 def test_loader_binds_f8_dtype_constant_as_raw_bits(tmp_path, fmt):
     """A constant whose GRAPH dtype is an f8 dtype binds the raw uint8 bit pattern — no LUT
-    decode, no scale. This is the in-graph decode-cone form (``EMMY_FP8_EXPAND``): the graph's
-    own algebra owns the value semantics, so handing over decoded values would double-decode."""
+    decode, no scale. The graph's own algebra owns the value semantics, so handing over
+    decoded values would double-decode."""
     bits = _finite_bits((8, 16))
     _write_checkpoint(tmp_path, {"layer.weight": _fp8_tensor(bits, fmt)})
     out = load_constants_from_safetensors(_weight_graph(dtype=fmt), str(tmp_path))
@@ -443,36 +423,6 @@ def test_loader_unquantized_checkpoint_unchanged(tmp_path):
     g = _weight_graph()
     assert spell_quantized_constants(g, str(tmp_path)) == 0
     np.testing.assert_array_equal(load_constants_from_safetensors(g, str(tmp_path))["p_w"], w)
-
-
-# ===================================================================
-# source_graph serialization round-trip
-# ===================================================================
-
-
-def test_source_graph_survives_graph_json_roundtrip(tmp_path):
-    g, bits, scale = _spelled(tmp_path, scale_shape=(2, 4))
-    folded = _fold(g)
-    g2 = Graph.from_dict(json.loads(json.dumps(folded.to_dict())))
-    record = g2.nodes["p_w"].op.source_graph
-    assert record is not None and set(record.outputs) <= set(record.nodes)
-    out = load_constants_from_safetensors(g2, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], _torch_ref(bits, scale))
-
-
-def test_source_graph_structural_key_is_deterministic(tmp_path):
-    """Two independent spell+fold builds of the same checkpoint digest identically — a nested
-    ``Graph`` field must key by structure, never by object identity — and the record's own key
-    survives a JSON round-trip (persisted-IR form: the fold clears live-engine op state)."""
-    g1, _b, _s = _spelled(tmp_path, scale_shape=(8, 1))
-    folded = _fold(g1)
-    k1 = folded.structural_key()
-    g2 = _weight_graph()
-    assert spell_quantized_constants(g2, str(tmp_path)) == 1
-    assert _fold(g2).structural_key() == k1
-    record = folded.nodes["p_w"].op.source_graph
-    roundtrip = Graph.from_dict(json.loads(json.dumps(folded.to_dict()))).nodes["p_w"].op.source_graph
-    assert roundtrip.structural_key() == record.structural_key()
 
 
 # ===================================================================
@@ -800,8 +750,8 @@ def test_trace_model_spells_cones_and_binds_dequantized_twin(tmp_path):
 def _run_e2e(tmp_path, config, ref_sd):
     """Compile the traced quantized model on the CUDA backend, bind computed buffers from the
     wrapper and every checkpoint tensor through the safetensors loader (bits + scales for the
-    in-graph cone; record evaluation for folded constants; plain reads for the rest), and
-    return ``(emmy_logits, ref_logits, compiled)``."""
+    in-graph cone and plain reads for the rest), and return
+    ``(emmy_logits, ref_logits, compiled)``."""
     import transformers
 
     from emmy.commands.compile import _trace_model
@@ -840,26 +790,12 @@ def _assert_e2e_gate(emmy_logits, ref_logits, label):
 @requires_cuda
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,
-    compiled on the CUDA backend with the DEFAULT fold: every dequant cone dissolves at 032, so
-    the kernels see plain compute-dtype constants (bind-time evaluation), and the output matches
-    the dequantized eager reference."""
-    config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
-    emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
-    assert not _f8_constants(compiled), "an f8 constant survived — the fold did not dissolve the cone"
-    assert not any(isinstance(n.op, ElementwiseOp) and n.op.op.decodes is not None for n in compiled.nodes.values())
-    _assert_e2e_gate(emmy_logits, ref_logits, "fold mode")
-
-
-@requires_cuda
-def test_quantized_checkpoint_e2e_cuda_expanded(tmp_path, monkeypatch):
-    """The SAME tiny quantized model with ``EMMY_FP8_EXPAND=1`` — the kernel-path correctness
-    anchor: the fold is skipped, the dequant cone rides the graph into the kernels (fp8 bits in
-    device memory, decode + mul-hoisted scale realized in-kernel), same numeric gate."""
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+    compiled on the CUDA backend with the dequant cone unconditionally in-graph: fp8 bits stay
+    compressed in device memory, and the output matches the dequantized eager reference."""
     config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
     assert _f8_constants(compiled), "no fp8-dtype constant survived to the compiled graph — the cone did not stay in-graph"
-    _assert_e2e_gate(emmy_logits, ref_logits, "EMMY_FP8_EXPAND=1")
+    _assert_e2e_gate(emmy_logits, ref_logits, "expanded fp8 algebra")
 
 
 # ===================================================================

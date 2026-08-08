@@ -16,6 +16,122 @@ import re
 # Repo root: tests/architecture/ → tests/ → repo
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+_POST_DECOMPOSITION_ROOTS = (
+    "emmy/config.py",
+    "emmy/compiler/backend",
+    "emmy/compiler/dtype.py",
+    "emmy/compiler/ir/kernel",
+    "emmy/compiler/ir/loop",
+    "emmy/compiler/ir/stmt",
+    "emmy/compiler/ir/tile",
+    "emmy/compiler/pipeline/passes/loop",
+    "emmy/compiler/pipeline/passes/lowering",
+)
+
+
+# ── The in-kernel trellis-decode exemption ─────────────────────────────────────────────────
+#
+# The rule above ("no checkpoint-format name past frontend decomposition") is the right rule for
+# every checkpoint format emmy ingests EXCEPT one deliberate case, and this list is that case
+# stated out loud rather than hidden by a weakened regex.
+#
+# Trellis (EXL3) reconstruction has TWO lanes (``loader/quant.spell_trellis_constants``):
+#
+#   * the FOLDED lane, the default — the decode is spelled at birth as a constant-only cone and
+#     ``032_fold_constant_subgraphs`` dissolves it before Loop IR. Nothing checkpoint-shaped
+#     reaches lowering, scheduling or codegen; this is the lane the blanket rule protects, and
+#     ``loader/trellis.py``'s generic-algebra spelling of it adds no op class at all.
+#   * the KERNEL lane, ``EMMY_TRELLIS_EXPAND`` — the decode deliberately SURVIVES. A
+#     ``TrellisLoad`` leaf reaches Loop, Tile and Kernel IR so the packed codes are the only
+#     weight bytes that cross DRAM. This is not an oversight: GLM-4.5-Air at 2.25 bpw is
+#     28.9 GiB resident this way and 37.3 GiB once the decode is folded, i.e. it does not fit a
+#     32 GB card at all without it.
+#
+# WHAT THE EXEMPTION LICENSES: the name of the decode PRIMITIVE — ``TrellisLoad``,
+# ``TrellisDecodeOp``, ``emmy_trellis_decode``, ``TRELLIS_TILE``, ``EMMY_TRELLIS_EXPAND`` — in
+# the files that implement it, plus the comments that explain them.
+#
+# WHAT IT DOES NOT LICENSE: any NEW downstream file learning the words, and any downstream code
+# acting on the checkpoint's LAYOUT rather than the primitive — sibling-tensor keys, the
+# safetensors index, ``quant_method`` / ``quantization_config``, marker-sibling logic, code-rate
+# allocation. Those stay in ``loader/``. A file that needs to be added here is a design change and
+# should be argued for in review, not appended.
+#
+# The companion test below rejects a dead entry, so the list can only shrink as the kernel lane
+# is generalized — it cannot rot into a blanket.
+_KERNEL_LANE_EXEMPT: dict[str, str] = {
+    "emmy/config.py": "EMMY_TRELLIS_EXPAND / EMMY_TRELLIS_SPELLING — config.py is the sole owner of the EMMY_* namespace",
+    "emmy/compiler/dtype.py": "i16 is the packed-code carrier; the comment says why it is the one integer type kernels see",
+    "emmy/compiler/backend/cuda/dtype.py": "the same carrier's CUDA spelling",
+    "emmy/compiler/backend/plan.py": "the `hadamard` computed-constant kind the basis restore contracts against — and the "
+    "one real back-edge here, `build_source_op` importing `loader.exl3.sylvester_hadamard` for it",
+    "emmy/compiler/ir/kernel/render.py": "`emmy_trellis_decode` — the device-side realization of the TrellisLoad leaf",
+    "emmy/compiler/ir/stmt/leaves.py": "the `TrellisLoad` leaf itself and its 16x16 tile constant",
+    "emmy/compiler/ir/stmt/passes.py": "one comment: why the generic Load handler must not swallow a TrellisLoad",
+    "emmy/compiler/ir/tile/ir.py": "one comment: a computed edge has no gmem element layout to describe",
+    "emmy/compiler/pipeline/passes/loop/lifting/050_lift_trellis_decode.py": "the lift that turns the hat-basis decode "
+    "into a LoopOp of per-element reads",
+    "emmy/compiler/pipeline/passes/loop/stamp/_stamp.py": "one comment: the operand's code rate, stamped as a search fact",
+    "emmy/compiler/pipeline/passes/lowering/kernel/055_fuse_trellis_runs.py": "the tile-column run fusion (one code fetch "
+    "per 16 decoded weights)",
+    "emmy/compiler/pipeline/passes/lowering/kernel/060_pair_decode_accum.py": "the f16-pair decode/accumulate scheme",
+    "emmy/compiler/pipeline/passes/lowering/kernel/_atom.py": "the compute fill that evaluates the decode cone into its slab",
+    "emmy/compiler/pipeline/passes/lowering/kernel/_stage.py": "the same compute fill's staging",
+    "emmy/compiler/pipeline/passes/lowering/tile/010_recognize.py": "one comment: a computed B stores inline on its channel edge",
+    "emmy/compiler/pipeline/passes/lowering/tile/_atomize.py": "binding a computed-B channel as a cone rather than an operand",
+    "emmy/compiler/pipeline/passes/lowering/tile/_legality.py": "one comment naming the computed-B cover predicate's subject",
+    "emmy/compiler/pipeline/passes/lowering/tile/_schedule.py": "the decode band and the computed-B warp-only dispatch",
+}
+
+_FORMAT_NAME_RE = re.compile(r"\b(?:trellis|exl3)\b", re.IGNORECASE)
+
+
+def _post_decomposition_files() -> list[pathlib.Path]:
+    out: list[pathlib.Path] = []
+    for relative in _POST_DECOMPOSITION_ROOTS:
+        root = _REPO_ROOT / relative
+        out.extend(sorted(root.rglob("*.py")) if root.is_dir() else [root])
+    return out
+
+
+def _format_name_hits(path: pathlib.Path) -> list[str]:
+    return [
+        f"{path.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}"
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1)
+        if _FORMAT_NAME_RE.search(line)
+    ]
+
+
+def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
+    """Checkpoint-format implementation details may not enter downstream dialects or passes.
+
+    The one exception is the in-kernel trellis decode, enumerated file by file in
+    ``_KERNEL_LANE_EXEMPT`` above with the reason each file is on the list. Everything else
+    under ``_POST_DECOMPOSITION_ROOTS`` must be generic IR, comments included."""
+    offenders: list[str] = []
+    for path in _post_decomposition_files():
+        if str(path.relative_to(_REPO_ROOT)) in _KERNEL_LANE_EXEMPT:
+            continue
+        offenders.extend(_format_name_hits(path))
+    assert not offenders, (
+        "checkpoint-format names must stop at frontend decomposition; downstream code and comments "
+        "may contain only generic IR. If this is genuinely new in-kernel decode machinery, add the "
+        "file to _KERNEL_LANE_EXEMPT with a reason — and expect that to be argued about:\n" + "\n".join(offenders)
+    )
+
+
+def test_kernel_lane_exemption_has_no_dead_entries() -> None:
+    """Every exempted file must exist, sit under a scanned root, and actually still need the
+    exemption. This is what stops the list becoming a blanket: clean a file up (or fold the
+    kernel lane away) and the entry must go with it."""
+    scanned = {str(p.relative_to(_REPO_ROOT)) for p in _post_decomposition_files()}
+    dead = [
+        f"{rel}: {'not under a scanned root' if rel not in scanned else 'no longer uses the name'}"
+        for rel in _KERNEL_LANE_EXEMPT
+        if rel not in scanned or not _format_name_hits(_REPO_ROOT / rel)
+    ]
+    assert not dead, "stale _KERNEL_LANE_EXEMPT entries — drop them:\n" + "\n".join(dead)
+
 
 def test_lowering_tile_does_not_import_kernel_ir() -> None:
     """``lowering/tile/*.py`` may not import from ``ir.kernel.ir``.

@@ -59,8 +59,8 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 READABLE = "EMMY_READABLE"
-FP8_EXPAND = "EMMY_FP8_EXPAND"
 TRELLIS_EXPAND = "EMMY_TRELLIS_EXPAND"
+TRELLIS_SPELLING = "EMMY_TRELLIS_SPELLING"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -278,17 +278,6 @@ def set_readable(on: bool, *, overwrite: bool = False) -> None:
         os.environ[READABLE] = "1" if on else "0"
 
 
-def fp8_expand() -> bool:
-    """``EMMY_FP8_EXPAND`` — keep an fp8 checkpoint's decode cone in-graph for the
-    kernel path (f8 bits in device memory, decode + scale realized in-kernel) by
-    SKIPPING the ``032_fold_constant_subgraphs`` fold. OFF by default: the fold
-    collapses the cone into one bind-time-evaluated constant (the weight
-    materializes at the compute dtype — a one-time cost instead of a per-forward
-    recompute). On is the kernel-storage development path; off is the deployable
-    default."""
-    return _bool(FP8_EXPAND)
-
-
 def trellis_expand() -> bool:
     """``EMMY_TRELLIS_EXPAND`` — the trellis KERNEL PATH: packed codes stay in device memory and
     the per-tile decode is realized in the warp tier's compute fill. Two effects, both off by
@@ -301,6 +290,21 @@ def trellis_expand() -> bool:
       they reach the lift. The checkpoint-basis form has no kernel realization and folds
       regardless."""
     return _bool(TRELLIS_EXPAND)
+
+
+def trellis_spelling() -> str:
+    """``EMMY_TRELLIS_SPELLING`` — WHICH birth-time spelling the FOLDED trellis lane uses. Two
+    exist today because two independent lines of work arrived at different answers; the choice is
+    unresolved and this knob is how a reviewer A/Bs them (see ``loader/quant.py``):
+
+    - ``"op"`` (default) — three checkpoint leaves under one ``TrellisDecodeOp``, the same op the
+      kernel lane's hat-basis form uses, evaluated at bind time by ``loader/exl3.py``'s numpy.
+    - ``"generic"`` — ``loader/trellis.py``'s pure range / cast / bitcast / gather / index-map /
+      matmul cone, which adds no op class downstream at the price of a much larger static cone.
+
+    Both fold to the same bind-time constant at ``032_fold_constant_subgraphs``; the KERNEL lane
+    (``EMMY_TRELLIS_EXPAND``) is unaffected — it has only the ``TrellisDecodeOp`` spelling."""
+    return (os.environ.get(TRELLIS_SPELLING) or "op").strip().lower()
 
 
 def dump_dir() -> Path | None:

@@ -679,9 +679,9 @@ class Stage:
     scalar tier; 0 for the 1-D shared row).
 
     The pipeline has two buffering levels down the memory hierarchy, each with its own depth:
-    ``depth`` is the **gmem→smem** ring (the cp.async / TMA prefetch over the serial reduce
-    loop), ``reg_depth`` is the **smem→register** double-buffer (the ldmatrix ping-pong over
-    the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
+    ``depth`` is the **gmem→smem** ring (a synchronous slot fill or the cp.async / TMA prefetch
+    over the serial reduce loop), ``reg_depth`` is the **smem→register** double-buffer (the
+    fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
     orthogonal — ``d3/cp/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
     The slab K-*granularity* (how much K is resident) is ``TilePlan.bk``, NOT a third depth

@@ -518,7 +518,10 @@ class TernaryExpr(_ExprOps):
     if_false: Expr
 
     def eval(self, env: dict[str, object]) -> object:
-        return self.if_true.eval(env) if self.cond.eval(env) else self.if_false.eval(env)
+        cond = self.cond.eval(env)
+        if np.ndim(cond) == 0:
+            return self.if_true.eval(env) if bool(cond) else self.if_false.eval(env)
+        return np.where(cond, self.if_true.eval(env), self.if_false.eval(env))
 
     def pretty(self) -> str:
         return f"({self.cond.pretty()} ? {self.if_true.pretty()} : {self.if_false.pretty()})"

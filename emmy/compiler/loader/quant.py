@@ -17,30 +17,38 @@ architecture-twin construction). Two checkpoint families share the design — FP
   fp8-stored weight ``ConstantOp`` into in-graph algebra — a bits constant
   (f8 dtype) + a scale constant + the decode-cast / broadcast-multiply cone.
   From that point the graph carries NO quantization metadata; a quantized
-  weight is just constants + algebra. By default the generic
-  ``032_fold_constant_subgraphs`` pass then dissolves the cone back into one
-  bind-time-evaluated constant; with ``EMMY_FP8_EXPAND`` the cone stays
-  in-graph for the kernel path.
+  weight is just constants + algebra, and the cone stays in-graph so the
+  compressed device storage reaches the ordinary lowering and scheduling rules
+  (``032_fold_constant_subgraphs`` declines every storage-decode cone).
 - :func:`spell_quantized_inputs`: the input-sourced twin of the constant
   speller for graphs whose weights are forward-argument ``InputOp``s (the MoE
   serving seam's expert programs). Each named input becomes an fp8 bits input
   (uint8 carrier at the feed) plus a new scale input, with the same dequant
-  cone spelled in-graph; an input-rooted cone is not a constant subgraph, so
-  it stays in-graph unconditionally — no ``EMMY_FP8_EXPAND`` analog.
+  cone spelled in-graph.
 - :func:`load_dequantized_state_dict`: the eager / accuracy twin's state dict,
   every fp8 weight dequantized. Reads config + index directly (loader-band —
   it feeds the architecture twin before any graph exists, and its whole-dict
   semantics, consumed scales dropped, have no graph counterpart).
-- :func:`spell_trellis_constants`: the EXL3 sibling of the constant speller —
-  each trellis-coded weight becomes three leaf constants (int16 codes + the
-  f16 ``suh``/``svh`` channel vectors) joined by a ``TrellisDecodeOp``. By
-  default that is the checkpoint-basis decode, which
-  ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph``
-  record (the correctness lane); under ``EMMY_TRELLIS_EXPAND`` the consuming
-  LINEAR is re-spelled instead, with the Hadamard / channel-vector basis
-  restore moved onto the activations around a hat-basis decode — the form the
-  warp tier decodes in-kernel. :func:`load_dequantized_state_dict` decodes the
-  same siblings into ``.weight`` values for the eager twin.
+- :func:`spell_trellis_constants`: the EXL3 sibling of the constant speller.
+  TWO lanes, and — for now — two spellings of the folded one:
+
+  * **folded (default)** — the checkpoint-basis decode as a constant-only
+    cone, which ``032_fold_constant_subgraphs`` collapses into a bind-time
+    ``source_graph`` record. Spelled either as three leaf constants under one
+    ``TrellisDecodeOp`` (:func:`_spell_trellis_one`, the default) or as
+    ``loader/trellis.py``'s pure range / cast / bitcast / gather / index-map /
+    matmul algebra (:func:`_spell_trellis_generic_one`), selected by
+    ``EMMY_TRELLIS_SPELLING``. Both fold to the same constant; the second adds
+    no op class downstream, the first is far the smaller cone and shares the
+    kernel lane's numpy reference. See :func:`spell_trellis_constants`.
+  * **kernel (``EMMY_TRELLIS_EXPAND``)** — the consuming LINEAR is re-spelled
+    instead, with the Hadamard / channel-vector basis restore moved onto the
+    activations around a HAT-BASIS ``TrellisDecodeOp``, the form the warp tier
+    decodes in-kernel so the packed codes are the only weight bytes crossing
+    DRAM. This lane has one spelling only.
+
+  :func:`load_dequantized_state_dict` decodes the same siblings into
+  ``.weight`` values for the eager twin.
 - :func:`spell_trellis_inputs`: the input-sourced twin of that kernel-path
   spelling, for the MoE serving seam's expert programs. Each named weight input
   becomes the int16 codes input plus two appended channel-vector inputs, with
@@ -554,33 +562,55 @@ def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: di
     if dims is None:
         return False
     n, k, _n_pad, _k_pad = dims
-    node = graph.nodes[nid]
-    op, out = node.op, node.output
-    shape, t_shape = (n, k), shapes["trellis"]
-    suh_shape, svh_shape = shapes["suh"], shapes["svh"]
+    out = graph.nodes[nid].output
 
     frag = Graph()
-    codes = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_trellis", source_path=base + ".trellis", source_shape=t_shape, source_dtype="i16"),
-        inputs=[],
-        output=Tensor(f"{out.name}_trellis", t_shape, "i16"),
-    )
-    suh = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_suh", source_path=base + ".suh", source_shape=suh_shape, source_dtype="f16"),
-        inputs=[],
-        output=Tensor(f"{out.name}_suh", suh_shape, "f16"),
-    )
-    svh = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_svh", source_path=base + ".svh", source_shape=svh_shape, source_dtype="f16"),
-        inputs=[],
-        output=Tensor(f"{out.name}_svh", svh_shape, "f16"),
-    )
+    codes, suh, svh = _trellis_leaves(frag, graph.nodes[nid], base, shapes)
     dec = frag.add_node(
         op=TrellisDecodeOp(cb=cb, out_features=n, in_features=k),
         inputs=[codes, suh, svh],
-        output=Tensor(out.name, shape, out.dtype),
+        output=Tensor(out.name, (n, k), out.dtype),
     )
     frag.outputs = [dec]
+    graph.splice(frag, consumed=[nid], output=nid)
+    return True
+
+
+def _trellis_leaves(frag: Graph, node, base: str, shapes: dict[str, tuple[int, ...]]) -> tuple[str, str, str]:
+    """The three checkpoint leaves every folded spelling starts from: the int16 codes and the
+    two f16 channel vectors, at their STORED shapes. Shared by both folded spellings."""
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    op, out = node.op, node.output
+    return tuple(
+        frag.add_node(
+            op=ConstantOp(name=f"{op.name}_{leaf}", source_path=f"{base}.{leaf}", source_shape=shapes[leaf], source_dtype=dt),
+            inputs=[],
+            output=Tensor(f"{out.name}_{leaf}", shapes[leaf], dt),
+        )
+        for leaf, dt in (("trellis", "i16"), ("suh", "f16"), ("svh", "f16"))
+    )
+
+
+def _spell_trellis_generic_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
+    """The GENERIC-ALGEBRA folded spelling: rewrite ``nid`` into ``loader/trellis.py``'s cone of
+    range / cast / bitcast / integer / gather / index-map / layout / matmul nodes over the same
+    three leaves — no ``TrellisDecodeOp``, no op class the pipeline does not already know.
+
+    Selected by ``EMMY_TRELLIS_SPELLING=generic``; :func:`_spell_trellis_one` is the default.
+    Both collapse at ``032_fold_constant_subgraphs`` into the same bind-time constant, so this
+    is a spelling choice, not a semantic one — see :func:`spell_trellis_constants`."""
+    from emmy.compiler.loader.trellis import spell_reconstruction  # noqa: PLC0415
+
+    dims = _trellis_dims(graph, nid, shapes)
+    if dims is None:
+        return False
+    n, k, _n_pad, _k_pad = dims
+    out = graph.nodes[nid].output
+
+    frag = Graph()
+    codes, suh, svh = _trellis_leaves(frag, graph.nodes[nid], base, shapes)
+    frag.outputs = [spell_reconstruction(frag, codes, suh, svh, cb=cb, shape=(n, k), name=out.name, dtype=out.dtype)]
     graph.splice(frag, consumed=[nid], output=nid)
     return True
 
@@ -842,6 +872,11 @@ def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int,
     return True
 
 
+#: The FOLDED lane's spellings, by ``EMMY_TRELLIS_SPELLING`` token. Both produce the same
+#: bind-time constant; see :func:`spell_trellis_constants` for why there are two.
+_FOLDED_SPELLINGS = {"op": _spell_trellis_one, "generic": _spell_trellis_generic_one}
+
+
 def spell_trellis_constants(graph: Graph, model_id_or_path: str, *, expand: bool | None = None) -> int:
     """Spell every EXL3 trellis-coded weight of ``graph`` as an in-graph decode cone, at birth.
 
@@ -849,19 +884,18 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str, *, expand: bool
     site. Source of truth is the CHECKPOINT: ``config.json`` declares ``quant_method:
     "exl3"`` (:func:`_exl3_quant_config`), and the safetensors index supplies the pairing —
     a traced ``<module>.weight`` constant whose module ships ``<module>.trellis`` siblings
-    is rewritten into the codes + ``suh``/``svh`` leaves and a ``TrellisDecodeOp`` (its ``cb``
-    field recording the marker-sibling presence, so the markers themselves never enter the
-    graph). From that point a quantized weight is just constants + algebra.
+    is rewritten into the codes + ``suh``/``svh`` leaves and the decode algebra over them
+    (marker-sibling PRESENCE resolves the codebook here, so the markers themselves never
+    enter the graph). From that point a quantized weight is just constants + algebra.
 
-    Two spellings, chosen by ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``) or, when the
+    TWO LANES, chosen by ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``) or, when the
     caller passes ``expand`` explicitly, by that — the serving trunk asks for the compressed
     lane per compile rather than per process. An explicit ``expand=True`` also stamps the
     ``trellis.expand`` graph hint, which is how ``032_fold_constant_subgraphs`` learns to leave
     the hat-basis cone in-graph without reading the env knob:
 
-    - **default, the correctness lane** — :func:`_spell_trellis_one` spells the
-      CHECKPOINT-BASIS decode (``hadamard=True``) as a constant-only cone, which
-      ``032_fold_constant_subgraphs`` collapses into ONE bind-time
+    - **default, the folded correctness lane** — the CHECKPOINT-BASIS decode as a
+      constant-only cone, which ``032_fold_constant_subgraphs`` collapses into ONE bind-time
       ``ConstantOp(source_graph=record)`` evaluated through the reference NumPy backend: full
       value footprint in memory, no kernel change.
     - **the kernel path** — :func:`_spell_trellis_activation_one` rewrites the consuming
@@ -870,6 +904,19 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str, *, expand: bool
       binds as computed B, so only the packed codes cross DRAM. Any linear it declines (a
       weight consumed by something other than one ``LinearOp``, symbolic activation dims) falls
       back to the folded cone, which stays correct.
+
+    TWO SPELLINGS OF THE FOLDED LANE, chosen by ``EMMY_TRELLIS_SPELLING``. They exist because
+    two independent lines of work answered the same question differently and the repo has not
+    yet picked one; both fold to the same constant, so this is a spelling choice only:
+
+    - ``"op"`` (default) — :func:`_spell_trellis_one`: three leaves under one
+      ``TrellisDecodeOp``, whose ``forward`` is ``loader/exl3.py``'s numpy. A handful of nodes,
+      and it is the SAME op the kernel lane's hat-basis form uses, so one reference governs
+      both lanes' numerics. The cost is a frontend op class that only the folder knows.
+    - ``"generic"`` — :func:`_spell_trellis_generic_one`: ``loader/trellis.py``'s pure range /
+      cast / bitcast / gather / index-map / matmul cone. Nothing checkpoint-shaped exists past
+      the loader, which is the stronger layering claim; the cost is a cone of hundreds of nodes
+      with whole-tensor f64 intermediates at bind time.
 
     Weights without a trellis sibling (embeddings, norms, routers, biases) load as plain
     tensors. Legacy checkpoints storing packed ``su``/``sv`` sign words instead of
@@ -890,6 +937,10 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str, *, expand: bool
         expand = config.trellis_expand()
     elif expand:
         graph.hints.set("trellis.expand", True)
+    token = config.trellis_spelling()
+    if token not in _FOLDED_SPELLINGS:
+        raise ValueError(f"EMMY_TRELLIS_SPELLING={token!r} is not one of {sorted(_FOLDED_SPELLINGS)}")
+    spell_folded = _FOLDED_SPELLINGS[token]
 
     spelled = 0
     with ExitStack() as stack:
@@ -916,7 +967,7 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str, *, expand: bool
             args = {"base": base, "cb": _exl3_codebook(index, base), "shapes": shapes}
             if expand and _spell_trellis_activation_one(graph, nid, **args):
                 spelled += 1
-            elif _spell_trellis_one(graph, nid, **args):
+            elif spell_folded(graph, nid, **args):
                 spelled += 1
     if spelled:
         logger.info("spelled %d trellis-coded weight constant(s) from %s", spelled, model_dir)
@@ -946,9 +997,8 @@ def spell_quantized_inputs(
     scale feeds reshaped to the interleaved ``(grid, 1)`` layout). The same decode-cast /
     broadcast-multiply cone as the constant speller (:func:`_dequant_cone`) re-creates the
     value tensor the trace promised — dtype, shape and consumers unchanged, so every later
-    pass is unaffected. An input-rooted cone is not a constant subgraph, so
-    ``032_fold_constant_subgraphs`` leaves it in-graph unconditionally and the W8A16
-    mul-hoist binding can absorb it exactly as on the ``EMMY_FP8_EXPAND`` constant path.
+    pass is unaffected. An input-rooted cone is not a constant subgraph, so the W8A16
+    mul-hoist binding can absorb it exactly as on the constant path.
 
     ``inverse`` divides by the scale (the stored scale is the reciprocal multiplier).
     The caller names these inputs explicitly, so any mismatch raises ``ValueError`` instead

@@ -1,46 +1,36 @@
-"""Collapse a maximal constant-only cone containing a storage-decode op into ONE bind-time constant.
+"""Collapse a maximal static computation cone into ONE bind-time constant.
 
-A quantized checkpoint enters the graph as pure algebra from birth
-(``loader.quant.spell_quantized_constants``): bits constant + scale constant + the decode-cast /
-broadcast-multiply cone. This rule dissolves that algebra as early as possible — the cone
-collapses into a single ``ConstantOp`` carrying the evaluation as a ``source_graph`` bind record
-(the constant-only mini-graph itself), which the loader binds leaf-by-leaf and evaluates through
-the reference NumPy backend at bind time. Everything downstream then sees a plain constant:
-``035``'s sibling merge and the ``050``/``060`` layout folds keep pattern-matching ordinary
-constants (a later fold appends its transpose to THIS constant's ``load_ops``, applied after the
-record evaluates), and no pass past this point can tell a quantized checkpoint from a plain one.
+The cone becomes a ``ConstantOp`` whose ``source_graph`` is the constant-only mini-graph itself.
+The loader binds its source leaves and evaluates the record through the reference NumPy backend.
+Everything downstream therefore sees one ordinary constant, while the record stays a transparent,
+serializable account of how that value is reconstructed.
 
 Matching rule — the cone rooted at a node ``r``:
 
-- every transitive input of ``r`` bottoms out in a source-backed ``ConstantOp`` (a checkpoint
-  ``source_path`` / ``source_parts`` / nested ``source_graph`` leaf — scalar and synthetic
-  constants decline the fold);
-- every interior op is a numpy-evaluable layout/elementwise/storage-decode op with static shapes;
-- the cone contains at least one storage-decode op (``ElementwiseImpl.decodes`` non-``None``,
-  or a ``TrellisDecodeOp`` — the EXL3 speller's cone);
+- every transitive input of ``r`` bottoms out in a source-backed or scalar ``ConstantOp``;
+- every interior op is a NumPy-evaluable generic tensor/layout op with static shapes;
+- the cone contains real computation, not only layout changes;
 - ``r`` is MAXIMAL: no consumer of ``r`` would itself extend the constant-only cone (otherwise
   the fold waits and fires at that consumer, so one constant absorbs the whole cone);
 - interior nodes are owned by the cone (no external consumer reads a mid-cone value).
 
-The decode-trait requirement is the digest-safety SCOPE, not a structural necessity: this rule
-is the conservative first instantiation of a general constant-subgraph fold, and folding
-anything else (e.g. an existing model's constant mask-math cone) is deliberately out of scope —
-widening the scope is gated on kernel-source digest evidence (``scripts/digest_kernels.py``),
-because those cones' kernels exist today and must not change bytes silently.
+Storage-decode cones deliberately stay expanded. Folding one would replace compressed device
+storage with a larger compute-dtype buffer, so ``ElementwiseImpl.decodes`` is the generic policy
+boundary: dtype decode + ordinary algebra remains available to lowering without a format flag.
+Pure layout cones also stay for the dedicated ``050``/``060`` policy, which decides whether a
+physical load-time layout change is profitable for the target.
 
-Gate: the fold is DEFAULT ON. ``EMMY_FP8_EXPAND`` (``config.fp8_expand``) SKIPS it for fp8
-cones — the decode cone then stays in-graph and rides the operand cone into the kernel (fp8
-bits in device memory, the decode absorbed by the storage dtype at the warp tier — see
-``lowering/tile/_atomize``). ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``) is the
-trellis sibling, and narrower: it skips the fold only for HAT-BASIS (``hadamard=False``)
-trellis cones, the form with a kernel realization (the per-element ``TrellisLoad`` lift →
-the computed-B compute fill); a checkpoint-basis (``hadamard=True``) cone folds regardless —
-no lowering rule knows it, and leaving it in-graph would hand the pipeline an op it cannot
-lower.
+The trellis decode is the one decode with TWO forms, and only one of them is compressed device
+storage (see ``loader/quant.spell_trellis_constants``). A CHECKPOINT-BASIS ``TrellisDecodeOp``
+(``hadamard=True``) is ordinary static computation and folds like any other cone — no lowering
+rule knows it, and leaving it in-graph would hand the pipeline an op it cannot lower. A HAT-BASIS
+one (``hadamard=False``) is the kernel lane's compressed form: it lifts to the per-element
+``TrellisLoad`` cone and binds as computed B, so it must stay expanded exactly as an fp8 decode
+does. ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``) and the ``trellis.expand`` graph hint —
+which the speller stamps when a caller asks for the compressed lane per compile rather than per
+process (``serving/gen_runner.py``, ``serving/twins.py``) — say which lane produced the graph.
 
-Numbered 032 — after the arithmetic normalizations (``010``–``030``), BEFORE the sibling merge
-(``035``) and the layout folds (``050``/``060``), so those passes only ever see the collapsed
-plain constant and compose on top of it.
+Numbered 032 runs after arithmetic normalization and before the sibling merge and layout folds.
 """
 
 from __future__ import annotations
@@ -50,34 +40,37 @@ import copy
 from emmy import config
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp, TrellisDecodeOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp
+from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SliceOp, TransposeOp, TrellisDecodeOp
+from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp, GatherOp, IndexMapOp, RangeOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
-# A cone root is always a compute node; ReshapeOp covers the 2-D-block form's reshape-back
-# root, and TrellisDecodeOp is its own root — the EXL3 speller's cone is exactly the decode
-# op over three constant leaves.
-PATTERN = [Pattern("root", (ElementwiseOp, ReshapeOp, TrellisDecodeOp))]
+_FOLDABLE = (
+    ElementwiseOp,
+    MatmulOp,
+    ReshapeOp,
+    SliceOp,
+    TransposeOp,
+    GatherOp,
+    IndexMapOp,
+    CastOp,
+    BitcastOp,
+    RangeOp,
+    TrellisDecodeOp,
+)
+_COMPUTE = (ElementwiseOp, MatmulOp, GatherOp, CastOp, BitcastOp, RangeOp, TrellisDecodeOp)
+PATTERN = [Pattern("root", _FOLDABLE)]
 
-# Interior ops the fold evaluates at bind time — the vocabulary the birth-time spellers emit
-# (decode cast, broadcast, scale multiply, block reshapes, the trellis decode) plus the plain
-# layout ops. All have working numpy ``forward``s; anything else declines the fold. Adding
-# ``TrellisDecodeOp`` widens no existing model's fold scope: the op exists only in cones the
-# EXL3 speller mints, so every pre-existing kernel is byte-identical (digest-gate verified).
-_FOLDABLE = (ElementwiseOp, ReshapeOp, TransposeOp, IndexMapOp, TrellisDecodeOp)
+
+def _is_static_leaf(op: ConstantOp) -> bool:
+    """A source-backed or literal scalar leaf that bind-time evaluation can supply."""
+    return op.value is not None or op.source_path is not None or bool(op.source_parts) or op.source_graph is not None
 
 
-def _is_source_leaf(op: ConstantOp) -> bool:
-    """A source-backed constant leaf the loader can bind (never a scalar / synthetic one)."""
-    return op.value is None and (op.source_path is not None or bool(op.source_parts) or op.source_graph is not None)
-
-
-def _collect_cone(graph: Graph, root_id: str) -> tuple[set[str], bool] | None:
-    """The constant-only cone rooted at ``root_id`` as ``(node ids, has_decode)``, or ``None``
-    when any transitive input disqualifies it (non-foldable op, symbolic shape, non-source
-    constant)."""
+def _collect_cone(graph: Graph, root_id: str) -> tuple[set[str], bool, bool] | None:
+    """Return ``(node ids, has_compute, has_storage_decode)`` for a static cone."""
     ids: set[str] = set()
-    has_decode = False
+    has_compute = False
+    has_storage_decode = False
     stack = [root_id]
     while stack:
         nid = stack.pop()
@@ -88,21 +81,29 @@ def _collect_cone(graph: Graph, root_id: str) -> tuple[set[str], bool] | None:
             return None
         op = node.op
         if isinstance(op, ConstantOp):
-            if not _is_source_leaf(op):
+            if not _is_static_leaf(op):
                 return None
             ids.add(nid)
             continue
         if not isinstance(op, _FOLDABLE) or any(not d.is_static for d in node.output.shape):
             return None
-        if (isinstance(op, ElementwiseOp) and op.op.decodes is not None) or isinstance(op, TrellisDecodeOp):
-            has_decode = True
+        has_compute |= isinstance(op, _COMPUTE)
+        has_storage_decode |= isinstance(op, ElementwiseOp) and op.op.decodes is not None
         ids.add(nid)
         for inp in node.inputs:
             producer = graph.producer(inp)
             if producer is None:
                 return None
             stack.append(producer.id)
-    return ids, has_decode
+    return ids, has_compute, has_storage_decode
+
+
+def _kernel_lane_decode(graph: Graph, cone: set[str]) -> bool:
+    """Whether the cone carries a HAT-BASIS trellis decode destined for the in-kernel realization
+    — the trellis form of "compressed device storage", which must not be folded away."""
+    if not any(isinstance(graph.nodes[nid].op, TrellisDecodeOp) and not graph.nodes[nid].op.hadamard for nid in cone):
+        return False
+    return config.trellis_expand() or bool(graph.hints.get("trellis.expand", False))
 
 
 def _extends_cone(graph: Graph, consumer_id: str, cone: set[str]) -> bool:
@@ -118,7 +119,7 @@ def _extends_cone(graph: Graph, consumer_id: str, cone: set[str]) -> bool:
             return False
         if producer.id in cone:
             continue
-        if isinstance(producer.op, ConstantOp) and _is_source_leaf(producer.op):
+        if isinstance(producer.op, ConstantOp) and _is_static_leaf(producer.op):
             continue
         if _collect_cone(graph, producer.id) is None:
             return False
@@ -129,24 +130,13 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
     collected = _collect_cone(match.graph, root.id)
     if collected is None:
         raise RuleSkipped("not a constant-only cone")
-    cone, has_decode = collected
-    if not has_decode:
-        # Digest-safety scope: only cones carrying a storage decode fold — see module docstring.
-        raise RuleSkipped("constant cone carries no storage-decode op — outside the fold's scope")
-    # EMMY_FP8_EXPAND keeps fp8 decode cones in-graph for the kernel path. EMMY_TRELLIS_EXPAND
-    # is the trellis sibling, gated to the HAT-BASIS form: only a hadamard-free decode has a
-    # kernel realization (the ``TrellisLoad`` lift → computed-B compute fill); a
-    # checkpoint-basis cone folds regardless — no lowering rule knows it.
-    trellis_ops = [match.graph.nodes[nid].op for nid in cone if isinstance(match.graph.nodes[nid].op, TrellisDecodeOp)]
-    if trellis_ops:
-        # The speller stamps ``trellis.expand`` on graphs it spelled for the kernel path
-        # regardless of the env knob — the serving trunk asks for the compressed lane per
-        # compile, not per process (``serving/gen_runner.py``).
-        expand = config.trellis_expand() or bool(match.graph.hints.get("trellis.expand", False))
-        if expand and not any(op.hadamard for op in trellis_ops):
-            raise RuleSkipped("EMMY_TRELLIS_EXPAND on — the hat-basis decode cone stays in-graph for the kernel path")
-    elif config.fp8_expand():
-        raise RuleSkipped("EMMY_FP8_EXPAND on — the decode cone stays in-graph for the kernel path")
+    cone, has_compute, has_storage_decode = collected
+    if not has_compute:
+        raise RuleSkipped("constant cone is layout-only — leave it to the target layout-fold policy")
+    if has_storage_decode:
+        raise RuleSkipped("storage-decode cone stays expanded to preserve compressed device storage")
+    if _kernel_lane_decode(match.graph, cone):
+        raise RuleSkipped("hat-basis trellis cone stays expanded for the in-kernel decode")
     for nid in cone:
         if nid != root.id and (nid in match.graph.outputs or not match.graph.users(nid) <= cone):
             raise RuleSkipped(f"cone-interior node {nid!r} has consumers outside the cone")

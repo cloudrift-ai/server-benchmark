@@ -539,7 +539,7 @@ def _stream_of(term: _Term, node) -> _Stream | None:
         return None
     if not qk.axis.extent.is_static:
         return None  # the score's fragment K-steps are unrolled — a symbolic head dim has no tier
-    atoms = atoms_for(_a_dtype(qk, inputs))
+    atoms = tuple(name for name in atoms_for(_a_dtype(qk, inputs), ctx=term.ctx) if ATOM_REGISTRY[name].c_to_a_repack)
     if not atoms:
         return None
     atom = ATOM_REGISTRY[atoms[0]]
@@ -567,7 +567,7 @@ def _stream_of(term: _Term, node) -> _Stream | None:
     b_dt, a_dt = atom.operand_dtype("b"), atom.operand_dtype("a")
     # Which atoms EXIST for this operand dtype is a term fact; whether the precision-trading sibling
     # is OFFERED is the choice layer's gate (:func:`_twisted_values`), which a pin bypasses.
-    sibling = atoms_for(_a_dtype(qk, inputs), acc=_a_dtype(qk, inputs))
+    sibling = atoms_for(_a_dtype(qk, inputs), acc=_a_dtype(qk, inputs), ctx=term.ctx)
     return _Stream(
         qk=qk,
         pv=pv,
@@ -608,7 +608,7 @@ def _computed_b(node) -> bool:
     return any(isinstance(ch.b, Fold) and ch.b.axis is None for ch in node.channels)
 
 
-def _promoted(node, inputs):
+def _promoted(node, inputs, ctx):
     """A mixed-dtype contraction — a plain **f32** ``a`` ``Load`` against 16-bit channels — with its
     ``a`` edge re-expressed as a one-``Load`` COMPUTED cone, so it rides the mandatory ``sync``
     compute-fill whose slab store demotes the value to the atom dtype. The copy transports move raw
@@ -627,7 +627,13 @@ def _promoted(node, inputs):
     # 16-bit channels only: the promotion targets the CONVERTING compute fill, and only the
     # 16-bit atoms have one — an f8 channel's k32 atom moves raw bytes, so promoting onto it
     # would demote the f32 value on the slab store.
-    if getattr(getattr(t, "dtype", None), "name", None) != "f32" or ch is None or ch.nbytes == 1 or not atoms_for(ch):
+    atoms = (ATOM_REGISTRY[name] for name in atoms_for(ch, ctx=ctx)) if ch is not None else ()
+    if (
+        getattr(getattr(t, "dtype", None), "name", None) != "f32"
+        or ch is None
+        or ch.nbytes == 1
+        or not any(not atom.materialized_edges_only for atom in atoms)
+    ):
         return None
     # ``a`` is a DERIVED reading, so the rewrite REBUILDS the bilinear fold over the new edge — the
     # one-``Load`` cone keeps the edge's bound name, so the regenerated lift is the same program.
@@ -669,7 +675,7 @@ def _readings(tile: TileOp, ctx) -> list[_Term]:
         # with the mixed-A PROMOTION by shape: ``_promoted`` needs every channel's B
         # materialized (``_channel_dtype``) and a materialized f32 ``a``.
         return [base, _reading(tile, _rewrap(tile.op, node.demoted()), ctx, ref=base.sched)]
-    promoted = _promoted(node, tile.inputs)
+    promoted = _promoted(node, tile.inputs, ctx)
     if promoted is None:
         return [base]
     return [base, _reading(tile, _rewrap(tile.op, promoted), ctx, ref=base.sched)]
@@ -683,9 +689,14 @@ def _rewrap(op, node):
 
 def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     """Whether a warp tile candidate is realizable on ``node`` — the K-step divisibility every warp
-    row needs, the gmem LAYOUT its operand loaders can read, plus the exact-cover geometry a
-    COMPUTED ``a`` edge's compute fill adds. All three are ``_legality`` predicates, dropped here
-    and RAISED on a pin (:func:`_contraction_values`)."""
+    row needs, the atom's own target / edge admissibility, the gmem LAYOUT its operand loaders can
+    read, plus the exact-cover geometry a COMPUTED ``a`` or ``b`` edge's compute fill adds. Every
+    one is a ``_legality`` predicate, dropped here and RAISED on a pin
+    (:func:`_contraction_values`)."""
+    if not legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=False):
+        return False
+    if not legal.enforce(legal.warp_atom_edges(node, plan.atom), pinned=False):
+        return False
     if not legal.enforce(legal.warp_k_step(node, plan), pinned=False):
         return False
     placed = plan.placed_on(term.place)
@@ -725,7 +736,7 @@ def _f8_mma_allowed(ctx) -> bool:
     overrides that. A ``TILE`` pin naming the atom bypasses this gate (pins are authoritative)."""
     from emmy.compiler.pipeline.search.space import FP8_MMA, precision_pin  # noqa: PLC0415
 
-    if ctx.compute_capability < (8, 9):
+    if not ctx.has_fp8_mma:
         return False
     return bool(precision_pin(FP8_MMA))
 
@@ -778,7 +789,7 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
         # requirements hold under any pin; the precision gate alone is bypassed by a ``TILE``
         # pin naming an f8 atom (pins are authoritative, the ``_f16acc_allowed`` convention —
         # the pin must also open the WORK inventories this site spells against).
-        atoms = atoms_for(ab)
+        atoms = atoms_for(ab, ctx=term.ctx)
         pin = term.pin("TILE", node)
         ok = (
             isinstance(node.a, Load)
@@ -787,14 +798,14 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
             and (_f8_mma_allowed(term.ctx) or (pin is not None and any(a in pin for a in atoms)))
         )
         return atoms if ok else ()
-    if not atoms_for(ab) and not isinstance(node.a, Load):
+    if not atoms_for(ab, ctx=term.ctx) and not isinstance(node.a, Load):
         ab = _channel_dtype(node, inputs)  # the demoting compute fill — an f32 cone on 16-bit B
         if ab is not None and ab.nbytes == 1:
             return ()  # an f8 channel under a computed cone stays off the warp tier (the fill would demote to f8)
-    atoms = atoms_for(ab)
+    atoms = atoms_for(ab, ctx=term.ctx)
     if not atoms or not _f16acc_allowed(term.ctx):
         return atoms
-    return atoms + atoms_for(ab, acc=ab)  # the f16-accumulate siblings, registry order preserved
+    return atoms + atoms_for(ab, acc=ab, ctx=term.ctx)  # the f16-accumulate siblings, registry order preserved
 
 
 # --- the pointwise cell: the register strip ---
@@ -1024,6 +1035,10 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     here, so a row's resolved spelling is reproducible BY CONSTRUCTION rather than by three copies
     of the dispatch staying in step."""
     budget = term.ctx.max_dynamic_smem
+    if want is not None and legal.stage_target(want, term.ctx) is not None:
+        return None
+    if want is not None and tile.is_warp and legal.warp_atom_stage(tile.atom, want) is not None:
+        return None
     if not isinstance(node.a, Load) or _computed_b(node):
         return legal.resolve_sync_stage(node, tile, budget, want.depth if want is not None else 1)
     if want is None or (want.transport == "tma" and not term.ctx.has_tma):
@@ -1089,7 +1104,16 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
     if pinned is not None:
         # A malformed pin RAISES through ``Stage.parse`` — this used to be swallowed into
         # gmem-direct, which made it the only silently-ignored pin in the family.
-        return [resolve(Stage.parse(pinned)) if pinned else None]
+        if not pinned:
+            return [None]
+        wanted = Stage.parse(pinned)
+        # SM70 pins are strict: do not silently turn a newer copy instruction or an unsupported
+        # Volta fragment drain into the gmem-direct sibling.
+        if term.ctx.compute_capability < (8, 0):
+            legal.enforce(legal.stage_target(wanted, term.ctx), pinned=True)
+            if plan.is_warp:
+                legal.enforce(legal.warp_atom_stage(plan.atom, wanted), pinned=True)
+        return [resolve(wanted)]
     return _resolved(stage_moves(warp=plan.is_warp), resolve)
 
 
@@ -1165,6 +1189,8 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
             if plan.is_warp:
                 # A PIN with an indivisible K-step or a gather epilogue RAISES — the same predicates
                 # the unpinned catalog above drops on, one home each.
+                legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=True)
+                legal.enforce(legal.warp_atom_edges(node, plan.atom), pinned=True)
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
                 if (placed := plan.placed_on(term.place)).axes is not None:

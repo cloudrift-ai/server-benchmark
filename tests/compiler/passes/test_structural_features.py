@@ -245,12 +245,9 @@ def test_dtype_multiset_stamps_f8_generically():
     assert feats["S_dtype_f8e4m3"] == 1.0
 
 
-def test_in_graph_fp8_decode_cone_stamps_the_f8_dtype_feature(monkeypatch):
-    """End to end through the loop dialect: with ``EMMY_FP8_EXPAND`` the birth-time decode cone
-    (bits constant → ``from_f8e4m3`` → scale multiply) survives the fold and fuses into the
-    matmul kernel, whose stamped dtype multiset then carries the fp8 load — the identity the
-    fp8 golden/search keys join on."""
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
+def test_in_graph_fp8_decode_cone_stamps_the_f8_dtype_feature():
+    """End to end through the loop dialect: the birth-time decode cone survives the generic
+    constant fold and fuses into the matmul kernel, whose dtype multiset carries the fp8 load."""
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415

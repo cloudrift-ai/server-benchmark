@@ -325,6 +325,10 @@ WARP_LANES = 32
 # fragment no longer fits the register file at any useful occupancy.
 MAX_FRAGMENT_CELLS = 32
 
+# The corresponding accumulator-register budget. Existing m16n8 f32 cells spend four registers,
+# so 32 cells remain legal; Volta's logical 16x16 cell spends eight and is capped at 16 cells.
+MAX_FRAGMENT_REGISTERS = 128
+
 # The scalar register-tile candidate SPACE: ``(par_n, par_m)`` parallel thread-tile widths ×
 # ``(reg_n, reg_m)`` per-thread register sub-tile widths, generated from the one constraint that
 # bounds it — the CTA thread budget, which a scalar tile spends ``par_n·par_m`` of. The register
@@ -393,7 +397,11 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     moves = []
     for name in atom_names:
         atom = ATOM_REGISTRY[name]
-        moves.extend(TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"]) for p in _WARP_TILE_SPACE)
+        moves.extend(
+            TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"])
+            for p in _WARP_TILE_SPACE
+            if p["fm"] * p["fn"] * atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
+        )
     return moves
 
 
@@ -434,10 +442,11 @@ def map_tile_moves() -> list[TilePlan]:
 
 def stage_moves(*, warp: bool) -> list[Stage]:
     """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
-    double-buffer variants. Both tiers offer the gmem→smem prefetch ring depths (the scalar ring
-    lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived by the
-    scalar stage resolver); the ``p2`` smem→register double-buffer is an ``ldmatrix`` transform,
-    warp-only.
+    double-buffer variants. Both tiers offer the asynchronous gmem→smem prefetch ring depths (the
+    scalar ring lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived
+    by the scalar stage resolver). The warp tier additionally offers the synchronous-copy ring for
+    atoms that lack an asynchronous copy instruction. Its depths use the same slot schedule but do
+    not promise copy/compute overlap. The ``p2`` smem→register double-buffer is warp-only.
 
     ``split`` — one transport PER staged edge instead of one over all of them — joins the warp list.
     It resolves only where the fold's edges are consumed at DISTINCT positions of its derived
@@ -450,7 +459,8 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     depths = [Stage.parse(s) for s in ("d1/cp", "d2/cp", "d3/cp", "d4/cp", "d1/tma", "d2/tma", "d3/tma", "d4/tma")]
     if not warp:
         return depths
-    return [*depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
+    sync = [Stage.parse(s) for s in ("d1/sync", "d2/sync", "d3/sync", "d4/sync", "d1/sync/p2", "d2/sync/p2")]
+    return [*sync, *depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
 
 
 # The COMPUTE-FILL depths — the ``sync`` transport a contraction with a computed operand edge (a

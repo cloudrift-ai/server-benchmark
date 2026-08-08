@@ -80,7 +80,9 @@ customer boots would recompile at runtime). The boot-to-boot pick flip is a real
 should be deterministic across processes); the fixpoint warm contains it but does not excuse it.
 
 **The pack changes the fixpoint's role.** The online pass also writes the execution-plan pack (`warm/pack`, keyed
-on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it), and every
+on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it; a
+compressed checkpoint adds a digest of its compression declaration, which the config hash cannot see, so two rungs
+of one conversion never share a pack), and every
 subsequent boot — the offline fixpoint passes, verify, customer boots — loads it: fork picks are frozen in the
 artifact, so the bimodal-pick class vanishes and the fixpoint converges immediately whenever the pack takes. The
 loop stays as a safety net for the case where the pack write was skipped (a weight outside the pack vocabulary) or

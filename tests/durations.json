@@ -573,6 +573,7 @@
  "tests/serving/test_gen_capture_gpu.py::test_run_device_sym_aliased_input_backing_replays_live": 0.3,
  "tests/serving/test_gen_capture_gpu.py::test_run_device_sym_inside_outer_capture_replays_live": 0.31,
  "tests/serving/test_gen_mtp_shim.py::test_drafter_contract_shares_raw_tied_embedding": 1.27,
+ "tests/serving/test_gen_pack_gpu.py::test_gen_pack_key_separates_quantized_rungs": 8.0,
  "tests/serving/test_gen_pack_gpu.py::test_gen_pack_second_boot_hits_and_matches": 7.28,
  "tests/serving/test_gen_prefill_device_gpu.py::test_run_device_sym_matches_host_path": 28.56,
  "tests/serving/test_gen_runner_gpu.py::test_adopted_raw_embed_table_matches_folded_gather": 3.5,

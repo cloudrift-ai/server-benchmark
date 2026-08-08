@@ -40,7 +40,6 @@ changes the model's forward changes these twins — exactly as it would change s
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
@@ -75,10 +74,11 @@ def capture_twin_graphs(
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
     from emmy.compiler.trace.huggingface import build_attention_split_wrapper  # noqa: PLC0415
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
 
-    model, revision = _split_revision(model)
+    model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
     text = getattr(cfg, "text_config", cfg)
     types = list(getattr(text, "layer_types", None) or [])
@@ -138,15 +138,6 @@ def capture_twin_graphs(
                     graphs[f"{half}{name}{suffix}"] = trace_split(wrapper, example_args, argnames)
     storage = coded_tensor_storage(model, cfg, revision=revision)
     return _spell_coded_twins(graphs, storage) if storage else graphs
-
-
-def _split_revision(model: str) -> tuple[str, str | None]:
-    """``"repo@rev"`` → ``("repo", "rev")``; anything else (including a local path, which is
-    checked first so a directory whose name contains ``@`` still resolves) → ``(model, None)``."""
-    if Path(model).is_dir() or "@" not in model:
-        return model, None
-    repo, _, rev = model.rpartition("@")
-    return repo, rev
 
 
 def _spell_coded_twins(graphs: dict[str, Graph], storage: dict) -> dict[str, Graph]:

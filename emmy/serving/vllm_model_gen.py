@@ -49,7 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
-from emmy.serving.vllm_model import _trunk_dtype_str
+from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +214,9 @@ class EmmyGenModel(nn.Module):
         config = getattr(mc.hf_config, "text_config", mc.hf_config)
         self.config = config
         self.dtype = mc.dtype
-        self._model_id = mc.model  # ``load_weights`` re-opens the checkpoint for an EXL3-coded head
+        # Revision-tagged: ``load_weights`` re-opens the checkpoint for an EXL3-coded head, and the
+        # runner resolves it again for the trace — both must land on the rung vLLM was pinned to.
+        self._model_id = pinned_model_id(mc)
 
         # Per-layer sliding/global attention (Gemma-3/4) IS supported: each vLLM Attention below
         # gets its layer's window and each layer its own-theta RoPE. A single uniform sliding
@@ -263,7 +265,7 @@ class EmmyGenModel(nn.Module):
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
         self.runner = EmmyGenRunner.create(
-            model_id=mc.model,
+            model_id=self._model_id,
             dtype_str=_trunk_dtype_str(mc.dtype),
             decode_bucket=decode_bucket,
             max_tokens=capacity,

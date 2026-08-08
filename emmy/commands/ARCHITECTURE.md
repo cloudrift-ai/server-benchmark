@@ -260,7 +260,11 @@ Serves an embedding model (or a generative chat model via `EmmyGenModel` with `-
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
-applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. Generative serving
+applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
+vLLM *and* reaches the emmy runner** — the plugin composes `<repo>@<revision>` and every checkpoint read inside emmy
+resolves that commit (see `serving/ARCHITECTURE.md`); without it a repo publishing several branches warns loudly and
+takes its default. `emmy pull` and `emmy compile` / `emmy run` accept the same `<repo>@<revision>` spelling directly,
+so a served rung can be reproduced off the CLI. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when

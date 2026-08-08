@@ -123,7 +123,12 @@ fails the lowering loudly (descriptors bake the base address at encode). A plan 
 a plan and fall back to the full compile; plans without the field keep format 1 byte-compatibly.
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
-key + environment tags + provenance + program index) and `plan/<program>.json`. Cubins are **not** copied — plans
+key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by
+the *runner*, and "model" there must cover everything the compiled programs read off the CHECKPOINT — not just its
+architecture config. A compressed checkpoint is the case that makes the difference: two rungs of one conversion
+share an architecture config and differ only in the per-tensor rates, which set the coded extents, so the runner
+adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key.
+Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
 the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*
 disqualifier (format/environment/key mismatch, unparsable plan, evicted cubin) and the caller falls back to the

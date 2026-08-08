@@ -645,11 +645,18 @@ class EmmyGenRunner:
 
     @classmethod
     def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
+        """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
+        carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
+        ``--revision`` on). Everything the runner resolves from the checkpoint — detection,
+        snapshot, the coded allocation, the pack key — goes through the tagged id, so a repo
+        publishing one rung per branch serves the rung that was asked for."""
         import torch
         from transformers import AutoModelForCausalLM
 
+        from emmy.compiler.loader.safetensors import split_revision, warn_if_unpinned
         from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
 
+        warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
         # engage its own fp8 machinery); build the twin from config and stream the shards —
         # dense trunk loaded as real values, expert tensors kept fp8 (``load_quantized_split``).
@@ -658,15 +665,21 @@ class EmmyGenRunner:
             # EXL3 keeps the TRUNK coded too — the whole point of a 2-bit checkpoint is that the
             # decoded trunk (GLM-4.5-Air: ~14 GiB) does not fit beside the experts. fp8 trunks
             # stay on the decoded lane, where the values are what the fp8 expert path expects.
-            from emmy.compiler.loader.quant import _exl3_quant_config
+            from emmy.compiler.loader.quant import _exl3_quant_config, checkpoint_quant_digest, checkpoint_quant_summary
             from emmy.compiler.trace.huggingface import load_quantized_split
 
             coded_trunk = _exl3_quant_config(qdir) is not None
+            # The RESOLVED directory and the scheme summary are logged, not just the requested id:
+            # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
+            # line is how a boot proves which rung it actually opened.
             logger.info(
-                "[gen_runner] loading %s (%s, quantized checkpoint: dense trunk %s, experts compressed)...",
+                "[gen_runner] loading %s (%s, quantized checkpoint: dense trunk %s, experts compressed) — resolved %s, %s, key %s...",
                 model_id,
                 dtype_str,
                 "coded" if coded_trunk else "as values",
+                qdir,
+                checkpoint_quant_summary(qdir),
+                checkpoint_quant_digest(qdir),
             )
             model, expert_store = load_quantized_split(qdir, getattr(torch, dtype_str), compress_trunk=coded_trunk)
             with torch.device("cpu"):
@@ -679,8 +692,9 @@ class EmmyGenRunner:
                     expert_store=expert_store,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
+        repo, revision = split_revision(model_id)
         with torch.device("cpu"):
-            model = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype_str)).eval()
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str)).eval()
             return cls.from_model(
                 model, dtype_str=dtype_str, decode_bucket=decode_bucket, max_tokens=max_tokens, prefill_bucket=prefill_bucket
             )
@@ -757,6 +771,7 @@ class EmmyGenRunner:
 
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
+        from emmy.compiler.loader.quant import checkpoint_quant_digest
 
         cfg_dict = model.config.to_dict()
         for volatile in ("_name_or_path", "transformers_version"):
@@ -773,6 +788,13 @@ class EmmyGenRunner:
             "max_tokens": int(max_tokens or 0),
             "prefill_bucket": int(prefill_bucket or 0),
         }
+        # The config hash alone does NOT identify a compressed checkpoint: the twin is built from a
+        # config the loader band strips of its compression scheme, so two rungs of one repo — same
+        # architecture, different per-tensor rates and therefore different coded extents and
+        # programs — hash identically and would share this pack. Key on the loader's own digest of
+        # the checkpoint too (``None`` for an uncompressed one, which keeps its existing key).
+        if (ckpt_dir := (expert_store or {}).get("dir")) and (qd := checkpoint_quant_digest(ckpt_dir)) is not None:
+            pack_key["quant_sha"] = qd
         pack_at = pack_path(emmy_config.pack_dir(), pack_key) if emmy_config.pack_dir() is not None else None
         loaded = load_pack(pack_at, key=pack_key) if pack_at is not None else None
         if loaded is not None:

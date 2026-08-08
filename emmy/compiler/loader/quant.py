@@ -145,6 +145,54 @@ def _exl3_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
+def checkpoint_quant_digest(model_dir) -> str | None:
+    """A short hash of the checkpoint's quantization declaration, or ``None`` when it declares
+    none. Identifies the CODE RATES a cache key would otherwise miss.
+
+    The trace builds its twin from the config with ``quantization_config`` STRIPPED (transformers
+    would otherwise engage its own quantizer machinery), so a key hashed off the twin's config —
+    the serving pack key — cannot see the scheme at all. That is invisible for one checkpoint and
+    wrong across two: a repo publishing one EXL3 rung per branch has the same architecture config
+    on every branch and differs only in the allocation, which sets the coded tensors' shapes and
+    therefore the compiled programs. The rungs would share a pack.
+
+    Preference order is most specific first: the EXL3 allocation sidecar (``quantization_config.json``
+    — the per-module rate listing), else the ``quantization_config`` block of ``config.json`` (fp8,
+    and an EXL3 checkpoint shipped without the sidecar).
+    """
+    import hashlib  # noqa: PLC0415
+
+    from emmy.compiler.loader.exl3 import _SIDECAR  # noqa: PLC0415
+
+    model_dir = Path(model_dir)
+    sidecar = model_dir / _SIDECAR
+    if sidecar.exists():
+        return hashlib.sha1(sidecar.read_bytes()).hexdigest()[:16]
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.exists():
+        return None
+    qc = json.loads(cfg_path.read_text()).get("quantization_config")
+    if not isinstance(qc, dict):
+        return None
+    return hashlib.sha1(json.dumps(qc, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def checkpoint_quant_summary(model_dir) -> str:
+    """One line naming the checkpoint's quantization scheme and rate, for a boot log.
+
+    Keeps format knowledge in this band while letting the serving runner report WHICH checkpoint
+    it opened — the rate is the observable that distinguishes two rungs of one repo, so a boot
+    that prints it is a boot whose revision pinning can be checked from the log alone.
+    ``"unquantized"`` when the checkpoint declares no scheme.
+    """
+    model_dir = Path(model_dir)
+    if (qc := _exl3_quant_config(model_dir)) is not None:
+        return f"exl3 {qc.get('bits')} bpw (head {qc.get('head_bits')})"
+    if (qc := _fp8_quant_config(model_dir)) is not None:
+        return f"fp8 {qc.get('fmt') or qc.get('quant_method')}"
+    return "unquantized"
+
+
 def engine_config_overrides(hf_config) -> dict:
     """HF-config overrides a serving engine needs so it does not try to own weights emmy's
     loader already owns. ``{}`` for an ordinary checkpoint (and for ``None``, the caller's

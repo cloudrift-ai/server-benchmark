@@ -641,7 +641,7 @@ def _is_quantized_dir(p) -> bool:
     return _fp8_quant_config(p) is not None or _exl3_quant_config(p) is not None
 
 
-def quantized_checkpoint_dir(model_id_or_path: str):
+def quantized_checkpoint_dir(model_id_or_path: str, revision: str | None = None):
     """The local checkpoint dir when the model is a quantized checkpoint (FP8 or EXL3),
     else ``None``.
 
@@ -650,6 +650,12 @@ def quantized_checkpoint_dir(model_id_or_path: str):
     quantized — the trace-and-bind path then needs the shards anyway (the
     dequant algebra is spelled from the safetensors index, weights read from
     the shards).
+
+    The id may carry its revision as ``<repo>@<revision>``
+    (:func:`~emmy.compiler.loader.safetensors.split_revision`); an explicit ``revision``
+    argument wins. BOTH the detection read and the snapshot must use it — a repo that
+    publishes one rung per branch has a different ``config.json`` (and a different
+    per-tensor bit allocation) on each, so the default branch is a different model.
     """
     from pathlib import Path  # noqa: PLC0415
 
@@ -658,8 +664,12 @@ def quantized_checkpoint_dir(model_id_or_path: str):
         return p if _is_quantized_dir(p) else None
     from huggingface_hub import hf_hub_download  # noqa: PLC0415
 
+    from emmy.compiler.loader.safetensors import _resolve_model_dir, split_revision  # noqa: PLC0415
+
+    repo, tagged = split_revision(model_id_or_path)
+    revision = revision or tagged
     try:
-        cfg_path = hf_hub_download(model_id_or_path, "config.json")
+        cfg_path = hf_hub_download(repo, "config.json", revision=revision)
     except Exception as e:  # detection is best-effort: an unreadable config means
         # "not a quantized checkpoint here" and the pre-existing from_pretrained
         # path keeps ownership of error reporting (bad id, gated repo, offline).
@@ -667,9 +677,7 @@ def quantized_checkpoint_dir(model_id_or_path: str):
         return None
     if not _is_quantized_dir(Path(cfg_path).parent):
         return None
-    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
-
-    return _resolve_model_dir(model_id_or_path)
+    return _resolve_model_dir(repo, revision)
 
 
 # Expert-tensor leaves of a transformers-v5 experts module → the expert program's INPUT names

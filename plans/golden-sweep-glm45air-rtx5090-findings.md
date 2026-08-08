@@ -241,11 +241,12 @@ programs, and this sweep shipped nothing for either.
   pushed available KV down to 0.28 GiB, below what `--max-model-len 4096` needs. With 32 the pool is **9,184 tokens**
   against the record's 9,392 — within 2 %, so the serving shape is effectively the recorded one. Reproduces on a pack
   hit, so it is not a cold-compile transient; not root-caused here.
-- The model is served from the local snapshot directory, not the repo id: `quantized_checkpoint_dir` reads
-  `config.json` from the repo's DEFAULT branch, which on a branch-per-rung repo has none, so the runner falls through
-  to `AutoModelForCausalLM.from_pretrained` and dies with "Unrecognized model … should have a `model_type` key".
-  `--revision` reaches vLLM but not the runner's own checkpoint resolution. Worth fixing before the image bake, since
-  the release pipeline pins `SERVE_REVISION`.
+- The model was served from the local snapshot directory, not the repo id, because `quantized_checkpoint_dir` read
+  `config.json` from the repo's DEFAULT branch, which on a branch-per-rung repo has none, so the runner fell through
+  to `AutoModelForCausalLM.from_pretrained` and died with "Unrecognized model … should have a `model_type` key" —
+  `--revision` reached vLLM but not the runner's own checkpoint resolution. **FIXED 2026-08-08**: the plugin hands the
+  runner `<repo>@<revision>` and every resolver honors it, so `emmy serve --generate turboderp/GLM-4.5-Air-exl3
+  --revision <sha>` boots the pinned rung directly.
 
 **Gates**: `make test` green (pytest summary 0 failed; the durations-gate non-zero exit is the known pre-existing
 one), the golden drift gate green (13 passed), `make lint` clean, and `scripts/digest_kernels.py` byte-identical to

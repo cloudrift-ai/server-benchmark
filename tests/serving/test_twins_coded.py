@@ -21,7 +21,8 @@ import pytest
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, TrellisDecodeOp
-from emmy.serving.twins import _spell_coded_twins, _split_revision
+from emmy.compiler.loader.safetensors import split_revision
+from emmy.serving.twins import _spell_coded_twins
 
 
 def _entry(base: str, n: int, k: int, bits: int) -> dict:
@@ -128,4 +129,4 @@ def test_an_ambiguous_suffix_names_no_module():
 def test_model_tag_may_pin_the_rung(spec, want):
     """A coded checkpoint's rung lives on a branch, and the rungs differ in exactly the bit
     allocation the keys carry — so the ``model:`` tag may pin one."""
-    assert _split_revision(spec) == want
+    assert split_revision(spec) == want

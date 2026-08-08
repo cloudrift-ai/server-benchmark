@@ -167,7 +167,9 @@ same in out-feature blocks, for a tensor whose float64 fold would not fit beside
 `lm_head` folds ~5 GiB whole). Blocking is bit-exact in the hat basis and within the fold's own documented fp16
 rounding after it. Ingestion follows the fp8
 design exactly: `config.json` declares `quant_method: "exl3"` (detected by `quantized_checkpoint_dir` alongside
-fp8), the twin carries decoded real weights (`load_dequantized_state_dict` decodes trellis siblings to `.weight`
+fp8 — a hub id may pin its branch or commit as `<repo>@<revision>`, which detection and the snapshot both honor,
+because a conversion publishing one rung per branch differs in exactly the per-tensor allocation the coded shapes
+carry), the twin carries decoded real weights (`load_dequantized_state_dict` decodes trellis siblings to `.weight`
 values; per-expert checkpoint modules pack into the v5 3-D expert params, encode padding — both dims rounded up
 to 128, e.g. GLM-4.5-Air's `intermediate_size` 10944 → 11008 — trimmed back to the declared shapes), and
 `spell_trellis_constants` (the sibling of `spell_quantized_constants`) rewrites each coded `<module>.weight`

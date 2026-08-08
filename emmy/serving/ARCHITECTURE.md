@@ -483,6 +483,22 @@ Recorded follow-ups, in impact order:
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
   a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
+  The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
+  the warm boot uses the hub id) and adds `quant_sha`, the loader's digest of the checkpoint's compression
+  declaration. That entry is load-bearing, not defensive: the twin is built from a config **stripped** of its
+  compression scheme, so two rungs of one coded conversion — same architecture, different per-tensor rates and
+  therefore different coded extents — hash identically on `config_sha` alone and would share one pack, each warm
+  overwriting the other's plans.
+- **`--revision` reaches the runner, as a tagged id.** vLLM keeps the repo id and the revision in two fields and only
+  the id ever reached emmy, so the runner re-resolved the checkpoint off the repo's DEFAULT branch while vLLM's config
+  came from the pinned one. Both shims now compose `<repo>@<revision>` (`pinned_model_id`) and hand the runners that
+  one string; every resolver splits it (`loader.safetensors.split_revision`), so detection, the snapshot, the coded
+  allocation sidecar, the `lm_head` siblings and the pack key all land on the same commit. It matters for a repo that
+  publishes one rung of a conversion per branch — the rungs differ in exactly the per-tensor bit allocation the shape
+  keys, the goldens and the coded twins carry. An unpinned load of such a repo warns loudly and names the branches
+  (`warn_if_unpinned`, the library half of `warm.sh`'s hard refusal); a local checkpoint path is revision-free and
+  passes through untouched. The boot logs the RESOLVED snapshot directory, the scheme summary and the digest, which is
+  how a running server can be checked against the rung it was asked for.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower
   `--max-model-len` for bigger models / smaller cards.

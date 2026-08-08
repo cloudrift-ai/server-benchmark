@@ -493,8 +493,10 @@ deliberately still owed.** Full write-up in `plans/golden-sweep-glm45air-rtx5090
 - Two boot facts for Phase 5, both forced discoveries: `--max-num-seqs 32` is required (vLLM's default 256 OOMs in
   the post-KV sampler warmup, and its warmup budget alone drops available KV to 0.28 GiB — at 32 the pool is 9,184
   tokens against the recorded 9,392); and `emmy serve <repo-id>` cannot resolve a branch-only EXL3 repo, because
-  `quantized_checkpoint_dir` reads `config.json` off the DEFAULT branch and `--revision` reaches vLLM but not the
-  runner. Serve the snapshot path until that is fixed.
+  `quantized_checkpoint_dir` read `config.json` off the DEFAULT branch and `--revision` reached vLLM but not the
+  runner. **FIXED 2026-08-08** — the plugin tags the id as `<repo>@<revision>` and every resolver splits it, so the
+  repo id + `--revision` now serves the pinned rung (and the pack key gained the checkpoint's compression digest,
+  without which the 2.00 and 2.25 rungs shared one pack).
 - One compiler-side fix rode along: the `sync` compute-fill depths were a literal inside `_schedule`, so a recorded
   `d1/sync` was not a member of any catalog the golden permanence gate checks — the same defect the decode band's
   split widths had. They are now `space.sync_stage_moves()`. Emission-neutral (kernel digests identical).

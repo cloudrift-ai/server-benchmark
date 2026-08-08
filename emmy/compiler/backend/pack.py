@@ -13,7 +13,9 @@ snapshot together. Weights are external too (the HF checkpoint), rebound by
 ``WeightSpec.source_path`` at load.
 
 Validity: a pack loads only when its manifest matches the caller's ``key`` (model identity +
-serving shape — composed by the runner) AND the current environment (backend, device arch,
+serving shape — composed by the runner; "identity" has to include whatever the compiled programs
+read off the CHECKPOINT, not just the architecture config — see the serving runners' keys) AND
+the current environment (backend, device arch,
 nvcc toolkit tag + flags — the same tags the cubin cache keys on) AND every referenced cubin
 still exists. **Any mismatch or error returns ``None`` and the caller falls back to the full
 compile path** — a stale or damaged pack costs a recompile, never a wrong result. Compiler

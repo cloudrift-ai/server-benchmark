@@ -531,6 +531,7 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
         logger.error("torch and transformers are required: pip install torch transformers")
         sys.exit(1)
 
+    from emmy.compiler.loader.safetensors import split_revision
     from emmy.compiler.trace.huggingface import load_quantized_twin, quantized_checkpoint_dir
     from emmy.compiler.trace.torch import trace_module
 
@@ -543,8 +544,12 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
         # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
         model = load_quantized_twin(quant_dir, dtype)
     else:
+        # A hub id may pin its branch or commit as ``<repo>@<revision>``, the same spelling the
+        # quantized lane above resolves through — a repo publishing one rung per branch has a
+        # different model on each, so the default branch is not a safe stand-in.
+        repo, revision = split_revision(model_id)
         try:
-            model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, torch_dtype=dtype)
         except ValueError as e:
             # Only fall back to executing the repo's custom modeling code when
             # transformers explicitly requires it (e.g. MiniCPM3). Models that ship
@@ -552,7 +557,7 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
             # the built-in path — their remote code may not match this transformers.
             if "trust_remote_code" not in str(e):
                 raise
-            model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, torch_dtype=dtype, trust_remote_code=True)
     model.eval()
 
     def _stamp(graph: Graph) -> Graph:

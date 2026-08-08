@@ -199,7 +199,7 @@ def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
         {"TILE@a0": "f4x8", "WORK": "t32x16"},  # the golden, emitted third
         {"TILE@a0": "f4x8", "WORK": "t64x16"},
     ]
-    monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx: rows)
+    monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx, **kw: rows)
     golden = {"TILE": "f4x8", "WORK": "t32x16"}
 
     _, rank_tied, pool, rank_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=lambda r: 1.0)

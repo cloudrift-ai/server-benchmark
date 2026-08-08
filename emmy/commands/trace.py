@@ -143,6 +143,9 @@ def trace_inline_code(code: str, dynamic_shapes: dict | None = None) -> dict:
         sys.exit(1)
 
     from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.compiler.trace.trellis_op import register as _register_trellis_op
+
+    _register_trellis_op()  # so a snippet may name ``torch.ops.emmy.trellis_decode``
 
     try:
         tree = ast.parse(code, mode="exec")

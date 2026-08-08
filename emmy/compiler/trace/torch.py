@@ -29,9 +29,11 @@ from emmy.compiler.ir.frontend.ir import (
     SliceOp,
     SoftmaxOp,
     TransposeOp,
+    TrellisDecodeOp,
     UnsqueezeOp,
 )
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
+from emmy.compiler.trace.trellis_op import OP_TARGET as TRELLIS_OP_TARGET
 
 if TYPE_CHECKING:
     import torch
@@ -559,6 +561,22 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     op_name = _op_name(fx_node.target)
     if op_name == "chunk":
         _handle_chunk(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+
+    # ``emmy::trellis_decode`` — the one non-aten op the tracer knows (``trace/trellis_op.py``):
+    # the torch spelling of the EXL3 hat-basis decode, so a coded matmul can be written as a
+    # snippet. Maps onto the SAME frontend node the checkpoint speller (``loader/quant.py``)
+    # builds. Handled ahead of ``_resolve_inputs`` because its ``cb`` / extent args are op
+    # PARAMETERS, not operands — the generic scalar path would mint dead ConstantOp nodes.
+    if str(fx_node.target).startswith(TRELLIS_OP_TARGET):
+        cb, out_features, in_features = (int(a) for a in fx_node.args[1:4])
+        g.add_node(
+            op=TrellisDecodeOp(cb=cb, out_features=out_features, in_features=in_features, hadamard=False),
+            inputs=[node_map[fx_node.args[0].name]],
+            output=Tensor(fx_node.name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+            node_id=fx_node.name,
+        )
+        node_map[fx_node.name] = fx_node.name
         return
 
     # ``aten.sym_size.int`` and similar shape-metadata ops return a

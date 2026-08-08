@@ -1091,6 +1091,22 @@ multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A
 mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSNorm output via a lambda
 (`(lambda r: gelu(r@Wg)*(r@Wu))(rms_norm(x))`) since a torch expression cannot otherwise share it.
 
+**A golden's B-side STORAGE class is part of its key.** `ShapeKey.dtype_class` splits a shape wherever the kernel
+family splits: `""` for the f32/f16/bf16 world (f16 and bf16 deliberately still share a key — same bytes, same
+atoms), `"f8"` for an fp8-stored weight, `"trellis"` for a trellis-coded (EXL3) one. The class also FORCES
+`is_warp=True` on both sides, because `is_warp` names the dtype family (the fp32 scalar tier vs the 16-bit world),
+not the tier a shape deployed on — an f16 `M=1` matvec keys `is_warp=True` and deploys the reduce tier — and the
+op-side dtype multiset is unreliable for both classes (fp8's f32 scale constant, the trellis basis restore's scale
+constants on the A cone). A coded matmul is spelled `dtype: trellis` plus `k_bits` (the EXL3 code rate) and `cb` (the
+codebook id); its snippet is the HAT-BASIS `F.linear(x, trellis_decode(codes))` at the codes grid's 128-padded
+extents, with the codes minted in a preamble statement so the tracer lifts them as an input (the fp8 arm's trick —
+folded to a constant, the decode would vanish and the entry would record a plain f16 matmul). The hat basis is the
+right basis because the activation-side restore puts `·suh`, both 128-block Hadamards and `·svh` in separate kernels
+on either side of the contraction. Two known blind spots, both ordering-protected like the `trans_b` caveat above:
+the class does not carry the code RATE (one rate per shape, or a mixed-allocation checkpoint's two rungs collide),
+and a coded fork must be kept out of the computed-A cone rebuild in `_fork_shape_key` (its decode fill spells the
+same `d*/sync` transport the rebuild's offer signal keys on).
+
 **Latencies are recorded in pairs, or not at all.** A MEASURED entry carries `emmy_us` and `cublas_us` (both > 0)
 — the ordinary case, and the only one `ratio` / `golden` / the A/B gates below mean anything for. An UNMEASURED entry
 carries both as exactly `0.0`: a verified-deployable SCHEDULE with no timing, for a shape whose winner is known but

@@ -58,7 +58,7 @@ import yaml
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 
 
-def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = False) -> str:
+def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = False, *, k_bits: int = 0, cb: int = 0) -> str:
     """The torch expression a matmul golden config tunes / benches / reproduces.
 
     Single source of truth: the autotune / repro paths feed this to
@@ -82,7 +82,33 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = 
     channel scale multiply are written in-graph as plain algebra, so the traced contraction
     carries the f8 B operand — the storage class ``ShapeKey.dtype_class`` keys on. A
     preamble statement mints the fp8 weight (``randn(...).to(f8)``); the tracer lifts it
-    as an input, which is what keeps the cast + multiply from folding away."""
+    as an input, which is what keeps the cast + multiply from folding away.
+
+    A **trellis** ``dtype`` (EXL3 codes, ``k_bits`` bits per weight, codebook ``cb``) spells the
+    HAT-BASIS coded linear — ``F.linear(x, trellis_decode(codes))`` at the codes grid's own
+    128-padded extents. Same preamble trick, for the same reason: the codes are minted as a
+    preamble statement so the tracer lifts them as an *input*, which is what keeps
+    ``032_fold_constant_subgraphs`` from folding the decode into a bind-time constant and
+    leaving a plain f16 matmul behind. The decode is written with the one non-aten op the
+    tracer knows, ``torch.ops.emmy.trellis_decode`` (``trace/trellis_op.py``), which maps onto
+    the very ``TrellisDecodeOp`` the EXL3 checkpoint speller builds.
+
+    BASIS CHOICE — hat, not checkpoint. After the activation-side basis restore (VQ Phase 3.3)
+    a served coded linear reads
+    ``x → pad → ·suh → H128 → ·1/16 → @ W_hat → ·1/8 → H128 → ·svh → slice``: the ``suh``/``svh``
+    channel vectors and both Hadamards live in SEPARATE pointwise/matmul kernels on either side
+    of the contraction, and the contraction itself is exactly this bare hat-basis linear at the
+    padded extents. Spelling the whole chain in the snippet would record a golden for kernels the
+    coded matmul does not contain; spelling the hat basis reproduces the deployed kernel's
+    structural key exactly (pinned by
+    ``test_golden_snippet_key_joins_the_in_model_key`` in the Phase 3 test file)."""
+    if dtype == "trellis":
+        codes_shape = f"{K // 16},{N // 16},{16 * k_bits}"
+        return (
+            f"codes = torch.randint(-32768,32767,({codes_shape}),dtype=torch.int16)\n"
+            f"torch.nn.functional.linear(torch.randn({M},{K},dtype=torch.float16), "
+            f"torch.ops.emmy.trellis_decode(codes,{cb},{N},{K}))"
+        )
     if dtype in ("fp8", "f8e4m3", "f8e5m2"):
         f8 = "torch.float8_e5m2" if dtype == "f8e5m2" else "torch.float8_e4m3fn"
         w_shape, s_shape = (f"{N},{K}", f"{N},1") if trans_b else (f"{K},{N}", f"1,{N}")
@@ -264,13 +290,31 @@ class MatmulGoldenConfig(GoldenConfig):
     # real fix is a layout signal in the stamped ``S_*`` features + this key, which does not
     # exist yet. Until then, keep BOTH layout twins recorded and current together.
     trans_b: bool = False
+    # TRELLIS entries only (``dtype: trellis``): the EXL3 code rate (bits per weight, 1..8) and
+    # codebook id, which together fix the codes grid ``(K/16, N/16, 16*k_bits)`` the snippet
+    # mints and the decode arithmetic the kernel emits. They are NOT part of the ShapeKey — see
+    # the ``dtype_class`` field doc's rate caveat — so one shape may hold only one rate's entry.
+    k_bits: int = 0
+    cb: int = 0
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
+        if self.dtype == "trellis":
+            if not 1 <= self.k_bits <= 8:
+                raise ValueError(f"{self.name}: a trellis golden must record k_bits in [1, 8], got {self.k_bits}")
+            if not self.trans_b:
+                raise ValueError(f"{self.name}: a trellis golden is the F.linear layout — the decode emits (N, K); set trans_b")
+            if self.N % 128 or self.K % 128:
+                # The codes grid is 128-padded on both dims and a served coded linear contracts at
+                # the PADDED extents (the speller pads x and slices y around it), so a golden must
+                # record the padded shape or it keys a contraction the model never runs.
+                raise ValueError(f"{self.name}: a trellis golden records the 128-padded extents, got N={self.N} K={self.K}")
+        elif self.k_bits or self.cb:
+            raise ValueError(f"{self.name}: k_bits / cb are trellis-only fields (dtype={self.dtype!r})")
 
     def snippet(self) -> str:
         """The torch expression this config tunes / benches / reproduces."""
-        return matmul_snippet(self.M, self.N, self.K, self.dtype, self.trans_b)
+        return matmul_snippet(self.M, self.N, self.K, self.dtype, self.trans_b, k_bits=self.k_bits, cb=self.cb)
 
     def shape_key(self):
         """This config's :class:`~emmy.compiler.pipeline.search.data.ShapeKey` —

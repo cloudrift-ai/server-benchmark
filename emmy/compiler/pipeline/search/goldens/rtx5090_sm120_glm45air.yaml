@@ -1,0 +1,104 @@
+# GLM-4.5-Air-exl3 (trellis-coded / EXL3 weights, decoded inside the kernel) on the RTX 5090 —
+# seeded 2026-08-07 by a manual pinned --ab sweep (no tuner), each entry reproduced 3x. This is the
+# FIRST coded-weight golden file; it covers the decode-phase (M=1) reduce tier only. See the
+# residual notes at the bottom for what the full sweep still owes.
+#
+# HOW TO READ — L2 RESIDENCY, and it is load-bearing here more than anywhere else.
+# `run --bench --golden` replays one kernel over one weight slab ~100x. At 2 bits per weight a
+# projection's whole codes slab is TINY: the 4096->11008 entry below streams 11.3 MB of codes,
+# which lives in the 5090's 96 MB L2 for the entire bench. A 29 GB trunk in a real step does not.
+# So the absolute microseconds here DO NOT predict in-model step time, and neither does the
+# vs-uncompressed ratio: the L2-resident shapes measure at rough parity with their f16 twins
+# (which are streaming out of L2 at ~4.9 TB/s, a rate no 29 GB model ever sees), while the same
+# comparison past L2 shows the compressed form ahead by 3.7x. That parity-vs-win split is the
+# concrete reason the past-L2 square entry is in this file at all. Same-shape comparisons (the
+# A/B this file is seeded from) stay valid; cross-shape and cross-format ones do not. Judge the
+# format end to end — twin / serving latency and the roofline audit — never here.
+#
+# WHY THESE EXIST: the offline prior mis-ranks the decode band's split width on a cold compile.
+# The band partitions the contraction across CTAs (`gNk` = N-way cross-CTA split, `coop-t/r16` =
+# 32 lanes sweeping the output axis over the tile's 16 register rows), and the WIDEST split that
+# divides the tile count wins at every shape measured — but greedy takes g8k / g4k, leaving
+# 19-27% on the table. The two entries below are exactly that correction.
+#
+# MEASUREMENT METHOD: `emmy run -c "<snippet>" --bench --bench-backends emmy --warmup 10
+# --iters 100 --ab "REDUCE=g32k/coop-t/r16,WORK=t32" --ab ...` over the g{32,16,8,4}k ladder,
+# 3 reps. `emmy_us` is the SPLIT PAIR's total (partial + finalize), matching the olmoe file.
+# `--bench-backends emmy` is REQUIRED for a coded shape: the eager reference is the numpy
+# reference decode (`loader/exl3.decode_trellis`), correct but ~0.7 s per call at 4096x11008, so
+# the default eager lane would re-decode once per bench iteration.
+#
+# cublas_us DEVIATES from the usual convention (the live `Eager PyTorch` row of the same
+# `run --bench`), for the reason just given — that row would time the numpy decode. It records
+# instead the torch eager f16 row at the SAME extents with uncompressed weights, measured
+# separately with `run -c "F.linear(randn(M,K,f16), randn(N,K,f16))" --bench`. It answers
+# "what would this projection cost if we had shipped it in f16", not "what does cuBLAS do with
+# these bytes" — there is no cuBLAS path for coded weights. For reference, emmy's OWN f16 twin
+# at these shapes: 18.6 us (4096->11008) and 580.9 us (22016^2).
+#
+# BASIS: the recorded shape is the HAT-BASIS contraction at the codes grid's 128-padded extents —
+# `F.linear(x, trellis_decode(codes))`, no suh/svh and no Hadamard. That is exactly the
+# contraction a served coded linear runs: the activation-side basis restore (VQ Phase 3.3) puts
+# `·suh`, both 128-block Hadamards and `·svh` in SEPARATE kernels on either side of it. Verified
+# by keying both forms: the golden's `ShapeKey` equals the key the deploy side builds for the
+# EXL3-spelled in-model graph, at M=1 and at prefill M (see
+# `tests/compiler/passes/test_trellis_computed_b.py`).
+#
+# RATE CAVEAT (ordering-protected, like the trans_b layout caveat in MatmulGoldenConfig): the
+# `trellis` dtype class does NOT carry the code rate. Both entries are k_bits=2 / cb=0. An EXL3
+# "optimized" rung allocates bits per tensor by Hessian sensitivity, so the same (M, N, K) can
+# appear at two rates in one checkpoint and they would share this key while wanting different
+# schedules. Until the 992 stamp grows a rate feature, record at most one rate per shape.
+#
+# NO `model:` HEADER YET, deliberately: `eval golden --in-model` traces weight-free serving twins
+# from config.json, and the twin builder has no coded arm — it would build plain f16 linears and
+# report GAP on every entry here (or fail outright). Tag the file once the coded serving carve
+# lands. Until then the deploy check is the per-entry one: compile the entry's own snippet greedy
+# and confirm the golden tier answers MATCH.
+#
+# NOT COVERED, with reasons (the full Phase 4 sweep owes these):
+#  * `down` (11008 -> 4096, M=1) — the decode band offers exactly ONE split there (`g16k`), so the
+#    fork has no choice to make and a golden could never be consulted. The narrow split window is
+#    a compiler-side residual, not a seeding one.
+#  * prefill / warp-tier coded matmuls — the fork offers ~3.8k rows; that is a real sweep.
+#  * the routed-expert matmuls — they arrive as program inputs and the expert serving programs are
+#    still being built.
+gpu_name: NVIDIA GeForce RTX 5090
+compute_cap:
+  - 12
+  - 0
+configs:
+  # ---- dense MLP gate/up projection, decode phase (M=1) ----------------------------------------
+  # GLM-4.5-Air hidden 4096 -> intermediate 10944, stored 128-padded to 11008. Codes 11.3 MB
+  # (L2-resident in this bench — see HOW TO READ). Greedy takes g8k at 19.5 us; g32k is 15.8.
+  # Reps: 15.70 / 15.87 / 15.75 us (spread 1.1%); greedy 19.60 / 19.52 / 19.52.
+  - kernel: matmul
+    name: glm45air.mlp_gate_up.m1
+    M: 1
+    N: 11008
+    K: 4096
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 15.8
+    cublas_us: 55.0
+  # ---- past-L2 reference square, decode phase (M=1) --------------------------------------------
+  # Not a GLM projection: a deliberate 121 MB codes slab (past the 5090's 96 MB L2), the only shape
+  # in this file that measures the format the way a 29 GB trunk experiences it. Keep it — it is the
+  # control that tells the parity readings above apart from real wins, and it carries the largest
+  # correction (greedy g4k 215.3 us -> g32k 157.9, 1.36x).
+  # Reps: 158.10 / 157.72 / 157.76 us (spread 0.24%); greedy 216.0 / 215.5 / 214.4.
+  - kernel: matmul
+    name: glm45air.pastl2_22016.m1
+    M: 1
+    N: 22016
+    K: 22016
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 157.9
+    cublas_us: 586.0

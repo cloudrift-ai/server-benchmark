@@ -19,6 +19,14 @@ Per-op handlers map aten names (`aten.add.Tensor`,
 pulled from the FX meta and fed into the op's `infer_output_shape` to
 stamp the output tensor.
 
+`emmy::trellis_decode` is the one NON-aten target the walker knows (`trellis_op.py` registers it with torch; the
+inline-code tracer registers before exec'ing a snippet). It exists so a trellis-coded matmul is writable as a torch
+expression at all — a trellis walk composes from no tensor ops, and every tuning / golden / reproduction path drives
+a shape from a snippet. The handler maps it onto the hat-basis `TrellisDecodeOp` the EXL3 checkpoint speller builds,
+so a snippet-traced graph and a served graph reach the same kernel; it runs ahead of the generic scalar-arg path
+because its `cb` / extent arguments are op parameters, not operands. The eager implementation is the numpy reference
+decode — correct, slow, and only ever an accuracy reference (bench a coded shape with `--bench-backends emmy`).
+
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
 `operator.getitem` resolves an integer tuple index to the matching slice, so no multi-output Graph IR is introduced.

@@ -575,7 +575,7 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
     )
     seen: list = []
 
-    def fake_evaluate_golden(M, N, K, dtype, gold, ctx, *, dynamic=False):
+    def fake_evaluate_golden(M, N, K, dtype, gold, ctx, *, dynamic=False, **kw):
         seen.append(ctx)
         return dict(gold), 0, 1, 0
 

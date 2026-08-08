@@ -63,6 +63,41 @@ def test_trans_b_golden_snippet_and_shape_key():
     assert c.shape_key() == twin.shape_key()
 
 
+def test_trellis_snippet_mints_the_codes_as_an_input():
+    # The coded matmul's torch spelling: the codes grid in a PREAMBLE statement (so the tracer
+    # lifts it as an input and the decode survives 032's constant fold), decoded by the one
+    # non-aten op the tracer knows, contracted in the F.linear layout the decode's (N, K) output
+    # dictates.
+    assert matmul_snippet(1, 11008, 4096, "trellis", True, k_bits=2, cb=0) == (
+        "codes = torch.randint(-32768,32767,(256,688,32),dtype=torch.int16)\n"
+        "torch.nn.functional.linear(torch.randn(1,4096,dtype=torch.float16), "
+        "torch.ops.emmy.trellis_decode(codes,0,11008,4096))"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kw", "match"),
+    [
+        ({"k_bits": 0}, "k_bits in"),
+        ({"k_bits": 9}, "k_bits in"),
+        ({"k_bits": 2, "trans_b": False}, "F.linear layout"),
+        ({"k_bits": 2, "N": 200}, "128-padded"),
+        ({"k_bits": 2, "K": 300}, "128-padded"),
+    ],
+)
+def test_trellis_golden_schema_is_validated(kw, match):
+    # A trellis entry that misspells its rate, layout or extents would key a contraction the
+    # served model never runs — refuse it at load, not at deploy.
+    fields = {"name": "t", "M": 1, "N": 1024, "K": 512, "dtype": "trellis", "trans_b": True, **kw}
+    with pytest.raises(ValueError, match=match):
+        MatmulGoldenConfig(**fields)
+
+
+def test_rate_fields_are_trellis_only():
+    with pytest.raises(ValueError, match="trellis-only"):
+        MatmulGoldenConfig(name="t", M=1, N=1024, K=512, dtype="fp16", k_bits=2)
+
+
 @pytest.mark.parametrize(
     ("emmy_us", "cublas_us", "ratio", "golden"),
     [(100.0, 99.0, 0.99, True), (100.0, 95.0, 0.95, True), (100.0, 80.0, 0.80, False), (0.0, 99.0, 0.0, False)],
@@ -236,7 +271,14 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     nothing today, so there is no catalog to be a member of); a reduce golden's ``TILE`` is
     likewise uncatalogued (the reduce fork partitions K only), so only its ``REDUCE`` is pinned."""
     from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers
-    from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves, splitk_moves, stage_moves, warp_tile_moves
+    from emmy.compiler.pipeline.search.space import (
+        coop_reduce_moves,
+        decode_band_moves,
+        scalar_tile_moves,
+        splitk_moves,
+        stage_moves,
+        warp_tile_moves,
+    )
 
     # The catalogs hand out TYPED slices; a golden's stored site value re-merges its WORK
     # inventory into the same slice — so "member" means "the replayed pin selects an enumerated
@@ -263,7 +305,9 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         assert not stage or Stage.parse(stage) in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
         red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
-        assert red is None or red in splitk_moves() + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+        # A coded-B entry's partition comes from the decode band alone (see ``decode_band_moves``).
+        pool = decode_band_moves() if g.dtype == "trellis" else splitk_moves() + coop_reduce_moves()
+        assert red is None or red in pool, f"{where}: REDUCE {reduce_spec!r} not enumerable"
 
 
 def test_attention_golden_geometry_is_a_member_of_the_twisted_grid():

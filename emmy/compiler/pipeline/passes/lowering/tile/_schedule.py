@@ -94,6 +94,8 @@ from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction, make_cone
 from emmy.compiler.pipeline.search.space import (
+    DECODE_BAND_CTAS,
+    DECODE_BAND_TILE,
     RASTER,
     REDUCE,
     STAGE,
@@ -854,8 +856,6 @@ def _pick_coop(extent: int, free: int, *, has_tail: bool = False) -> int:
     return coop if coop >= 2 else 1
 
 
-_DECODE_TILE = 16  # the trellis tile's k rows — the run one band step decodes from one code fetch
-_DECODE_CTAS = (32, 16, 8, 4)  # the decode band's split widths, widest first (option-0 leads)
 _DECODE_MIN_STEPS = 4  # keep at least this many tile steps per CTA — a shorter run is launch-bound
 _DECODE_MIN_CTAS = 2048  # a narrower split leaves the warp-wide blocks short of one full wave
 
@@ -885,16 +885,16 @@ def _decode_band_specs(term: _Term, node, k_static, inner, epilogue) -> list[Red
     projection shapes. A split whose slice is not tile-aligned is skipped rather than offered —
     the run would not fuse and the row would be a per-element decode under a transposed band, the
     worst of both."""
-    if not _decoded_b(term, node) or k_static is None or k_static % _DECODE_TILE:
+    if not _decoded_b(term, node) or k_static is None or k_static % DECODE_BAND_TILE:
         return []
     warps = max(1, _free_cells(term.place) // WARP_LANES)
     out: list[ReducePlan] = []
-    for cta in _DECODE_CTAS:
-        if k_static % (_DECODE_TILE * cta) or k_static // (_DECODE_TILE * cta) < _DECODE_MIN_STEPS:
+    for cta in DECODE_BAND_CTAS:
+        if k_static % (DECODE_BAND_TILE * cta) or k_static // (DECODE_BAND_TILE * cta) < _DECODE_MIN_STEPS:
             continue
         if out and warps * cta < _DECODE_MIN_CTAS:
             continue  # the widest legal split always leads; narrower ones only while they fill
-        p = ReducePlan.of(cta=cta, coop=WARP_LANES, coop_transposed=True, reg=_DECODE_TILE)
+        p = ReducePlan.of(cta=cta, coop=WARP_LANES, coop_transposed=True, reg=DECODE_BAND_TILE)
         if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
             continue
         if not legal.enforce(epilogue, pinned=False) or p in out:

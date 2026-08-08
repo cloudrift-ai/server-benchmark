@@ -413,8 +413,36 @@ checkpoint, and our decode is exact.
 
 **Hardware**: 5090. **Depends on**: Phase 3.
 
+**STATUS: ENABLEMENT + PROOF-OF-CONCEPT DONE (2026-08-07); the full sweep is still owed.** A trellis golden is now
+expressible, matchable, benchable and deployable:
+
+- `ShapeKey.from_matmul` takes the `trellis` dtype spelling (`dtype_class="trellis"`, `is_warp` FORCED — the flag is
+  the dtype family, not the deployed tier, which is what makes one key serve the M=1 decode band and the prefill
+  mma alike). Both constructors agree by construction, pinned by a test that keys the golden, its own snippet, and
+  the EXL3-SPELLED in-model graph at M=1 / M=32 / M=256 and asserts all three `joins()`.
+- `matmul_snippet`'s trellis arm writes the HAT-BASIS coded linear at the codes grid's 128-padded extents, codes
+  minted in a preamble statement (the fp8 trick) so the tracer lifts them as an input. It needs a torch spelling of
+  the decode, so `emmy::trellis_decode` is registered as the one non-aten op the tracer maps (onto the very
+  `TrellisDecodeOp` the speller builds). Hat basis is correct because Phase 3.3 puts `suh`/`svh` and both Hadamards
+  in separate kernels around the contraction. `MatmulGoldenConfig` gained `k_bits` / `cb`; `golden_eval._DTYPES` /
+  `_matmul_graph` build the coded enumeration graph.
+- Two defects found and fixed on the way. (a) `_fork_shape_key` rebuilt every prefill coded contraction as
+  `kind="fused"` AND dropped its `dtype_class` — the sync-STAGE offer signal is no longer unique to a computed-A
+  cone now the decode fill spells it. (b) The decode band's split widths lived as module-private constants in
+  `_schedule.py`, so a recorded band partition was not a member of any catalog the golden permanence gate checks;
+  they are now `space.decode_band_moves`.
+- Seeded 2 entries, 3 reps each: `glm45air.mlp_gate_up.m1` (1x11008x4096, k_bits 2) 19.55 → 15.77 µs (1.24x, spread
+  1.1 %) and `glm45air.pastl2_22016.m1` (1x22016x22016) 215.3 → 157.9 µs (1.36x, spread 0.24 %). Both deploy: the
+  golden tier answers MATCH and the kernel carries `g32k/coop-t/r16`, on the entry's own snippet AND on the
+  EXL3-spelled in-model graph.
+- Residuals for the full sweep: no `model:` header yet (the serving twin builder has no coded arm, so
+  `eval golden --in-model` would GAP or fail on every entry — tag the file once the coded carve lands); the key
+  carries no CODE RATE, so a mixed-allocation rung can collide two tensors at identical extents; `down`
+  (11008→4096, M=1) offers exactly one band width and so has no fork a golden could decide; prefill/warp coded
+  matmuls are a ~3.8k-row pool nobody has swept; expert programs are unbuilt.
+
 Seed `emmy/compiler/pipeline/search/goldens/rtx5090_sm120_glm45air.yaml`, following the structure and preamble
-conventions of `rtx5090_sm120_gptoss20b.yaml` — which is the closest precedent: a MoE, on this card, whose expert
+conventions of `rtx5090_sm120_olmoe.yaml` — the closest precedent: a MoE, on this card, whose expert
 weights arrive as program inputs.
 
 - Seed over the **serving programs themselves**, not synthetic shapes.

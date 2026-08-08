@@ -22,19 +22,31 @@ from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
 # fp8-storage spelling (e4m3, the format every target checkpoint uses); the
 # canonical tokens ``f8e4m3`` / ``f8e5m2`` also pass through via the
 # ``_DTYPES.get(dtype, dtype)`` fallthrough below.
-_DTYPES = {"fp32": "f32", "fp16": "f16", "bf16": "bf16", "fp8": "f8e4m3"}
+_DTYPES = {"fp32": "f32", "fp16": "f16", "bf16": "bf16", "fp8": "f8e4m3", "trellis": "f16"}
 
 
-def _matmul_graph(M: int, N: int, K: int, dtype: str):
-    """A bare ``(M, K) @ (K, N)`` matmul frontend graph — the shape a matmul golden records."""
+def _matmul_graph(M: int, N: int, K: int, dtype: str, *, k_bits: int = 0, cb: int = 0):
+    """A bare ``(M, K) @ (K, N)`` matmul frontend graph — the shape a matmul golden records.
+
+    ``dtype="trellis"`` builds the coded form instead: an i16 codes input under a hat-basis
+    ``TrellisDecodeOp`` feeding a ``LinearOp`` — the same nodes ``golden.matmul_snippet``'s
+    trellis arm traces to, so the enumeration this reconstructs is the one a coded shape's
+    fork actually offers. ``_DTYPES`` maps ``trellis`` to ``f16`` because that is the dtype of
+    everything in the graph except the codes carrier itself."""
     from emmy.compiler import dtype as _dt  # noqa: PLC0415
     from emmy.compiler.graph import Graph, Tensor  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, TrellisDecodeOp  # noqa: PLC0415
 
     dt = _dt.get(_DTYPES.get(dtype, dtype))
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (M, K), dt), node_id="a")
+    if dtype == "trellis":
+        g.add_node(InputOp(), [], Tensor("codes", (K // 16, N // 16, 16 * k_bits), _dt.get("i16")), node_id="codes")
+        w = g.add_node(TrellisDecodeOp(cb=cb, out_features=N, in_features=K, hadamard=False), ["codes"], Tensor("b", (N, K), dt))
+        g.add_node(LinearOp(), ["a", w], Tensor("o", (M, N), dt), node_id="o")
+        g.inputs, g.outputs = ["a", "codes"], ["o"]
+        return g
     g.add_node(InputOp(), [], Tensor("b", (K, N), dt), node_id="b")
     g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (M, N), dt), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]
@@ -73,10 +85,10 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> list[dict]:
     return rows
 
 
-def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context) -> list[dict]:
+def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context, *, k_bits: int = 0, cb: int = 0) -> list[dict]:
     """Reconstruct the planner's matmul enumeration for a shape (:func:`enumerate_graph` over the
     bare matmul graph, TILE-family rows)."""
-    return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE")
+    return enumerate_graph(_matmul_graph(M, N, K, dtype, k_bits=k_bits, cb=cb), ctx, family="TILE")
 
 
 def _offline_scorer(M: int, N: int, K: int, ctx: Context, *, dynamic: bool = False) -> Callable[[dict], float]:
@@ -107,6 +119,8 @@ def evaluate_golden(
     ctx: Context,
     scorer: Callable[[dict], float] | None = None,
     dynamic: bool = False,
+    k_bits: int = 0,
+    cb: int = 0,
 ) -> tuple[dict, int | None, int, int | None]:
     """Score a matmul shape's full enumeration and return ``(pick, rank, pool,
     rank_optimistic)``: the argmax pick (higher score = better), the recorded golden's
@@ -137,7 +151,7 @@ def evaluate_golden(
 
     gate = F16_MMA_F32_ACC.pinned("1") if golden_knobs and fast_math_knobs(golden_knobs) else nullcontext()
     with gate:
-        rows = _enumerate(M, N, K, dtype, ctx)
+        rows = _enumerate(M, N, K, dtype, ctx, k_bits=k_bits, cb=cb)
     if not rows:
         return {}, None, 0, None
     if scorer is None:

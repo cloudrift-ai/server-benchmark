@@ -209,7 +209,12 @@ on the 5090 at M=1, K=2, against the same-shape f16 matvec: N=K=22016 (past L2) 
 and 157 µs at the band's best pinned split; the L2-resident GLM dense projections land at f16 parity (gate/up
 4096→11008: 19.6 vs 18.6; down 11008→4096: 20.5 vs 18.7), where f16 reads its weights out of L2 at 4.9 TB/s and
 the comparison flatters it. NCU puts the residual on instruction issue, not bandwidth: 11.5 warp-instructions
-per decoded weight, SM throughput 69 % against DRAM 35 %.
+per decoded weight, SM throughput 69 % against DRAM 35 %. The band's split widths are a catalog
+(`space.decode_band_moves`, widest first), so a recorded golden's partition is a catalog member like every other
+kind's — and it needs to be one: the offline prior mis-ranks the width cold (it takes `g8k`/`g4k` where `g32k` wins),
+which is 19–27 % at the seeded shapes, and `goldens/rtx5090_sm120_glm45air.yaml` is that correction. The window is
+narrow enough that some real shapes offer only ONE width and so have no fork to decide (`down`, 11008→4096 at M=1) —
+widening it is a compiler-side follow-up, not a seeding one.
 
 **Activation-side basis restore.** Only `W_hat` decodes in-kernel, so under the same `EMMY_TRELLIS_EXPAND` gate
 `spell_trellis_constants` rewrites the CONSUMING LINEAR instead of the weight constant, moving the checkpoint's

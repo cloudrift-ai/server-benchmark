@@ -443,6 +443,21 @@ def stage_moves(*, warp: bool) -> list[Stage]:
 # the scheduler's.
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
+# The DECODE BAND (a trellis-coded B at the reduce tier): the trellis tile's k rows — the run one
+# band step decodes from a single code fetch — and the band's cross-CTA split widths, widest first
+# (option-0 leads). Divisor / occupancy / tile-alignment legality is the scheduler's.
+DECODE_BAND_TILE: int = 16
+DECODE_BAND_CTAS: tuple[int, ...] = (32, 16, 8, 4)
+
+
+def decode_band_moves() -> list[ReducePlan]:
+    """The ``REDUCE`` candidates a DECODED B answers with — the transposed coop band (32 lanes
+    sweeping the output axis) at ``reg`` = the trellis tile's 16 k rows, over a cross-CTA split, so
+    a lane's register copies walk one tile COLUMN and ``055_fuse_trellis_runs`` can collapse them
+    into one run. A decoded B offers these ALONE (never the plain coop catalog): a code fetch is a
+    whole 16x16 weight tile, so any other partition re-fetches it per element."""
+    return [ReducePlan.of(cta=w, coop=WARP_LANES, coop_transposed=True, reg=DECODE_BAND_TILE) for w in DECODE_BAND_CTAS]
+
 
 def splitk_moves() -> list[ReducePlan]:
     """The cross-CTA split-K ``REDUCE`` candidates, both tiers each: the deferred-kernel finalize

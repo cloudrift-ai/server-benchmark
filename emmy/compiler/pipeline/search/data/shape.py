@@ -84,6 +84,21 @@ class ShapeKey:
     # an ``i16`` codes buffer decoded in-kernel, an eighth of the bytes and a wholly
     # different realization at both tiers (the warp tier's compute fill, the reduce
     # tier's decode band), so it must not join its f16 twin's rows in either direction.
+    # It forces ``is_warp=True`` in both constructors for the same reason ``"f8"`` does.
+    # ``is_warp`` is a DTYPE-FAMILY discriminator (the fp32 scalar tier vs the 16-bit
+    # world), NOT a claim about which tier deployed: an f16 ``M=1`` matvec keys
+    # ``is_warp=True`` and deploys the reduce tier (every ``.m1`` entry in
+    # ``rtx5090_sm120_olmoe.yaml``). A decoded B is 16-bit at both tiers — the decode
+    # produces f16 — while its op-side dtype multiset is unreliable exactly like fp8's
+    # (the activation-side basis restore puts scale constants on the A cone), so the
+    # class pins the flag instead of deriving it.
+    #
+    # CAVEAT (documented, not enforced): the class does NOT carry the code rate. Two
+    # tensors quantized at different bits/weight (an EXL3 "optimized" rung allocates them
+    # per-tensor by Hessian sensitivity) share a key at identical ``(M, N, K)`` even
+    # though the decode's instruction count — and so the best schedule — differs. The
+    # ``992`` stamp has no rate feature to key on today; until it does, a mixed-rate
+    # checkpoint must not record two entries of one shape at different rates.
     dtype_class: str = ""
 
     # Key classes that carry the aspect discriminator (see ``free_max``).
@@ -92,6 +107,9 @@ class ShapeKey:
     # Golden/CLI dtype spellings that name fp8 B-side storage (``fp8`` is the
     # generic golden spelling, defaulting to e4m3 — see ``golden_eval._DTYPES``).
     _F8_DTYPES = ("fp8", "f8e4m3", "f8e5m2")
+
+    # The golden/CLI dtype spelling that names trellis-coded (EXL3) B-side storage.
+    _TRELLIS_DTYPES = ("trellis",)
 
     def __post_init__(self) -> None:
         if (self.is_dyn or self.kind not in self._FREE_MAX_KINDS) and self.free_max:
@@ -102,21 +120,24 @@ class ShapeKey:
         """The shape of an ``(M, K) @ (K, N)`` matmul. fp32 lowers on the scalar
         thread tier; fp16 / bf16 on the warp (MMA) tier; an fp8-B spelling
         (``fp8`` / ``f8e4m3`` / ``f8e5m2``) is warp too and additionally carries
-        ``dtype_class="f8"`` (see the field doc). ``dynamic`` marks the M
+        ``dtype_class="f8"``; the ``trellis`` spelling likewise carries
+        ``dtype_class="trellis"`` and ``is_warp=True`` (see the field doc — the flag
+        is the dtype family, not the deployed tier, so it holds for the ``M=1``
+        decode band as much as for the prefill mma). ``dynamic`` marks the M
         axis symbolic (the only symbolic-axis golden form today): the key then
         MIRRORS what ``992_stamp_structural_features`` puts on the op — symbolic
         axes are **excluded** from the extent products (``free_prod = N``, not the
         hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
         the stamped histogram is the only identity the op side has (it doesn't
         know the hint), so a hint-sized golden key would never join it."""
-        f8 = dtype in cls._F8_DTYPES
+        f8, trellis = dtype in cls._F8_DTYPES, dtype in cls._TRELLIS_DTYPES
         return cls(
             free_prod=N if dynamic else M * N,
             reduce_max=K,
-            is_warp=f8 or dtype != "fp32",
+            is_warp=f8 or trellis or dtype != "fp32",
             is_dyn=dynamic,
             free_max=0 if dynamic else max(M, N),
-            dtype_class="f8" if f8 else "",
+            dtype_class="f8" if f8 else ("trellis" if trellis else ""),
         )
 
     @classmethod
@@ -157,7 +178,10 @@ class ShapeKey:
         would otherwise flip the dtype-multiset signal to scalar, the same hazard the
         ``"fused"`` kind forces around. ``S_dtype_i16`` marks the trellis class the same
         way: ``i16`` is the packed-code carrier and nothing else reads one, so the stamp
-        already separates a decoded B from its f16 twin at the same ``(M, N, K)``."""
+        already separates a decoded B from its f16 twin at the same ``(M, N, K)``; it
+        forces ``is_warp`` for the same reason fp8 does — see the field doc; the flag
+        names the dtype family, not the tier, so the ``M=1`` decode band keys ``True``
+        just as an f16 matvec does."""
         n_axes = s.get("S_ext_n_free_axis", 0) + s.get("S_ext_n_reduce_axis", 0) + s.get("S_ext_n_symbolic_axis", 0)
         kind = ""
         if 0 < s.get("S_loop_depth", 0) < n_axes:
@@ -170,7 +194,7 @@ class ShapeKey:
         return cls(
             free_prod=int(s.get("S_ext_free_prod", 0)),
             reduce_max=int(s.get("S_ext_reduce_max", 0)),
-            is_warp=kind == "fused" or f8 or not s.get("S_dtype_f32", 0),
+            is_warp=kind == "fused" or f8 or trellis or not s.get("S_dtype_f32", 0),
             is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),

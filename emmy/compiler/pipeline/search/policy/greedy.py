@@ -599,7 +599,15 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
     ``is_warp=True`` (a computed-A contraction is a warp mma) and ``kind="fused"``; ``free_max``
     carries the stamped aspect (both key builders keep it for the fused kind — see the aspect note
     below); ``reduce_max`` stays the contraction extent (the fused goldens key on it even when
-    dynamic — unlike the flash reduce)."""
+    dynamic — unlike the flash reduce).
+
+    A DECODED B (``dtype_class == "trellis"``) is excluded from the cone rebuild: the sync-STAGE
+    offer signal is no longer unique to a computed-A cone now that the trellis compute fill spells
+    the same transport, and a trellis contraction is a plain two-free-axis nest with a computed B,
+    not a fused megakernel. Left un-excluded, every prefill-M coded matmul re-keyed to
+    ``kind="fused"`` AND lost its storage class — a key that collides with a real RMSNorm→linear
+    cone of equal extents and can never join a coded shape's own golden. Both rebuilds carry
+    ``dtype_class`` through for the same reason."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
     stamps = base if base is not None else rows[0]
@@ -614,9 +622,12 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
             is_warp=key.is_warp,
             is_dyn=key.is_dyn,
             kind="flash",
+            dtype_class=key.dtype_class,
         )
     elif (
         key.kind == ""
+        # A computed-B decode fill also spells ``sync``; see the docstring.
+        and key.dtype_class != "trellis"
         # A computed-A cone CONTRACTS: its output is 2-D ``(M, N)``. A standalone RMSNorm
         # STATISTIC kernel produces ONE value per row — without this the cut's own ``__stat``
         # producer was rebuilt to ``kind="fused"``, which both locked it out of the plain
@@ -633,7 +644,13 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
         # global norm→kv cone onto the M=32 local norm→q golden — equal free_prod (131072)
         # and reduce (3840) — deploying the wrong config at a fabricated µs.
         key = ShapeKey(
-            free_prod=key.free_prod, reduce_max=key.reduce_max, is_warp=True, is_dyn=key.is_dyn, kind="fused", free_max=key.free_max
+            free_prod=key.free_prod,
+            reduce_max=key.reduce_max,
+            is_warp=True,
+            is_dyn=key.is_dyn,
+            kind="fused",
+            free_max=key.free_max,
+            dtype_class=key.dtype_class,
         )
     return key
 

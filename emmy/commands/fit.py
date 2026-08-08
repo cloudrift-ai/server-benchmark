@@ -173,9 +173,9 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
                 from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
 
                 with F16_MMA_F32_ACC.pinned("1"):
-                    rows = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
+                    rows = _enumerate(g.M, g.N, g.K, g.dtype, ctx, k_bits=getattr(g, "k_bits", 0), cb=getattr(g, "cb", 0))
             else:
-                rows = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
+                rows = _enumerate(g.M, g.N, g.K, g.dtype, ctx, k_bits=getattr(g, "k_bits", 0), cb=getattr(g, "cb", 0))
             tier = "dyn" if dyn else ("thread" if g.dtype == "fp32" else "warp")
         else:
             skipped.append((g.gpu_name, g.name, fit_cv.OUT_OF_SCOPE))

@@ -33,9 +33,14 @@ findings. Consequences for the phases below:
 
 - **Pinned target**: `turboderp/GLM-4.5-Air-exl3` branch `2.25bpw`, commit `6a309ed6…` (cached locally, 29.4 GiB).
   The 2.00 rung (`2.0bpw` @ `a1adde54…`) stays cached as a measured comparison point, not a serving target.
-- **Quantized KV is mandatory scope**, not a stretch: at ~29.8 GB weights the card fits only ~4K tokens of fp16 KV
-  (exllamav3 measured; ~325 KiB/token marginal). The emmy serving stack needs a quantized KV cache (q4-class) for
-  any credible admission capacity. This is new work the original plan did not scope.
+- **Quantized KV is mandatory scope**, not a stretch: at ~29.8 GB weights the card fits few fp16 KV tokens (straight
+  arithmetic says 184 KiB/token — 46 layers × 8 KV heads × 128 head dim × fp16 × K and V; exllamav3 measured ~325
+  KiB/token marginal, a ~1.8× discrepancy the Phase 5 headroom sweep must resolve). Scoped 2026-08-07: emmy owns no
+  KV — the generative carve runs vLLM's paged attention (and its cache) between the pre/post programs — so the
+  route is vLLM's own `--kv-cache-dtype fp8_e4m3` (serving-glue only: the `_attn_aliased` fast path in
+  `vllm_model_gen.py` bails when KV scales are active, plus serve-command passthrough). An emmy-owned q4 cache
+  (exllamav3-style group-32) is a post-Phase-3 stretch: its in-kernel dequant needs exactly the files Phase 3 is
+  rewriting.
 - Phases 1–3 are unaffected (the decode is rung-independent; K just varies per tensor under the optimized
   allocation, which the decoder already handles). Phase 4+ seeds goldens and benches on the 2.25 checkpoint;
   Phase 6 must re-measure the exllamav3 baselines on 2.25 with the recorded client invocation.

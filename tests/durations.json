@@ -584,6 +584,7 @@
  "tests/serving/test_gen_runner_gpu.py::test_gen_runner_gptoss_fp8_create_matches_dequantized_reference": 28.46,
  "tests/serving/test_gen_runner_gpu.py::test_gen_runner_moe_stitch_matches_eager": 16.18,
  "tests/serving/test_gen_runner_gpu.py::test_gen_runner_stitch_matches_eager": 10.59,
+ "tests/serving/test_gen_runner_gpu.py::test_host_mapped_embed_table_gathers_identically_and_costs_no_vram": 7.6,
  "tests/serving/test_gen_runner_gpu.py::test_layers_share_activation_arena": 10.72,
  "tests/serving/test_gen_runner_gpu.py::test_moe_expert_m256_twin_matches_eager_across_experts": 6.17,
  "tests/serving/test_gen_runner_gpu.py::test_moe_expert_shape_groups_compile_and_dispatch_per_layer": 23.1,

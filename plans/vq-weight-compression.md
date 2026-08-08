@@ -535,7 +535,12 @@ weights arrive as program inputs.
 
 **Hardware**: 5090 (the release pipeline runs on the target GPU). **Depends on**: Phase 4.
 
-**STATUS: IT SERVES, AND THE CARD IS FULL (2026-08-07).** `emmy serve --generate` boots GLM-4.5-Air 2.25bpw on one
+**STATUS: THE POOL IS NO LONGER THE LIMIT; THE DECODE TIER IS (2026-08-08).** The vocab-table reclaim below took
+the KV pool from **864 to 9,392–14,016** fp8 tokens depending on how the rest of the budget is spent, and
+`--max-model-len` from 512 to **4096**. The concurrency sweep that pool unlocked then found the *next* wall, and it
+is not memory: see "The concurrency measurement" below.
+
+**STATUS (2026-08-07): IT SERVES, AND THE CARD IS FULL.** `emmy serve --generate` boots GLM-4.5-Air 2.25bpw on one
 5090, answers chat requests coherently, and has **864 tokens of KV cache**. Three boot blockers were closed getting
 there; the fourth finding is that there is no room left, which is what Phase 5 must now solve before it can bake
 anything.
@@ -590,16 +595,145 @@ the *2.00* rung was TTFT 499 ms / TPOT 11.9 ms, so this first configuration is ~
 TPOT — with the whole of Phase 4's golden sweep still owed (the boot's own roofline audit flags
 `L0.post.decode.m8` at 17x its weight-streaming floor), CUDA graphs off, and the M=1 decode tier off.
 
-**What Phase 5 must do before it bakes an image**, in measured-value order:
+### The vocab reclaim, measured (2026-08-08)
 
-1. **Reclaim vocab-table bytes.** The two vocab-sized fp16 tables are the budget: emmy's embed table (1.156 GiB,
-   and GLM-4.5-Air is untied so it is *not* shared with the head) and the decoded `lm_head` (1.156 GiB). Serving
-   the head coded returns 0.722 GiB; sourcing the embedding gather from host-mapped memory would return 1.156
-   more. Either one alone multiplies the KV pool several times over; both together would put it near 18k fp8
-   tokens. Note the embed route has to survive whole-step CUDA-graph capture, which rules out a host round trip
-   inside `embed_device`.
-2. Re-measure headroom once (1) lands, then pin `models/<slug>.env`.
-3. Finish Phase 4's sweep — TPOT is ~40x the model's own decode memory floor, and the goldens are the lever.
+Two vocab-sized fp16 tables were the whole remaining budget. **The embed table was taken; the coded `lm_head` was
+not**, and the reason is bytes per unit of risk rather than taste:
+
+| item | bytes | route | verdict |
+| --- | --- | --- | --- |
+| embed table, 151552 x 4096 fp16 | **1.156 GiB** | mapped host memory, device-addressed gather | **TAKEN** |
+| decoded `lm_head`, same shape | 0.722 GiB net (1.156 fp16 - 0.434 coded) | replace vLLM's logits path with a coded matmul | deferred |
+
+The embed table is 60 % more bytes for a fraction of the work: `EMMY_GEN_EMBED_HOST=1` allocates it with
+`cudaHostAlloc`-mapped memory, whose address is a valid *device* address under unified virtual addressing, so
+`embed_device` stays a plain device-side gather and whole-step capture still records it — no host round trip, which
+was the stated constraint. The coded head, by contrast, means not constructing `ParallelLMHead` at all and
+compiling a new 4096x151552 K=6 program family with its own dynamic-M tiers and goldens; there was no route to its
+bytes short of that (the head is read whole every step, so parking *it* in host memory costs ~46 ms/step over this
+box's PCIe link and ~17 ms even coded).
+
+**Measured on the 5090.** Free after the runner and the head goes **0.184 -> 1.338 GiB**, i.e. the reclaim returns
+**1.154 GiB** of the table's 1.156 — all of it. The gather's price is PCIe latency per token, and this box's card
+sits on a **gen5 x1** link (3.6 GB/s measured, both directions): 22.6 us for an 8-token decode step and 1.25 ms for
+a 512-token prefill chunk, against 3.4 us flat for a device-resident gather. On this model that is 0.02 % of TPOT
+and 0.1 % of TTFT, and c=1 TPOT is unchanged (102.86 ms mapped vs 102.5 ms resident). A x16 link would divide the
+cost again — the numbers below are pessimistic on that axis, not optimistic.
+
+**Where the reclaimed budget goes, all measured, eager unless stated:**
+
+| config | KV tokens | note |
+| --- | --- | --- |
+| before, util 0.9755, mml 512, 16 MiB workspace | 864 | the 2026-08-07 wall |
+| after, same knobs | **14,016** | 16.2x; allocates, then OOMs in the post-KV warmup — a headroom reading, not a config |
+| util 0.970, mml **4096**, 16 MiB workspace | 11,488 | serves c=1; **dies at c>=4** — FlashInfer asks 144 MiB for `batch_prefill_tmp_v` |
+| util 0.970, mml 4096, 64 MiB, whole-step capture | 9,488 | capture costs 2,000 tokens for **2.8 %** TPOT (100.0 vs 102.9) |
+| util 0.9641, mml 4096, **394 MiB** (vLLM default) | 9,392 | allocated, then OOMs claiming the workspace (398 MiB free) |
+| **util 0.9641, mml 4096, 256 MiB workspace** | **9,392** | **the config that serves the whole grid** |
+
+Three findings worth carrying: the utilization band is no longer a few tenths of a percent wide; the FlashInfer
+workspace is allocated **lazily on first attention plan**, so it is invisible to vLLM's KV sizing and has to be
+budgeted by hand (16 MiB boots and then kills the engine at c>=4 — a latent failure, not a config); and whole-step
+decode capture is now affordable but **not worth buying** at a capture ladder of `[1]`, because MoE capture covers
+single-token steps only and every c>1 decode step runs eager regardless.
+
+### The concurrency measurement — the pool stopped being the limit, the expert launch chain is
+
+The pool now admits 14 concurrent 512+128-token streams where it admitted one, so the sweep the plan's thesis
+rests on finally runs. **It does not show the win.** Throughput is close to flat in concurrency, and the reason is
+measured, not guessed.
+
+| c | N | completed | dur s | req/s | out tok/s | TTFT med s | TTFT p99 s | TPOT med ms | ITL med ms | W mean | peak VRAM MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 8 | 8/8 | 122 | 0.066 | **8.4** | 1.96 | 3.3 | 104 | 105 | 209 | 32037 |
+| 4 | 24 | 24/24 | 337 | 0.071 | **9.1** | 9.22 | 12.8 | 373 | 349 | 131 | 32037 |
+| 8 | 48 | 48/48 | 603 | 0.080 | **10.2** | 12.08 | 26.0 | 698 | 609 | 128 | 32037 |
+| 16 | 64 | 64/64 | 751 | 0.085 | **10.9** | 15.79 | 52.1 | 1292 | 1076 | 126 | 32037 |
+
+*Protocol*: `scripts/bench_serve_sweep.py` against a live `emmy serve --generate`, the Phase 0 workload grid
+exactly (512 in / 128 out, `--ignore-eos`, N = 8/24/48/64), one discarded warmup and **one** recorded run per point
+rather than the recipe's three — a time reduction, so there is no spread column and the table owes its repeats at
+image-bake time. Every point completed all its requests (the driver refuses to report one that did not). Two other
+deviations from `experiments/GLM-4.5-Air-EXL3/serving_rtx5090/recipe.yaml`: prefix caching was left at vLLM's
+default ON rather than `--no-enable-prefix-caching` (observed hit rate 0-9 %), and the run is a bare `emmy serve`,
+not the prebuilt image, which does not exist yet.
+
+**Why, quantitatively.** GLM-4.5-Air routes `top_k=8` of `E=128` experts per token across 45 MoE layers, and
+`combine_routed_experts` issues **one launch per DISTINCT expert hit in the step**.
+That is correct and already amortized per expert — each expert's weights are read once for all its rows — but the
+launch COUNT scales with distinct experts, and distinct experts saturate at `E` long before tokens do. Predict the
+count as a coupon-collector expectation, `E x (1 - (1 - 1/E)^(c x k))` per layer, and compare it against measured
+TPOT:
+
+| c | predicted distinct experts/layer | launches/step | predicted step cost vs c=1 | measured TPOT vs c=1 |
+| --- | --- | --- | --- | --- |
+| 1 | 8.0 | 360 | 1.00x | 1.00x (104.3 ms) |
+| 4 | 28.3 | 1,274 | 3.54x | **3.58x** (373.4 ms) |
+| 8 | 50.5 | 2,273 | 6.31x | **6.69x** (697.8 ms) |
+| 16 | 81.0 | 3,645 | 10.1x | **12.4x** (1292 ms) |
+
+Step cost tracks the launch count, not the token count: the prediction is within **1 %** at c=4 and **6 %** at c=8.
+At c=16 it undershoots by 23 %, which is where the pool itself finally shows up — occupancy sits at 96-98 % with
+15 running and 1 waiting, so queueing and preemption add cost the launch model does not carry (and the router is
+not uniform, so 81 distinct experts is a floor). That is the signature of the per-expert launch chain rather than
+of bandwidth, and `plans/moe-m2-dispatch-design.md` measured that chain from the other end — ~117 us of Python
+framing per launch, so 360 x 117 us = 42 ms of pure framing inside a 104 ms c=1 TPOT.
+
+So continuous batching does exactly what it should — it admits the streams — and then every additional stream costs
+nearly a full step's work because the dispatch is per-expert-launch bound. **The concurrency argument cannot be
+made on this model until MoE M2 (fused grouped-GEMM dispatch, or captured launch-set recovery) lands.** That is the
+honest state, and it is a dispatch-architecture item, not a memory or a golden one.
+
+**Against the contender.** Phase 0's exllamav3/tabbyAPI numbers are on the **2.00** rung and must be re-measured on
+2.25 before any table quotes them (Phase 6 item 3), so treat the ratios as indicative:
+
+| c | exllamav3 2.00 out tok/s | emmy 2.25 out tok/s | exllamav3 TTFT | emmy TTFT | exllamav3 TPOT | emmy TPOT |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 62.7 | 8.4 | 0.50 s | 1.96 s | 11.9 ms | 104 ms |
+| 4 | ~102 | 9.1 | 1.32 s | 9.22 s | 27.9 ms | 373 ms |
+| 8 | ~99 | 10.2 | 5.99 s | 12.08 s | 29.2 ms | 698 ms |
+| 16 | ~99 | 10.9 | 14.7 s | 15.79 s | 29.9 ms | 1292 ms |
+
+Worth reading carefully rather than as a single ratio. exllamav3 **also** flattens, saturating near 100 tok/s from
+c=4 and converting further concurrency into queue time (its effective parallelism is ~4-5 on that cache), and by
+c=16 emmy's TTFT is within 7 % of it — both are queue-dominated there. So the opening the plan predicted is still
+there in principle: the contender does not scale either. It is emmy that cannot take it yet, because emmy flattens
+an order of magnitude lower and for a different reason — launch chain, not admission.
+
+**What was NOT the cause, each ruled out by measurement:**
+
+- *The KV pool* — it was, at 864 tokens; it is not now. At c=16 the pool sits at 96-98 % occupancy with 15 running
+  and 1 waiting, i.e. admission is saturated and still no throughput.
+- *The decode-tier lockout.* At `EMMY_GEN_DECODE_BUCKET=8` every step with 9-32 running sequences falls off the
+  static twin onto the capacity-512 symbolic program, which is exactly the ladder trap
+  `emmy/serving/ARCHITECTURE.md` warns reclaiming footprint re-opens. Rebuilding at **bucket 32** (a 1079 s cold
+  build; same 9,392 KV tokens, so it is free in memory) closes that hole and buys **6 %**: c=16 TPOT 1271 -> 1192
+  ms, while c=1 gives back 1.3 % (102.9 -> 104.2, the T=1 step now padding to 32 rows). Real, and an order of
+  magnitude too small to be the story.
+- *CUDA graphs.* 2.8 % of TPOT at c=1 and nothing above it (MoE capture is limited to capture size 1), for 2,000
+  KV tokens. Declined.
+
+**What Phase 5 must still do before it bakes an image**, ranked by measured value:
+
+1. **MoE M2 — the per-expert launch chain.** This is now the whole story, at both concurrency and batch 1: 360
+   launches per step at c=1 and ~3,645 at c=16, and the step cost tracks that count. Design already exists
+   (`plans/moe-m2-dispatch-design.md`). Nothing else on this list changes the shape of the sweep table.
+2. **Phase 4's golden sweep.** Owed in full, and independent of (1): the boot's own roofline audit still flags
+   `L0.post.decode.m32` at **17x** its weight-streaming floor (~67 us), unchanged from the bucket-8 boot. This is
+   the batch-1 TPOT lever.
+3. ~~Reclaim vocab-table bytes~~ — the embed table is done (above). The **coded `lm_head` is still owed**: 0.722 GiB,
+   about 8,000 more fp8 tokens, and it is now the only vocab-sized item left. Its value changed character, though:
+   with the pool no longer binding, those bytes buy headroom (a bigger workspace, a longer context, whole-step
+   capture) rather than the difference between serving and not.
+4. **TTFT.** 2.8-3.0 s for a 512-token prompt — 5.6 ms/token of prefill — against exllamav3's 499 ms at c=1 on the
+   2.00 rung. Prefill runs the symbolic programs at `EMMY_GEN_PREFILL_CAPACITY=512`; raising capacity is a pack-key
+   change (cold rebuild) and should be swept once (2) has moved the kernels.
+5. **Pin `models/<slug>.env`** — **not yet**, deliberately: the config seals the cache key, and (1), (2) and (4) all
+   still move it. The recipe/experiment TODO(Phase 5) placeholders stay until then.
+
+Two config facts the pin will need, both measured above and neither derivable: the attention workspace must be
+**256 MiB** (16 MiB boots and then kills the engine at c>=4; the 394 MiB default does not fit) and utilization
+**0.9641** with `--max-model-len 4096`.
 
 Only then run the documented release workflow in `docker/vllm-emmy-serve/ARCHITECTURE.md` end to end — it is the
 authority; do not improvise.
@@ -622,9 +756,14 @@ whoever fills it, so a coded head means replacing the engine's logits path, not 
 card yields **0.184 GiB free** after the runner and the head, against a 394 MiB FlashInfer workspace and a
 profiling peak that both come out of it. The booting configuration gets **864 fp8 KV tokens** by shrinking the
 workspace, going eager and sitting at util 0.9755 in a band a few tenths of a percent wide. So the coded head is
-still owed — it is worth 0.722 GiB, about 8,000 fp8 KV tokens — and it is no longer the only candidate: the
-untied embed table is 1.156 GiB of the same kind of money. Settle both before the sweep; the sweep measures
-whatever the vocab tables already are.
+still owed — it is worth 0.722 GiB, about 8,000 fp8 KV tokens.
+
+**Update 2026-08-08.** The head's sibling candidate — the untied embed table, 1.156 GiB — was settled instead, and
+it settled the *pool*: see "The vocab reclaim, measured" above. The head is therefore no longer the difference
+between serving and not serving; it is 0.722 GiB of headroom to spend on a bigger pool or a bigger workspace once
+the decode tier is worth feeding. Its price has not changed and there is still no cheaper route to it than the
+coded matmul: the head is read whole every step, so it cannot follow the embed table into host memory (~46 ms/step
+decoded over this box's link, ~17 ms even coded, against a 102 ms TPOT).
 
 ### Prerequisites for the config
 

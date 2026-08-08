@@ -987,3 +987,54 @@ def test_gen_runner_gptoss_fp8_create_matches_dequantized_reference(tmp_path):
             lambda e, rows: expert(rows, w_gu[e], experts.down_proj[e], b_gu[e], experts.down_proj_bias[e]),
         )
         torch.testing.assert_close(h_ref + combined, want_out, rtol=1e-4, atol=1e-5)
+
+
+def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch):
+    """``EMMY_GEN_EMBED_HOST`` moves the vocab table out of VRAM without changing a single
+    gathered row.
+
+    The knob exists to hand a vocab-sized fp16 table (over a GiB on a 150k vocab) back to the
+    KV cache on a card the weights already fill. Three things have to hold: the gather still
+    lands on the same values, the table's device pointer is NOT device memory (otherwise the
+    bytes were never returned), and the numpy table the oracle path reads is a VIEW of the same
+    allocation rather than a second host copy."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        use_sliding_window=False,
+    )
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(config).eval()
+    ids = torch.tensor([1, 3, 5, 63], dtype=torch.long, device="cuda")
+
+    device_runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    if not device_runner.has_device_decode:
+        pytest.skip("decode-bucket programs unavailable for this shape")
+    expected = device_runner.embed_device(ids).cpu().numpy()
+
+    monkeypatch.setenv("EMMY_GEN_EMBED_HOST", "1")
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    np.testing.assert_array_equal(runner.embed_device(ids).cpu().numpy(), expected)
+    np.testing.assert_array_equal(runner.embed(ids.cpu().numpy()), expected)
+
+    table = runner._embed_weight_dev
+    assert table.is_cuda, "the gather must stay a device-side op (host round trips break capture)"
+    attrs = cp.cuda.runtime.pointerGetAttributes(table.data_ptr())
+    assert int(attrs.hostPointer) == table.data_ptr(), "the table must be host memory mapped into the device space"
+    assert runner._embed_weight.ctypes.data == table.data_ptr(), "the numpy view must alias the mapped buffer, not copy it"

@@ -1382,8 +1382,13 @@ class EmmyGenRunner:
 
         import torch
 
+        from emmy import config as emmy_config
+
         if getattr(self, "_embed_weight_dev", None) is None:
-            self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
+            if emmy_config.gen_embed_host():
+                self._embed_weight, self._embed_weight_dev = self._map_embed_table_to_host()
+            else:
+                self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
         self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         if self._moe is not None:
             # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
@@ -1451,6 +1456,50 @@ class EmmyGenRunner:
                                 p.arrays[name] = cp.empty(0, dtype=p.arrays[name].dtype)
                     cp.get_default_memory_pool().free_all_blocks()
         self._dev_ready = True
+
+    def _map_embed_table_to_host(self):
+        """Move the token-embedding table into **mapped host memory** and return
+        ``(numpy view, torch CUDA view)`` of that one allocation (``EMMY_GEN_EMBED_HOST``).
+
+        The allocation is ``cudaHostAlloc``-mapped, so under unified virtual addressing its host
+        address is also a valid device address: a gather kernel indexes it exactly as it indexes
+        device memory, reading the rows over PCIe. That keeps ``embed_device`` a plain device-side
+        op with no host round trip, so the whole-step decode capture still records it — the reason
+        this is worth doing rather than gathering on the host.
+
+        The table then costs no VRAM at all. On a card the weights already fill, that is straight
+        KV-cache budget: at a 151552-row fp16 vocab it is 1.156 GiB, and an untied checkpoint
+        shares it with nothing. The price is PCIe latency per embedded token (~2 bytes x hidden
+        per row), paid on every step in proportion to its width.
+
+        Host memory does not double: the numpy table the oracle / prefill fallback gathers from is
+        rebound to a view of the SAME buffer, and the original host array is dropped."""
+        import ctypes  # noqa: PLC0415
+
+        import cupy as cp  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+        import torch  # noqa: PLC0415
+
+        table = np.ascontiguousarray(self._embed_weight)
+        rt = cp.cuda.runtime
+        pinned = cp.cuda.PinnedMemory(table.nbytes, flags=rt.hostAllocMapped | rt.hostAllocPortable)
+        host = np.frombuffer((ctypes.c_char * table.nbytes).from_address(pinned.ptr), dtype=table.dtype).reshape(table.shape)
+        host[...] = table
+        # UVA makes the host address the device address; assert it rather than trust it — a
+        # platform where it does not hold would hand the gather kernel an unmapped pointer.
+        attrs = rt.pointerGetAttributes(pinned.ptr)
+        if int(attrs.devicePointer) != int(pinned.ptr):
+            raise RuntimeError("EMMY_GEN_EMBED_HOST: this platform does not map host allocations into the device address space")
+        mem = cp.cuda.UnownedMemory(pinned.ptr, table.nbytes, pinned)
+        arr = cp.ndarray(table.shape, dtype=table.dtype, memptr=cp.cuda.MemoryPointer(mem, 0))
+        self._embed_pinned = (pinned, arr)  # keepalive: the views below do not own the allocation
+        logger.info(
+            "[gen_runner] embed table (%d x %d, %.3f GiB) mapped in host memory — 0 device bytes",
+            table.shape[0],
+            table.shape[1],
+            table.nbytes / 2**30,
+        )
+        return host, torch.from_dlpack(arr)
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties

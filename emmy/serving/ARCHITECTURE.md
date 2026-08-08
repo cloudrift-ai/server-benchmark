@@ -331,7 +331,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   looking healthy.
   On a tied checkpoint `load_weights` then hands the loaded head to the runner
   (`adopt_embed_table`) so the runner drops its own ~2 GiB folded device copy and gathers from the SHARED raw table
-  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled). Either way it ends by
+  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled). An **untied**
+  checkpoint has no table to share, and `EMMY_GEN_EMBED_HOST` is the reclaim for that case — see "The vocab table"
+  under the device-footprint section. Either way it ends by
   releasing both allocators' free blocks to the driver (`reclaim_device_memory` — torch's `empty_cache` plus cupy's
   `free_all_blocks`) **before vLLM's KV-cache profiling**: vLLM budgets `util × total − currently-used` off the
   driver's accounting and cannot see that a cached block is free. The reclaimed memory becomes KV blocks
@@ -549,6 +551,45 @@ program set every time a lane is retuned. **`EMMY_GEN_PREFILL_CAPACITY` pins it 
 rider headroom) to match. Reach for it when the arena is competing with the KV cache rather than with
 nothing: a model that fills the card with weights pays for every token of capacity it never serves.
 
+### The vocab table, and `EMMY_GEN_EMBED_HOST`
+
+The runner's other large resident is the token-embedding table, and it does not scale with the serving
+shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a modern vocab (GLM-4.5-Air:
+151552 x 4096 fp16 = **1.156 GiB**). On a **tied** checkpoint it costs nothing beyond the head, because
+`adopt_embed_table` shares the one tensor. An **untied** checkpoint has no such route: the table is a
+second full-size resident, and on a card the weights already fill it is competing directly with the KV
+cache.
+
+**`EMMY_GEN_EMBED_HOST=1` moves it off the card entirely.** The table is allocated with
+`cudaHostAlloc`-mapped host memory, whose address is a valid *device* address under unified virtual
+addressing, so `embed_device` stays a plain device-side gather that reads the rows over PCIe. That is
+the whole reason to prefer it to a host gather: no host round trip, so whole-step decode capture still
+records the lookup. Host memory does not double either — the numpy table the oracle and the prefill
+fallback read is rebound to a view of the same buffer.
+
+The price is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with a step's
+width and with the link. Measured on a 5090 sitting on a **gen5 x1** link (3.6 GB/s — a slot-limited
+box, not the format's fault): 22.6 us for an 8-token decode step and 1.25 ms for a 512-token prefill
+chunk, against a device-resident gather's 3.4 us flat. On that model those are 0.02 % of TPOT and 0.1 %
+of TTFT; a x16 link would divide them again. It is still strictly a *reclaim* knob — leave it off
+wherever the card has room, because the device gather is two orders of magnitude faster and free.
+
+### The attention workspace is invisible to the KV budget
+
+One more resident does not appear in vLLM's KV sizing at all, and on a card with no slack it decides whether the
+server survives its first concurrent step. FlashInfer's `float_workspace_buffer`
+(`VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE`, default **394 MiB**) is allocated **lazily, on the first attention
+plan** — after the profiling pass, so vLLM
+budgets the KV cache as if it did not exist and then the allocation comes out of whatever is physically left.
+
+Two failure modes follow, both measured on GLM-4.5-Air. Sized too small, the boot succeeds and the *engine dies
+mid-benchmark*: at 16 MiB the batch-1 lane serves normally and the first `c >= 4` step raises
+`Buffer overflow ... batch_prefill_tmp_v` and kills the EngineCore. Sized at the default with the KV pool already
+claiming the free memory, the OOM lands on the workspace itself. So on a weight-saturated card the workspace has to
+be budgeted **by hand** — pick a size the deployment's widest step actually needs, then lower
+`--gpu-memory-utilization` until the physical leftover covers it. It is a serving-shape constant like the arena
+width, and a baked image must pin it.
+
 ### Reclaiming footprint re-opens the capture-ladder question
 
 These two knobs are coupled, and the coupling is a trap for whoever does the footprint work.
@@ -564,6 +605,11 @@ that path costs roughly **2x** the static twin per step.
 the widths it newly makes reachable**, and raise the decode bucket (to a width with tuned kernels) or fix
 the ladder in the same change. Otherwise the reward for fixing the memory problem is silently losing the
 static decode twin.
+
+Re-check it, but do not assume it is the dominant cost once found. On GLM-4.5-Air a 1.156 GiB reclaim
+took admission from 1 stream to 14 and duly opened this hole (bucket 8, steps of 9–32 rows); rebuilding
+at bucket 32 closed it and bought **6 %** of c=16 TPOT, while the step cost stayed proportional to the
+number of DISTINCT experts the step routes to — the per-expert launch chain, not the tier.
 
 This applies with particular force to **baked serving images**, which may ship a hand-written
 `cudagraph_capture_sizes` list in their entrypoint rather than going through `_gen_graph_args`. Such a

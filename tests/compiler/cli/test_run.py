@@ -50,16 +50,16 @@ def test_run_input_and_code_mutually_exclusive(run_cli):
 
 
 def test_pinned_knobs_sets_and_restores_env(monkeypatch):
-    """``_pinned_knobs`` pins ``EMMY_<KNOB>`` for the block, then restores the
+    """``pinned_knobs`` pins ``EMMY_<KNOB>`` for the block, then restores the
     prior environment — removing keys that were unset, restoring preexisting ones
     (the golden-bench A/B relies on this to compile a pinned variant cleanly)."""
     import os
 
-    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     monkeypatch.delenv("EMMY_TILE", raising=False)
     monkeypatch.setenv("EMMY_STAGE", "preexisting")
-    with _pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
+    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
         assert os.environ["EMMY_TILE"] == "f2x4"
         assert os.environ["EMMY_STAGE"] == "d2/cp"
         assert os.environ["EMMY_WARP_SPECIALIZE"] == "False"
@@ -322,9 +322,9 @@ def test_unreproducible_pin_flag(monkeypatch):
     knobs, so absence ≠ dropped), while an unregistered family flags as a pin typo.
     A synthetic registry (mirroring space.py's TILE/STAGE/FAST_EXP declarations)
     keeps the test independent of module-load order."""
-    from emmy.commands.run import _unreproducible_pin_flag
     from emmy.compiler.pipeline import knob as knob_mod
     from emmy.compiler.pipeline.knob import Knob, KnobType
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     monkeypatch.setattr(
         knob_mod,
@@ -337,37 +337,37 @@ def test_unreproducible_pin_flag(monkeypatch):
     )
 
     # Honored pin — realized exactly.
-    assert _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
     # Silently swapped pin — the greedy-vs-greedy case the gate exists for.
-    flag = _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
+    flag = unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
     assert "unreproducible pin" in flag and "TILE=w2x1/f1x8" in flag and "w4x2/f2x4" in flag
     # A REGISTERED family with no stamp on any kernel is ungateable, not a miss: on a
     # partially re-lowered --ir reload the stamp may have been serialized away (a full
     # compile OFF-fills declared knobs, so a dropped pin still shows as (off)/conflict).
-    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
     # An UNREGISTERED family with no stamp is a typo in the pin — flagged.
-    assert "(unset)" in _unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
+    assert "(unset)" in unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
     # Multi-kernel lowering (split main + finalize): honored on the second kernel.
-    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
+    assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
     # Bare pin vs single-axis @-keyed realization.
-    assert _unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@d": "f2x2"}]) is None
+    assert unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@d": "f2x2"}]) is None
     # Bare pin vs a MULTI-axis realization (flash stamps two TILE@ keys — no collapse).
-    assert _unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
     # An @-keyed pin whose axis the re-lowering renamed: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
-    flag = _unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
+    flag = unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
     assert "TILE@d2=w2x1/f1x8" in flag and "(unset)" not in flag
     # Registry-canonical value compare (bool knob pinned via the string grammar).
-    assert _unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
+    assert unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
     # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
     # sibling never pollutes the diagnostic...
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
-    assert "realized (off)" in _unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
+    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
 
 
 def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):

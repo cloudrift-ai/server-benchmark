@@ -15,12 +15,12 @@ def test_stage_pin_does_not_bypass_keyed_tile_pins():
 
     torch = pytest.importorskip("torch")  # noqa: F841
 
-    from emmy.commands.run import _pinned_knobs
     from emmy.commands.trace import trace_inline_code
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
     from emmy.compiler.pipeline.fork import Fork
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     d = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,128,64,dtype=torch.float16), "
@@ -40,7 +40,7 @@ def test_stage_pin_does_not_bypass_keyed_tile_pins():
             o = o.expand()[0]
         return o
 
-    with _pinned_knobs(pins):
+    with pinned_knobs(pins):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context(compute_capability=(8, 9))).resolve(g, decide)
     stamped = next(k for _, n in out.nodes.items() if (k := getattr(n.op, "knobs", None)) and "TILE@dd" in k)
     # F1: the stamp is the SITE spelling; the pin's worker half lands in the ONE WORK entry.

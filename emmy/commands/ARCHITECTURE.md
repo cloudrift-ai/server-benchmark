@@ -100,13 +100,48 @@ async def _handle_foo(args):
     await ...
 ```
 
-The compiler commands (`compile`, `run`, and `tune`) share a model-adapter selector. `causal-lm` is the default and
+The compiler commands (`trace`, `compile`, `run`, and `tune`) share the same input loader and model-adapter selector.
+They accept a Hugging Face model, pre-traced JSON IR, or inline `--code`; `causal-lm` is the default and
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. A quantized checkpoint (config.json
-`quantization_config`, e.g. an FP8 release) resolves to its bf16 architecture twin for tracing; the loader
-dequantizes the real weights at bind time (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+and Emmy always rebuild the same module and example inputs. Dynamic-shape parsing, quantized architecture twins and
+their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
+identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+
+The trace/tune handlers delegate working-golden inventory construction, target reconstruction, proposal measurement,
+and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by
+`run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
+handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
+
+`emmy trace MODEL --golden-output PATH` additionally lowers the traced graph through the post-fusion Loop IR and
+writes a working golden YAML inventory without constructing a backend or measuring a kernel. Its target grouping
+matches the two-level tuner's fold-aware inner search: a flash-attention score producer is absorbed into its consumer
+rather than emitted as a second target, and the consumer reproducer carries both nodes' frontend provenance. Remaining
+kernels are deduplicated by structural cache key and point to relative `<stem>.kernels/*.torch.json` reproducers that
+`emmy tune` can load directly. These are working-only `kernel: traced` entries: tracing records neither knobs nor
+timings and refuses to replace either an existing YAML or its sidecar directory. A golden-only invocation writes no
+auto-named Graph JSON; explicit `--output` requests both artifacts, while ordinary trace without a golden keeps its
+auto-named Graph output.
+
+`emmy tune --golden-file PATH` consumes that working YAML directly. Recognized specialized entries reconstruct their
+snippet; `kernel: traced` entries load the relative reproducer. Rows for the same target are grouped as candidate knob
+sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
+is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
+remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize
+several CudaOps; conflicting multi-CudaOp knob rows are reported as ambiguous instead of being assigned an invented
+winner. Proposal feedback is written immediately after measurement, before MCTS, so an interruption preserves it.
+The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
+the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
+flags and never writes the trusted
+`emmy_us` / `cublas_us` fields. With multiple homogeneous `--devices`, independent working-file targets share one
+event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
+When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
+rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
+rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+
+For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
+knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
 
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU

@@ -4,113 +4,59 @@ import ast
 import json
 import logging
 import sys
+from pathlib import Path
+
+from emmy.compiler.pipeline.search.working_golden import preflight_trace_inventory, write_trace_inventory
 
 logger = logging.getLogger(__name__)
 
 
 def register_trace_command(subparsers):
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+    from emmy.commands.compile import add_input_args  # noqa: PLC0415
 
     parser = subparsers.add_parser(
         "trace",
-        help="Trace a transformer layer or inline torch module to Graph IR",
+        help="Trace a model, pre-traced IR, or inline torch module to Graph IR",
     )
+    add_input_args(parser, include_dump_dir=False)
+    parser.add_argument("--output", "-o", help="Output JSON path (default: auto-generated)")
     parser.add_argument(
-        "model",
-        nargs="?",
-        help="HuggingFace model ID (e.g., meta-llama/Llama-3.1-8B). Mutually exclusive with --code.",
-    )
-    parser.add_argument(
-        "--code",
+        "--golden-output",
+        metavar="PATH",
         help=(
-            "Inline Python expression whose last statement is a call. "
-            "The callable may be an nn.Module (e.g. 'nn.RMSNorm(2048)(torch.randn(1,32,2048))') "
-            "or a torch function (e.g. 'F.silu(torch.randn(1,32,2048))', "
-            "'torch.matmul(torch.randn(4,3), torch.randn(3,2))'). "
-            "Call args are used as example inputs. Mutually exclusive with the positional model ID."
+            "Write a working golden YAML skeleton plus one relative .torch.json reproducer per "
+            "distinct post-fusion kernel. The skeleton contains no knobs or measurements and "
+            "refuses to replace an existing YAML or sidecar directory."
         ),
     )
-    parser.add_argument(
-        "--layer",
-        type=int,
-        default=None,
-        help="Layer index to trace. Omit to trace the whole model (input_ids -> logits).",
-    )
-    parser.add_argument(
-        "--seq-len",
-        type=int,
-        default=DEFAULT_SEQ_HINT,
-        help="Sequence length for the example input (default: 512, matching ``DEFAULT_SEQ_HINT``).",
-    )
-    parser.add_argument("--output", "-o", help="Output JSON path (default: auto-generated)")
     parser.set_defaults(func=handle_trace)
 
 
 def handle_trace(args):
-    if args.code and args.model:
-        logger.error("--code and positional model are mutually exclusive")
+    if args.code and args.input:
+        logger.error("--code and positional input are mutually exclusive")
         sys.exit(2)
-    if not args.code and not args.model:
-        logger.error("either a positional model ID or --code is required")
+    if not args.code and not args.input:
+        logger.error("either a positional model ID / IR file or --code is required")
         sys.exit(2)
+    if args.golden_output:
+        try:
+            preflight_trace_inventory(args.golden_output, graph_output=args.output)
+        except FileExistsError as e:
+            logger.error(str(e))
+            sys.exit(2)
 
-    if args.code:
-        _handle_trace_code(args)
-    else:
-        _handle_trace_model(args)
+    from emmy.commands.compile import load_or_trace  # noqa: PLC0415
+    from emmy.compiler.target import apply_target_arg  # noqa: PLC0415
 
-
-def _handle_trace_model(args):
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM
-    except ImportError:
-        logger.error("torch and transformers are required: pip install torch transformers")
-        sys.exit(1)
-
-    from emmy.compiler.trace.torch import trace_module
-
-    logger.info("Loading %s...", args.model)
-    dtype = torch.float32 if args.layer is None else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
-    model.eval()
-    seq_len = args.seq_len
-
-    if args.layer is None:
-        from emmy.compiler.trace.huggingface import build_full_model_wrapper
-
-        logger.info("Tracing full model (seq_len=%d)...", seq_len)
-        wrapper = build_full_model_wrapper(model, seq_len, dtype)
-        input_ids = torch.zeros((1, seq_len), dtype=torch.long)
-        graph = trace_module(wrapper, (input_ids,))
-        basename = f"{args.model.replace('/', '-').lower()}-full-s{seq_len}"
-    else:
-        layers = model.model.layers
-        if args.layer >= len(layers):
-            logger.error("Layer %d not found (model has %d layers)", args.layer, len(layers))
-            sys.exit(1)
-
-        block = layers[args.layer]
-        logger.info("Tracing layer %d...", args.layer)
-
-        hidden_size = model.config.hidden_size
-        x = torch.randn(1, seq_len, hidden_size, dtype=dtype)
-        position_ids = torch.arange(seq_len).unsqueeze(0)
-        cos, sin = model.model.rotary_emb(x, position_ids)
-
-        graph = trace_module(
-            block,
-            (x,),
-            kwargs={"position_embeddings": (cos, sin)},
-        )
-        basename = f"{args.model.replace('/', '-').lower()}-layer{args.layer}"
-
+    apply_target_arg(args)
+    graph, basename, _ = load_or_trace(args)
     _save(graph, args, default_basename=basename)
-
-
-def _handle_trace_code(args):
-    graph, slug, _ = graph_from_code(args.code)
-    _save(graph, args, default_basename=slug)
+    if args.golden_output:
+        input_path = Path(args.input) if args.input else None
+        model = args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
+        result = write_trace_inventory(graph, args.golden_output, graph_output=args.output, model=model)
+        logger.info("Saved working golden: %s (%d distinct kernel(s))", result.path, result.target_count)
 
 
 def graph_from_code(code: str, dynamic_shapes: dict | None = None):
@@ -311,6 +257,11 @@ def _save(graph, args, default_basename: str) -> None:
         len(graph.nodes),
         ", ".join(f"{v} {k}" for k, v in sorted(ops_count.items())),
     )
+
+    # A working-golden-only invocation should not leave a second, auto-named
+    # Graph artifact. An explicit --output still requests both artifacts.
+    if args.output is None and args.golden_output:
+        return
 
     output_path = args.output or f"{default_basename}.json"
     with open(output_path, "w") as f:

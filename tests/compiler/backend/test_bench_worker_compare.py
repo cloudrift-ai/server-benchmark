@@ -21,6 +21,30 @@ import time
 from ..conftest import requires_cuda
 
 
+def test_oneshot_compare_worker_uses_selected_device(monkeypatch) -> None:
+    from emmy.compiler.backend.cuda import program
+
+    seen = []
+
+    class Worker:
+        def __init__(self, *, device_id=None):
+            seen.append(("init", device_id))
+
+        async def run_job(self, request, *, wall_timeout_s):
+            seen.append(("run", request, wall_timeout_s))
+            return {"ok": True}
+
+        async def aclose(self):
+            seen.append(("close",))
+
+    monkeypatch.setattr(program, "_AsyncBenchWorker", Worker)
+
+    result = asyncio.run(program._run_job_oneshot({"job": "compare"}, wall_timeout_s=5.0, device_id=3))
+
+    assert result == {"ok": True}
+    assert seen == [("init", 3), ("run", {"job": "compare"}, 5.0), ("close",)]
+
+
 @requires_cuda
 def test_compare_in_worker_returns_torch_and_emmy() -> None:
     from emmy.commands.run import _detect_stage, _passes_after_stage

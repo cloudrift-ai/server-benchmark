@@ -22,19 +22,21 @@ def _namespace(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_compile_run_and_tune_expose_adapter_flag():
-    """All three model compiler commands accept the same adapter choices."""
+def test_compiler_commands_expose_adapter_flag():
+    """Every model compiler command accepts the same adapter choices."""
     from emmy.commands.compile import register_compile_command
     from emmy.commands.run import register_run_command
+    from emmy.commands.trace import register_trace_command
     from emmy.commands.tune import register_tune_command
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     register_compile_command(subparsers)
     register_run_command(subparsers)
+    register_trace_command(subparsers)
     register_tune_command(subparsers)
 
-    for command in ("compile", "run", "tune"):
+    for command in ("trace", "compile", "run", "tune"):
         args = parser.parse_args([command, "facebook/DiT-XL-2-256", "--adapter", "dit", "--layer", "0"])
         assert args.adapter == "dit"
         assert args.layer == 0
@@ -51,7 +53,7 @@ def test_default_adapter_remains_causal_lm():
     assert args.adapter == "causal-lm"
 
 
-@pytest.mark.parametrize("command", ["compile", "run", "tune"])
+@pytest.mark.parametrize("command", ["trace", "compile", "run", "tune"])
 def test_dit_cli_requires_layer_before_loading(command, run_cli):
     """Every public command rejects the missing layer before touching CUDA or the Hub."""
     rc, stdout, stderr = run_cli(command, "facebook/DiT-XL-2-256", "--adapter", "dit")

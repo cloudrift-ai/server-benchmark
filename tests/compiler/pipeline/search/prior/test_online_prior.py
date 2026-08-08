@@ -29,6 +29,17 @@ def _leaf_stats(us: float, *, variance: float = 0.5, n_samples: int = 7) -> Perf
     return PerfStats(median=us, min=us, max=us, mean=us, variance=variance, n_samples=n_samples)
 
 
+def test_best_realized_keeps_direct_knobs_and_cost_paired() -> None:
+    search = TuningSearch()
+    slow = _node({"TILE": "slow"}, search.tree.root)
+    fast = _node({"TILE": "fast"}, search.tree.root)
+    search.tree.root.children = [slow, fast]
+    slow.realized_knobs, slow.bench_stats, slow.bench_status, slow.realized_cuda_ops = {"TILE": "slow"}, _leaf_stats(8.0), "ok", 1
+    fast.realized_knobs, fast.bench_stats, fast.bench_status, fast.realized_cuda_ops = {"TILE": "fast"}, _leaf_stats(5.0), "ok", 2
+
+    assert search.best_realized() == ({"TILE": "fast"}, 5.0, 2)
+
+
 def _fit(rows, **kw):
     """A OnlinePrior fit on ``rows`` (fast: few iterations)."""
     p = OnlinePrior(seed=0, iterations=40, min_rows=3, **kw)
@@ -458,6 +469,23 @@ def test_collect_node_records_within_batch_duplicate_key_max_visits():
     assert r.visits == 1  # max, not 1 + 1
     assert r.is_leaf and r.n_samples == 7  # the leaf row's stats survived
     assert r.parent_key is None and r.depth == 1  # first-seen (branch) position
+
+
+def test_tuning_search_measurement_budget_ignores_cache_hits():
+    search = TuningSearch(max_measurements=2)
+
+    search.note_bench(measured=False)
+    assert search.measurements == 0
+    assert not search._should_stop()
+
+    search.note_bench(measured=True)
+    assert search.measurements == 1
+    assert not search._should_stop()
+
+    search.note_bench(measured=True)
+    assert search.measurements == 2
+    assert search._should_stop()
+    assert search.stop_reason.startswith("max_measurements (2 reached")
 
 
 def test_collect_node_records_emits_o3_regime_row():

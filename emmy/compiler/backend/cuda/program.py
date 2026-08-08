@@ -1844,13 +1844,14 @@ async def benchmark_compare_worker_async(
     }
 
 
-async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float) -> dict:
-    """Spawn a fresh (unpinned) ``_AsyncBenchWorker``, run one job, tear it down.
+async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float, device_id: int | None = None) -> dict:
+    """Spawn a fresh ``_AsyncBenchWorker``, run one job, tear it down.
     The transport for the synchronous one-shot bridges below — they each wrap this
     in ``asyncio.run`` (the worker's streams bind to the loop, so it can't persist
     across ``asyncio.run`` calls; the per-call ~0.2 s spawn is negligible against a
-    deployable ``--bench``)."""
-    worker = _AsyncBenchWorker()
+    deployable ``--bench``). ``device_id`` keeps the comparison on the selected
+    tune GPU instead of silently falling back to ordinal 0."""
+    worker = _AsyncBenchWorker(device_id=device_id)
     try:
         return await worker.run_job(request_obj, wall_timeout_s=wall_timeout_s)
     finally:
@@ -1867,6 +1868,7 @@ async def benchmark_compare_isolated_async(
     iters: int,
     seed: int,
     nvcc_flags: str | None = None,
+    device_id: int | None = None,
 ) -> tuple:
     """Run the deployable eager / torch.compile / emmy comparison in the
     SIGKILL-able worker, awaiting a fresh one-shot :class:`_AsyncBenchWorker`
@@ -1899,5 +1901,6 @@ async def benchmark_compare_isolated_async(
             "seed": seed,
         },
         wall_timeout_s=wall_timeout_s,
+        device_id=device_id,
     )
     return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False)

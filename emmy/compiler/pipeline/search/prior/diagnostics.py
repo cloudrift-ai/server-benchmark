@@ -262,7 +262,7 @@ def report(prior) -> str:
     covered, total = _golden_coverage(groups)
     lines.append(f"[prior] golden coverage: {covered}/{total} golden matmul shapes have data in the dataset")
     if covered == 0:
-        lines.append("  none yet — tune the golden shapes (`emmy tune --golden NAME`) to validate against them")
+        lines.append("  none yet — tune a working golden file (`emmy tune --golden-file PATH`) to validate against them")
     return "\n".join(lines)
 
 

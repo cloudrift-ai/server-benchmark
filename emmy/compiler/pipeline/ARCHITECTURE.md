@@ -74,7 +74,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden configs** | per-GPU YAML files under `search/goldens/`, checked into the repo | recorded by hand from `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1); `emmy fit` trains the offline prior on them; `tune --dataset golden`; `emmy eval golden` |
+| **Golden configs** | per-GPU YAML files under `search/goldens/`, checked into the repo | promoted by hand from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1); `emmy fit` trains the offline prior on them; `emmy eval golden` |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — one row per benched kernel, at whatever flags the sweep ran | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
@@ -784,13 +784,19 @@ trajectory; re-running lets it reach and bench the genuinely-new variants the im
 rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that re-exploration and was removed —
 HISTORY.md: "Retired designs".)
 
-### Per-kernel GPU parallelism (`--gpus N` / `--devices 0,1,2`)
+### Per-kernel and working-target GPU parallelism (`--gpus N` / `--devices 0,1,2`)
 
 Because the inner search tunes each unique kernel independently, the per-op loop fans out across GPUs. The whole tuner
 is async-only: `run_two_level_tune` `await`s `_inner_reward_async` per outer terminal, which runs one coroutine per
 unique kernel over an `asyncio.Queue` of `len(pool)` device-pinned `CudaBackend`s — each pops a backend, drives its
 op's whole inner search via `Pipeline.tune_async`, then returns the backend. So `len(pool)` benches run at once, one
 per GPU.
+
+A `--golden-file` sweep adds a second safe unit of parallelism: independent targets are driven concurrently over the
+same backend queue after their process-global proposal pins have been measured in file order. All target tasks share
+one DB and one prior instance on the same event-loop thread; they do not create independent checkpoints. This keeps
+multiple GPUs busy even when every traced reproducer contains only one post-fusion kernel. A requested dump root gets
+one indexed target subdirectory so concurrent compiler artifacts never overwrite each other.
 
 - **True single-thread asyncio**: every Python statement (lowering, DB writes, prior `add_rows` / `maybe_refit` /
   `checkpoint`) runs on the one event-loop thread and yields only at the bench `await`, so the shared `db` / `prior`
@@ -803,6 +809,33 @@ per GPU.
 - A backend pins its async worker to a physical GPU via the child spawn env (`CUDA_VISIBLE_DEVICES`, plus a per-device
   `EMMY_GPU_LOCK` suffix), never mutating the parent `os.environ`.
 - Parallelism is bounded by the unique-kernel count; devices must be homogeneous.
+
+### Working-golden proposals and measured-candidate budgets
+
+`search/working_golden.py` owns the mutable working-file lifecycle: fold-aware trace inventory generation, safe
+sidecar writes, target/candidate reconstruction, exact proposal measurement, and atomic ranking/winner persistence.
+`search/pins.py` owns the scoped knob environment and realized-pin validation shared with `run`; neither reusable
+service belongs to the CLI layer.
+
+For `tune --golden-file`, every entry with an explicit `knobs` mapping (including `{}` for a forkless anchor) is
+compiled with scoped authoritative pins and measured through
+the normal isolated benchmark and DB persistence path before the unpinned MCTS. A realized-vs-requested check marks an
+unoffered proposal `pin_unmatched` instead of attributing the planner's fallback to the proposed row. Successful seed
+rows feed the shared prior immediately, so the following MCTS can use their evidence. Ranking feedback is flushed to
+the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
+only when their union is conflict-free; otherwise the ranking is explicitly ambiguous.
+
+`--max-candidates N` is a hard per-kernel budget. Each supplied proposal reserves one slot even if its measurement is
+already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals consistently. MCTS receives the remaining
+slots and counts only terminals that reached a live backend; cached replay observations update the tree without
+spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
+and the final tune winner is annotated or appended as another proposal only when one directly searched observation
+provides both its knob row and cost. A later greedy deploy replay can select different golden/DB evidence and is never
+paired with that search reward. These `-O1` ranking numbers never populate
+`emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
+
+Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
+proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.
 
 ### Search dynamics (the MCTS itself)
 
@@ -1084,21 +1117,32 @@ longer deploys, and the checks that keep the A/B honest.
 `golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / norm_linear / mlp_geglu /
 rope / embedding / pointwise subclasses — the `OfflinePrior`'s ground truth. The `rope` / `embedding` kinds are
 fork-nothing memory-bound anchors: they record empty knobs and can only serve as `eval golden` regression checks (no
-fork means nothing to warm at deploy). Every kind carries `shape_key()` / `snippet()` / `dtype`, so
-`tune --dataset golden` and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
+fork means nothing to warm at deploy). Every kind carries `shape_key()` / `snippet()` / `dtype`, so the
+`run --bench --golden` A/B covers the reduce / pointwise entries too, not just matmul.
 `NormLinearGoldenConfig` (the fused `rms_norm(x)·nw @ W` computed-A megakernel) and `MlpGeGluGoldenConfig` (its
 multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A kinds — both trace to the single fused
 mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSNorm output via a lambda
 (`(lambda r: gelu(r@Wg)*(r@Wu))(rms_norm(x))`) since a torch expression cannot otherwise share it.
 
-**Latencies are recorded in pairs, or not at all.** A MEASURED entry carries `emmy_us` and `cublas_us` (both > 0)
-— the ordinary case, and the only one `ratio` / `golden` / the A/B gates below mean anything for. An UNMEASURED entry
-carries both as exactly `0.0`: a verified-deployable SCHEDULE with no timing, for a shape whose winner is known but
-whose µs were never recorded. The deploy tier accepts it and ranks it LAST (`_golden_evidence_index` sorts on
-`emmy_us or inf`), so it decides a shape no measured entry covers and yields the moment one is recorded. One-sided is
-a recording bug and the well-formedness gate rejects it (`ratio` would silently read 0 or divide by a missing
-baseline). Prefer measuring; an unmeasured entry is how a hardcoded deploy default gets out of the scheduler and into
-the corpus without inventing numbers for it.
+**One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** A working file
+may contain an inventory entry (no knobs or timings), a proposed candidate (knobs but no timings), or a verified
+candidate (knobs plus paired positive `emmy_us` / `cublas_us`). `load_golden_file` and `dump_golden_file` validate
+this format without mutating the parsed entries; dumping refuses to replace an existing file unless its caller opts
+in explicitly. A traced-kernel inventory uses the working-only `kernel: traced` discriminator and a non-empty
+`reproducer` path resolved relative to the YAML file; absolute paths and parent traversal are rejected. Repository
+promotion is stricter: every entry must select a recognized golden kind and carry an explicit knobs mapping
+(possibly empty for a verified forkless anchor) plus both positive finite timings. Missing, one-sided, zero, NaN,
+and infinite measurements are rejected before they can become trusted deploy evidence. A working entry may also
+carry an opaque `ranking` mapping
+for fast-compile feedback (`status`, `latency_us`, compile flags, and measured knobs); it does not change the entry's
+state, is stripped before specialized-config instantiation, and is rejected by repository validation because only
+deployable-regime timings belong in trusted goldens.
+
+Three `facebook/DiT-XL-2-256` RTX 4080 schedules predate that rule: they were moved from a hardcoded deploy table
+without recorded timings. They remain deployable through the `REPOSITORY` loader's exact full-identity compatibility
+set and are marked `provisional: true`; the promotion validator rejects them and admits no new provisional identity.
+The golden evidence tier continues to rank those zero-timing seeds last (`emmy_us or inf`) until they can be re-measured
+on an RTX 4080. This is migration debt, not a supported way to add a golden.
 
 **A matmul golden's layout must match the fork it is meant to decide.** `MatmulGoldenConfig.trans_b` spells the
 serving Linear layout — B given `(N, K)`, contracted as `x @ w.T` via an `F.linear` snippet. The traced contraction
@@ -1140,7 +1184,8 @@ bump that changes the forward changes the twins exactly as it changes serving, a
 **The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every
 forking golden entry it re-compiles the shape's OWN snippet un-pinned (deployable regime, the golden file's own card —
 the enumeration is static given shape+context, so no GPU bench) and checks the recorded knobs against the offered
-candidates. An entry only a pin can realize (`EMMY_KNOBS` / `tune --golden` benches it, the enumeration never offers
+candidates. An entry only a pin can realize (`EMMY_KNOBS` / working-file proposal measurement benches it, the
+enumeration never offers
 it) reports **PIN-ONLY** — legal as a documented lever while an OFFERED sibling floors the shape (the 4090
 `attention.hd512.s4096` split-KV row beside its serial deploy-floor sibling); a shape whose entries are ALL pin-only
 reports **FALL-THROUGH** and exits 1: a deploy logs "no offered candidate realizes any of them" and falls past the
@@ -1151,14 +1196,11 @@ downstream accuracy check before the floor-sibling discipline. Fast-math entries
 passes it and `--in-model` is the authority there, while the s4096 split-KV row fails even standalone, which is what
 this audit catches at record time.
 
-**Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
-(`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union
-would tune another card's config under the live card's name. For `tune` the scoping is strict: a live card with no
-recorded goldens exits with an error instead of inheriting the union fallback — golden tuning targets the live card's
-own recordings only, so an uncovered card is fixed by recording goldens for it, not papered over
-(`live_recorded_goldens` is the no-fallback probe that tells an uncovered card from an off-GPU run). `run` / `compile`
-`--golden` keep the union fallback on an uncovered card (the seed / transfer flow — the pinned config re-benches
-live), and off-GPU the full union is returned (pure-logic tests).
+**Live-GPU scoping.** `run` / `compile --golden NAME` prefer the **live** card's goldens
+(`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can
+select another card's spelling. They keep the union fallback on an uncovered card (the seed / transfer flow — the
+pinned config re-benches live), and off-GPU the full union is returned (pure-logic tests). Tuning instead consumes an
+explicit working file whose GPU header is checked against the selected tune device.
 
 **The A/B carries three integrity gates:**
 
@@ -1413,9 +1455,8 @@ The SKU-exact `facebook/DiT-XL-2-256` deploy overrides that used to sit beside i
 table, a flash-winner matcher and a `b128` LayerNorm `REDUCE` narrowing, all string-matched on `NVIDIA GeForce RTX
 4080`. A recorded winner belongs in the golden corpus, which the deploy evidence tier already consults ahead of the
 prior, and which is versioned, auditable through `emmy eval golden`, and covered by the drift gate. What could be
-expressed as a golden moved to `goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, schedule-only — see the unmeasured-entry
-convention under GOLDEN below): the two plain-A projections as `matmul` entries and the block's SDPA as an
-`attention` entry.
+expressed as a golden moved to `goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, the three exact provisional entries
+described in Part 7): the two plain-A projections as `matmul` entries and the block's SDPA as an `attention` entry.
 
 What could NOT be expressed was deleted rather than mis-filed, both times for the same reason: **no golden kind
 describes a LayerNorm**. The DiT prologue is AdaLayerNorm-Zero, while every fused kind (`norm_linear` / `mlp_geglu`)

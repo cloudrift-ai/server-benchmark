@@ -203,8 +203,32 @@ class CompilerDump:
             header.append(f"#   {oid} ({node_prov[oid]['kind']}): {have}/{total} — {'full' if full else 'partial'}")
         self._write_text(f"{prefix}.kernels/{safe}.torch.txt", "\n".join(header) + "\n\n" + sub.pretty_print())
 
+    @classmethod
+    def torch_reproducer_graph(cls, input_graph: Graph, node, *, absorbed=()) -> Graph | None:
+        """Return the standalone frontend graph implemented by ``node``.
+
+        This is the in-memory form of the ``<kernel>.torch.json`` artifact written by
+        :meth:`_dump_torch_repro`.  Callers that need reproducers without a full compiler
+        dump (notably ``emmy trace --golden-output``) use this seam so provenance slicing
+        has one implementation.  ``None`` means the lowered node carries no frontend
+        provenance. ``absorbed`` carries compute producers which the target's
+        fold-aware lowering consumes (for example, flash attention's score
+        producer), so the reproducer covers the complete tuning target.
+        """
+        from emmy.compiler import provenance  # noqa: PLC0415
+
+        origins = {oid for lowered in (node, *absorbed) for oid in provenance.get(lowered) if oid in input_graph.nodes}
+        return cls._torch_repro_subgraph_from(input_graph, origins) if origins else None
+
     def _torch_repro_subgraph(self, origins: set[str]) -> Graph:
-        """Slice ``_input_graph`` to ``origins`` + their input closure.
+        """Instance form used by the compiler dump after :meth:`dump_input_graph`."""
+        if self._input_graph is None:
+            raise RuntimeError("dump_input_graph must run before slicing a Torch reproducer")
+        return self._torch_repro_subgraph_from(self._input_graph, origins)
+
+    @classmethod
+    def _torch_repro_subgraph_from(cls, src: Graph, origins: set[str]) -> Graph:
+        """Slice ``src`` to ``origins`` + their input closure.
 
         A frontend op feeding an origin but not itself an origin becomes a
         synthetic ``InputOp`` boundary (so the slice is standalone); constants
@@ -218,7 +242,6 @@ class CompilerDump:
         from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
         from emmy.compiler.pipeline.search.slice import topo_order  # noqa: PLC0415
 
-        src = self._input_graph
         keep: set[str] = set(origins)
         synthetic: set[str] = set()
         stack = [inp for oid in origins for inp in src.nodes[oid].inputs]
@@ -230,7 +253,7 @@ class CompilerDump:
                 keep.add(cur)
                 stack.extend(src.nodes[cur].inputs)
                 continue
-            const_chain = self._constant_closure(src, cur)
+            const_chain = cls._constant_closure(src, cur)
             if const_chain is not None:
                 keep |= const_chain
             else:

@@ -1,14 +1,16 @@
 ---
 name: discover-new-models
-description: Use this skill when the user asks "what new models should we try / benchmark", "find / discover new (open) models worth exploring", "scout trending models for our GPUs", "which new models fit B200 / H200 / H100 / Pro6000 / 5090 / 4090", "what's new and worth benchmarking", or otherwise wants a shortlist of newly-released, in-demand open-weight models emmy doesn't support yet, each mapped to the hardware it runs on. Produces a ranked, hardware-bucketed shortlist ready to hand to the `benchmark-new-model` skill. Discovery + popularity come from `scripts/new_models.py` (keyless); hype/news from web search; hardware fit from a VRAM calculation.
-version: 0.1.0
+description: >-
+  Use this skill when the user asks what new models to try or benchmark, wants newly released open models discovered,
+  or wants trending models mapped to suitable GPU hardware. It produces a ranked shortlist ready for the
+  `onboard-model` skill, using keyless discovery data, web search, and a VRAM fit calculation.
 ---
 
 # Discover New Models to Explore
 
 Turn "what new models are worth our GPU hours?" into a concrete, ranked shortlist: newly-released open-weight
 models emmy **doesn't support yet**, filtered to the ones with real demand/hype, each tagged with the GPU
-configs it fits. The output is a hand-off list for the **`benchmark-new-model`** skill — this skill never
+configs it fits. The output is a hand-off list for the **`onboard-model`** skill — this skill never
 deploys or benchmarks anything itself; it researches and recommends.
 
 Everything here is **keyless and read-only**: `scripts/new_models.py` hits public OpenRouter + HuggingFace
@@ -50,7 +52,7 @@ each on HuggingFace, and ranks by HF momentum. Each JSON row in `models[]` carri
 
 | Field | Meaning | Use |
 |---|---|---|
-| `hf_id` | HuggingFace repo id | the model identity; feeds `benchmark-new-model` |
+| `hf_id` | HuggingFace repo id | the model identity; feeds `onboard-model` |
 | `created_at` | HF release date | recency |
 | `downloads` | HF 30-day pulls | adoption (lagging, size-biased toward small models) |
 | `likes` | cumulative HF likes | reputation |
@@ -158,7 +160,7 @@ Flag any model with **no engine support yet** or **no suitable quant** as "watch
 
 ## Step 6 — Hand off
 
-For each (model, hardware) pair the user wants to pursue, offer to invoke **`benchmark-new-model`** — pass the
+For each (model, hardware) pair the user wants to pursue, offer to invoke **`onboard-model`** — pass the
 `hf_id` and the chosen GPU + `gpu_count`. That skill does the real work (engine/image research, recipe, validate,
 benchmark within time caps). Don't reimplement any of it here.
 
@@ -175,6 +177,6 @@ If the user just wanted the survey, stop at the matrix.
   snapshot — lean on HF `trending` + news there.
 - **Don't spam the script.** HF rate-limits bursts; use `--workers 4` and re-run sparingly (transient failures
   land in the script's "COULD NOT VERIFY" bucket — wait and re-run, don't hammer).
-- **Don't deploy or write recipes in this skill.** Discovery only; `benchmark-new-model` owns deployment.
+- **Don't deploy or write recipes in this skill.** Discovery only; `onboard-model` owns deployment.
 - **Don't forget overhead.** The fit table is weights-only; real serving needs ~1.3× for activations + KV, more
   for long context / high concurrency.

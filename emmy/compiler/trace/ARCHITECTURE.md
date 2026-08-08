@@ -141,10 +141,16 @@ shared with CausalLM traces.
 
 ## Entry points
 
+- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile`, `run`, and `tune`, so
+  adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
+- Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
+  `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, groups
+  fold-aware tuning targets, and writes the YAML plus reproducer sidecars. `commands.trace` only validates CLI paths
+  and reports the resulting artifacts.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,
   `trace_module(build_layer_wrapper(block, …), (x,), dynamic_shapes={"x": {1: Dim("seq_len")}})`.
-- Inline expression: `graph_from_code("torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))")` (used by `emmy compile --code` and `emmy trace --code`).
+- Inline expression: `graph_from_code("torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))")` (used by every compiler CLI).
 - DiT block: `trace_dit_model("facebook/DiT-XL-2-256", 0)` (fixed FP16 block workload).
 
 ## Rule

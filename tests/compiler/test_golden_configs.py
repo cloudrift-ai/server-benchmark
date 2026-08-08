@@ -3,7 +3,7 @@
 These are pure-data checks (no GPU): the records load from the per-GPU YAML files,
 the derived ``ratio`` / ``golden`` properties stay consistent, and ``matmul_snippet``
 / ``repro_command`` render the canonical form. The actual latencies are measured on
-a CUDA device via ``emmy tune --golden NAME --bench`` and recorded into the YAML.
+a CUDA device through the deployable golden A/B workflow and recorded into the YAML.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     EmbeddingGoldenConfig,
     GoldenConfig,
+    GoldenEntryState,
+    GoldenFileValidation,
     LinearNormGoldenConfig,
     MatmulGoldenConfig,
     MlpGeGluGoldenConfig,
@@ -28,7 +30,12 @@ from emmy.compiler.pipeline.search.golden import (
     SoftmaxGoldenConfig,
     _live_gpu_key,
     _load_goldens,
+    dump_golden_file,
+    golden_config_from_entry,
+    golden_entry_state,
+    load_golden_file,
     matmul_snippet,
+    validate_golden_file,
 )
 from emmy.gpu import by_name
 
@@ -148,14 +155,12 @@ def test_golden_configs_set_is_well_formed():
             assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
         else:
             assert c.M > 0 and c.N > 0, c.name
-        # Latencies are recorded in PAIRS or not at all. A measured entry carries both; an
-        # UNMEASURED entry (both exactly 0.0) records a verified-deployable SCHEDULE with no timing
-        # — the deploy tier accepts it and ranks it last (``_golden_evidence_index`` sorts on
-        # ``emmy_us or inf``), so it decides a shape no measured entry covers and yields the moment
-        # one is recorded. One-sided is always a recording bug: ``ratio`` would silently read 0 or
-        # divide by a missing baseline.
+        # Repository promotion requires paired positive timings. The only zero/zero rows are the
+        # three explicitly marked RTX 4080 compatibility seeds; no new provisional identity passes
+        # the repository loader.
         measured = (c.emmy_us > 0, c.cublas_us > 0)
         assert measured in ((True, True), (False, False)), f"{c.name}: latencies must be recorded in pairs, got {c.emmy_us}/{c.cublas_us}"
+        assert c.provisional is (measured == (False, False)), c.name
         assert c.emmy_us >= 0 and c.cublas_us >= 0, c.name
         assert c.ratio >= 0.0, c.name
         assert c.golden == (c.ratio >= 0.95), c.name
@@ -205,6 +210,176 @@ def test_goldens_load_from_yaml():
     loaded = _load_goldens()
     assert loaded  # non-empty
     assert len(loaded) == len(GOLDEN_CONFIGS)
+
+
+def _golden_file_entry(**overrides):
+    entry = {
+        "kernel": "matmul",
+        "name": "matmul.test",
+        "M": 16,
+        "N": 32,
+        "K": 64,
+        "dtype": "fp16",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _golden_file_document(*entries):
+    return {
+        "format_version": 1,
+        "gpu_name": "NVIDIA GeForce RTX 4080",
+        "compute_cap": [8, 9],
+        "configs": list(entries),
+    }
+
+
+@pytest.mark.parametrize(
+    ("entry", "state"),
+    [
+        (_golden_file_entry(), GoldenEntryState.INVENTORY),
+        (_golden_file_entry(knobs={}), GoldenEntryState.PROPOSAL),
+        (_golden_file_entry(knobs={"TILE": "f2x2"}), GoldenEntryState.PROPOSAL),
+        (_golden_file_entry(knobs={}, emmy_us=12.5, cublas_us=14.0), GoldenEntryState.VERIFIED),
+        (
+            _golden_file_entry(knobs={"TILE": "f2x2"}, emmy_us=12.5, cublas_us=14.0),
+            GoldenEntryState.VERIFIED,
+        ),
+    ],
+)
+def test_golden_entry_state(entry, state):
+    assert golden_entry_state(entry) == state
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"emmy_us": 1.0},
+        {"emmy_us": 1.0, "cublas_us": 1.0},
+        {"knobs": {"TILE": "f2x2"}, "emmy_us": 0.0, "cublas_us": 1.0},
+        {"knobs": {"TILE": "f2x2"}, "emmy_us": float("nan"), "cublas_us": 1.0},
+    ],
+)
+def test_golden_entry_state_rejects_invalid_measurements(overrides):
+    with pytest.raises(ValueError):
+        golden_entry_state(_golden_file_entry(**overrides))
+
+
+def test_working_golden_file_accepts_inventory_proposal_verified_and_generic_entries():
+    doc = _golden_file_document(
+        _golden_file_entry(),
+        _golden_file_entry(
+            name="matmul.proposed",
+            knobs={"TILE": "f2x2"},
+            ranking={"status": "ok", "latency_us": 12.5, "compile_flags": "-Xcicc -O1"},
+        ),
+        _golden_file_entry(name="matmul.verified", knobs={"TILE": "f2x2"}, emmy_us=12.5, cublas_us=14.0),
+        {"kernel": "traced", "name": "k_model_kernel", "reproducer": "model.trace.json"},
+    )
+    validate_golden_file(doc, validation=GoldenFileValidation.WORKING)
+    assert isinstance(golden_config_from_entry(doc, doc["configs"][0]), MatmulGoldenConfig)
+    assert golden_config_from_entry(doc, doc["configs"][-1]) is None
+
+
+def test_working_ranking_metadata_must_be_a_mapping_and_cannot_be_promoted():
+    invalid = _golden_file_document(_golden_file_entry(ranking=[]))
+    with pytest.raises(ValueError):
+        validate_golden_file(invalid)
+
+    measured = _golden_file_document(
+        _golden_file_entry(
+            knobs={"TILE": "f2x2"},
+            emmy_us=12.5,
+            cublas_us=14.0,
+            ranking={"status": "ok", "latency_us": 15.0},
+        )
+    )
+    with pytest.raises(ValueError):
+        validate_golden_file(measured, validation=GoldenFileValidation.PROMOTION)
+
+
+@pytest.mark.parametrize("reproducer", [None, "", "/tmp/model.json", "../model.json", "artifacts/../../model.json", "dir\\model.json"])
+def test_working_traced_entry_requires_safe_relative_reproducer(reproducer):
+    entry = {"kernel": "traced", "name": "k_model_kernel"}
+    if reproducer is not None:
+        entry["reproducer"] = reproducer
+    with pytest.raises(ValueError):
+        validate_golden_file(_golden_file_document(entry))
+
+
+def test_working_file_rejects_unknown_generic_kernel_kind():
+    entry = {"kernel": "unknown", "name": "k_model_kernel", "reproducer": "model.trace.json"}
+    with pytest.raises(ValueError):
+        validate_golden_file(_golden_file_document(entry))
+
+
+def test_promotion_requires_specialized_verified_entries():
+    verified = _golden_file_document(_golden_file_entry(knobs={"TILE": "f2x2"}, emmy_us=12.5, cublas_us=14.0))
+    validate_golden_file(verified, validation=GoldenFileValidation.PROMOTION)
+
+    generic = {
+        "kernel": "traced",
+        "name": "k_model_kernel",
+        "knobs": {"TILE": "f2x2"},
+        "emmy_us": 1.0,
+        "cublas_us": 1.0,
+    }
+    rejected = [
+        _golden_file_document(_golden_file_entry()),
+        _golden_file_document(_golden_file_entry(knobs={"TILE": "f2x2"})),
+        _golden_file_document(generic),
+    ]
+    for doc in rejected:
+        with pytest.raises(ValueError):
+            validate_golden_file(doc, validation=GoldenFileValidation.PROMOTION)
+
+
+def test_repository_validation_grandfathers_only_the_three_marked_4080_seeds():
+    source = _GOLDENS_DIR / "rtx4080_sm89.yaml"
+    doc = load_golden_file(source, validation=GoldenFileValidation.REPOSITORY)
+    provisional = [entry for entry in doc["configs"] if entry.get("provisional")]
+    assert {entry["name"] for entry in provisional} == {
+        "dit_xl_2.attn_out_proj.s256",
+        "dit_xl_2.ff_out_proj.s256",
+        "dit_xl_2.attn.s256",
+    }
+
+    unexpected = _golden_file_document(
+        _golden_file_entry(
+            name="matmul.new_provisional",
+            knobs={"TILE": "f2x2"},
+            emmy_us=0.0,
+            cublas_us=0.0,
+            provisional=True,
+        )
+    )
+    with pytest.raises(ValueError):
+        validate_golden_file(unexpected, validation=GoldenFileValidation.REPOSITORY)
+    with pytest.raises(ValueError):
+        validate_golden_file(doc, validation=GoldenFileValidation.PROMOTION)
+
+    changed_shape = dict(provisional[0], M=257)
+    with pytest.raises(ValueError):
+        validate_golden_file(_golden_file_document(changed_shape), validation=GoldenFileValidation.REPOSITORY)
+
+    changed_knobs = dict(provisional[0], knobs={**provisional[0]["knobs"], "WORK": "w1x1"})
+    with pytest.raises(ValueError, match="three exact RTX 4080"):
+        validate_golden_file(_golden_file_document(changed_knobs), validation=GoldenFileValidation.WORKING)
+    with pytest.raises(ValueError, match="three exact RTX 4080"):
+        validate_golden_file(_golden_file_document(changed_knobs), validation=GoldenFileValidation.REPOSITORY)
+
+
+def test_golden_file_dump_round_trips_and_refuses_overwrite(tmp_path):
+    doc = _golden_file_document(
+        _golden_file_entry(),
+        {"kernel": "traced", "name": "k_model_kernel", "reproducer": "model.trace.json"},
+    )
+    path = tmp_path / "working.yaml"
+    assert dump_golden_file(doc, path) == path
+    assert load_golden_file(path) == doc
+    with pytest.raises(FileExistsError):
+        dump_golden_file(doc, path)
+    dump_golden_file(doc, path, overwrite=True)
 
 
 def test_goldens_speak_native_codecs_and_featurize():

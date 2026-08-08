@@ -157,8 +157,12 @@ serve-config-guard:
 # The goldens are the top tier of the fork-resolution evidence hierarchy — without them the
 # warm bakes cold-greedy picks (catastrophic on unseeded projection shapes) into cubins and
 # the pack, where nothing downstream revisits them. Gate the warm on coverage existing.
+# SERVE_REVISION is forwarded because a repo's revisions do NOT share kernel shapes (an EXL3
+# rung differs in exactly the per-tensor bit allocation the shape keys carry), so a
+# revision-tagged golden set can only be evaluated against the revision being released.
 serve-goldens: serve-config-guard
-	./venv/bin/python scripts/check_serving_goldens.py --model "$(SERVE_MODEL)" --gpu "$(SERVE_GPU_NAME)"
+	./venv/bin/python scripts/check_serving_goldens.py --model "$(SERVE_MODEL)" --gpu "$(SERVE_GPU_NAME)" \
+		$(if $(SERVE_REVISION),--revision "$(SERVE_REVISION)")
 
 serve-warm: serve-config-guard
 	BASE_IMAGE=$(VLLM_EMMY_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/warm.sh

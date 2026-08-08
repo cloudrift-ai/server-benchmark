@@ -71,6 +71,12 @@ them — and offer the real options:
   matcher deliberately refuses to guess, because a quantized or resized model does not share the base's kernel
   shapes. If the user knows the shapes really are identical, adding this model to the golden file's `model:`
   provenance is the fix — not a bypass flag.
+- *the goldens are revision-tagged and the release named no revision* → coverage cannot be evaluated. Pin
+  `SERVE_REVISION` in `models/<slug>.env` (step 4 requires it anyway) and re-run; `make serve-goldens` forwards it.
+- *the goldens are recorded against ANOTHER revision of this repo* — e.g. a different EXL3 rung. The rungs differ in
+  exactly the per-tensor bit allocation the shape keys carry, so those entries are not coverage. Sweep this
+  revision, or release the revision that is covered. Re-tagging the golden's `model:` header is right only when the
+  two spellings genuinely name one checkpoint (a branch name vs its commit sha) — never to make the gate green.
 
 Whichever the user chooses, **carry it into the release notes**. "Released without golden coverage" is a property of
 the artifact, not a detail of the session.
@@ -119,7 +125,7 @@ pushed from the same commit (the wheel is part of the cubin cache key) — when 
 ## Step 3 — Toolchain preflight (GATE)
 
 ```bash
-MODEL=<id> ARCH=<target arch> scripts/preflight_serving_kernels.sh
+MODEL=<id> ARCH=<target arch> REVISION=<config SERVE_REVISION> scripts/preflight_serving_kernels.sh
 ```
 
 Run it **inside the freshly built image** so it uses the image's exact nvcc (exact command in ARCHITECTURE.md). It

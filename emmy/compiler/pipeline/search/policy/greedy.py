@@ -607,7 +607,9 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
     not a fused megakernel. Left un-excluded, every prefill-M coded matmul re-keyed to
     ``kind="fused"`` AND lost its storage class — a key that collides with a real RMSNorm→linear
     cone of equal extents and can never join a coded shape's own golden. Both rebuilds carry
-    ``dtype_class`` and the coded ``k_bits`` rate through for the same reason."""
+    ``dtype_class`` and the coded ``k_bits`` rate through for the same reason — and carry them
+    STRUCTURALLY, by stating only what changes (``dataclasses.replace``) rather than re-listing
+    the fields, so the next key dimension cannot be dropped here by omission."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
     stamps = base if base is not None else rows[0]
@@ -616,15 +618,11 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
     # the pair may appear only on the warp leaves, and row 0 — whichever leaf the
     # planner emitted first — need not be one of them.
     if any({"dd", "pj"} <= {k.split("@", 1)[-1] for k in row if k.startswith("TILE@")} for row in rows):
-        key = ShapeKey(
-            free_prod=key.free_prod,
-            reduce_max=0 if key.is_dyn else key.reduce_max,
-            is_warp=key.is_warp,
-            is_dyn=key.is_dyn,
-            kind="flash",
-            dtype_class=key.dtype_class,
-            k_bits=key.k_bits,
-        )
+        # ``replace``, not a fresh ``ShapeKey(...)``: a rebuild states only what it CHANGES, so a
+        # dimension added to the key rides through instead of silently resetting to its default —
+        # which would merge this fork with every other key that differs only there. (``free_max``
+        # needs no mention: ``__post_init__`` normalizes it to 0 off the ``flash`` kind.)
+        key = replace(key, reduce_max=0 if key.is_dyn else key.reduce_max, kind="flash")
     elif (
         key.kind == ""
         # A computed-B decode fill also spells ``sync``; see the docstring.
@@ -643,17 +641,9 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
         # preserves the stamped aspect, and the fused kind keeps it (a computed-A cone is a
         # plain two-free-axis ``(M, H) @ (H, N)``). Dropping it here collapsed the M=256
         # global norm→kv cone onto the M=32 local norm→q golden — equal free_prod (131072)
-        # and reduce (3840) — deploying the wrong config at a fabricated µs.
-        key = ShapeKey(
-            free_prod=key.free_prod,
-            reduce_max=key.reduce_max,
-            is_warp=True,
-            is_dyn=key.is_dyn,
-            kind="fused",
-            free_max=key.free_max,
-            dtype_class=key.dtype_class,
-            k_bits=key.k_bits,
-        )
+        # and reduce (3840) — deploying the wrong config at a fabricated µs. Carrying it (and
+        # every other dimension) is what ``replace`` guarantees structurally.
+        key = replace(key, is_warp=True, kind="fused")
     return key
 
 

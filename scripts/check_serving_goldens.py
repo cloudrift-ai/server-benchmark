@@ -15,22 +15,47 @@ point for a human, never as something to proceed through quietly.
 
     ./venv/bin/python scripts/check_serving_goldens.py --model google/gemma-4-12B-it
     ./venv/bin/python scripts/check_serving_goldens.py --model <id> --gpu "NVIDIA GeForce RTX 5090"
+    ./venv/bin/python scripts/check_serving_goldens.py --model <id> --revision <sha>   # a tagged golden set
 
-Exit codes: 0 = goldens found for this (model, card); 1 = none found (or the card has no
-golden file at all); 2 = bad usage. The message names what IS recorded, so the caller can
-tell "this card has nothing" from "this card is tuned, but for other models".
+Exit codes: 0 = goldens found for this (model, card); 1 = none found, or coverage cannot be
+evaluated (see the revision rule below), or the card has no golden file at all; 2 = bad usage.
+The message names what IS recorded, so the caller can tell "this card has nothing" from "this
+card is tuned, but for other models" from "this card is tuned for this model, at another
+revision".
 
-Matching is by **model slug**, the same schema the image name uses (model_slug.sh), with a
+Matching has two halves, the REPO and the REVISION.
+
+**Repo** — by **model slug**, the same schema the image name uses (model_slug.sh), with a
 prefix rule on `-` boundaries so a golden recorded against a base checkpoint covers its
 instruction-tuned sibling: goldens tagged `google/gemma-4-12B` satisfy a release of
 `google/gemma-4-12B-it`, because a fine-tune shares its base's layer geometry and therefore
 its kernel shapes. A quantized or resized variant does NOT share them — those slugs differ
 past the boundary and correctly miss.
+
+**Revision** — a golden's `model:` provenance may be spelled `<repo>@<revision>`, because one
+repo publishes several checkpoints that do NOT share kernel shapes: an EXL3 repo carries one
+branch per bit rate, and the rungs differ in exactly the per-tensor bit allocation the shape
+keys carry. The slug deliberately does not encode the revision (two rungs share one image
+name), so the revision is compared separately, against `--revision` (the release config's
+`SERVE_REVISION`; `make serve-goldens` forwards it):
+
+  * an UNTAGGED golden makes no revision claim and covers every revision of its repo — that is
+    the pre-existing behaviour, and every non-EXL3 golden file today is untagged;
+  * a golden tagged `@R` covers a release of `R` and no other revision;
+  * a golden tagged `@R` when the release named NO revision is **unevaluable**, not covered:
+    the gate fails and says so, rather than reporting zero coverage for a card that plainly
+    has some. Pass `--revision`.
+
+Revisions compare as exact strings, with one allowance: an abbreviated hex commit sha matches
+the full one it prefixes (`git rev-parse --short` is a legitimate spelling of the same commit).
+A branch name and a commit sha never match each other — nothing here can resolve one to the
+other offline, and guessing is what this gate exists to prevent.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import subprocess
 import sys
@@ -43,13 +68,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 _SLUG_SCRIPT = PROJECT_ROOT / "docker" / "vllm-emmy-serve" / "model_slug.sh"
 
 
+@functools.cache
 def model_slug(model: str) -> str:
     """The image-naming slug for an HF model id.
 
     Shells out to `model_slug.sh` rather than reimplementing it: the slug decides both the
     image repo and which `models/<slug>.env` the warm and the bake read, so two
     implementations that disagree would let those two steps load different configs — the
-    cache-key parity failure the release contract is built to prevent.
+    cache-key parity failure the release contract is built to prevent. Memoized because the
+    matchers below call it once per golden and a card carries hundreds.
     """
     if not _SLUG_SCRIPT.is_file():  # a source checkout always has it; a stripped one won't
         return re.sub(r"[^a-z0-9._-]+", "-", model.rsplit("/", 1)[-1].lower()).strip("._-")
@@ -57,8 +84,41 @@ def model_slug(model: str) -> str:
     return out.stdout.strip()
 
 
-def covers(golden_model: str | None, target_slug: str) -> bool:
-    """Does a golden recorded against ``golden_model`` cover a release of ``target_slug``?
+def split_revision(model: str) -> tuple[str, str | None]:
+    """``<repo>@<revision>`` → ``(repo, revision)``; a bare id → ``(id, None)``.
+
+    HF ids carry no ``@``, so the separator is unambiguous. The revision half must never reach
+    :func:`model_slug` — ``turboderp/GLM-4.5-Air-exl3@2.25bpw`` sanitizes to the slug
+    ``glm-4.5-air-exl3-2.25bpw``, which matches no release and is what made this gate report
+    zero coverage for a card that had some.
+    """
+    repo, sep, rev = model.rpartition("@")
+    return (repo, rev.strip() or None) if sep and repo else (model, None)
+
+
+def revision_matches(golden_rev: str | None, target_rev: str | None) -> bool:
+    """Does a golden's revision claim admit the revision being released?
+
+    ``None`` on the golden side is "no claim" — it covers every revision. ``None`` on the
+    target side against a golden that DOES claim one is unevaluable, which is not coverage:
+    the caller reports it as its own failure mode rather than folding it into "no goldens".
+    """
+    if golden_rev is None:
+        return True
+    if not target_rev:
+        return False
+    g, t = golden_rev.strip(), target_rev.strip()
+    if g == t:
+        return True
+    # An abbreviated commit sha names the same commit as the full one it prefixes (the release
+    # tag itself is built from `git rev-parse --short`). Hex-only and >= 7 chars, so a short
+    # branch name can never prefix-match a sha.
+    hexish = all(re.fullmatch(r"[0-9a-f]{7,40}", s) for s in (g, t))
+    return hexish and (g.startswith(t) or t.startswith(g))
+
+
+def covers_repo(golden_model: str | None, target_slug: str) -> bool:
+    """Does ``golden_model``'s REPO half name the same checkpoint family as ``target_slug``?
 
     Exact slug match, or the golden's slug being a `-`-boundary prefix of the target's (the
     base-checkpoint rule above). Untagged goldens (``model: None``) never count — a shape
@@ -67,19 +127,63 @@ def covers(golden_model: str | None, target_slug: str) -> bool:
     """
     if not golden_model:
         return False
-    g = model_slug(golden_model)
+    g = model_slug(split_revision(golden_model)[0])
     return g == target_slug or target_slug.startswith(f"{g}-")
+
+
+def covers(golden_model: str | None, target_slug: str, target_revision: str | None = None) -> bool:
+    """Does a golden recorded against ``golden_model`` cover a release of this (slug, revision)?
+
+    Both halves must admit it — see the module docstring for the repo and revision rules.
+    """
+    return covers_repo(golden_model, target_slug) and revision_matches(split_revision(golden_model or "")[1], target_revision)
+
+
+def select_goldens(goldens, target_slug: str, target_revision: str | None) -> tuple[list, list]:
+    """Partition ``goldens`` into ``(matched, wrong_revision)`` for this release.
+
+    ``wrong_revision`` holds the goldens whose repo matches but whose revision claim does not
+    (including "does not, because the release named none"). Keeping them separate is the whole
+    point: they are the difference between "this card is not tuned for your model" and "it is,
+    but for another checkpoint of it", and the second must not be reported as the first.
+    """
+    matched, wrong_rev = [], []
+    for g in goldens:
+        if not covers_repo(g.model, target_slug):
+            continue
+        (matched if revision_matches(split_revision(g.model)[1], target_revision) else wrong_rev).append(g)
+    return matched, wrong_rev
+
+
+def _revisions(goldens) -> str:
+    """The distinct revision tags of ``goldens``, for a message."""
+    return ", ".join(sorted({split_revision(g.model)[1] or "(untagged)" for g in goldens}))
+
+
+def _provenance(golden_model: str) -> str:
+    """A golden's provenance as ``slug`` / ``slug@revision`` — org-collapsed like the target it
+    is listed beside, but with the revision kept OUT of the slug (running the whole tagged id
+    through ``model_slug`` yields ``glm-4.5-air-exl3-2.25bpw``, a slug no release ever has)."""
+    repo, rev = split_revision(golden_model)
+    return f"{model_slug(repo)}@{rev}" if rev else model_slug(repo)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", required=True, help="HF model id being released")
+    ap.add_argument("--model", required=True, help="HF model id being released (a `<repo>@<revision>` spelling is accepted)")
+    ap.add_argument(
+        "--revision",
+        default=None,
+        help="checkpoint revision being released (the config's SERVE_REVISION) — required when this repo's goldens are revision-tagged",
+    )
     ap.add_argument("--gpu", default=None, help="GPU name to check (default: the live card)")
     args = ap.parse_args()
 
     from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, live_recorded_goldens
 
-    target = model_slug(args.model)
+    repo, tagged = split_revision(args.model)
+    revision = (args.revision or "").strip() or tagged
+    target = model_slug(repo)
 
     if args.gpu:
         card = args.gpu
@@ -100,9 +204,23 @@ def main() -> int:
             print("  Nothing seeds the fork picks; the warm would bake cold-greedy kernels.")
             return 1
 
-    matched = [g for g in on_card if covers(g.model, target)]
+    matched, wrong_rev = select_goldens(on_card, target, revision)
+    if not matched and wrong_rev and revision is None:
+        # UNEVALUABLE, and the one case that must never read as "no goldens": the card is tuned
+        # for this repo, but every entry claims a revision and the release named none.
+        print(f"FAIL: {card} has {len(wrong_rev)} golden(s) for {repo!r}, but they are revision-tagged and this release named none.")
+        print(f"  coverage CANNOT be evaluated. recorded revision(s): {_revisions(wrong_rev)}")
+        print("  Pass --revision <sha> (the config's SERVE_REVISION, which `make serve-goldens` forwards).")
+        return 1
+    if not matched and wrong_rev:
+        print(f"FAIL: {card} has {len(wrong_rev)} golden(s) for {repo!r}, but recorded against {_revisions(wrong_rev)}, not {revision!r}.")
+        print("  A repo's revisions do not share kernel shapes — an EXL3 rung differs in exactly the per-tensor")
+        print("  bit allocation the shape keys carry — so another revision's goldens are not coverage for this one.")
+        print("  Seed goldens for this revision, or re-tag the golden file's `model:` header if the two spellings")
+        print("  really name one checkpoint (a branch name and a commit sha are not resolvable to each other here).")
+        return 1
     if not matched:
-        others = Counter(model_slug(g.model) for g in on_card if g.model)
+        others = Counter(_provenance(g.model) for g in on_card if g.model)
         print(f"FAIL: {card} has goldens, but none recorded for {args.model!r} (slug {target!r}).")
         if others:
             listed = ", ".join(f"{m} ({n})" for m, n in sorted(others.items()))
@@ -114,10 +232,16 @@ def main() -> int:
         return 1
 
     kinds = Counter(type(g).__name__ for g in matched)
-    print(f"OK: {len(matched)} golden(s) on {card} cover {args.model!r} (slug {target!r}).")
+    at = f" at revision {revision!r}" if revision else ""
+    print(f"OK: {len(matched)} golden(s) on {card} cover {repo!r} (slug {target!r}){at}.")
     print(f"  kinds: {', '.join(f'{k}={n}' for k, n in sorted(kinds.items()))}")
     provenance = sorted({g.model for g in matched if g.model})
     print(f"  recorded against: {', '.join(provenance)}")
+    if wrong_rev:
+        # Not a failure — something else covered the release — but never silent: these entries
+        # WILL be consulted by the fork resolution (the `model:` tag is provenance, not a join
+        # key), and they are not evidence for this checkpoint.
+        print(f"  NOTE: {len(wrong_rev)} further golden(s) for this repo were NOT counted — recorded against {_revisions(wrong_rev)}.")
     return 0
 
 

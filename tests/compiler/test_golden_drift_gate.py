@@ -35,6 +35,7 @@ Interactive twin: ``emmy eval golden --in-model``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -308,14 +309,23 @@ def share_dir(tmp_path_factory):
     return share
 
 
+# DERIVED, never hand-listed: the wire carries whatever fields ``ShapeKey`` declares, so a field
+# added to the key cannot go missing here. A hand-written list silently MERGES the keys that
+# differ only in an omitted field — this one had already dropped ``dtype_class`` and ``k_bits``,
+# harmless only because the audited model is uncoded, and exactly wrong the moment a coded model
+# joins the gate (every rate of one shape would collapse onto a single wire).
+_KEY_FIELDS = tuple(f.name for f in dataclasses.fields(ShapeKey))
+
+
 def _key_wire(key: ShapeKey) -> list:
-    """A ShapeKey as JSON-able primitives (field order is the constructor's)."""
-    return [key.free_prod, key.reduce_max, key.is_warp, key.is_dyn, key.kind, key.free_max]
+    """A ShapeKey as JSON-able primitives, in declaration order."""
+    return [getattr(key, f) for f in _KEY_FIELDS]
 
 
 def _key_of(wire: list) -> ShapeKey:
-    free_prod, reduce_max, is_warp, is_dyn, kind, free_max = wire
-    return ShapeKey(free_prod=free_prod, reduce_max=reduce_max, is_warp=is_warp, is_dyn=is_dyn, kind=kind, free_max=free_max)
+    # ``strict`` so a wire written by an older/newer field set fails loudly instead of
+    # reconstructing a key with silently defaulted dimensions.
+    return ShapeKey(**dict(zip(_KEY_FIELDS, wire, strict=True)))
 
 
 def _publish(share_dir, gpu_name: str, shard: int, gaps: set, majors: set, drifts: set, matches: int) -> list[dict] | None:
@@ -427,3 +437,52 @@ def test_no_major_key_hides_in_the_generic_baseline():
         assert not leaked, (
             f"warp-contraction key(s) in EXPECTED_GAPS[{gpu_name}] — move them to EXPECTED_MAJOR_GAPS: {sorted(leaked, key=str)}"
         )
+
+
+def test_key_wire_carries_every_shape_key_field():
+    """The cross-shard wire must be a LOSSLESS ShapeKey encoding.
+
+    It was not: the wire hand-listed six of the eight fields, dropping ``dtype_class`` and (once
+    the code rate landed) ``k_bits``. Harmless while the audited model is uncoded — both are
+    defaults on every gemma-4 key — and silently wrong the moment a coded model joins the gate,
+    because the union would then merge each shape's rates into one key and the ratchets would
+    compare a collapsed set against a full one. Derived from the dataclass, that cannot recur."""
+    key = ShapeKey(free_prod=11008, reduce_max=4096, is_warp=True, free_max=11008, dtype_class="trellis", k_bits=3)
+    wire = _key_wire(key)
+    assert len(wire) == len(dataclasses.fields(ShapeKey))
+    carried = dict(zip(_KEY_FIELDS, wire, strict=True))
+    assert carried["dtype_class"] == "trellis" and carried["k_bits"] == 3  # the two that were dropped
+    assert _key_of(wire) == key
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        # Storage class: an fp8 or trellis-coded B is a different kernel family from its 16-bit
+        # twin at the same (M, N, K) — the split the class exists to make.
+        (
+            ShapeKey(free_prod=11008, reduce_max=4096, is_warp=True, free_max=11008),
+            ShapeKey(free_prod=11008, reduce_max=4096, is_warp=True, free_max=11008, dtype_class="trellis"),
+        ),
+        # Code rate: one (M, N, K) appears at several rates in ONE mixed-allocation EXL3 rung,
+        # and the codes slab's size and the decode's word math both scale with the rate.
+        (
+            ShapeKey(free_prod=11008, reduce_max=4096, is_warp=True, free_max=11008, dtype_class="trellis", k_bits=2),
+            ShapeKey(free_prod=11008, reduce_max=4096, is_warp=True, free_max=11008, dtype_class="trellis", k_bits=4),
+        ),
+    ],
+)
+def test_key_wire_does_not_merge_keys_that_differ_only_in_a_late_added_field(a, b):
+    assert a != b
+    assert _key_wire(a) != _key_wire(b), "the shard wire merges two distinct keys"
+    assert _key_of(_key_wire(a)) == a and _key_of(_key_wire(b)) == b
+
+
+def test_key_wire_round_trips_the_baselines():
+    """Every ratcheted key survives publish → union unchanged (the wire is JSON, so it also has
+    to survive that), and a wire of the wrong width fails loudly instead of defaulting fields."""
+    for keys in (*EXPECTED_GAPS.values(), *EXPECTED_MAJOR_GAPS.values()):
+        for k in keys:
+            assert _key_of(json.loads(json.dumps(_key_wire(k)))) == k
+    with pytest.raises(ValueError):
+        _key_of(_key_wire(next(iter(EXPECTED_GAPS["NVIDIA GeForce RTX 5090"])))[:-1])

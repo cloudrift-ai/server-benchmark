@@ -188,11 +188,23 @@ The full release session on a rented card (each step from the repo checkout; hos
    those picks are then frozen into the shipped cubins **and the pack**, where no later boot revisits them. So a
    golden-less release does not ship a slightly slower image; it ships a permanently bad one.
 
-   Matching is by the golden's recorded `model:` provenance, compared as slugs, with a `-`-boundary prefix rule so
-   a base checkpoint's goldens cover its instruction-tuned sibling (same layer geometry, same kernel shapes) while a
-   quantized or resized variant correctly misses. On FAIL the script distinguishes "this card has no goldens at all"
-   from "this card is tuned, but for other models" and names them — that difference decides what to do next, so it
-   is a question for a human, not something to proceed through.
+   Matching is by the golden's recorded `model:` provenance, in two halves. The **repo** half compares as slugs,
+   with a `-`-boundary prefix rule so a base checkpoint's goldens cover its instruction-tuned sibling (same layer
+   geometry, same kernel shapes) while a quantized or resized variant correctly misses. The **revision** half
+   compares against `SERVE_REVISION`, which `make serve-goldens` forwards: since the slug deliberately does not
+   encode the revision (above) and a repo's revisions do NOT share kernel shapes — an EXL3 rung differs in exactly
+   the per-tensor bit allocation the shape keys carry — a golden may tag its provenance `<repo>@<revision>`, and
+   such an entry covers that revision and no other. An **untagged** golden makes no revision claim and covers every
+   revision of its repo, which is how every non-coded golden file behaves. Tagged goldens plus a release that named
+   no revision is **unevaluable**: the gate fails saying so, rather than reporting zero coverage for a card that
+   plainly has some. Revisions compare as exact strings (an abbreviated hex sha matches the full one it prefixes);
+   a branch name and a commit sha never match, because nothing offline can resolve one to the other.
+
+   On FAIL the script distinguishes "this card has no goldens at all" from "this card is tuned, but for other
+   models" from "it is tuned for this model, at another revision" and names them — that difference decides what to
+   do next, so it is a question for a human, not something to proceed through. On PASS it still reports any
+   repo-matching goldens the revision rule excluded, since the fork resolution will consult them regardless (the
+   `model:` tag is provenance, never a join key).
 
 1. Build the base image the warm will compile inside of:
 
@@ -212,9 +224,9 @@ The full release session on a rented card (each step from the repo checkout; hos
        cloudriftai/vllm-emmy:TAG /scripts/preflight_serving_kernels.sh   # expect: <N> OK, 0 FAIL
    ```
 
-   The enumeration is this model's golden set (the same matcher as step 0), so the preflight covers exactly the
-   picks the warm will deploy. `<N>` grows as goldens land — the gate is **0 FAIL with at least one OK**, never a
-   specific count.
+   The enumeration is this model's golden set (the same matcher as step 0, revision half included — pass
+   `-e REVISION=$SERVE_REVISION` when the goldens are tagged), so the preflight covers exactly the picks the warm
+   will deploy. `<N>` grows as goldens land — the gate is **0 FAIL with at least one OK**, never a specific count.
 
 3. **Re-measure memory headroom** and finalize `models/<slug>.env` — the config seals the cache key, so it cannot change
    after this point without re-warming. Step `--max-model-len` / `--max-num-batched-tokens` up from the old floor

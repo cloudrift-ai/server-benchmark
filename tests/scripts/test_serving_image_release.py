@@ -338,11 +338,12 @@ def _gate(model: str, *args: str, gpu: str = "NVIDIA GeForce RTX 5090"):
     return subprocess.run(cmd, capture_output=True, text=True, cwd=PROJECT_ROOT)
 
 
-# The `@revision`-tagged golden file that made these cases real (VQ Phase 4). Its provenance is
-# `turboderp/GLM-4.5-Air-exl3@2.25bpw`; before the revision half of the matcher existed, every
-# one of the three checks below reported "none recorded for this model".
+# The `@revision`-tagged golden file that made these cases real (VQ Phase 4). It is tagged by sha
+# rather than by the `2.25bpw` branch it was cut from, because the release pipeline pins
+# `SERVE_REVISION` to a sha and the gate compares revisions exactly. Before the revision half of
+# the matcher existed, every one of the three checks below reported "none recorded for this model".
 _TAGGED_MODEL = "turboderp/GLM-4.5-Air-exl3"
-_TAGGED_REV = "2.25bpw"
+_TAGGED_REV = "6a309ed6d606fc0154e6e1aeb0912cd3c25534fe"
 
 
 def test_gate_matches_a_revision_tagged_golden_set():
@@ -357,7 +358,7 @@ def test_gate_rejects_a_different_revision_of_the_same_repo():
     another rung's goldens are not coverage — and the message must say THAT, not "no goldens"."""
     result = _gate(_TAGGED_MODEL, "--revision", "2.0bpw")
     assert result.returncode == 1
-    assert "recorded against 2.25bpw, not '2.0bpw'" in result.stdout
+    assert f"recorded against {_TAGGED_REV}, not '2.0bpw'" in result.stdout
     assert "none recorded for" not in result.stdout
 
 

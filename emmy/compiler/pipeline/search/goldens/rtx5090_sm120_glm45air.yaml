@@ -78,7 +78,10 @@
 #  * the routed-expert matmuls — they arrive as program inputs and the expert serving programs are
 #    still being built, so no twin can spell them yet.
 gpu_name: NVIDIA GeForce RTX 5090
-model: turboderp/GLM-4.5-Air-exl3@2.25bpw
+# Tagged by commit sha, not the `2.25bpw` branch name: a branch can be re-cut, and the release
+# pipeline pins `SERVE_REVISION` to a sha, which the coverage gate compares exactly. The sha below
+# is what the `2.25bpw` ref resolved to when these entries were measured.
+model: turboderp/GLM-4.5-Air-exl3@6a309ed6d606fc0154e6e1aeb0912cd3c25534fe
 compute_cap:
   - 12
   - 0

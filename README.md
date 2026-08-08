@@ -302,7 +302,8 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 - [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
   (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
-  [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot)
+  [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
+  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — pinned Volta serving runtime for Qwen3.5)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs
 - [kernels/](kernels/) — Standalone CUDA kernel sources

@@ -1,0 +1,51 @@
+# Compile and execute Emmy's Volta MMA path inside the pinned CUDA 12.8/1Cat image. The image is
+# built first by experiments/volta-sm70-stack. Artifacts prove source, PTX, cubin, SASS, accuracy,
+# and the realized schedule on one live V100; no timing from this host is a final result.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+  run: |
+    set -euo pipefail
+    mkdir -p $task_dir/dump $task_dir/cubins
+    repo_path=$$(realpath $repo_dir)
+    task_path=$$(realpath $task_dir)
+    docker run --rm --gpus "device=$gpu_device_ids" \
+      --entrypoint bash \
+      --volume "$$repo_path:/workspace:ro" \
+      --volume "$$task_path:/artifacts" \
+      --env EMMY_CUBIN_CACHE=/artifacts/cubins \
+      --env EMMY_TILE=mma_m8n8k4_f16_f32/f1x1 \
+      --env EMMY_WORK=w1x1 \
+      --env EMMY_STAGE= \
+      --env EMMY_REDUCE= \
+      cloudriftai/1cat-vllm-sm70:1.2.2 \
+      -lc 'set -euo pipefail
+    export PYTHONPATH=/workspace
+    cd /workspace
+    python -c "from emmy.emmy import main; main()" run --code '\''a=torch.randn((64,64),dtype=torch.float16); b=torch.randn((64,64),dtype=torch.float16); torch.matmul(a,b)'\'' \
+      --target sm_70 --bench --bench-backends emmy --warmup 5 --iters 20 \
+      --dump-dir /artifacts/dump --json /artifacts/bench.json -vv 2>&1 | tee /artifacts/run.log
+    source_file=$$(find /artifacts/dump -path "*cuda*.kernels/*.txt" ! -name "*.torch.txt" | head -1)
+    test -n "$$source_file"
+    cp "$$source_file" /artifacts/generated.cu
+    nvcc --ptx -arch=sm_70 -o /artifacts/generated.ptx /artifacts/generated.cu
+    cuobjdump --dump-sass /artifacts/cubins/*.cubin > /artifacts/sass.txt
+    grep -q "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32" /artifacts/generated.ptx
+    grep -q "HMMA.884" /artifacts/sass.txt
+    ! grep -Eq "LDMATRIX|CP\.ASYNC|HMMA\.168" /artifacts/sass.txt
+    tar -C /artifacts -czf /artifacts/mma-smoke.tar.gz dump cubins generated.cu generated.ptx
+    compute-sanitizer --tool memcheck --error-exitcode=99 \
+      python -c "from emmy.emmy import main; main()" run --code '\''a=torch.randn((17,12),dtype=torch.float16); b=torch.randn((12,19),dtype=torch.float16); torch.matmul(a,b)'\'' \
+      --target sm_70 --dump-dir /artifacts/sanitizer-dump 2>&1 | tee /artifacts/sanitizer.log'
+  result_files:
+    - "*.json"
+    - "*.log"
+    - "*.txt"
+    - "*.ptx"
+    - mma-smoke.tar.gz
+  timeout: 1800
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

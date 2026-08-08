@@ -1,0 +1,53 @@
+# Build and qualify the pinned 1Cat-vLLM 1.2.2 image on one V100. This is a command workload so
+# the image remains local to the fixed Phase 1 host; the normal serving recipe can reuse the tag.
+command:
+  stage:
+    - docker/1cat-vllm-sm70
+  run: |
+    set -euo pipefail
+    cd $repo_dir
+    docker build \
+      --provenance=false \
+      --file docker/1cat-vllm-sm70/Dockerfile \
+      --tag cloudriftai/1cat-vllm-sm70:1.2.2 \
+      . 2>&1 | tee $task_dir/image-build.log
+    docker image inspect cloudriftai/1cat-vllm-sm70:1.2.2 \
+      --format '{{json .RepoDigests}} {{.Id}}' | tee $task_dir/image-id.txt
+    docker run --rm --gpus "device=$gpu_device_ids" \
+      --entrypoint bash cloudriftai/1cat-vllm-sm70:1.2.2 \
+      -lc 'vllm --version
+    python - <<"PY"
+    import catboost
+    import cupy
+    import importlib.metadata
+    import torch
+    import vllm
+    from pathlib import Path
+
+    assert torch.cuda.is_available()
+    assert torch.cuda.get_device_capability() == (7, 0)
+    runner = Path(vllm.__file__).parent / "v1" / "worker" / "gpu_model_runner.py"
+    runner_source = runner.read_text()
+    assert "tuple[torch.Tensor | None, torch.Tensor | None]" in runner_source
+    assert "_dummy_run return non-last PP rank" in runner_source
+    tilelang_version = importlib.metadata.version("tilelang")
+    tvm_ffi_version = importlib.metadata.version("apache-tvm-ffi")
+    print(f"torch={torch.__version__}")
+    print(f"vllm={vllm.__version__}")
+    print(f"tilelang={tilelang_version}")
+    print(f"apache-tvm-ffi={tvm_ffi_version}")
+    print(f"cupy={cupy.__version__}")
+    print(f"catboost={catboost.__version__}")
+    print(f"device={torch.cuda.get_device_name()}")
+    print(f"arch={torch.cuda.get_arch_list()}")
+    print(torch.matmul(torch.ones((16, 16), device="cuda", dtype=torch.float16),
+                       torch.ones((16, 16), device="cuda", dtype=torch.float16))[0, 0].item())
+    PY' 2>&1 | tee $task_dir/runtime-probe.log
+  result_files:
+    - "*.log"
+    - image-id.txt
+  timeout: 3600
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

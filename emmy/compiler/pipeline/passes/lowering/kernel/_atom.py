@@ -40,7 +40,7 @@ from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -981,7 +981,14 @@ class _MmaOps(_AtomOps):
         """The gmem-direct mma leaf constructors: ``ldmatrix`` each operand fragment straight from
         gmem, ``mma.sync`` every cell, the K-loop a ``StridedLoop`` of step ``atom_k`` (a symbolic /
         non-divisible K zero-fills the masked-K tail via the ``k_zero`` helper variants — canonical
-        and transposed-B both have gmem-direct K zero-fill helpers)."""
+        and transposed-B both have gmem-direct K zero-fill helpers).
+
+        Each fragment steps its operand's rows at the stride DERIVED from the load index + buffer
+        shape (``gmem_row_stride``), never the buffer's declared trailing extent: an index map on
+        the operand — a reshape feeding the linear — re-strides the rows, and taking the
+        declaration read a rectangle of the wrong buffer. The schedule already refused every layout
+        with no derivable stride (``_legality.tiled_operand_layout``), which is why this asserts
+        rather than falls back. The flash realizer (``_twist``) states the same contract."""
         c = self.c
         atom, (m, n) = self.tile.atom, mn
         k_axis = c.axis
@@ -993,13 +1000,25 @@ class _MmaOps(_AtomOps):
         a_load, b_load, b_trans = c.a, c.b, c.b_trans
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
+        # ``0`` = the loader's own fallback (``ir._resolve_ldm``, the declared trailing extent),
+        # which the schedule gate admitted only where it IS the row step — a canonical index, whose
+        # symbolic extent no integer derivation can name.
+        ldm_a = gmem_row_stride(a_load, m.axis.name, self.inputs) or 0
+        ldm_b = gmem_row_stride(b_load, n.axis.name if b_trans else k_axis.name, self.inputs) or 0
 
         def read_row(i):
             cell = offset[0].base(i)
             idx = tuple(Sigma({m.axis.name: cell}).apply(e) for e in a_load.index)
             return [
                 LdmatrixLoad(
-                    frag=f"_a{i}", src_buffer=a_load.input, src_index=idx, role="a", staged=False, gmem_guard=_guard(m, cell), k_zero=k_zero
+                    frag=f"_a{i}",
+                    src_buffer=a_load.input,
+                    src_index=idx,
+                    role="a",
+                    ldm=ldm_a,
+                    staged=False,
+                    gmem_guard=_guard(m, cell),
+                    k_zero=k_zero,
                 )
             ]
 
@@ -1012,6 +1031,7 @@ class _MmaOps(_AtomOps):
                     src_buffer=b_load.input,
                     src_index=idx,
                     role="b",
+                    ldm=ldm_b,
                     staged=False,
                     b_trans=b_trans,
                     gmem_guard=_guard(n, cell),

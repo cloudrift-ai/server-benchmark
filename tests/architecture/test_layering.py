@@ -54,7 +54,7 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     kernel pass layer; a tile pass importing ``lowering.kernel`` is a back-edge in
     the pass DAG — a tile pass depending on a downstream kernel pass's internals.
     What the two layers genuinely share lives in the ``lowering/`` root modules —
-    ``_addr`` (addressing algebra: ``gmem_row_stride``, ``BYTE_SLAB_PAD``) and
+    ``_addr`` (addressing algebra: ``gmem_axis_step`` / ``gmem_row_stride``, ``BYTE_SLAB_PAD``) and
     ``_reduction`` (``Reduction``, ``loop_state_head``) — pure ``ir.*`` queries and
     layout facts imported by both layers.
 

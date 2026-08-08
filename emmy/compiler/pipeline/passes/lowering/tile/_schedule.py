@@ -682,15 +682,18 @@ def _rewrap(op, node):
 
 def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     """Whether a warp tile candidate is realizable on ``node`` — the K-step divisibility every warp
-    row needs, plus the exact-cover geometry a COMPUTED ``a`` edge's compute fill adds. Both are
-    ``_legality`` predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
+    row needs, the gmem LAYOUT its operand loaders can read, plus the exact-cover geometry a
+    COMPUTED ``a`` edge's compute fill adds. All three are ``_legality`` predicates, dropped here
+    and RAISED on a pin (:func:`_contraction_values`)."""
     if not legal.enforce(legal.warp_k_step(node, plan), pinned=False):
+        return False
+    placed = plan.placed_on(term.place)
+    if placed.axes is None:
+        return isinstance(node.a, Load) and not _computed_b(node)  # nothing to place a compute-filled tile on
+    if not legal.enforce(legal.tiled_operand_layout(node, placed, term.tile.inputs), pinned=False):
         return False
     if isinstance(node.a, Load) and not _computed_b(node):
         return True
-    placed = plan.placed_on(term.place)
-    if placed.axes is None:
-        return False  # no (m, n) pair on the grid — nothing to place a compute-filled tile on
     if not isinstance(node.a, Load) and not legal.enforce(legal.computed_a_cover(node, placed), pinned=False):
         return False
     if _computed_b(node) and not legal.enforce(legal.computed_b_cover(node, placed), pinned=False):
@@ -1162,6 +1165,8 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
                 # the unpinned catalog above drops on, one home each.
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
+                if (placed := plan.placed_on(term.place)).axes is not None:
+                    legal.enforce(legal.tiled_operand_layout(node, placed, term.tile.inputs), pinned=True)
                 if _computed_b(node):
                     legal.enforce(legal.computed_b_cover(node, plan.placed_on(term.place)), pinned=True)
                 if not isinstance(node.a, Load):

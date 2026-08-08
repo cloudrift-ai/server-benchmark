@@ -32,13 +32,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import affine_form
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, gmem_row_stride, reads_declared_rows
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -256,13 +257,82 @@ def fragment_epilogue(epilogue: Body) -> str | None:
 # ---- operand staging --------------------------------------------------------------------------- #
 
 
-def _tma_operand_rank(index: tuple, tile_name: str, k_name: str) -> bool:
-    """Whether TMA's box can encode this operand's gmem index. The data plane is the TRAILING 2
-    dims; extra LEADING dims ride as extent-1 box dims whose origin is evaluated once per fill, so
-    those exprs must not move with the tile or the K loop."""
+def _tma_operand_box(index: tuple, row_name: str, col_name: str) -> bool:
+    """Whether TMA's box can encode this operand's gmem index. The box is a rectangle in the
+    DESCRIPTOR's own coordinates — the declared buffer's trailing two dims — and only its ORIGIN
+    is computed per fill (``_atom._box_origin``), so the index must place the slab's row axis on
+    the declared row dim and its column axis on the declared contiguous dim, each at coefficient
+    1. An offset (a split-K partial's ``ksplit·(K/w) + k``) rides along; anything that MOVES the
+    coordinate — a reshape's delinearization, a transpose, a strided read — declines, because the
+    box would then walk the declared row pitch and copy the wrong rows.
+
+    Extra LEADING dims ride as extent-1 box dims whose origin is evaluated once per fill, so those
+    exprs must not move with either axis. cp.async is unaffected: its fill substitutes per cell, by
+    axis NAME (the same split ``_kv_penultimate`` draws for the streaming pair)."""
     if not 2 <= len(index) <= 4:
         return False
-    return all(not ({tile_name, k_name} & e.free_vars()) for e in index[:-2])
+    if any({row_name, col_name} & e.free_vars() for e in index[:-2]):
+        return False
+    for e, own, other in ((index[-2], row_name, col_name), (index[-1], col_name, row_name)):
+        form = affine_form(e, {own})
+        if form is None or form[1].get(own, 0) != 1 or other in e.free_vars():
+            return False
+    return True
+
+
+def _operand_axes(c: Fold, tile: TilePlan, role: str) -> tuple[str, str]:
+    """An operand's ``(row, inner)`` axis names — the two the slab geometry is built on. A is
+    ``(m, k)``; a canonical B is ``(k, n)`` and a transposed B ``(n, k)`` (its own gmem
+    orientation, K contiguous — the serving ``F.linear`` layout)."""
+    m_name, n_name, k_name = tile.m.axis.name, tile.n.axis.name, c.axis.name
+    if role == "a":
+        return m_name, k_name
+    return (n_name, k_name) if c.b_trans else (k_name, n_name)
+
+
+def _chunk_elems(tile: TilePlan) -> int:
+    """The longest CONTIGUOUS gmem run a tiled operand loader reads in one go — the granule the
+    operand's column stride must hold over. The mma fragment lane map packs a whole atom edge; a
+    cp.async chunk is at most 16 B. TMA reads a whole box row and is gated separately
+    (:func:`_tma_operand_box` refuses anything but a plain window)."""
+    if not tile.is_warp:
+        return _TMA_ALIGN  # the scalar tier's only copy transport is cp.async: a 16 B chunk
+    return max(tile.atom.atom_k, tile.atom.atom_n, _TMA_ALIGN)
+
+
+def tiled_operand_layout(c: Fold, tile: TilePlan, inputs) -> str | None:
+    """Whether the TILED operand loaders can read each MATERIALIZED operand's gmem layout — the
+    ONE layout gate the mma tier and every copy transport share.
+
+    They read an operand as a 2-D window: rows stepped by one scalar stride, columns CONTIGUOUS
+    over the loader's chunk (the fragment lane map packs adjacent elements, the cp.async fill
+    copies up to 16 B per row). So the flat gmem address must step the row axis by a stride that
+    holds across the WHOLE tile, and step the inner axis by exactly one element over a window the
+    chunk fits inside (:func:`~emmy.compiler.pipeline.passes.lowering._addr.gmem_axis_step`).
+
+    A layout op on the operand is what tests it. A reshape re-strides the rows — derivable, and the
+    loaders take the derived step. A BLOCKED gather (the sdpa→o_proj chain) keeps unit columns
+    inside each head, which the chunk fits. A TRANSPOSE strides the columns and is readable by no
+    loader here: refusing keeps the node on the per-cell scalar tier, whose σ substitutes the whole
+    index per element and is correct for any map. Silence here was the miscompile — the loaders
+    took the operand's DECLARED trailing extent as its row stride and read the wrong rows."""
+    chunk = _chunk_elems(tile)
+    for edge, role in ((c.a, "a"), *((ch.b, "b") for ch in c.channels)):
+        if not isinstance(edge, Load) or inputs is None or edge.input not in inputs:
+            continue  # a computed cone has no gmem layout; an unknown buffer, no evidence to gate on
+        row, inner = _operand_axes(c, tile, role)
+        if gmem_row_stride(edge, row, inputs) is None and not reads_declared_rows(edge, row):
+            return (
+                f"the tiled operand loaders step {role.upper()} rows at a derived gmem stride; "
+                f"{edge.input!r}'s index gives none for axis {row!r} (an index map the address algebra cannot read)"
+            )
+        step = gmem_axis_step(edge, inner, inputs)
+        if step is None or step[0] != 1 or (step[1] and step[1] % chunk):
+            return (
+                f"the tiled operand loaders read {role.upper()} columns CONTIGUOUSLY in {chunk}-element chunks; "
+                f"{edge.input!r}'s index steps axis {inner!r} by {step and step[0]} over runs of {step and step[1]}"
+            )
+    return None
 
 
 def _warp_cp_async(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool) -> bool:
@@ -335,8 +405,8 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     rank_ok = (
         isinstance(c.a, Load)
         and isinstance(c.b, Load)  # a descriptor needs a gmem address on BOTH edges
-        and _tma_operand_rank(c.a.index, m.axis.name, c.axis.name)
-        and _tma_operand_rank(c.b.index, n.axis.name, c.axis.name)
+        and _tma_operand_box(c.a.index, *_operand_axes(c, tile, "a"))
+        and _tma_operand_box(c.b.index, *_operand_axes(c, tile, "b"))
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
@@ -633,13 +703,17 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
         return None
     if not inputs or not isinstance(c.a, Load) or not isinstance(c.b, Load) or c.a.input not in inputs:
         return None
+    # The scalar tier's GMEM-DIRECT rows read per element through σ and take any index map; its
+    # SLAB fills are the same 2-D window the warp tier stages, so they take the same layout gate.
+    if tiled_operand_layout(c, tile, inputs) is not None:
+        return None
     # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
     # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier
     # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
     if any(t is not None and t.dtype.nbytes < 2 for t in (inputs.get(c.a.input), inputs.get(c.b.input))):
         return None
     if stage.transport == "tma" and not (
-        _tma_operand_rank(c.a.index, tile.m.axis.name, c.axis.name) and _tma_operand_rank(c.b.index, tile.n.axis.name, c.axis.name)
+        _tma_operand_box(c.a.index, *_operand_axes(c, tile, "a")) and _tma_operand_box(c.b.index, *_operand_axes(c, tile, "b"))
     ):
         return None
     # Staging needs the CTA to BE one (tile_m x tile_n) output tile (the cooperative fill / drain
@@ -686,6 +760,7 @@ __all__ = [
     "splitkv_slice",
     "stage_split_groups",
     "strip_width",
+    "tiled_operand_layout",
     "twisted_atom",
     "twisted_block",
     "twisted_sites_agree",

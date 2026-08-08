@@ -164,6 +164,21 @@ the enumerator recurses: a `_site_values` entry plus legality predicates, with n
 enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.
 
+**The operand LAYOUT gate.** Every tiled operand loader — the mma fragment lane map, the cp.async slab fill, the TMA
+box — reads a materialized operand as a 2-D window: rows stepped by one scalar stride, columns contiguous over the
+loader's chunk. None of that is the operand's DECLARATION; it is a property of the `Load`'s index, which a layout op
+between the activation and its matmul rewrites. `_addr.gmem_axis_step` is the one place that reads it, answering
+`(delta, run)` — how far the flat address moves per step of an axis, and over how long a window that holds — and
+three index forms answer: the canonical layout, a BLOCKED gather (the sdpa→o_proj chain, unit columns inside each
+head), and a DELINEARIZED reshape whose components re-read one flat coordinate. `_legality.tiled_operand_layout`
+turns that into the candidate gate (a derivable row stride, unit columns over a window the chunk fits inside) and
+`_atom` stamps the derived stride as the fragment loaders' `ldm`, the way the flash realizer already did. Taking the
+declared trailing extent instead was a silent miscompile on plain f16: a reshape feeding a linear read a rectangle of
+the wrong buffer. What no loader can read — a TRANSPOSED operand strides its columns; TMA's box lives in the
+descriptor's own coordinates, so it additionally needs the axes ON the declared trailing two dims — is refused, and
+the node falls back to the per-cell scalar tier, whose σ substitutes the whole index per element and is correct for
+any map.
+
 **The streaming pair, site by site.** A fold whose DERIVED evaluation contracts (`_schedule._streams` — structural,
 never the `TWISTED` role) keeps its children as sites: the hoisted QK score edge and the synthesized P@V. Each
 enumerates its own half of `twisted_warp_moves`' free geometry — the key-atom / query-tile pair, since `warps_m` is

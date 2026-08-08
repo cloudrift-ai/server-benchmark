@@ -154,10 +154,9 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
     base = ("--use_fast_math",)
     if not uses_tma:
         return base
-    import cupy as cp
+    from emmy.compiler.target import compute_capability  # noqa: PLC0415
 
-    cap_str = str(cp.cuda.Device().compute_capability)  # e.g. "120" for sm_12.0
-    major, minor = cap_str[:-1], cap_str[-1]
+    major, minor = compute_capability()
     return (*base, f"--gpu-architecture=sm_{major}{minor}a")
 
 

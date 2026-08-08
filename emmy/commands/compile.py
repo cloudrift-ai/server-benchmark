@@ -538,9 +538,9 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     dtype = torch.float32 if layer is None else torch.float16
     quant_dir = quantized_checkpoint_dir(model_id)
     if quant_dir is not None:
-        # FP8 checkpoint: trace the architecture twin from config, carrying the
-        # dequantized real weights (from_pretrained would engage transformers'
-        # own fp8 machinery — the trace is quantization-blind; see the FP8 plan).
+        # Quantized checkpoint (fp8 / EXL3): trace the architecture twin from config,
+        # carrying the decoded real weights (from_pretrained would engage transformers'
+        # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
         model = load_quantized_twin(quant_dir, dtype)
     else:
         try:
@@ -556,13 +556,15 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     model.eval()
 
     def _stamp(graph: Graph) -> Graph:
-        # The checkpoint's fp8 weights are spelled as in-graph algebra immediately
+        # The checkpoint's quantized weights are spelled as in-graph algebra immediately
         # after trace, before any pass runs — from here on the graph carries no
-        # quantization metadata (the fold pass then dissolves the cones by default).
+        # quantization metadata; generic storage-decode algebra stays available to lowering.
+        # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
-            from emmy.compiler.loader.quant import spell_quantized_constants  # noqa: PLC0415
+            from emmy.compiler.loader.quant import spell_quantized_constants, spell_trellis_constants  # noqa: PLC0415
 
             spell_quantized_constants(graph, str(quant_dir))
+            spell_trellis_constants(graph, str(quant_dir))
         return graph
 
     if layer is None:

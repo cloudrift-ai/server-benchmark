@@ -217,6 +217,36 @@ class Context:
         return self.compute_capability in _F16ACC_HALF_RATE_CCS
 
     @property
+    def has_volta_mma(self) -> bool:
+        """Whether the scheduler selects the Volta ``mma.sync.m8n8k4`` family."""
+        return (7, 0) <= self.compute_capability < (8, 0)
+
+    @property
+    def has_mma_m16n8k16(self) -> bool:
+        """Whether the target has the Ampere ``mma.sync.m16n8k16`` family."""
+        return self.compute_capability >= (8, 0)
+
+    @property
+    def has_ldmatrix(self) -> bool:
+        """Whether the target can issue ``ldmatrix`` (Turing, sm_75, or newer)."""
+        return self.compute_capability >= (7, 5)
+
+    @property
+    def has_cp_async(self) -> bool:
+        """Whether the target can issue the Ampere ``cp.async`` copy instruction."""
+        return self.compute_capability >= (8, 0)
+
+    @property
+    def has_bf16_mma(self) -> bool:
+        """Whether the target has the Ampere BF16 ``mma.sync`` instruction family."""
+        return self.compute_capability >= (8, 0)
+
+    @property
+    def has_fp8_mma(self) -> bool:
+        """Whether the target has the Ada native FP8 ``mma.sync`` instruction family."""
+        return self.compute_capability >= (8, 9)
+
+    @property
     def has_tma(self) -> bool:
         """Whether the target can issue TMA (``cp.async.bulk.tensor``) — a Hopper (sm_90) feature.
         Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage below sm_90 fails to

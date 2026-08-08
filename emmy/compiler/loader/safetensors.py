@@ -161,8 +161,8 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
     semantics (the birth-time spelling — ``loader.quant``). Decode-to-values
     applies only when the graph wants a non-f8 dtype from fp8 storage.
 
-    A ``source_graph`` constant (a cone folded by ``032_fold_constant_subgraphs``)
-    binds each of the record's leaf sources under the same rules and evaluates
+    A ``source_graph`` constant (a static computation folded at bind time) binds
+    each of the record's leaf sources under the same rules and evaluates
     the record through the NumPy backend; this constant's own trailing
     ``load_ops`` chain (e.g. a later-folded transpose) then runs on the result.
     """

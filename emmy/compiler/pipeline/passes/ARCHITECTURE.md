@@ -11,19 +11,17 @@ structurally, not a distinct kind.
 
 ## Quantization is not a concept past the decomposition band
 
-A quantized checkpoint is spelled as in-graph algebra at BIRTH (`loader.quant.spell_quantized_constants`, immediately
-post-trace) and dissolved as early as possible: the generic `frontend/decomposition/032_fold_constant_subgraphs` rule
-collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
-(its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
-only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
-`load_ops`. `EMMY_FP8_EXPAND` skips the fold, leaving the cone in-graph for the kernel path. Either way, downstream
-layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`), decode-trait
-elementwise ops (`ElementwiseImpl.decodes`), and graph algebra. They may NEVER know checkpoint formats, scheme names,
-scale pairing, or any quantization metadata — there is none: no shared IR type carries a quant field. The frontend
-band (the birth-time speller + the fold rule + the loader) is the only place quantization-as-a-concept exists, and a
-mechanical gate (`tests/compiler/loader/test_quant.py`) greps the tree for concept leaks. `032`'s decode-trait scope
-is the conservative first instantiation of a general constant-subgraph fold — widening it (folding decode-free
-constant cones that exist in today's models) is gated on kernel-source digest evidence.
+A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).
+The scheme may choose different generic algebra, but it may not mint a scheme-specific op. The generic
+`frontend/decomposition/032_fold_constant_subgraphs` rule collapses static computation cones into a bind-time
+`ConstantOp` (`source_graph`) before Loop IR. It deliberately leaves storage-decode cones expanded so compressed
+device storage is preserved, and leaves layout-only cones to the target-specific `050`/`060` load-layout policy.
+
+The boundary is structural, not a naming guideline. Lowering, shared statement and tile dialects, backends, and search
+may contain canonical dtypes, generic ops, and graph algebra. They may NEVER contain a checkpoint format's custom op,
+statement, helper, pass branch, schedule feature, environment gate, comment, or name. A new format belongs in the
+loader and its birth-time speller must emit only generic algebra. `tests/architecture/test_layering.py` scans every
+post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one inventory, then a product over sites
 
@@ -497,6 +495,17 @@ is the plain scalar fma cell). The contraction binder (`bind_contraction`) is lo
 reuse it on flash's nested QK^T / PV; flash's score IS a role=CONTRACTION **fold** on a hoisted operand edge of the
 kv stream (its PV twin synthesized in the derived blocked evaluation), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
+
+An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
+16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It accepts only materialized A/B edges:
+SM70 has no `ldmatrix`, but materialized f16 A/B edges may use synchronous-copy staging: ordinary vector global loads
+and shared stores fill the existing slab ring, and the same cooperative m8n8k4 lane map gathers fragments from shared
+memory. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>` register-fragment pipelining;
+blocking copies make deeper shared rings correct but do not promise copy/compute overlap. Computed operand edges,
+C-to-A repacking, and flash still decline this atom. Target capability predicates select this family below SM80 and
+the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
+lowering through instructions the target cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order; the historical acc-unspecified

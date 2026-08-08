@@ -263,7 +263,7 @@ def _bare_f8_linear_graph(m, n, k, out_dtype="f32"):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_k32_mma_matches_lut_reference_cuda(monkeypatch):
+def test_k32_mma_matches_lut_reference_cuda():
     """The fragment-ABI anchor: fixed fp8 bits through the pinned k32 kernel vs the LUT-decode
     numpy reference. Two bit regimes: an EXACT one (A in {0, ±1}, B in one exponent band — every
     partial sum exactly representable, so even sm_89's reduced-precision accumulate and the f16
@@ -271,7 +271,6 @@ def test_k32_mma_matches_lut_reference_cuda(monkeypatch):
     from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 64, 64
     rng = np.random.default_rng(11)
     backend = CudaBackend()
@@ -340,7 +339,7 @@ def _w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_w8a8_static_act_quant_e2e_cuda(monkeypatch):
+def test_w8a8_static_act_quant_e2e_cuda():
     """The W8A8 e2e (M3 priority 4): the encode kernel materializes ``x_f8`` via the
     <cuda_fp8.h> constructor, the linear's double decode cone binds BOTH raw f8 operands onto the
     k32 mma, and the epilogue composes ``act_scale ⊗ weight_scale`` on the f32 accumulator.
@@ -350,7 +349,6 @@ def test_w8a8_static_act_quant_e2e_cuda(monkeypatch):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(7)
     bits = rng.integers(0, 256, (n, k)).astype(np.uint8)
@@ -429,7 +427,7 @@ def _dyn_w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_w8a8_dynamic_per_token_amax_cuda(monkeypatch):
+def test_w8a8_dynamic_per_token_amax_cuda():
     """Dynamic per-token amax (M3 priority 5): the composition falls out of the existing
     machinery — the amax statistic + encode ride their own kernels, the k32 mma consumes the
     materialized bits, and the m-indexed per-token scale hoists like any k-invariant factor.
@@ -440,7 +438,6 @@ def test_w8a8_dynamic_per_token_amax_cuda(monkeypatch):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(9)
     bits = rng.integers(0, 256, (n, k)).astype(np.uint8)
@@ -482,7 +479,6 @@ def test_w8a8_needs_the_gate_to_enumerate_cuda(monkeypatch):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
 
-    monkeypatch.setenv("EMMY_FP8_EXPAND", "1")
     monkeypatch.delenv("EMMY_FP8_MMA", raising=False)
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
     m, n, k = 32, 512, 512

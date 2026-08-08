@@ -1,0 +1,75 @@
+# Build and qualify the source-pinned CloudRift 1Cat-vLLM image on one V100. This is a command
+# workload so the image remains local to the fixed host; serving recipes reuse the tag.
+command:
+  stage:
+    - docker/1cat-vllm-sm70
+  run: |
+    set -euo pipefail
+    cd $repo_dir
+    docker build \
+      --provenance=false \
+      --file docker/1cat-vllm-sm70/Dockerfile \
+      --tag cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift \
+      . 2>&1 | tee $task_dir/image-build.log
+    docker image inspect cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift \
+      --format '{{json .RepoDigests}} {{.Id}}' | tee $task_dir/image-id.txt
+    docker run --rm --gpus "device=$gpu_device_ids" \
+      --entrypoint bash cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift \
+      -lc 'set -euo pipefail
+    curl --version
+    vllm --version
+    python - <<"PY"
+    import importlib.metadata
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import torch
+    import vllm
+
+    assert torch.cuda.is_available()
+    assert torch.cuda.get_device_capability() == (7, 0)
+    assert importlib.metadata.version("tilelang") == "0.1.10"
+    assert importlib.metadata.version("apache-tvm-ffi") == "0.1.10"
+    assert importlib.metadata.version("1cat-vllm") == f"{vllm.__version__}.cu128"
+
+    runner = Path(vllm.__file__).parent / "v1" / "worker" / "gpu_model_runner.py"
+    runner_source = runner.read_text()
+    assert "tuple[torch.Tensor | None, torch.Tensor | None]" in runner_source
+    assert "_dummy_run return non-last PP rank" in runner_source
+
+    tilelang = importlib.metadata.distribution("tilelang")
+    include_dir = Path(str(tilelang.locate_file("tilelang/src")))
+    cutlass_dir = Path(str(tilelang.locate_file("tilelang/3rdparty/cutlass/include")))
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "tilelang_sm70_header_smoke.cu"
+        cubin = Path(tmp) / "tilelang_sm70_header_smoke.cubin"
+        source.write_text(
+            "#include <tl_templates/cuda/common.h>\n"
+            "extern \"C\" __global__ void int_float_only(const int* input, float* output) {\n"
+            "  if (threadIdx.x == 0) output[0] = static_cast<float>(input[0]);\n"
+            "}\n"
+        )
+        subprocess.run(
+            [
+                "nvcc", "--cubin", "-O3", "-lineinfo", "-arch=sm_70", "-std=c++17",
+                f"-I{include_dir}", f"-I{cutlass_dir}", "-o", str(cubin), str(source),
+            ],
+            check=True,
+        )
+
+    print(f"torch={torch.__version__}")
+    print(f"vllm={vllm.__version__}")
+    print(f"device={torch.cuda.get_device_name()}")
+    print(f"arch={torch.cuda.get_arch_list()}")
+    print(torch.matmul(torch.ones((16, 16), device="cuda", dtype=torch.float16),
+                       torch.ones((16, 16), device="cuda", dtype=torch.float16))[0, 0].item())
+    PY' 2>&1 | tee $task_dir/runtime-probe.log
+  result_files:
+    - "*.log"
+    - image-id.txt
+  timeout: 7200
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

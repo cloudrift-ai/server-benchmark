@@ -6,13 +6,15 @@ rewrites it into ``ir.tensor.ir`` primitives (elementwise + reduce + indexmap
 + constants). After the decomposition pass completes, none of these ops
 should remain in the graph.
 
-Two groups:
+Three groups:
 
 1. **Layout-only ops** — ``TransposeOp``, ``ReshapeOp``, ``SliceOp``,
    ``CatOp``, ``UnsqueezeOp``. Rewritten to a single ``IndexMapOp`` each.
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
    ``MeanOp``. Rewritten to elementwise/reduce chains (sometimes with
    inserted ``IndexMapOp`` unsqueezes so the broadcast contraction works).
+3. **Static construction** is spelled with generic tensor IR and folded before
+   Loop IR; checkpoint formats do not add frontend op classes.
 """
 
 from __future__ import annotations

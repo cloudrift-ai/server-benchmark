@@ -16,6 +16,35 @@ import re
 # Repo root: tests/architecture/ → tests/ → repo
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+_POST_DECOMPOSITION_ROOTS = (
+    "emmy/config.py",
+    "emmy/compiler/backend",
+    "emmy/compiler/dtype.py",
+    "emmy/compiler/ir/kernel",
+    "emmy/compiler/ir/loop",
+    "emmy/compiler/ir/stmt",
+    "emmy/compiler/ir/tile",
+    "emmy/compiler/pipeline/passes/loop",
+    "emmy/compiler/pipeline/passes/lowering",
+)
+
+
+def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
+    """Checkpoint-format implementation details may not enter downstream dialects or passes."""
+    forbidden = re.compile(r"\b(?:trellis|exl3)\b", re.IGNORECASE)
+    offenders: list[str] = []
+    for relative in _POST_DECOMPOSITION_ROOTS:
+        root = _REPO_ROOT / relative
+        paths = sorted(root.rglob("*.py")) if root.is_dir() else [root]
+        for path in paths:
+            for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+                if forbidden.search(line):
+                    offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "checkpoint-format names must stop at frontend decomposition; downstream code and comments "
+        "may contain only generic IR:\n" + "\n".join(offenders)
+    )
+
 
 def test_lowering_tile_does_not_import_kernel_ir() -> None:
     """``lowering/tile/*.py`` may not import from ``ir.kernel.ir``.

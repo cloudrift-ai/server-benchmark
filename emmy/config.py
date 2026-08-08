@@ -57,7 +57,6 @@ GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
-FP8_EXPAND = "EMMY_FP8_EXPAND"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -273,17 +272,6 @@ def set_readable(on: bool, *, overwrite: bool = False) -> None:
     to default readability ON without clobbering ``EMMY_READABLE=0``."""
     if overwrite or READABLE not in os.environ:
         os.environ[READABLE] = "1" if on else "0"
-
-
-def fp8_expand() -> bool:
-    """``EMMY_FP8_EXPAND`` — keep an fp8 checkpoint's decode cone in-graph for the
-    kernel path (f8 bits in device memory, decode + scale realized in-kernel) by
-    SKIPPING the ``032_fold_constant_subgraphs`` fold. OFF by default: the fold
-    collapses the cone into one bind-time-evaluated constant (the weight
-    materializes at the compute dtype — a one-time cost instead of a per-forward
-    recompute). On is the kernel-storage development path; off is the deployable
-    default."""
-    return _bool(FP8_EXPAND)
 
 
 def dump_dir() -> Path | None:

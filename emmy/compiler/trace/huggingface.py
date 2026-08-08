@@ -9,6 +9,7 @@ the FX graph. The mask is precomputed and stapled on as a buffer; HF's
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -454,7 +455,10 @@ def build_moe_split_wrapper(block):
     - ``post_attn(attn_out[T, Hq·D], residual[T, H]) -> (h[T, H], xn[T, H])`` — o_proj + residual,
       then the post-attention norm. BOTH come out: the router and the expert programs consume the
       normed ``xn``, and the layer output is ``h + combine(expert outputs)`` — the norm output must
-      materialize at the seam because it is shared across the k routed experts.
+      materialize at the seam because it is shared across the k routed experts. A DeepSeek/GLM-style
+      always-on ``shared_experts`` module (a plain dense MLP over the same ``xn``) folds INTO the
+      returned ``h`` (``h = residual + o_proj(attn) + shared_experts(xn)``), so the runner's
+      route-and-combine half needs no seam change for it.
     - ``expert(x[T_e, H], w_gate_up, w_down [, b_gate_up, b_down]) -> y[T_e, H]`` — one expert's
       gated MLP with the weights as FORWARD ARGUMENTS (they trace as graph inputs, not constants),
       so ONE compiled program serves every expert of every same-shaped layer; the caller passes
@@ -469,9 +473,9 @@ def build_moe_split_wrapper(block):
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
-    block layout and NO always-on shared expert only; the Gemma 4-norm MoE form and DeepSeek-style
-    ``shared_experts`` blocks are rejected loudly until a model needs them — a silent pass would
-    drop the shared-experts term from every layer's output."""
+    block layout only; the Gemma 4-norm MoE form and Qwen-MoE's GATED shared expert
+    (``shared_expert_gate``) are rejected loudly until a model needs them — a silent pass would
+    drop (or mis-weight) the shared term from every layer's output."""
     import torch
     import torch.nn as nn
 
@@ -479,12 +483,12 @@ def build_moe_split_wrapper(block):
     if parts is None:
         raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
     _, experts = parts
-    for shared_attr in ("shared_experts", "shared_expert"):
-        if getattr(block.mlp, shared_attr, None) is not None:
-            raise NotImplementedError(
-                f"build_moe_split_wrapper: block.mlp carries an always-on `{shared_attr}` module (DeepSeek/Qwen-MoE "
-                f"lineage) — the carve has no seam for it yet and would silently drop its contribution"
-            )
+    if getattr(block.mlp, "shared_expert_gate", None) is not None:
+        raise NotImplementedError(
+            "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
+            "the ungated shared-experts fold below would silently drop the gate, mis-weighting every layer's output"
+        )
+    shared_experts = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(block.mlp, a, None)) is not None), None)
     if getattr(block, "pre_feedforward_layernorm", None) is not None:
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
     pre = _build_pre_wrapper(block)
@@ -495,10 +499,17 @@ def build_moe_split_wrapper(block):
             super().__init__()
             self.o_proj = attn.o_proj
             self.post_attention_layernorm = block.post_attention_layernorm
+            # DeepSeek/GLM lineage: an always-on dense MLP beside the routed experts,
+            # consuming the same normed xn. Folding it into h keeps the runner's
+            # route-and-combine half seam-free: layer_out = h + Σ w_e · expert_e(xn).
+            self.shared_experts = shared_experts
 
         def forward(self, attn_out, residual):
             h = residual + self.o_proj(attn_out)
-            return h, self.post_attention_layernorm(h)
+            xn = self.post_attention_layernorm(h)
+            if self.shared_experts is not None:
+                h = h + self.shared_experts(xn)
+            return h, xn
 
     transposed, _interleaved, has_bias = moe_expert_layout(experts)
     act_fn = getattr(experts, "act_fn", None)
@@ -601,8 +612,17 @@ class _PassThroughMask:
         return self._wrapper.causal_mask
 
 
+def _is_quantized_dir(p) -> bool:
+    """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
+    (FP8 scale-paired bits, or EXL3 trellis-coded siblings)."""
+    from emmy.compiler.loader.quant import _exl3_quant_config, _fp8_quant_config  # noqa: PLC0415
+
+    return _fp8_quant_config(p) is not None or _exl3_quant_config(p) is not None
+
+
 def quantized_checkpoint_dir(model_id_or_path: str):
-    """The local checkpoint dir when the model is an FP8-quantized checkpoint, else ``None``.
+    """The local checkpoint dir when the model is a quantized checkpoint (FP8 or EXL3),
+    else ``None``.
 
     Detection reads only ``config.json`` (for a repo id, a single cached hub
     download); the full snapshot is fetched only when the checkpoint IS
@@ -612,11 +632,9 @@ def quantized_checkpoint_dir(model_id_or_path: str):
     """
     from pathlib import Path  # noqa: PLC0415
 
-    from emmy.compiler.loader.quant import _fp8_quant_config  # noqa: PLC0415
-
     p = Path(model_id_or_path)
     if p.is_dir():
-        return p if _fp8_quant_config(p) is not None else None
+        return p if _is_quantized_dir(p) else None
     from huggingface_hub import hf_hub_download  # noqa: PLC0415
 
     try:
@@ -626,7 +644,7 @@ def quantized_checkpoint_dir(model_id_or_path: str):
         # path keeps ownership of error reporting (bad id, gated repo, offline).
         logger.debug("quantized-checkpoint detection skipped for %s: %s", model_id_or_path, e)
         return None
-    if _fp8_quant_config(Path(cfg_path).parent) is None:
+    if not _is_quantized_dir(Path(cfg_path).parent):
         return None
     from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
@@ -772,20 +790,77 @@ def load_quantized_split(model_dir, dtype):
     return model, {"fmt": fmt, "layers": layers_store}
 
 
+def _trim_padded_weights(model, state: dict) -> None:
+    """Slice encode-padded weight values back to the module's declared shape, in place.
+
+    EXL3 pads both dims of every quantized linear to multiples of 128 at encode time
+    (GLM-4.5-Air: ``intermediate_size`` 10944 → 11008), so a decoded state value can
+    overhang the module's parameter. Slicing the leading extents is exactly the reference
+    math (zero-padded activations in, sliced outputs). Guarded
+    tightly: only when every overhanging dim is exactly the declared dim's roundup to 128 —
+    anything else stays as-is for ``load_state_dict`` to report."""
+    for key, param in model.state_dict().items():
+        t = state.get(key)
+        if t is None or t.shape == param.shape or t.dim() != param.dim():
+            continue
+        if all(td == -(-pd // 128) * 128 or td == pd for td, pd in zip(t.shape, param.shape, strict=True)):
+            state[key] = t[tuple(slice(0, pd) for pd in param.shape)].contiguous()
+
+
+def _pack_expert_state(model, state: dict) -> None:
+    """Pack per-expert checkpoint weights into the transformers-v5 3-D expert params, in place.
+
+    The DeepSeek/GLM checkpoint lineage stores each expert as its own module
+    (``…experts.E.{gate,up,down}_proj.weight``), while the v5 experts module declares the
+    E-stacked 3-D params (``…experts.gate_up_proj`` ``(E, 2*I, H)`` / ``…experts.down_proj``
+    ``(E, H, I)``) — ``from_pretrained`` applies the hub conversion mapping, but a state dict
+    built by the loaders must pack here. Per-expert ``nn.Linear`` weights are the ``(out,
+    in)`` orientation by construction, so the packing is deterministic: stack, with gate/up
+    concatenated along the out axis (the ``chunk(2)`` halves). Fires only when the model
+    expects a packed param whose per-expert sources are all present in ``state``; a shape
+    mismatch raises rather than loading a silently wrong twin."""
+    import torch  # noqa: PLC0415
+
+    for key, param in model.state_dict().items():
+        m = re.match(r"(.*\.experts)\.(gate_up_proj|down_proj)$", key)
+        if m is None or key in state:
+            continue
+        base, leaf = m.groups()
+        n_experts = param.shape[0]
+        parts = []
+        consumed: list[str] = []
+        for e in range(n_experts):
+            names = [f"{base}.{e}.{p}.weight" for p in (("gate_proj", "up_proj") if leaf == "gate_up_proj" else ("down_proj",))]
+            halves = [state.get(nm) for nm in names]
+            consumed += names
+            parts.append(None if any(h is None for h in halves) else halves[0] if len(halves) == 1 else torch.cat(halves, dim=0))
+        if any(p is None for p in parts):
+            continue  # not the per-expert layout (or an incomplete checkpoint) — leave for load_state_dict to report
+        packed = torch.stack(parts, dim=0)
+        if packed.shape != param.shape:
+            raise ValueError(f"expert packing for {key}: packed shape {tuple(packed.shape)} != expected {tuple(param.shape)}")
+        for nm in consumed:
+            del state[nm]
+        state[key] = packed
+
+
 def load_quantized_twin(model_dir, dtype):
     """Architecture twin of a quantized checkpoint, carrying the DEQUANTIZED real weights.
 
     A quantized checkpoint cannot go through ``from_pretrained`` as-is —
-    transformers would engage its own fp8 machinery, and the trace is
-    quantization-blind (quantization is a property of the checkpoint, not the
-    architecture; see the FP8 plan). So: build the plain architecture from
-    config with ``quantization_config`` stripped, then load the checkpoint's
-    tensors with every fp8 weight dequantized
-    (``loader.quant.load_dequantized_state_dict``) — the returned module is
-    both the trace subject and the eager / accuracy reference. ``strict=False``
-    tolerates non-persistent buffers absent from the checkpoint (rotary
-    ``inv_freq``); ``tie_weights()`` re-asserts tied embeddings after the load
-    (see ``binder.py``'s state_dict-vs-named_parameters note).
+    transformers would engage its own quantizer machinery (or reject the
+    scheme outright: EXL3), and the trace is quantization-blind (quantization
+    is a property of the checkpoint, not the architecture; see the FP8 plan).
+    So: build the plain architecture from config with ``quantization_config``
+    stripped, then load the checkpoint's tensors with every quantized weight
+    decoded (``loader.quant.load_dequantized_state_dict`` — fp8 scale pairs
+    and EXL3 trellis siblings alike) — the returned module is both the trace
+    subject and the eager / accuracy reference. Per-expert checkpoint weights
+    pack into the v5 3-D expert params (:func:`_pack_expert_state`).
+    ``strict=False`` tolerates non-persistent buffers absent from the
+    checkpoint (rotary ``inv_freq``); ``tie_weights()`` re-asserts tied
+    embeddings after the load (see ``binder.py``'s
+    state_dict-vs-named_parameters note).
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -801,6 +876,8 @@ def load_quantized_twin(model_dir, dtype):
     for k, v in load_dequantized_state_dict(model_dir).items():
         t = torch.from_numpy(np.ascontiguousarray(v))
         state[k] = t.to(dtype) if t.is_floating_point() else t
+    _trim_padded_weights(model, state)
+    _pack_expert_state(model, state)
     missing, unexpected = model.load_state_dict(state, strict=False)
     if unexpected:
         logger.warning("quantized twin: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])

@@ -80,11 +80,11 @@ def nvcc_path() -> str | None:
 
 
 def device_arch(uses_tma: bool) -> str:
-    """``sm_<cc>`` for the live device, plus the ``a`` (arch-accelerated)
-    suffix for TMA kernels — matching ``program._nvrtc_options``' arch."""
-    import cupy as cp  # noqa: PLC0415
+    """The active compiler target, plus the ``a`` suffix for a TMA kernel."""
+    from emmy.compiler.target import compute_capability  # noqa: PLC0415
 
-    cap = str(cp.cuda.Device().compute_capability)  # e.g. "120"
+    major, minor = compute_capability()
+    cap = f"{major}{minor}"
     return f"sm_{cap}" + ("a" if uses_tma else "")
 
 

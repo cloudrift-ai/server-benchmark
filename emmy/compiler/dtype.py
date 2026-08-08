@@ -25,8 +25,8 @@ class DataType:
 
     Two sub-families (see :func:`is_structured`):
 
-    - **Scalar** — a single logical element per value (``F32`` / ``F16`` /
-      ``BF16`` / ``I32`` / ``I64``). These are plain ``DataType`` instances.
+    - **Scalar** — a single logical element per value (floating-point and
+      signed/unsigned integer types). These are plain ``DataType`` instances.
     - **Structured** (:class:`StructuredType`) — a register-composite value
       with a hardware-specific layout, e.g. the packed vector ``F16x2``
       (``__half2``), as opposed to a plain scalar element.
@@ -61,6 +61,7 @@ class StructuredType(DataType):
 
 F32 = DataType("f32", np.dtype(np.float32), 4)
 F16 = DataType("f16", np.dtype(np.float16), 2)
+F64 = DataType("f64", np.dtype(np.float64), 8)
 # BFloat16 — same 2-byte footprint as F16 but different exponent / mantissa
 # split (8 / 7 vs 5 / 10). Used by the mma.sync bf16 atom kind (M9 of the MMA
 # fragment-factorization plan). NumPy has no first-class bf16; we map to
@@ -82,12 +83,15 @@ F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 
 
-# Integer types — appear on ``input_ids`` placeholders from HF whole-model
-# traces. The compiler doesn't generate kernels that compute on them today
-# (LM-head gather + embedding lookup is index math); they exist so the
-# graph can carry the right Tensor.dtype past the placeholder.
+# Integer types appear on ``input_ids`` placeholders and in generic static
+# construction algebra. Runtime kernels do not yet lower the unsigned forms;
+# the generic constant folder removes their current uses before Loop IR.
+I16 = DataType("i16", np.dtype(np.int16), 2)
 I32 = DataType("i32", np.dtype(np.int32), 4)
 I64 = DataType("i64", np.dtype(np.int64), 8)
+U16 = DataType("u16", np.dtype(np.uint16), 2)
+U32 = DataType("u32", np.dtype(np.uint32), 4)
+U64 = DataType("u64", np.dtype(np.uint64), 8)
 
 # Bool — appears on the explicit-mask construction ops in HF whole-model
 # traces (comparisons / logical masks feeding the attention bias). Like the
@@ -96,7 +100,7 @@ I64 = DataType("i64", np.dtype(np.int64), 8)
 BOOL = DataType("bool", np.dtype(np.bool_), 1)
 
 
-_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, BF16, F8E4M3, F8E5M2, F16x2, I32, I64, BOOL)}
+_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, F64, BF16, F8E4M3, F8E5M2, F16x2, I16, I32, I64, U16, U32, U64, BOOL)}
 
 # Aliases let callers feed PyTorch/numpy-style names without re-canonicalizing
 # at every callsite. The canonical name (``F32.name == "f32"``) is what lands
@@ -106,12 +110,18 @@ _ALIASES: dict[str, str] = {
     "float": "f32",
     "float16": "f16",
     "half": "f16",
+    "float64": "f64",
+    "double": "f64",
     "bfloat16": "bf16",
     "float8_e4m3fn": "f8e4m3",  # torch spelling ("fn" — finite + NaN, no inf)
     "float8_e5m2": "f8e5m2",
+    "int16": "i16",
     "int32": "i32",
     "int64": "i64",
     "long": "i64",
+    "uint16": "u16",
+    "uint32": "u32",
+    "uint64": "u64",
 }
 
 

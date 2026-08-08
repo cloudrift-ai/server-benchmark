@@ -66,14 +66,12 @@ engine:
       # TODO(Phase 5) — the prebuilt per-model image does not exist yet. The slug is fixed
       #   by docker/vllm-emmy-serve/model_slug.sh (turboderp/GLM-4.5-Air-exl3 →
       #   glm-4.5-air-exl3); the tag comes out of `make serve-push MODEL=…`.
-      #   Two release-pipeline gaps block that build and are neither this file's to fix
-      #   nor safe to discover during a warm run:
-      #     - models/<slug>.env has no SERVE_REVISION and serve.sh passes no --revision,
-      #       so the warm would bake the DEFAULT branch (2.00 bpw), not this rung.
-      #     - serve.sh hardcodes --hf-overrides '{"architectures": ["EmmyGenModel"]}' with
-      #       no EXL3 arm and a power-of-two cudagraph ladder. An EXL3 boot needs
-      #       "quantization_config": null (vLLM has no exl3 quant method and refuses the
-      #       boot outright), and an MoE boot needs the capture ladder capped at 1.
+      #   The release-pipeline gaps that used to block that build are CLOSED: SERVE_REVISION
+      #   now flows env → serve.sh → warm.sh → the baked image (and warm.sh refuses an
+      #   unpinned multi-branch repo), SERVE_QUANT=exl3 emits the
+      #   "quantization_config": null override vLLM needs (it has no exl3 quant method and
+      #   refuses the boot without it), and SERVE_CAPTURE_SIZES caps the MoE capture ladder
+      #   at 1. The runner honours the revision too, and the pack key now separates rungs.
       #       Both are what `emmy serve --generate` already does; serve.sh has to catch up
       #       or the warm run dies before it compiles anything.
       image: "cloudriftai/vllm-emmy-glm-4.5-air-exl3:latest"

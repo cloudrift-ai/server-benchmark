@@ -177,12 +177,8 @@ def decode_trellis(trellis: np.ndarray, cb: int = 0) -> np.ndarray:
     return out.reshape(kt, nt, 16, 16).transpose(0, 2, 1, 3).reshape(16 * kt, 16 * nt)
 
 
-def sylvester_hadamard(n: int) -> np.ndarray:
-    """The natural-order Sylvester Hadamard matrix of size ``n`` (a power of two), float64.
-
-    Symmetric (``H == H.T``) and ``H @ H == n·I``, so ``H/sqrt(n)`` is its own inverse — the
-    property both the weight-side fold (:func:`fold_hadamard`) and the activation-side basis
-    restore rely on."""
+def _sylvester_had(n: int) -> np.ndarray:
+    """The natural-order Sylvester Hadamard matrix of size ``n`` (a power of two), float64."""
     h = np.ones((1, 1), dtype=np.float64)
     while h.shape[0] < n:
         h = np.block([[h, h], [h, -h]])
@@ -205,7 +201,7 @@ def fold_hadamard(w_hat: np.ndarray, suh: np.ndarray, svh: np.ndarray) -> np.nda
     suh, svh = np.asarray(suh), np.asarray(svh)
     if suh.shape != (k,) or svh.shape != (n,):
         raise ValueError(f"suh/svh shapes {suh.shape}/{svh.shape} do not match weight shape {w_hat.shape}")
-    h = sylvester_hadamard(HAD_BLOCK) / np.sqrt(HAD_BLOCK)
+    h = _sylvester_had(HAD_BLOCK) / np.sqrt(HAD_BLOCK)
     w = w_hat.astype(np.float64)
     w = (h @ w.reshape(k // HAD_BLOCK, HAD_BLOCK, n)).reshape(k, n)  # H128 . W_hat, per 128 rows
     w = (w.reshape(k, n // HAD_BLOCK, HAD_BLOCK) @ h).reshape(k, n)  # … . H128, per 128 cols

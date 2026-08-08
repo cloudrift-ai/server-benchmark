@@ -1,5 +1,5 @@
 # Build and qualify the source-pinned CloudRift 1Cat-vLLM image on one V100. This is a command
-# workload so the image remains local to the fixed Phase 1 host; serving recipes reuse the tag.
+# workload so the image remains local to the fixed host; serving recipes reuse the tag.
 command:
   stage:
     - docker/1cat-vllm-sm70

@@ -86,9 +86,6 @@ F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 # traces. The compiler doesn't generate kernels that compute on them today
 # (LM-head gather + embedding lookup is index math); they exist so the
 # graph can carry the right Tensor.dtype past the placeholder.
-# I16 is the packed-code carrier of trellis-coded (EXL3) checkpoints: the
-# stored code words are int16 and bind bit-identically through the loader;
-# like I32/I64 it never reaches a kernel (the decode cone folds at bind time).
 I16 = DataType("i16", np.dtype(np.int16), 2)
 I32 = DataType("i32", np.dtype(np.int32), 4)
 I64 = DataType("i64", np.dtype(np.int64), 8)

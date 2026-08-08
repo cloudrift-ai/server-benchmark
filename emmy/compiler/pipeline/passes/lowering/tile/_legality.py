@@ -436,33 +436,13 @@ def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
     return None
 
 
-def computed_b_cover(c: Fold, tile: TilePlan) -> str | None:
-    """The geometry a COMPUTED ``b`` edge's compute fill demands — the B-side twin of
-    :func:`computed_a_cover`: a STATIC contraction K (the staged driver reads one, and the B
-    fill's ``k0 + row`` has no K clamp) and an N width that EXACTLY covers the output columns
-    (the fill's ``col_base + col`` has no N clamp — an overhanging column would decode
-    out-of-bounds codes). A masked / symbolic M is fine: M rides the A operand, whose fill
-    clamp-reads the overhang."""
-    if not c.axis.extent.is_static:
-        return "a computed B edge needs a static contraction K — the sync compute-fill has no K mask"
-    if tile.n.mask:
-        return (
-            f"a computed B edge needs a TILE whose N width exactly covers the static output columns "
-            f"(N={tile.n.axis.extent}, no N mask in the sync compute-fill); pick a dividing tile."
-        )
-    return None
-
-
 def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
-    """The ``sync`` compute-fill :class:`Stage` for a warp contraction with a COMPUTED operand
-    edge — the fused computed-A cone, or a computed-B (trellis decode) channel — under ``tile``:
-    MANDATORY for these forms (the gmem-direct mma leaf refuses a computed edge, and cp.async /
-    TMA are copy transports that cannot evaluate a producer cone), so it has no gmem-direct
-    ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed
-    ``budget``: one A slab, one B slab per channel, and one fp32 row per bridged statistic
-    (``ops.cone_seam``'s ``stats`` — the same node boundary the materializer fills through; a
-    materialized or computed-B ``a`` bridges none). The slab BYTES are the same whichever edge
-    is computed — every slab holds decoded atom-dtype elements.
+    """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction under ``tile``
+    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
+    copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
+    and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
+    slab, one B slab per channel, and one fp32 row per bridged statistic (``ops.cone_seam``'s
+    ``stats`` — the same node boundary the materializer fills through).
 
     ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the B cp.async slabs ring
     (their copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill and drain), while the
@@ -478,7 +458,7 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
         return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
-    _, _, stats = cone_seam(c.a) if not isinstance(c.a, Load) else ((), (), ())
+    _, _, stats = cone_seam(c.a)
     a_bytes = tile.m.tile * bk_elems * a_nbytes
     b_bytes = len(c.channels) * tile.n.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * tile.m.tile * 4
@@ -713,7 +693,6 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
 
 __all__ = [
     "computed_a_cover",
-    "computed_b_cover",
     "enforce",
     "fragment_epilogue",
     "coop_band_layout",

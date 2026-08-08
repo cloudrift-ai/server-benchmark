@@ -162,39 +162,6 @@ static __device__ __forceinline__ void emmy_cp_async_wait() {
 # 16-bit elems each); ``c``/``d`` are ``float`` (f32 accumulate). Lane→element
 # layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``LdmatrixLoad`` /
 # ``RegStore`` address arithmetic in ``ir/kernel/ir.py``).
-# Trellis-coded (EXL3) weight decode — the ``TrellisLoad`` leaf's realization. ``codes`` points
-# at ONE 16x16 tile's packed words (``16*kbits`` uint16 = ``8*kbits`` uint32; the int16 buffer
-# read as little-endian uint32 IS the SWAP16 pair join); the element's 16-bit window is bits
-# ``[(t+1)*kbits - 16, (t+1)*kbits) mod 256*kbits`` of the circular stream, MSB-first, with the
-# step ``t`` derived from the in-tile coords through the mma m16n8k16 B-fragment order. The
-# 3INST computed codebook follows — no stored LUT anywhere. Exact fp16 arithmetic, widened once
-# to float on return (``loader/exl3.py`` is the bit-exact numpy reference).
-_TRELLIS_PRELUDE = """\
-static __device__ __forceinline__ float emmy_trellis_decode(
-        const unsigned short* __restrict__ codes, int kbits, int cb, int k_lo, int n_lo) {
-    int lane = ((n_lo & 7) << 2) | ((k_lo & 7) >> 1);
-    int j = (k_lo & 1) | (((k_lo >> 3) & 1) << 1) | (((n_lo >> 3) & 1) << 2);
-    int t = (lane << 3) | j;
-    int nbits = kbits << 8;
-    int b0 = ((t + 1) * kbits - 16 + nbits) % nbits;
-    int w = b0 >> 5;
-    int nwords = kbits << 3;
-    const unsigned int* u32 = (const unsigned int*)codes;
-    unsigned long long joined = ((unsigned long long)u32[w] << 32) | (unsigned long long)u32[(w + 1) % nwords];
-    unsigned int x = (unsigned int)(joined >> (48 - (b0 & 31))) & 0xFFFFu;
-    if (cb == 2) {
-        x *= 0x83DCD12Du;
-        unsigned int s = ((x & 0xFFu) + ((x >> 8) & 0xFFu) + ((x >> 16) & 0xFFu) + (x >> 24) + 0x6400u) & 0xFFFFu;
-        __half h = __ushort_as_half((unsigned short)s);
-        return __half2float(__hfma(h, __ushort_as_half((unsigned short)0x1EEEu), __ushort_as_half((unsigned short)0xC931u)));
-    }
-    x = (cb == 1) ? x * 0xCBAC1FEDu : x * 89226354u + 64248484u;
-    x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
-    return __half2float(__hadd(__ushort_as_half((unsigned short)(x & 0xFFFFu)),
-                               __ushort_as_half((unsigned short)(x >> 16))));
-}
-"""
-
 _MMA_M8N8K4_PRELUDE = """\
 // Volta m8n8k4: one warp instruction performs four independent 8x8 MMAs.
 // The lane's four-lane computation group selects one quadrant of a logical
@@ -1046,16 +1013,7 @@ def render_kernelop(
         mma_sync_prelude += _F8_STAGED_PRELUDE
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
-    # The trellis decode helper joins only when a ``TrellisLoad`` is present (kernel-source
-    # digest safety), and its fp16 intrinsics need the fp16 header even when no kernel
-    # parameter carries an f16 dtype.
-    from emmy.compiler.ir.stmt import TrellisLoad  # noqa: PLC0415
-
-    trellis_prelude = ""
-    if any(isinstance(s, TrellisLoad) for s in kernel_op.body.iter()):
-        trellis_prelude = _TRELLIS_PRELUDE
-        includes = "".join(f"#include {h}\n" for h in cuda_includes([*sig_dtypes, "f16"]))
-    preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{trellis_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

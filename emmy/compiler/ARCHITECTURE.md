@@ -172,53 +172,17 @@ constant at birth into three leaf constants (int16 codes on the `i16` carrier + 
 by a `TrellisDecodeOp` (frontend IR; `cb` records the `mcg`/`mul1` marker presence, `out_features`/`in_features`
 slice the encode padding — the reference math, since exllamav3 zero-pads activations in and slices outputs).
 `032_fold_constant_subgraphs` collapses the cone into a bind-time `source_graph` record — this is the
-correctness lane: full value footprint in memory, bind-time decode bit-exact against the direct decode. Not
-every linear is coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0
-`o_proj`), and those load as ordinary tensors.
-
-**In-kernel trellis decode (computed-B).** The HAT-BASIS form of the op (`TrellisDecodeOp(hadamard=False)` —
-the raw per-tile decode, no channel vectors, no Hadamard fold; the basis restore rides the activations, below)
-has a kernel realization: it lifts to a `LoopOp` of per-element `TrellisLoad` reads
-(the window is directly addressable in the tile's circular bit stream, so each element decodes independently —
-no carried walk state), loop fusion inlines it into the consuming matmul, and the contraction binder stores it
-as a COMPUTED-B cone. The warp tier then schedules it over the mandatory `sync` compute-fill: the fill decodes
-each B tile straight into the K-major smem slab the ldmatrix drain already reads (one `emmy_trellis_decode`
-helper call per element — window extraction + the 3INST computed codebook, no stored LUT), while the packed
-codes are the only weight bytes that ever cross DRAM (~8× fewer than f16 at K=2) and the A operand rides its
-usual vectorized `cp.async` fill underneath. Split-K, TMA and the scalar staged tiers decline (a computed B has
-no gmem element layout); the COLLAPSE reading is the reduce-tier fallback (per-cell decode — correct, slow).
-Constant-rooted hat-basis cones fold by default and stay in-graph under `EMMY_TRELLIS_EXPAND` (the kernel-path
-gate, the trellis sibling of `EMMY_FP8_EXPAND`); checkpoint-basis cones fold regardless. Measured on the 5090
-at N=K=22016, K=2 (codes 121 MB — past L2): the compressed matmul beats the same-shape f16 matmul at M=128
-(2.10 vs 2.34 ms) and runs decode-ALU-bound at larger prefill M (1.6–1.7× f16 at M=256–2048) — the per-element
-decode re-runs per M-tile row, which is the standing lever for the reduce-tier (decode-phase) and
-fragment-drain follow-ups.
-
-**Activation-side basis restore.** Only `W_hat` decodes in-kernel, so under the same `EMMY_TRELLIS_EXPAND` gate
-`spell_trellis_constants` rewrites the CONSUMING LINEAR instead of the weight constant, moving the checkpoint's
-`W = diag(suh)·H·W_hat·H·diag(svh)` basis onto the activations — `x → [pad to k_pad] → ·suh → H → ·1/16 →
-@ W_hat → ·1/8 → H → ·svh → [slice] → [+bias]`. The 128-block Hadamard is spelled as PLAIN ALGEBRA: a
-128×128 matmul over a 128-blocked operand against one graph-wide `HadamardOp` constant (a zero-input generator
-inside a zero-leaf `source_graph` bind record — the matrix has no checkpoint source; symmetric, so `LinearOp`
-needs no transpose), which puts the transform on the existing tiers with no new kernel machinery. Two rules make
-the chain lower correctly and are load-bearing: every layout change (the encode-pad concat, the flat↔block
-reshapes, the output slice) is absorbed by a POINTWISE and never reaches a matmul's activation operand, and the
-`1/sqrt(128)` per side is split as the exact powers of two `1/16` before the weight and `1/8` after, so the
-shared constant is plain ±1 and both intermediates stay below the balanced magnitude. A linear the rewrite
-declines (a weight without exactly one `LinearOp` consumer, symbolic activation dims) falls back to the folded
-checkpoint-basis cone, correct everywhere. Measured on the 5090 at N=K=22016, K=2 (past L2), against the same
-matmul with no basis restore: **+4.5 % at M=1 and +13.4 % at M=128**, the transforms collapsing into 3–4 kernels
-(the scale multiplies fuse as computed-A cones on the two Hadamard matmuls) — at or under exllamav3's ~14 %
-standalone cost. At L2-resident shapes the ratio is much worse (+36 % / +68 % at M=128 on the GLM dense
-projections) because the compressed matmul is artificially fast there; those absolute microseconds do not
-predict in-model step time.
+correctness lane: full value footprint in memory, bind-time decode bit-exact against the direct decode. Not every
+linear is coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0 `o_proj`), and
+those load as ordinary tensors.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
-search — may know canonical dtypes (`f8e4m3`), decode-trait elementwise ops (`ElementwiseImpl.decodes`), and graph
-algebra; they may NEVER know checkpoint formats, scheme names, scale pairing, or quantization metadata. The frontend
-band (the birth-time speller + the fold pass + the loader) is the only place quantization-as-a-concept exists; a
-mechanical gate test (`tests/compiler/loader/test_quant.py`) greps `emmy/` for concept leaks against a frontend-band
-allowlist.
+search — may know canonical dtypes (`f8e4m3`), generic elementwise ops, and graph algebra. They may NEVER contain a
+checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or name.
+Scheme-specific types and metadata belong only to checkpoint loading and frontend IR. Frontend decomposition must
+replace them with generic algebra or a regular constant before Loop IR is built. If an optimization cannot cross that
+boundary in generic IR, keep the bind-time constant path instead of extending the downstream dialects. Mechanical
+architecture tests scan the post-decomposition source tree for format-name leaks.
 
 ## Op provenance
 

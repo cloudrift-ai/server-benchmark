@@ -30,7 +30,7 @@ geometry."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, TrellisLoad, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.tile import Channel, Fold, Store
@@ -201,24 +201,7 @@ def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: L
     return a_leaf, b_leaf, raw, Body((*hoisted, *chain, *epilogue))
 
 
-def _trellis_b_cone(body: list, b_arg: str, m_name: str) -> list | None:
-    """The computed-B cone of lift argument ``b_arg``, when it is a KERNEL-REALIZABLE decode —
-    a pure MAP cone whose leaf is a :class:`TrellisLoad` (the per-element trellis decode; the
-    compute fill evaluates it into the B slab) with no ``m_name``-indexed load riding it (the
-    mirror of the A-side cone guard: an m-indexed load inside B would make the "streamed"
-    operand M-resident). ``None`` for any other computed B — an arbitrary f16 producer cone
-    stays UNBOUND on purpose (the fill could evaluate it, but offering warp rows there would
-    re-schedule existing models' shapes that today demote to PLANAR; widening is gated on its
-    own evidence)."""
-    cone = map_cone(body, b_arg)
-    if not cone or not any(isinstance(st, TrellisLoad) for st in cone):
-        return None
-    if any(isinstance(st, Load) and m_name in _idx_vars(st.index) for st in cone):
-        return None
-    return cone
-
-
-def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load | list, str, Body]:
+def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load, str, Body]:
     """Resolve the ``(a_load, b_load, acc, epilogue)`` operand→role facts for a ``CONTRACTION``
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
     ``m_name`` / ``n_name``, with projection ``epilogue``.
@@ -229,11 +212,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     fusion has inlined an operand cone, the cone itself as a zero-axis ``Fold`` NODE (the computed-A form,
     which rides the ``sync`` compute-fill; the caller shapes it into the inline cone node via
     :func:`make_cone`, which also puts the K seam on the node). The fold accumulator is the loop
-    body's ``Accum`` target. B binds the same two ways: a plain ``Load``, or — when its value is a
-    kernel-realizable per-element decode (a :class:`TrellisLoad` leaf, named directly or under a
-    pure MAP cone with no m-indexed load, :func:`_trellis_b_cone`) — a COMPUTED cone list the
-    caller wraps via :func:`make_cone`. The computed-B form rides the same ``sync`` compute-fill,
-    decoding the B tile into its slab while the packed codes stay compressed in gmem.
+    body's ``Accum`` target.
 
     Binding A off the LIFT and not off "the first (m, k)-indexed load" is load-bearing: a
     cone-INTERNAL load is (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as
@@ -265,13 +244,6 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
         if b_leaf.names[0] in lift.args:
             a_arg = next(a for a in lift.args if a != b_leaf.names[0])
             if a_leaf is not None and a_arg == a_leaf.names[0]:
-                if isinstance(b_leaf, TrellisLoad):
-                    # The COMPUTED-B trellis arm, direct form: the lift names the decode leaf
-                    # itself. Never bind it as a materialized B — every staging / split-K gate
-                    # would byte-copy the codes buffer as if it held the decoded elements.
-                    # Returned as a one-stmt cone; the caller wraps it via :func:`make_cone`,
-                    # and the warp tier's compute fill decodes the tile into the B slab.
-                    return a_leaf, [b_leaf], acc, epilogue
                 return a_leaf, b_leaf, acc, epilogue
             # A rides a computed cone. A storage decode times k-invariant multiplicative factors
             # binds through the mul-hoist FIRST (the raw storage-dtype A load — the W8A8
@@ -283,11 +255,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
                 return hoist
             cone = map_cone(body, a_arg)
             if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
-                # A DOUBLE-computed edge when B is the decode leaf: bind B as a cone here too.
-                # Handing back the bare ``TrellisLoad`` would make it a materialized B, and the
-                # staging gates would byte-copy the packed codes into the slab as if they held
-                # decoded elements — the decode would vanish from the kernel entirely.
-                return cone, ([b_leaf] if isinstance(b_leaf, TrellisLoad) else b_leaf), acc, epilogue
+                return cone, b_leaf, acc, epilogue
             # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
             # n-indexed load riding it) — falling through to the positional (m, k) rule below would
             # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
@@ -304,15 +272,6 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
         hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
         if hoist is not None:
             return hoist
-        # The COMPUTED-B trellis arm, wrapped form: the lift's B argument rides a pure MAP cone
-        # whose leaf is the per-element trellis decode. Binds as an inline cone (the mirror of
-        # the computed-A path); any other computed B still raises → the recognizer demotes the
-        # cell to PLANAR (the guardrail contract).
-        if a_leaf is not None and a_leaf.names[0] in lift.args:
-            b_arg = next(a for a in lift.args if a != a_leaf.names[0])
-            cone = _trellis_b_cone(body, b_arg, m_name)
-            if cone is not None:
-                return a_leaf, cone, acc, epilogue
         raise LoweringError("warp tier: the ⊗ lift's B operand is a computed cone that does not bind")
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")

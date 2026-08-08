@@ -121,8 +121,6 @@
  "tests/compiler/passes/test_schedule_pool_cache.py::test_pool_rows_are_read_only": 0.57,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_second_resolve_hits_the_pool_and_serves_identical_rows": 0.73,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_two_same_shape_kernels_share_one_enumeration": 0.59,
- "tests/compiler/passes/test_trellis_computed_b.py::test_computed_b_readings_never_collide": 0.27,
- "tests/compiler/passes/test_trellis_computed_b.py::test_computed_b_schedules_warp_only_over_the_sync_fill": 0.16,
  "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp": 6.1,
  "tests/compiler/pipeline/search/data/test_dataset.py::test_golden_compile_s_feats_matches_inline": 0.21,
  "tests/compiler/pipeline/search/data/test_dataset.py::test_traced_s_features_matmul_parity_and_no_match": 0.07,

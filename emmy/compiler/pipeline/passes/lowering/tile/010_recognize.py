@@ -327,10 +327,7 @@ def _nodify_contraction(node, free: tuple):
             con = Fold.contraction(
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
-                # A computed B (the trellis decode cone) stores inline on its channel edge, the
-                # exact mirror of the A cone — every ``isinstance(ch.b, Load)`` staging /
-                # split-K gate then answers "computed" off the edge.
-                channels=(Channel(b=b_load if isinstance(b_load, Load) else make_cone(b_load, rloop.axis.name), acc=acc),),
+                channels=(Channel(b=b_load, acc=acc),),
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
             # STORED form is the contraction itself (1s) — pure algebra; the

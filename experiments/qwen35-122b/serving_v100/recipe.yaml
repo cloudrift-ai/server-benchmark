@@ -1,6 +1,6 @@
-# Phase 1 correctness-only serving probe on the PCIe-only V100 host. These settings mirror the
-# recommended serving recipe, but this workload is deliberately tiny and its timings are not
-# publishable. The pinned image must first be built with experiments/volta-sm70-stack.
+# Frozen serving workload for an NVLink-qualified 16xV100 host. The three points are
+# deterministic single-stream measurements; benchmark.repeats preserves three raw repetitions in
+# Emmy's JSON. Publication requires build_volta_article_manifest.py --phase 2 --final.
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
   task: generate
@@ -35,10 +35,15 @@ benchmark:
   max_concurrency: 1
   num_prompts: 1
   random_input_len: 32
-  random_output_len: 16
+  random_output_len: 256
   seed: 0
   temperature: 0.0
+  ignore_eos: true
+  repeats: 3
 
+# Short decode, 4K/256, and a near-32K prompt with 512 tokens of context headroom.
 matrices:
   deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
   deploy.gpu_count: 16
+  benchmark.random_input_len: [32, 4096, 32000]
+  benchmark.random_output_len: [256, 256, 256]

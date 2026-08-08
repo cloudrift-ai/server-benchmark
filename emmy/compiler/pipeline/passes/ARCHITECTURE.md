@@ -16,21 +16,15 @@ post-trace) and dissolved as early as possible: the generic `frontend/decomposit
 collapses each maximal constant-only cone carrying a storage-decode op into one bind-time-evaluated `ConstantOp`
 (its `source_graph` bind record), BEFORE `035`'s sibling merge and the `050`/`060` layout folds — so those passes
 only ever pattern-match plain constants, and later folds compose their transposes onto the collapsed constant's
-`load_ops`. `EMMY_FP8_EXPAND` skips the fold for fp8 cones, leaving them in-graph for the kernel path; a
-trellis-coded (EXL3) cone in the CHECKPOINT basis — three constant leaves under a `TrellisDecodeOp(hadamard=True)`,
-spelled by `spell_trellis_constants` — folds unconditionally, since no lowering rule knows that form, while the
-HAT-BASIS form (`hadamard=False` — codes alone, no Hadamard fold) folds by default and stays in-graph under
-`EMMY_TRELLIS_EXPAND`: it lifts to a `LoopOp` of per-element `TrellisLoad` reads
-(`loop/lifting/050_lift_trellis_decode`) and rides the consuming matmul as a computed-B cone. Either way, downstream
-layers — lowering, backends, search — may know exactly three things: canonical dtypes (`f8e4m3`, the `i16` codes
-carrier), decode-trait
-ops/leaves (`ElementwiseImpl.decodes`, the `TrellisDecodeOp` class, the `TrellisLoad` stmt), and graph/loop
-algebra. They may NEVER know checkpoint formats, scheme names,
-scale pairing, or any quantization metadata — there is none: no shared IR type carries a quant field. The frontend
-band (the birth-time speller + the fold rule + the loader) is the only place quantization-as-a-concept exists, and a
-mechanical gate (`tests/compiler/loader/test_quant.py`) greps the tree for concept leaks. `032`'s decode-trait scope
-is the conservative first instantiation of a general constant-subgraph fold — widening it (folding decode-free
-constant cones that exist in today's models) is gated on kernel-source digest evidence.
+`load_ops`. `EMMY_FP8_EXPAND` may leave generic dtype decode and scaling algebra in the graph; a format-specific
+frontend op must fold or decompose into generic algebra before Loop IR.
+
+The boundary is structural, not a naming guideline. Lowering, shared statement and tile dialects, backends, and search
+may contain canonical dtypes, generic ops, and graph algebra. They may NEVER contain a checkpoint format's custom op,
+statement, helper, pass branch, schedule feature, environment gate, comment, or name. A new format belongs in the
+loader and frontend IR; its decomposition must erase the format. If generic IR cannot express the desired
+optimization, retain bind-time decoding rather than extending a downstream dialect. `tests/architecture/test_layering.py`
+scans every post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one inventory, then a product over sites
 
@@ -144,10 +138,7 @@ warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composit
 the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `sync`
 compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
-statistic site is a nested site under the same inventory. A COMPUTED `b` edge (the trellis decode cone) is carried
-symmetrically: warp-only over the same mandatory `sync` fill (the fill decodes the B tile into its slab; the ring at
-`d2` then prefetches the materialized A), with no split-K (nothing to σ-reindex) and the COLLAPSE reading as its
-reduce-tier fallback — `computed_b_cover` is the legality twin of `computed_a_cover`. The **flash streaming pair** is carried too, and it is why
+statistic site is a nested site under the same inventory. The **flash streaming pair** is carried too, and it is why
 the enumerator recurses: a `_site_values` entry plus legality predicates, with no emitter of its own. A term the
 enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.
@@ -308,16 +299,7 @@ failing several passes later:
   cp.async byte slab pads its rows by `_stage.BYTE_SLAB_PAD` for the drain's bank spread). The scalar resolver still
   declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
   the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
-  codebook decode are outside the multiplicative form. A computed B whose leaf is the kernel-realizable per-element
-  trellis decode (a `TrellisLoad`, named by the lift directly or under a pure MAP cone with no m-indexed load) binds as
-  a **COMPUTED-B cone** — the exact mirror of the computed-A edge, stored inline on its channel, warp-only over the
-  mandatory `sync` compute-fill (the fill evaluates the decode into the K-major B slab the ldmatrix drain already
-  reads, so the packed codes are the only weight bytes crossing DRAM; split-K declines — no gmem index to σ-reindex —
-  and TMA / the copy transports decline on the edge test; the COLLAPSE reading carries the reduce-tier fallback, a
-  per-cell decode). It binds that way on BOTH A arms — a decode leaf opposite a computed A cone is a
-  double-computed edge, and handing the bare leaf back would make it a materialized B whose staging gates
-  byte-copy the packed codes into the slab as decoded elements, dropping the decode from the kernel entirely.
-  Any other computed B raises, and the recognizer
+  codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
   demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an

@@ -33,14 +33,10 @@ architecture-twin construction). Two checkpoint families share the design — FP
   semantics, consumed scales dropped, have no graph counterpart).
 - :func:`spell_trellis_constants`: the EXL3 sibling of the constant speller —
   each trellis-coded weight becomes three leaf constants (int16 codes + the
-  f16 ``suh``/``svh`` channel vectors) joined by a ``TrellisDecodeOp``. By
-  default that is the checkpoint-basis decode, which
+  f16 ``suh``/``svh`` channel vectors) joined by a ``TrellisDecodeOp``, which
   ``032_fold_constant_subgraphs`` collapses into a bind-time ``source_graph``
-  record (the correctness lane); under ``EMMY_TRELLIS_EXPAND`` the consuming
-  LINEAR is re-spelled instead, with the Hadamard / channel-vector basis
-  restore moved onto the activations around a hat-basis decode — the form the
-  warp tier decodes in-kernel. :func:`load_dequantized_state_dict` decodes the
-  same siblings into ``.weight`` values for the eager twin.
+  record. :func:`load_dequantized_state_dict` decodes the same siblings into
+  ``.weight`` values for the eager twin.
 """
 
 from __future__ import annotations
@@ -56,7 +52,7 @@ import numpy as np
 from emmy.compiler.dtype import decode_f8  # noqa: F401 — re-exported; the LUT's home is the dtype layer
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.loader.exl3 import HAD_BLOCK, decode_trellis, fold_hadamard
+from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard
 
 logger = logging.getLogger(__name__)
 
@@ -433,42 +429,6 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
     return spelled
 
 
-def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) -> tuple[int, int, int, int] | None:
-    """Validate a trellis weight constant against its sibling shapes → ``(n, k, n_pad, k_pad)``.
-
-    ``(n, k)`` are the traced logical ``(out, in)`` dims; ``(n_pad, k_pad)`` the 128-padded
-    extents the checkpoint actually stores. ``None`` (with a warning) when the siblings do not
-    reproduce the traced weight shape, or when the constant is not a pristine single-source
-    trace constant — never a compile error.
-    """
-    node = graph.nodes[nid]
-    op, out = node.op, node.output
-    if op.load_ops or op.source_parts or op.value is not None:
-        return None  # only a pristine single-source trace constant is spelled (birth time — nothing has run yet)
-    if any(not d.is_static for d in out.shape) or len(out.shape) != 2:
-        return None
-    n, k = (d.as_static() for d in out.shape)
-
-    t_shape, suh_shape, svh_shape = shapes["trellis"], shapes["suh"], shapes["svh"]
-    k_pad = suh_shape[0] if len(suh_shape) == 1 else -1
-    n_pad = svh_shape[0] if len(svh_shape) == 1 else -1
-    # EXL3 pads both dims to multiples of 128 at encode time; the decode cone slices the
-    # padded weight back to the traced logical shape (exactly the reference math — see
-    # ``TrellisDecodeOp``). The sibling extents must be exactly the traced dims' roundups.
-    pad_ok = (-(-k // 128) * 128, -(-n // 128) * 128) == (k_pad, n_pad) if k > 0 and n > 0 else False
-    if len(t_shape) != 3 or not pad_ok or (t_shape[0] * 16, t_shape[1] * 16) != (k_pad, n_pad):
-        logger.warning(
-            "trellis weight %s: sibling shapes trellis=%s suh=%s svh=%s do not reproduce %s; constant left alone",
-            nid,
-            t_shape,
-            suh_shape,
-            svh_shape,
-            (n, k),
-        )
-        return None
-    return n, k, n_pad, k_pad
-
-
 def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
     """Rewrite the weight constant ``nid`` into its trellis decode cone: three leaf
     ConstantOps (``{base}.trellis`` int16 codes, ``{base}.suh`` / ``{base}.svh`` f16
@@ -481,14 +441,32 @@ def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: di
     from emmy.compiler.ir.frontend.ir import TrellisDecodeOp  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
-    dims = _trellis_dims(graph, nid, shapes)
-    if dims is None:
-        return False
-    n, k, _n_pad, _k_pad = dims
     node = graph.nodes[nid]
     op, out = node.op, node.output
-    shape, t_shape = (n, k), shapes["trellis"]
-    suh_shape, svh_shape = shapes["suh"], shapes["svh"]
+    if op.load_ops or op.source_parts or op.value is not None:
+        return False  # only a pristine single-source trace constant is spelled (birth time — nothing has run yet)
+    if any(not d.is_static for d in out.shape):
+        return False
+    shape = tuple(d.as_static() for d in out.shape)
+
+    t_shape, suh_shape, svh_shape = shapes["trellis"], shapes["suh"], shapes["svh"]
+    k_pad = suh_shape[0] if len(suh_shape) == 1 else -1
+    n_pad = svh_shape[0] if len(svh_shape) == 1 else -1
+    n, k = shape if len(shape) == 2 else (-1, -1)
+    # EXL3 pads both dims to multiples of 128 at encode time; the decode cone slices the
+    # padded weight back to the traced logical shape (exactly the reference math — see
+    # ``TrellisDecodeOp``). The sibling extents must be exactly the traced dims' roundups.
+    pad_ok = (-(-k // 128) * 128, -(-n // 128) * 128) == (k_pad, n_pad) if k > 0 and n > 0 else False
+    if len(t_shape) != 3 or not pad_ok or (t_shape[0] * 16, t_shape[1] * 16) != (k_pad, n_pad):
+        logger.warning(
+            "trellis weight %s: sibling shapes trellis=%s suh=%s svh=%s do not reproduce %s; constant left alone",
+            nid,
+            t_shape,
+            suh_shape,
+            svh_shape,
+            shape,
+        )
+        return False
 
     frag = Graph()
     codes = frag.add_node(
@@ -516,196 +494,6 @@ def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: di
     return True
 
 
-def _hadamard_constant(graph: Graph, dtype) -> str:
-    """The shared ±1 128-block Hadamard matrix constant; created once per graph and dtype.
-
-    It has no checkpoint source, so it rides a zero-leaf ``source_graph`` bind record over one
-    :class:`~emmy.compiler.ir.frontend.ir.HadamardOp` — the loader evaluates the record through
-    the reference NumPy backend exactly as it evaluates a folded cone, and every trellis linear
-    in the graph shares the one node.
-    """
-    from emmy.compiler.ir.frontend.ir import HadamardOp  # noqa: PLC0415
-    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
-
-    nid = f"_had{HAD_BLOCK}_{dtype.name}"
-    if nid not in graph.nodes:
-        record = Graph()
-        record.outputs = [record.add_node(op=HadamardOp(size=HAD_BLOCK), inputs=[], output=Tensor(nid, (HAD_BLOCK, HAD_BLOCK), dtype))]
-        graph.add_node(
-            op=ConstantOp(name=nid, source_graph=record, source_shape=(HAD_BLOCK, HAD_BLOCK), source_dtype=dtype.name),
-            inputs=[],
-            output=Tensor(nid, (HAD_BLOCK, HAD_BLOCK), dtype),
-            node_id=nid,
-        )
-    return nid
-
-
-def _had_blocks(frag: Graph, src: str, had: str, *, shape: tuple, dtype, name: str) -> str:
-    """The per-128-block Hadamard: contract a ``(…, w/128, 128)`` operand against the shared
-    128x128 constant. ``LinearOp`` is ``x @ H.T`` and ``H`` is symmetric, so no transpose.
-
-    Spelling the transform as plain matmul algebra — rather than a butterfly realization of its
-    own — is what puts it on the existing tiers and lets the search schedule it; the operand
-    arrives ALREADY 128-blocked (see :func:`_multiply`), so the matmul reads a plain buffer.
-    """
-    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
-    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
-
-    return frag.add_node(op=LinearOp(), inputs=[src, had], output=Tensor(name, shape, dtype))
-
-
-def _multiply(frag: Graph, src: str, factor: str, *, shape: tuple, dtype, name: str) -> str:
-    """``src * factor`` with ``factor`` a scalar or trailing-axis vector, broadcast made explicit.
-
-    ALSO the layout-absorbing step of the trellis chain: an index map (the encode-pad concat,
-    the flat↔128-block reshapes, the output slice) that reaches a MATMUL's A operand is
-    mis-lowered today — the fragment loaders take the operand's declared row stride, not the one
-    the index implies — so every such map is spelled onto a pointwise instead, which composes
-    index maps correctly. Keep that placement when editing this chain.
-    """
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
-    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
-
-    bc = broadcast_to(frag, factor, shape)
-    return frag.add_node(op=ElementwiseOp(op="multiply"), inputs=[src, bc], output=Tensor(name, shape, dtype))
-
-
-def _spell_trellis_activation_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
-    """Rewrite the LINEAR consuming trellis weight ``nid`` into the activation-side basis form.
-
-    The checkpoint stores ``W = diag(suh) · H · W_hat · H · diag(svh)`` in ``(in, out)``
-    orientation, with ``H`` the 128-block Sylvester Hadamard scaled ``1/sqrt(128)`` per side.
-    Only ``W_hat`` — the raw per-tile decode — has an in-kernel realization, so ``y = x @ W``
-    is re-spelled with the basis restore moved onto the activations:
-
-        x → [pad to k_pad] → ·suh → H → ·1/16 → **@ W_hat** → ·1/8 → H → ·svh → [slice] → [+bias]
-
-    Everything but the ``@ W_hat`` step is plain graph algebra — broadcast multiplies and two
-    128x128 matmuls — so it rides the existing tiers with no new kernel machinery. The middle
-    step is the hat-basis ``TrellisDecodeOp`` at the FULL padded extent, which lifts to the
-    per-element ``TrellisLoad`` cone and binds as computed B: the packed codes are the only
-    weight bytes crossing DRAM.
-
-    Two placement rules make the chain lower correctly, and both are load-bearing:
-
-    - **The Hadamard operands arrive 128-BLOCKED and its scale is a separate multiply.** Each
-      layout change (the encode-pad concat, the flat↔block reshapes, the output slice) is
-      spelled onto a POINTWISE, never onto a matmul's A operand — see :func:`_multiply`.
-    - **The 1/sqrt(128) per side is split as ``1/16`` before the weight and ``1/8`` after**, two
-      exact powers of two whose product is exactly ``1/128``, so the shared ``H`` constant is
-      plain ±1 (exact in f16/bf16) and both intermediates stay BELOW the balanced magnitude.
-
-    Encode padding is exactly the reference math: the Hadamard mixes within each 128-block, so a
-    K-side pad must be zeros on the activation (the weight-side fold's own row slice), and an
-    N-side pad is contracted and then sliced off.
-
-    Returns ``False`` — never a compile error — when the weight is not consumed by exactly one
-    ``LinearOp``, or when the activation carries symbolic dims; the caller then falls back to
-    the folded checkpoint-basis cone, which is correct everywhere.
-    """
-    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.frontend.ir import CatOp, LinearOp, ReshapeOp, SliceOp, TrellisDecodeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
-    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
-
-    dims = _trellis_dims(graph, nid, shapes)
-    if dims is None:
-        return False
-    n, k, n_pad, k_pad = dims
-    op = graph.nodes[nid].op
-
-    users = graph.consumers(nid)
-    if len(users) != 1:
-        return False
-    lin = graph.nodes[users[0]]
-    if not isinstance(lin.op, LinearOp) or len(lin.inputs) < 2 or lin.inputs[1] != nid or lin.inputs[0] == nid:
-        return False
-    x_t, y_t = graph.nodes[lin.inputs[0]].output, lin.output
-    if any(not d.is_static for d in x_t.shape) or len(x_t.shape) < 2:
-        return False
-    x_shape = tuple(d.as_static() for d in x_t.shape)
-    if x_shape[-1] != k:
-        return False
-    dtype, pre, lead = x_t.dtype, y_t.name, x_shape[:-1]
-    pad_shape, out_shape, final_shape = (*lead, k_pad), (*lead, n_pad), (*lead, n)
-    in_blk, out_blk = (*lead, k_pad // HAD_BLOCK, HAD_BLOCK), (*lead, n_pad // HAD_BLOCK, HAD_BLOCK)
-    had = _hadamard_constant(graph, dtype)
-
-    frag = Graph()
-    for alias in (lin.inputs[0], had, *lin.inputs[2:]):
-        t = graph.nodes[alias].output
-        frag.add_node(op=InputOp(), inputs=[], output=Tensor(alias, t.shape, t.dtype), node_id=alias)
-    codes = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_trellis", source_path=base + ".trellis", source_shape=shapes["trellis"], source_dtype="i16"),
-        inputs=[],
-        output=Tensor(f"{pre}_trellis", shapes["trellis"], "i16"),
-    )
-    # ``suh`` binds already 128-blocked (a reshape in the load chain, the pack vocabulary's own
-    # form) so it broadcasts straight onto the blocked activation.
-    suh = frag.add_node(
-        op=ConstantOp(
-            name=f"{op.name}_suh",
-            source_path=base + ".suh",
-            source_shape=(k_pad,),
-            source_dtype="f16",
-            load_ops=(ReshapeOp(shape=in_blk[-2:]),),
-        ),
-        inputs=[],
-        output=Tensor(f"{pre}_suh", in_blk[-2:], dtype),
-    )
-    svh = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_svh", source_path=base + ".svh", source_shape=(n_pad,), source_dtype="f16"),
-        inputs=[],
-        output=Tensor(f"{pre}_svh", (n_pad,), dtype),
-    )
-    scale = {
-        s: frag.add_node(op=ConstantOp(name=f"{pre}_r{s}", value=2.0**-s), inputs=[], output=Tensor(f"{pre}_r{s}", (1,), dtype))
-        for s in (4, 3)
-    }
-
-    # --- input side: zero-pad to the encode extent, apply suh, Hadamard ---
-    cur = lin.inputs[0]
-    if k_pad != k:
-        zero = frag.add_node(op=ConstantOp(name=f"{pre}_zero", value=0.0), inputs=[], output=Tensor(f"{pre}_zero", (1,), dtype))
-        dim = frag.add_node(op=ConstantOp(name=f"{pre}_catdim", value=-1.0), inputs=[], output=Tensor(f"{pre}_catdim", (1,), "i32"))
-        fill = broadcast_to(frag, zero, (*lead, k_pad - k))
-        cur = frag.add_node(op=CatOp(), inputs=[cur, fill, dim], output=Tensor(f"{pre}_xpad", pad_shape, dtype))
-    cur = frag.add_node(op=ReshapeOp(shape=in_blk), inputs=[cur], output=Tensor(f"{pre}_xblk", in_blk, dtype))
-    cur = _multiply(frag, cur, suh, shape=in_blk, dtype=dtype, name=f"{pre}_xs")
-    cur = _had_blocks(frag, cur, had, shape=in_blk, dtype=dtype, name=f"{pre}_xh")
-    cur = frag.add_node(op=ReshapeOp(shape=pad_shape), inputs=[cur], output=Tensor(f"{pre}_xhf", pad_shape, dtype))
-    cur = _multiply(frag, cur, scale[4], shape=pad_shape, dtype=dtype, name=f"{pre}_xr")
-
-    # --- the weight: the hat-basis decode at the full padded extent (computed B) ---
-    w_hat = frag.add_node(
-        op=TrellisDecodeOp(cb=cb, out_features=n_pad, in_features=k_pad, hadamard=False),
-        inputs=[codes],
-        output=Tensor(f"{pre}_what", (n_pad, k_pad), dtype),
-    )
-    cur = frag.add_node(op=LinearOp(), inputs=[cur, w_hat], output=Tensor(f"{pre}_z", out_shape, dtype))
-
-    # --- output side: Hadamard, apply svh, drop the encode padding, then bias ---
-    # The LAST stage carries the traced output tensor's own name, so the spliced chain hands
-    # the linear's consumers a buffer named exactly as before.
-    biased = lin.op.has_bias
-    cur = frag.add_node(op=ReshapeOp(shape=out_blk), inputs=[cur], output=Tensor(f"{pre}_zblk", out_blk, dtype))
-    cur = _multiply(frag, cur, scale[3], shape=out_blk, dtype=dtype, name=f"{pre}_zr")
-    cur = _had_blocks(frag, cur, had, shape=out_blk, dtype=dtype, name=f"{pre}_zh")
-    cur = frag.add_node(op=ReshapeOp(shape=out_shape), inputs=[cur], output=Tensor(f"{pre}_zhf", out_shape, dtype))
-    if n_pad != n:
-        cur = frag.add_node(op=SliceOp(shape=final_shape, dim=-1, start=0), inputs=[cur], output=Tensor(f"{pre}_yc", final_shape, dtype))
-        svh = frag.add_node(op=SliceOp(shape=(n,), dim=0, start=0), inputs=[svh], output=Tensor(f"{pre}_svhc", (n,), dtype))
-    cur = _multiply(frag, cur, svh, shape=final_shape, dtype=dtype, name=f"{pre}_ys" if biased else y_t.name)
-    if biased:
-        bias = broadcast_to(frag, lin.inputs[2], final_shape)
-        cur = frag.add_node(op=ElementwiseOp(op="add"), inputs=[cur, bias], output=Tensor(y_t.name, final_shape, dtype))
-    frag.outputs = [cur]
-    graph.splice(frag, consumed=[nid, lin.id], output=lin.id)
-    return True
-
-
 def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
     """Spell every EXL3 trellis-coded weight of ``graph`` as an in-graph decode cone, at birth.
 
@@ -713,23 +501,13 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
     site. Source of truth is the CHECKPOINT: ``config.json`` declares ``quant_method:
     "exl3"`` (:func:`_exl3_quant_config`), and the safetensors index supplies the pairing —
     a traced ``<module>.weight`` constant whose module ships ``<module>.trellis`` siblings
-    is rewritten into the codes + ``suh``/``svh`` leaves and a ``TrellisDecodeOp`` (its ``cb``
-    field recording the marker-sibling presence, so the markers themselves never enter the
-    graph). From that point a quantized weight is just constants + algebra.
-
-    Two spellings, chosen by ``EMMY_TRELLIS_EXPAND`` (``config.trellis_expand``):
-
-    - **default, the correctness lane** — :func:`_spell_trellis_one` spells the
-      CHECKPOINT-BASIS decode (``hadamard=True``) as a constant-only cone, which
-      ``032_fold_constant_subgraphs`` collapses into ONE bind-time
-      ``ConstantOp(source_graph=record)`` evaluated through the reference NumPy backend: full
-      value footprint in memory, no kernel change.
-    - **the kernel path** — :func:`_spell_trellis_activation_one` rewrites the consuming
-      LINEAR into the activation-side basis restore around a HAT-BASIS decode
-      (``hadamard=False``), the form that lifts to the per-element ``TrellisLoad`` cone and
-      binds as computed B, so only the packed codes cross DRAM. Any linear it declines (a
-      weight consumed by something other than one ``LinearOp``, symbolic activation dims) falls
-      back to the folded cone, which stays correct.
+    is rewritten by :func:`_spell_trellis_one` into the codes + ``suh``/``svh`` leaves and a
+    ``TrellisDecodeOp`` (its ``cb`` field recording the marker-sibling presence, so the
+    markers themselves never enter the graph). From that point a quantized weight is just
+    constants + algebra; ``032_fold_constant_subgraphs`` collapses the cone into ONE
+    bind-time ``ConstantOp(source_graph=record)``, evaluated through the reference NumPy
+    backend — full value footprint in memory, the correctness lane (in-kernel decode is
+    later work, so the cone folds even under ``EMMY_FP8_EXPAND``).
 
     Weights without a trellis sibling (embeddings, norms, routers, biases) load as plain
     tensors. Legacy checkpoints storing packed ``su``/``sv`` sign words instead of
@@ -739,7 +517,6 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
     """
     from safetensors import safe_open  # noqa: PLC0415
 
-    from emmy import config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import _build_index, _candidate_keys, _resolve_model_dir  # noqa: PLC0415
 
     model_dir = _resolve_model_dir(model_id_or_path)
@@ -769,10 +546,7 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
                 logger.warning("trellis weight %s: no suh/svh channel vectors (legacy packed-sign checkpoint?); constant left alone", nid)
                 continue
             shapes = {leaf: _shape(base + "." + leaf) for leaf in ("trellis", "suh", "svh")}
-            args = {"base": base, "cb": _exl3_codebook(index, base), "shapes": shapes}
-            if config.trellis_expand() and _spell_trellis_activation_one(graph, nid, **args):
-                spelled += 1
-            elif _spell_trellis_one(graph, nid, **args):
+            if _spell_trellis_one(graph, nid, base=base, cb=_exl3_codebook(index, base), shapes=shapes):
                 spelled += 1
     if spelled:
         logger.info("spelled %d trellis-coded weight constant(s) from %s", spelled, model_dir)

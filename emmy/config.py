@@ -58,7 +58,6 @@ GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
 FP8_EXPAND = "EMMY_FP8_EXPAND"
-TRELLIS_EXPAND = "EMMY_TRELLIS_EXPAND"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -285,20 +284,6 @@ def fp8_expand() -> bool:
     recompute). On is the kernel-storage development path; off is the deployable
     default."""
     return _bool(FP8_EXPAND)
-
-
-def trellis_expand() -> bool:
-    """``EMMY_TRELLIS_EXPAND`` — the trellis KERNEL PATH: packed codes stay in device memory and
-    the per-tile decode is realized in the warp tier's compute fill. Two effects, both off by
-    default (the folded correctness lane — the weight materializes at the compute dtype):
-
-    - ``loader.quant.spell_trellis_constants`` rewrites the CONSUMING LINEAR into the
-      activation-side basis restore (``x·suh`` / the 128-block Hadamard / ``·svh``) around a
-      HAT-BASIS decode, instead of spelling the checkpoint-basis cone over the weight alone.
-    - ``032_fold_constant_subgraphs`` SKIPS the fold for hat-basis (``hadamard=False``) cones, so
-      they reach the lift. The checkpoint-basis form has no kernel realization and folds
-      regardless."""
-    return _bool(TRELLIS_EXPAND)
 
 
 def dump_dir() -> Path | None:

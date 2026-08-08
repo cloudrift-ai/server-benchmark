@@ -110,9 +110,7 @@ def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> L
     if start + n > len(stmts_list):
         return None
     loads = stmts_list[start : start + n]
-    # Exact type: a decode leaf (``TrellisLoad``) reads COMPUTED elements, so widening a run of
-    # them into one plain vector ``Load`` would replace the decode with raw codes-buffer bytes.
-    if not all(type(s) is Load for s in loads):
+    if not all(isinstance(s, Load) for s in loads):
         return None
     # Already-widened Loads in the run aren't safe to re-merge — bail.
     if any(s.is_vector for s in loads):

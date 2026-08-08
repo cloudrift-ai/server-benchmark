@@ -1,5 +1,5 @@
 # Compile and execute Emmy's Volta MMA path inside the pinned CUDA 12.8/1Cat image. The image is
-# built first by experiments/volta-sm70-stack. Artifacts prove source, PTX, cubin, SASS, accuracy,
+# built first by experiments/qwen35-122b/stack_v100. Artifacts prove source, PTX, cubin, SASS, accuracy,
 # and the realized schedule on one live V100; no timing from this host is a final result.
 command:
   stage:

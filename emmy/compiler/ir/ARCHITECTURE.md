@@ -123,7 +123,7 @@ remain.
 |---------------|-------------------------------------------------------------------------------------------|
 | Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.  |
 | Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, `RmsNormOp`, `LayerNormOp`, `SoftmaxOp` — rewrite to elementwise + reduce chains. |
-| Storage-decode | `TrellisDecodeOp` — no decomposition rule: it only appears inside constant-only cones the EXL3 speller mints, which `032_fold_constant_subgraphs` collapses into bind-time `source_graph` records (its numpy `forward` is the record's evaluation). |
+| Storage-decode | `TrellisDecodeOp` — the frontend constant-subgraph fold replaces it with a bind-time `source_graph` constant before Loop IR (its numpy `forward` evaluates that record). |
 
 ## `tensor/ir.py`
 

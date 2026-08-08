@@ -1494,13 +1494,16 @@ identity facts that make a knob dict a complete variant identity (the online pri
 `format_tuning_knobs`. A feature is stamped only where the body has the thing it describes, so adding one leaves
 every other kernel's dict — and therefore every recorded key — untouched.
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
-`lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own
-pin > the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
-`F16_MMA_F32_ACC` offers the f16-accumulate mma atom forks (`a:mma_m16n8k16_f16_f16` — chunked f32 register promote;
-its own pin offers on any target, the umbrella only on the consumer dies where f32-accumulate is half rate).
-`FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
-identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `F16_REDUCE_F32_ACC` / `FAST_EXP`** (BOOL, pin-only — the f16-accumulate
+enumeration gate, the decode band's f16-pair fold, `lowering/kernel/085_fast_exp`) — the **precision-trading
+family**, never silently on. Precedence per knob: its own pin > the `FAST_MATH` umbrella > off
+(`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`; `F16_MMA_F32_ACC` offers the f16-accumulate mma
+atom forks (`a:mma_m16n8k16_f16_f16` — chunked f32 register promote; its own pin offers on any target, the umbrella
+only on the consumer dies where f32-accumulate is half rate); `F16_REDUCE_F32_ACC` pairs the trellis DECODE BAND's
+fold into `__half2` products summed over the tile column in fp16, promoted into the f32 accumulator once per tile
+step (`lowering/kernel/060_pair_decode_accum`). `FAST_MATH` is a meta gate over the others — `unfeatured`, never
+stamped/enumerated/featurized (the realized fork is identified by what it enables: `FAST_EXP`'s stamped BOOL, the
+`TILE` atom token, the packed run in the band's body).
 
 ### Tree-path schedule keys (the phase-2/3 codec)
 

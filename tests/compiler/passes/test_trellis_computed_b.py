@@ -621,6 +621,100 @@ def test_trellis_matvec_matches_hat_basis_reference_cuda(n, k, kbits):
     assert float(np.abs(y - ref).max()) / max(float(np.abs(ref).max()), 1e-9) < 2e-3
 
 
+def test_decode_band_widens_past_the_power_of_two_ladder():
+    """A contraction dim with an ODD factor has no power-of-two split that fills the card. GLM's
+    ``down`` (11008 -> 4096) is the case: 11008/16 = 688 = 16*43, so the fixed ladder tops out at
+    ``g16k`` — 2048 warp-wide CTAs, and a SINGLE offered row, which is also a fork with nothing to
+    decide and therefore no golden. The wide arm keys its widths on the TILE COUNT instead
+    (``tiles // steps``), which reaches ``g86k``'s 11008 CTAs: measured 15.3 us against g16k's
+    19.5 on the 5090."""
+    from emmy.compiler.pipeline.search.space import decode_band_moves
+
+    assert [p.cta for p in decode_band_moves(688)] == [86, 43, 32, 16, 8, 4]
+    assert [p.cta for p in decode_band_moves(256)] == [32, 16, 8, 4], "a power-of-two tile count keeps its ladder"
+    assert [p.cta for p in decode_band_moves()] == [32, 16, 8, 4], "no tile count -> the fixed catalog alone"
+
+    rows = [r["REDUCE"] for r in _matvec_term(n=4096, k=11008) if r.get("REDUCE")]
+    assert dict.fromkeys(rows) and rows[0] == "g86k/coop-t/r16", rows
+    assert len(dict.fromkeys(rows)) == 3, f"`down` must FORK for a golden to be consultable: {rows}"
+
+
+# ===================================================================
+# 3.2b — the f16-pair fold (``F16_REDUCE_F32_ACC``)
+# ===================================================================
+
+
+def _matvec_source(n, k, kbits, reduce="g4k/coop-t/r16"):
+    """The decode band's partial-kernel CUDA source at the pinned reduce partition."""
+    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    g, _ = _trellis_linear_graph(1, n, k, kbits)
+    with _pinned_knobs({"REDUCE": reduce, "WORK": "t32"}):
+        compiled = CudaBackend().compile(g)
+    return next(
+        (s for nd in compiled.nodes.values() if (s := getattr(nd.op, "kernel_source", None)) and "__partial" in (nd.op.kernel_name or "")),
+        next(s for nd in compiled.nodes.values() if (s := getattr(nd.op, "kernel_source", None))),
+    )
+
+
+def test_f16_pair_fold_is_off_by_default_and_leaves_the_source_alone(monkeypatch):
+    """A precision-trading knob is never silently on: unpinned, the band's source is the f32 one
+    byte for byte — the paired helpers do not even join the prelude."""
+    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    monkeypatch.delenv("EMMY_F16_REDUCE_F32_ACC", raising=False)
+    src = _matvec_source(1024, 512, 2)
+    assert "emmy_trellis_decode_col_pair" not in src and "__half2 " not in src.split('extern "C"', 1)[1]
+    monkeypatch.setenv("EMMY_F16_REDUCE_F32_ACC", "0")
+    assert _matvec_source(1024, 512, 2) == src, "an explicit 0 must render the same source as unset"
+
+
+@pytest.mark.parametrize("umbrella", ["EMMY_F16_REDUCE_F32_ACC", "EMMY_FAST_MATH"])
+def test_f16_pair_fold_pairs_the_whole_tile_column(monkeypatch, umbrella):
+    """Under its own pin or the ``FAST_MATH`` umbrella the band's 16 scalar triples collapse into
+    eight ``__half2`` products, an fp16 tree over the column, and ONE promote per tile step: no
+    scalar decode, no per-element widening, and 14 of the 16 f32 accumulator chains are gone."""
+    monkeypatch.setenv(umbrella, "1")
+    body = _matvec_source(1024, 512, 2).split('extern "C"', 1)[1]
+    assert body.count("emmy_trellis_decode_col_pair<2, 0>(") == 1, body
+    assert "emmy_trellis_decode_col<" not in body and "emmy_trellis_decode(" not in body
+    assert body.count("__half2float(") == 2, "one promote per tile step — the pair's two lanes"
+    assert body.count("float acc") == 2, "the tile column folds into two f32 chains, not sixteen"
+
+
+def test_f16_pair_fold_declines_the_per_element_decode(monkeypatch):
+    """The rewrite is the decode BAND's alone. Where the run never fused (a per-element decode
+    under some other partition) there is no tile column to pair, so the pass must leave the body
+    untouched rather than pair a partial set."""
+    monkeypatch.setenv("EMMY_F16_REDUCE_F32_ACC", "1")
+    body = _matvec_source(1024, 512, 2, reduce="coop").split('extern "C"', 1)[1]
+    assert "emmy_trellis_decode_col_pair" not in body, body
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize(("n", "k", "kbits", "cb"), [(1024, 512, 2, 0), (512, 1024, 6, 0), (1024, 512, 2, 1), (512, 512, 4, 2)])
+def test_f16_pair_fold_matches_the_hat_basis_reference_cuda(monkeypatch, n, k, kbits, cb):
+    """The paired fold's accuracy, all three codebooks. The promote lands once per tile step, so
+    the error is the fp16 PRODUCT's and does not grow with K — the same 2e-3 bar the f32 lane
+    meets (measured at the real decode-phase extents: 5.2e-4 at K=22016 against 3.8e-4)."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    monkeypatch.setenv("EMMY_F16_REDUCE_F32_ACC", "1")
+    rng = np.random.default_rng(9)
+    g, t_shape = _trellis_linear_graph(1, n, k, kbits, cb=cb)
+    codes = _codes(rng, t_shape[0] * 16, t_shape[1] * 16, kbits)
+    x = (rng.standard_normal((1, k)) * 0.05).astype(np.float16)
+    be = CudaBackend()
+    compiled = be.compile(g)
+    sources = [s for nd in compiled.nodes.values() if (s := getattr(nd.op, "kernel_source", None))]
+    assert any("emmy_trellis_decode_col_pair" in s for s in sources), "the matvec did not reach the paired band"
+    y = be.run(compiled, input_data={"x": x, "codes": codes})[0].outputs["y"].reshape(1, n).astype(np.float32)
+    ref = _ref(x, codes, cb, n, k)
+    assert float(np.abs(y - ref).max()) / max(float(np.abs(ref).max()), 1e-9) < 2e-3
+
+
 # ===================================================================
 # 3.4 — the expert / serving path: weights as program INPUTS
 # ===================================================================

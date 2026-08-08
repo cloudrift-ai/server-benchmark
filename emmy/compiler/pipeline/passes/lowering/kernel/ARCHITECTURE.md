@@ -384,11 +384,13 @@ code fetch per column instead of two words per weight;
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
 
-Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
+Three of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
 codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
 so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`
-lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N`, a generic
-**loop re-roller** iterated to a fixpoint). Loopify folds a maximal run of ≥ `N` congruent per-fragment statements — the
+lowers f32 `exp` through the SFU `__expf`), `060_pair_decode_accum` (`EMMY_F16_REDUCE_F32_ACC=1` pairs the decode
+band's fold into `__half2` — a packed run, `__hmul2` products, an fp16 tree over the tile column and one f32 promote
+per tile step; the second non-bit-exact policy, and like `085` it follows the `FAST_MATH` umbrella) and
+`100_loopify` (`EMMY_LOOPIFY=N`, a generic **loop re-roller** iterated to a fixpoint). Loopify folds a maximal run of ≥ `N` congruent per-fragment statements — the
 flash mma epilogue's `O_i_f` α-rescale / divide (`FragmentApply`), the `P@V` load+mma pairs, the fragment `RegStore`s,
 the A-fragment loads, the nested `QK` contraction (K-chunks × N-atoms), and at `N=2` the `sacc_f` QK scale — into
 `#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural

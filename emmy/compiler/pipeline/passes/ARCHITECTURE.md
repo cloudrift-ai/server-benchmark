@@ -158,9 +158,25 @@ per-element fetches of the same tile. And the row set: the B-orientation classif
 `None` on a decode leaf, because its index is the weight's logical `(k, n)` while the buffer is the codes grid, so
 the layout gate simply does not apply — but `ShapeKey` is decode-blind for the same reason, and leaving the
 per-element rows offered let a cold pick inherit an f16 matvec's measurement, the cold-poison class
-`coop_band_layout` already exists for. The split widths are enumerated widest-first (option-0 is the widest legal
+`coop_band_layout` already exists for. The split widths come from `space.decode_band_moves(tiles)` — a catalog, so a
+recorded golden's partition is checkable against it — and are enumerated widest-first (option-0 is the widest legal
 one), skipping any whose slice is not tile-aligned (the run would not fuse) or that leaves the warp-wide blocks
-short of a wave. The **flash streaming pair** is carried too, and it is why
+short of a wave. That catalog has TWO arms because a matvec's tile count is the model's contraction dim over 16 and
+routinely carries an odd factor: the WIDE arm leads and names its widths by the TILE STEPS each CTA keeps
+(`DECODE_BAND_STEPS`, `width = tiles // steps`), then the fixed power-of-two `DECODE_BAND_CTAS` ladder follows.
+Without the wide arm GLM's `down` (11008 -> 4096, 688 = 16*43 tiles) tops out at `g16k`'s 2048 warp-wide CTAs and
+offers a SINGLE row — a fork with nothing to decide, hence no golden — where `g86k`'s 11008 CTAs are 22 % faster.
+Wider is not monotonically better: the split's finalize reads a `cta x N` f32 workspace whose bytes over the codes'
+are `2 / (steps * k_bits)`, which is why the ladder starts at 8 steps rather than at the `_DECODE_MIN_STEPS` floor.
+
+Under the `F16_REDUCE_F32_ACC` precision gate (the `FAST_MATH` family), `060_pair_decode_accum` rewrites that band's
+body into the f16-pair form: the run decodes PACKED (`TrellisLoad.packed` — one `__half2` per k-row pair, straight
+out of the codebook's own fp16 add and never widened), the activations ride as width-2 vector loads, the products
+are `__hmul2`, and an fp16 tree over the tile column promotes into the f32 accumulator ONCE PER TILE STEP. The
+cadence is the band's own quantum and deliberately not a knob — the fp16 tree is 3 deep, so the error is the fp16
+product's (~5e-4 rel, flat in K) rather than an accumulation's, while longer cadences measure within 1 % and lose
+accuracy monotonically. Measured on the 5090: 8.25 warp-instructions per decoded weight against the f32 lane's
+11.47, and 13-18 % at the GLM decode-phase shapes. The **flash streaming pair** is carried too, and it is why
 the enumerator recurses: a `_site_values` entry plus legality predicates, with no emitter of its own. A term the
 enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.

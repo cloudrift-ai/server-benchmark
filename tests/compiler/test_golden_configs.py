@@ -305,8 +305,15 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         assert not stage or Stage.parse(stage) in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
         red = ReducePlan.parse(reduce_spec, work) if reduce_spec else None
-        # A coded-B entry's partition comes from the decode band alone (see ``decode_band_moves``).
-        pool = decode_band_moves() if g.dtype == "trellis" else splitk_moves() + coop_reduce_moves()
+        # A coded-B entry's partition comes from the decode band alone (see ``decode_band_moves``),
+        # whose WIDE arm is keyed on the contraction's trellis-tile count — so the catalog must be
+        # asked at the entry's own K, not in the abstract.
+        if g.dtype == "trellis":
+            from emmy.compiler.pipeline.search.space import DECODE_BAND_TILE
+
+            pool = decode_band_moves(g.K // DECODE_BAND_TILE)
+        else:
+            pool = splitk_moves() + coop_reduce_moves()
         assert red is None or red in pool, f"{where}: REDUCE {reduce_spec!r} not enumerable"
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from emmy.compiler.dtype import F32, DataType
+from emmy.compiler.dtype import F32, DataType, F16x2
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
@@ -298,6 +298,7 @@ class TrellisLoad(Load):
     cb: int
     k_bits: int
     n_tiles: int
+    packed: bool
 
     def __init__(
         self,
@@ -310,20 +311,25 @@ class TrellisLoad(Load):
         cb: int = 0,
         k_bits: int = 2,
         n_tiles: int = 1,
+        packed: bool = False,
     ) -> None:
         # The VALUE dtype is f32 (the decode's widened return) — never the codes buffer's i16;
         # defaulting it here keeps ``030_stamp_types`` from stamping the carrier dtype onto the
-        # decoded SSA value.
-        super().__init__(name, input, index, names=names, dtype=dtype if dtype is not None else F32)
+        # decoded SSA value. A PACKED run's value dtype is ``F16x2`` instead: it hands back the
+        # decode's own fp16 in pairs, never widened.
+        default = F16x2 if packed else F32
+        super().__init__(name, input, index, names=names, dtype=dtype if dtype is not None else default)
         object.__setattr__(self, "cb", int(cb))
         object.__setattr__(self, "k_bits", int(k_bits))
         object.__setattr__(self, "n_tiles", int(n_tiles))
+        object.__setattr__(self, "packed", bool(packed))
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)
         lhs = self.names[0] if self.is_scalar else f"{', '.join(self.names)}"
-        run = "" if self.is_scalar else f" run={len(self.names)}"
-        return [f"{indent}{lhs} = trellis_decode {self.input}[{idx}] cb={self.cb} K={self.k_bits}{run}"]
+        run = "" if self.is_scalar else f" run={2 * len(self.names) if self.packed else len(self.names)}"
+        pair = " packed" if self.packed else ""
+        return [f"{indent}{lhs} = trellis_decode {self.input}[{idx}] cb={self.cb} K={self.k_bits}{run}{pair}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
@@ -333,6 +339,19 @@ class TrellisLoad(Load):
         nx = self.index[1].simplify(SimplifyCtx.empty()).render(ctx)
         words = 16 * self.k_bits
         tile = f"((({kx}) >> 4) * {self.n_tiles} + (({nx}) >> 4)) * {words}"
+        if self.packed:
+            # The PAIRED run: ``names[p]`` is the ``__half2`` of k rows ``index[0] + 2p`` (low) and
+            # ``+ 2p + 1`` (high). Same one code fetch, and the decode's own fp16 is never widened.
+            assert len(self.names) == TRELLIS_TILE // 2, "a packed trellis run decodes one tile column in pairs"
+            for nm in self.names:
+                ctx.ssa_dtypes[nm] = "f16x2"
+            buf = f"{self.names[0]}_col"
+            return [
+                f"{pad}__half2 {buf}[{TRELLIS_TILE // 2}];",
+                f"{pad}emmy_trellis_decode_col_pair<{self.k_bits}, {self.cb}>("
+                f"(const unsigned short*){self.input} + ({tile}), ({nx}) & 15, {buf});",
+                *(f"{pad}__half2 {nm} = {buf}[{i}];" for i, nm in enumerate(self.names)),
+            ]
         for nm in self.names:
             ctx.ssa_dtypes[nm] = "f32"
         if self.is_scalar:

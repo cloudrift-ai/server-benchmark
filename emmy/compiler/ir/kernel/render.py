@@ -170,6 +170,16 @@ static __device__ __forceinline__ void emmy_cp_async_wait() {
 # 3INST computed codebook follows — no stored LUT anywhere. Exact fp16 arithmetic, widened once
 # to float on return (``loader/exl3.py`` is the bit-exact numpy reference).
 _TRELLIS_PRELUDE = """\
+// ``(x & 0x8FFF8FFF) ^ 0x3B603B60`` as ONE instruction. Written in C, ptxas spends two LOP3s: the
+// SASS form encodes at most one immediate, so the mask and the XOR constant cannot share an
+// instruction unless one of them is already in a register. Naming the whole 3-input bit function
+// (LUT 0x6a) lets ptxas hoist the second constant loop-invariantly and issue a single LOP3. Exact
+// — the same integer function, one instruction instead of two, and it runs once per decoded weight.
+static __device__ __forceinline__ unsigned int emmy_trellis_mask_xor(unsigned int x) {
+    asm("lop3.b32 %0, %0, 0x8fff8fff, 0x3b603b60, 0x6a;" : "+r"(x));
+    return x;
+}
+
 static __device__ __forceinline__ float emmy_trellis_value(unsigned int x, int cb) {
     if (cb == 2) {
         x *= 0x83DCD12Du;
@@ -178,7 +188,7 @@ static __device__ __forceinline__ float emmy_trellis_value(unsigned int x, int c
         return __half2float(__hfma(h, __ushort_as_half((unsigned short)0x1EEEu), __ushort_as_half((unsigned short)0xC931u)));
     }
     x = (cb == 1) ? x * 0xCBAC1FEDu : x * 89226354u + 64248484u;
-    x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
+    x = emmy_trellis_mask_xor(x);
     return __half2float(__hadd(__ushort_as_half((unsigned short)(x & 0xFFFFu)),
                                __ushort_as_half((unsigned short)(x >> 16))));
 }
@@ -232,6 +242,66 @@ static __device__ __forceinline__ void emmy_trellis_decode_col(
         unsigned long long joined = ((unsigned long long)W[i] << 32) | (unsigned long long)W[i + 1];
         out[e] = emmy_trellis_value((unsigned int)(joined >> (sh + 32 * i - KBITS * d)) & 0xFFFFu, CB);
     }
+}
+"""
+
+# The PAIRED tile-column decode — the f16-pair accumulate scheme's B half (``060_pair_decode_accum``,
+# gated by ``F16_REDUCE_F32_ACC``). Joins the prelude only when a packed ``TrellisLoad`` is present, so
+# the default lane's kernel source stays byte-identical.
+_TRELLIS_PAIR_PRELUDE = """\
+// Two 16-bit windows -> one ``__half2`` of their decoded values. The integer half of the 3INST
+// codebook stays scalar (each window has its own bit offset, so nothing pairs there); only the fp16
+// tail pairs, and that is where the saving is — one ``__hadd2`` for the pair, and no widening to
+// float at all. The value is bit-identical to ``emmy_trellis_value``'s before its ``__half2float``.
+template <int CB>
+static __device__ __forceinline__ __half2 emmy_trellis_value_pair(unsigned int x0, unsigned int x1) {
+    if (CB == 2) {
+        x0 *= 0x83DCD12Du;
+        x1 *= 0x83DCD12Du;
+        unsigned int s0 = ((x0 & 0xFFu) + ((x0 >> 8) & 0xFFu) + ((x0 >> 16) & 0xFFu) + (x0 >> 24) + 0x6400u) & 0xFFFFu;
+        unsigned int s1 = ((x1 & 0xFFu) + ((x1 >> 8) & 0xFFu) + ((x1 >> 16) & 0xFFu) + (x1 >> 24) + 0x6400u) & 0xFFFFu;
+        __half2 h = __halves2half2(__ushort_as_half((unsigned short)s0), __ushort_as_half((unsigned short)s1));
+        return __hfma2(h, __half2half2(__ushort_as_half((unsigned short)0x1EEEu)),
+                       __half2half2(__ushort_as_half((unsigned short)0xC931u)));
+    }
+    x0 = (CB == 1) ? x0 * 0xCBAC1FEDu : x0 * 89226354u + 64248484u;
+    x1 = (CB == 1) ? x1 * 0xCBAC1FEDu : x1 * 89226354u + 64248484u;
+    x0 = emmy_trellis_mask_xor(x0);
+    x1 = emmy_trellis_mask_xor(x1);
+    __half2 lo = __halves2half2(__ushort_as_half((unsigned short)(x0 & 0xFFFFu)),
+                                __ushort_as_half((unsigned short)(x1 & 0xFFFFu)));
+    __half2 hi = __halves2half2(__ushort_as_half((unsigned short)(x0 >> 16)),
+                                __ushort_as_half((unsigned short)(x1 >> 16)));
+    return __hadd2(lo, hi);
+}
+
+// The tile-column run in PAIRS: ``out[p]`` carries k rows ``2p`` (low) and ``2p+1`` (high) of column
+// ``n_lo``, from the same single code fetch the float form uses.
+template <int KBITS, int CB>
+static __device__ __forceinline__ void emmy_trellis_decode_col_pair(
+        const unsigned short* __restrict__ codes, int n_lo, __half2* out) {
+    const int nbits = KBITS << 8, nwords = KBITS << 3;
+    const int off_a = ((KBITS - 16) % 32 + 32) % 32;      // n_lo < 8
+    const int off_b = ((5 * KBITS - 16) % 32 + 32) % 32;  // n_lo >= 8
+    const int off_min = off_a < off_b ? off_a : off_b;
+    const int nw = ((off_min + KBITS * 27) >> 5) + 2;     // 27 = max step spread over the column
+    const unsigned int* u32 = (const unsigned int*)codes;
+    int tbase = emmy_trellis_step(KBITS, 0, n_lo);
+    int b0 = ((tbase + 1) * KBITS - 16 + nbits) % nbits;
+    int w0 = b0 >> 5, sh = 48 - (b0 & 31);
+    unsigned int W[nw + 1];
+#pragma unroll
+    for (int i = 0; i < nw + 1; i++) W[i] = u32[(w0 + i) % nwords];
+    unsigned int win[16];
+#pragma unroll
+    for (int e = 0; e < 16; e++) {
+        const int d = 8 * ((e & 7) >> 1) + (e & 1) + 2 * ((e >> 3) & 1);
+        const int i = (off_min + KBITS * d) >> 5;
+        unsigned long long joined = ((unsigned long long)W[i] << 32) | (unsigned long long)W[i + 1];
+        win[e] = (unsigned int)(joined >> (sh + 32 * i - KBITS * d)) & 0xFFFFu;
+    }
+#pragma unroll
+    for (int p = 0; p < 8; p++) out[p] = emmy_trellis_value_pair<CB>(win[2 * p], win[2 * p + 1]);
 }
 """
 
@@ -970,6 +1040,8 @@ def render_kernelop(
     trellis_prelude = ""
     if any(isinstance(s, TrellisLoad) for s in kernel_op.body.iter()):
         trellis_prelude = _TRELLIS_PRELUDE
+        if any(isinstance(s, TrellisLoad) and s.packed for s in kernel_op.body.iter()):
+            trellis_prelude += _TRELLIS_PAIR_PRELUDE
         includes = "".join(f"#include {h}\n" for h in cuda_includes([*sig_dtypes, "f16"]))
     preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{trellis_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'

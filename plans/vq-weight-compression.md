@@ -312,13 +312,36 @@ Order matters — the fragment path first, or every measurement undersells the f
    976 → 214 µs vs f16's 580 — 2.7x ahead** (157 µs at the band's best pinned split, 3.7x); gate/up 4096→11008
    161 → 19.6 vs 18.6; down 11008→4096 441 → 20.5 vs 18.7. The two L2-resident shapes are at f16 parity and that
    is the honest reading — f16 streams its weights out of L2 at 4.9 TB/s there, which no 30 GB model sees.
-   Residual, with evidence: NCU on the past-L2 band puts SM throughput at 69 % against DRAM 35 %, so the wall is
-   the decode's own instruction count (11.5 warp-instructions per weight, ~128 µs of pure issue against a 71 µs
-   DRAM floor), not bandwidth. Next levers, in order: fewer instructions per weight (half2 accumulate folded to f32
-   on a cadence, as exllamav3 does), and occupancy (79 registers/thread, 46 % achieved). Second residual: the
-   offline prior does not rank the band's split widths correctly on a cold compile (it takes `g8k`/`g4k` where
-   `g32k` wins, 20–36 % left on the table) — that is what Phase 4's golden seeding is for, and the `trellis`
-   dtype class is what makes such a golden keyable.
+   **SECOND ROUND (2026-08-07), three levers, each measured alone.** NCU on the 3.2 band said the wall was
+   instruction issue, not bandwidth (SM 69 % vs DRAM 35 %, 11.47 warp-instructions per 2-bit weight against a
+   ~71 µs DRAM floor), and that is what these attack.
+   (a) **One LOP3 for the codebook's mask/XOR** (`emmy_trellis_mask_xor`, exact, ungated): written in C, ptxas
+   spends two LOP3s because the SASS form encodes at most one immediate; naming the 3-input bit function lets it
+   hoist the second constant and issue one. −1 instruction per weight, **−8 % at the past-L2 square** on its own.
+   (b) **The split ladder past the powers of two** (`DECODE_BAND_STEPS`, `decode_band_moves(tiles)`): a matvec's
+   tile count is the contraction dim over 16 and routinely carries an odd factor, so the wide arm names widths by
+   the tile STEPS each CTA keeps. `down` (688 = 16·43 tiles) went from ONE offered row (`g16k`, 2048 CTAs, 19.5 µs
+   — a fork with nothing to decide, hence no golden) to three, with `g86k` at 15.3. Wider is not monotone: the
+   finalize reads a `cta × N` f32 workspace worth `2/(steps·k_bits)` of the code traffic, so the ladder starts at
+   8 steps. (c) **The f16-pair fold** (`F16_REDUCE_F32_ACC`, `060_pair_decode_accum`, `FAST_MATH` family): packed
+   run + `__hmul2` products + an fp16 tree over the tile column + ONE f32 promote per tile step. 11.47 → 8.25
+   warp-instructions per weight, **−13…18 %**. The cadence is the band's quantum and deliberately not a knob — the
+   fp16 tree is 3 deep, so the error is the fp16 product's (5.0–5.2e-4 rel against the f32 lane's 3.6–3.9e-4, FLAT
+   in K) where a chain over the whole slice reaches 1.0–1.7e-3 and grows with the slice; longer cadences measure
+   within 1 %.
+   Greedy end state on the 5090 (goldens live; f16 twin in brackets): past-L2 square **142.2 µs f32 lane /
+   122.6 f16-pair** [581.7] — 4.1x / 4.7x, and 852 / 988 GB/s of codes off DRAM; gate/up **14.9 / 12.3** [18.7];
+   down **15.3 / 12.9** [18.5], which flips `down` from BEHIND its f16 twin to 1.21x / 1.43x ahead. The
+   L2-residency caveat above still governs the two projections — they are relative A/B only.
+   Residual: NCU after is SM 65 % / DRAM 46 %, so the two are now balanced and further instruction cuts pay less.
+   The measured remainder is OCCUPANCY: 55 registers/thread but 46 % achieved, and registers are not the binder —
+   a 32-thread block caps at 24 blocks/SM, which is 24 of the 48 warp slots. Widening the block is NOT reachable by
+   a knob today: `WORK=t128` puts the extra warps on the REDUCE axis (a cross-warp k split, which also offsets the
+   anchor off a tile boundary so the run stops fusing — 3x slower, measured 474 vs 159 µs). A standalone kernel
+   carrying the shipped body over 128-thread blocks that map the extra warps to the FREE axis measures 124.9 µs
+   against 129.8 — **~4 %**, and it needs a WORK-mapping change to reach. Not worth chasing at that size. (The same
+   standalone reaches 116.4 with a longer-cadence f16 CHAIN instead of the per-step tree, but that is the accuracy
+   trade the cadence choice above already rejected.)
 3. **Activation-side Hadamard** as a computed-A-style prologue, if the format requires it at kernel level rather
    than being foldable into the checkpoint.
    **STATUS: DONE (2026-08-07).** Under the same `EMMY_TRELLIS_EXPAND` gate, `spell_trellis_constants` now
@@ -460,7 +483,12 @@ expressible, matchable, benchable and deployable:
   1.1 %) and `glm45air.pastl2_22016.m1` (1x22016x22016) 215.3 → 157.9 µs (1.36x, spread 0.24 %). Both deploy: the
   golden tier answers MATCH and the kernel carries `g32k/coop-t/r16`, on the entry's own snippet AND on the
   EXL3-spelled in-model graph.
-
+- **Re-measured and extended after the 3.2 second round (2026-08-07), now 3 entries.** The one-LOP3 fix moved every
+  absolute number and the widened ladder moved one winner, so the whole offered ladder was re-swept at each shape,
+  3 reps: `mlp_gate_up.m1` keeps `g32k` at 15.0 µs; `pastl2_22016.m1` moves `g32k` → **`g43k`** at 142.4 (g86k ties
+  in this lane at 142.44 and the f16-pair lane separates them, 122.4 vs 126.7); and `mlp_down.m1`
+  (1x4096x11008) is NEW at **`g86k`** 15.3 µs, the row the widened ladder unlocked (g16k 19.5). All three deploy at
+  greedy. The two lanes pick the SAME split at every entry, so one recorded schedule serves both.
 **Both enablement gaps CLOSED (2026-08-07), so the real sweep can start:**
 
 - **The key carries the CODE RATE.** `ShapeKey.k_bits`, fed by `MatmulGoldenConfig.k_bits` on the golden side and by
@@ -481,15 +509,15 @@ expressible, matchable, benchable and deployable:
 
 Residuals for the full sweep: the GAPs above are the sweep itself (attention q/k/v/o at 4 and 3 bits, the dense MLP at
 every prefill width, and the uncoded fused/norm forks of a model nobody has tuned); prefill/warp coded matmuls are a
-~3.8k-row pool; `down` (11008→4096, M=1) offers exactly one band width and so has no fork a golden could decide. Two
-twin-side limits bound what the audit can see. A coded twin pairs ONE traced layer's structure with one checkpoint
-layer's rates, so where a layer codes only part of the twin (GLM stores layer 0's `o_proj` uncompressed, and its MoE
-layers have no dense MLP) the rest stay f16 and those forks are artifacts of the pairing, not shapes the model runs.
-And there is still no EXPERT twin: the expert weights arrive as program inputs, so a config-only skeleton contains
-nothing coded, and `_build_expert_group` takes checkpoint tensors rather than specs. The path is short now — the
-sidecar already lists every expert's rate and trellis shape, and its four distinct expert signatures (4 / 1 / 38 / 2
-layers) are exactly the four shape groups `from_model` interns — so what is owed is a spec-taking seam in
-`gen_runner`, not new format knowledge.
+~3.8k-row pool. (`down`'s "one band width, so no fork a golden could decide" residual is CLOSED — the widened ladder
+gives it three rows and it is seeded.) Two twin-side limits bound what the audit can see. A coded twin pairs ONE
+traced layer's structure with one checkpoint layer's rates, so where a layer codes only part of the twin (GLM stores
+layer 0's `o_proj` uncompressed, and its MoE layers have no dense MLP) the rest stay f16 and those forks are artifacts
+of the pairing, not shapes the model runs. And there is still no EXPERT twin: the expert weights arrive as program
+inputs, so a config-only skeleton contains nothing coded, and `_build_expert_group` takes checkpoint tensors rather
+than specs. The path is short now — the sidecar already lists every expert's rate and trellis shape, and its four
+distinct expert signatures (4 / 1 / 38 / 2 layers) are exactly the four shape groups `from_model` interns — so what is
+owed is a spec-taking seam in `gen_runner`, not new format knowledge.
 
 Seed `emmy/compiler/pipeline/search/goldens/rtx5090_sm120_glm45air.yaml`, following the structure and preamble
 conventions of `rtx5090_sm120_olmoe.yaml` — the closest precedent: a MoE, on this card, whose expert

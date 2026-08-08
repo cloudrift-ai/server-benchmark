@@ -252,6 +252,20 @@ FP8_MMA = Knob(
 )
 
 
+F16_REDUCE_F32_ACC = Knob(
+    "F16_REDUCE_F32_ACC",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Pair the DECODE BAND's fold into f16: the tile column's 16 decoded weights and their "
+    "activations ride as eight __half2, multiply with __hmul2, sum over the column in fp16, and "
+    "promote into the f32 accumulator ONCE PER TILE STEP (the band's own quantum — the fp16 tree "
+    "is 3 deep, so the error is the fp16 product's, ~4e-4 rel, not an accumulation's). Cuts ~2.5 "
+    "warp-instructions per decoded weight off an instruction-bound matvec. Pin 1 to enable, 0 "
+    "never; unset follows FAST_MATH. Stamped on the kernel either way (like FAST_EXP), so the "
+    "realized config records the policy and the rewrite is idempotent.",
+)
+
+
 def precision_pin(knob: Knob) -> bool | None:
     """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
     set, else the ``FAST_MATH`` umbrella pin, else ``None`` (neither set — the caller applies its
@@ -448,15 +462,32 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 # (option-0 leads). Divisor / occupancy / tile-alignment legality is the scheduler's.
 DECODE_BAND_TILE: int = 16
 DECODE_BAND_CTAS: tuple[int, ...] = (32, 16, 8, 4)
+# The WIDE arm's widths, named by the TILE STEPS each CTA keeps rather than by the width itself:
+# ``width = tiles // steps``. A matvec's tile count is the model's contraction dim over 16, which
+# routinely carries an odd factor (GLM-4.5-Air's 11008 -> 688 = 16*43), and a power-of-two-only
+# ladder cannot divide it far enough to fill the card — the `down` projection's widest legal
+# power-of-two split leaves 2048 warp-wide CTAs where 11008 is available, and measures 19.7 us
+# against g86k's 15.3. Going wider still is not free: the split's finalize reads a ``cta x N`` f32
+# workspace, whose bytes over the codes' are ``2 / (steps * k_bits)`` — a quarter of the code
+# traffic at 4 steps, an eighth at 8 — which is why the ladder starts at 8 rather than at the
+# ``_DECODE_MIN_STEPS`` floor.
+DECODE_BAND_STEPS: tuple[int, ...] = (8, 16, 32)
 
 
-def decode_band_moves() -> list[ReducePlan]:
+def decode_band_moves(tiles: int | None = None) -> list[ReducePlan]:
     """The ``REDUCE`` candidates a DECODED B answers with — the transposed coop band (32 lanes
     sweeping the output axis) at ``reg`` = the trellis tile's 16 k rows, over a cross-CTA split, so
     a lane's register copies walk one tile COLUMN and ``055_fuse_trellis_runs`` can collapse them
     into one run. A decoded B offers these ALONE (never the plain coop catalog): a code fetch is a
-    whole 16x16 weight tile, so any other partition re-fetches it per element."""
-    return [ReducePlan.of(cta=w, coop=WARP_LANES, coop_transposed=True, reg=DECODE_BAND_TILE) for w in DECODE_BAND_CTAS]
+    whole 16x16 weight tile, so any other partition re-fetches it per element.
+
+    ``tiles`` is the contraction's trellis-tile count (``K // 16``). Given it, the WIDE arm leads:
+    one width per :data:`DECODE_BAND_STEPS` entry that divides ``tiles``, widest first, then the
+    fixed :data:`DECODE_BAND_CTAS` ladder. Without it only the fixed ladder is offered — the
+    catalog a caller that does not know K can still check membership against."""
+    widths = [tiles // s for s in DECODE_BAND_STEPS if tiles and tiles % s == 0] if tiles else []
+    widths += [w for w in DECODE_BAND_CTAS if w not in widths]
+    return [ReducePlan.of(cta=w, coop=WARP_LANES, coop_transposed=True, reg=DECODE_BAND_TILE) for w in widths]
 
 
 def splitk_moves() -> list[ReducePlan]:

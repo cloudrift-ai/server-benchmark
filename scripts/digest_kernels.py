@@ -20,15 +20,16 @@ import hashlib
 import os
 import sys
 import traceback
+from unittest import mock
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 from emmy.compiler.context import Context  # noqa: E402
 from emmy.compiler.dim import Dim  # noqa: E402
-from emmy.compiler.dtype import F16  # noqa: E402
+from emmy.compiler.dtype import F16, get  # noqa: E402
 from emmy.compiler.graph import Graph, Tensor  # noqa: E402
 from emmy.compiler.ir.base import InputOp  # noqa: E402
-from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp  # noqa: E402
+from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp, TrellisDecodeOp  # noqa: E402
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: E402
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: E402
 from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: E402
@@ -50,6 +51,22 @@ def matmul(M=512, N=512, K=512, lin=False):
     op = LinearOp() if lin else MatmulOp()
     g.add_node(op=op, inputs=["x", "w"], output=Tensor("y", (Dim(M) if not isinstance(M, Dim) else M, Dim(N)), dtype=F16), node_id="y")
     g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def trellis_matvec(N=1024, K=512, kbits=2, cb=0):
+    """The decode-phase coded linear — the shape the DECODE BAND realizes. Codes are an INPUT (a
+    constant-rooted decode folds away), and the extents are the codes grid's 128-padded ones."""
+    g = Graph()
+    _inp(g, "x", (1, K))
+    _inp(g, "codes", (K // 16, N // 16, 16 * kbits), dt=get("i16"))
+    w = g.add_node(
+        op=TrellisDecodeOp(cb=cb, out_features=N, in_features=K, hadamard=False),
+        inputs=["codes"],
+        output=Tensor("w_hat_t", (Dim(N), Dim(K)), dtype=F16),
+    )
+    g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor("y", (Dim(1), Dim(N)), dtype=F16), node_id="y")
+    g.inputs, g.outputs = ["x", "codes"], ["y"]
     return g
 
 
@@ -177,6 +194,17 @@ CASES = [
     ),
     ("flash_chain", lambda: sdpa(64), {"TILE": "a:scalar", "TILE@pj": "f64"}),
     ("flash_scalar", lambda: sdpa(64), {"REDUCE": "coop", "WORK": "t128"}),
+    # The DECODE BAND: a trellis-coded B at the reduce tier, its tile-column run, and the f16-pair
+    # fold the FAST_MATH family gates. The paired case pins the knob through ``env`` because the
+    # rewrite is a kernel-tier policy, not a schedule family.
+    ("trellis_band", lambda: trellis_matvec(), {"REDUCE": "g4k/coop-t/r16", "WORK": "t32"}),
+    (
+        "trellis_band_pair",
+        lambda: trellis_matvec(),
+        {"REDUCE": "g4k/coop-t/r16", "WORK": "t32"},
+        {"EMMY_F16_REDUCE_F32_ACC": "1"},
+    ),
+    ("trellis_band_k6", lambda: trellis_matvec(512, 1024, kbits=6), {"REDUCE": "g4k/coop-t/r16", "WORK": "t32"}),
 ]
 
 
@@ -216,7 +244,12 @@ def _liveness(name, pins, realized):
     return f"{name}: no kernel stamped {pins}; realized {got}"
 
 
-def run_case(name, build, pins):
+def run_case(name, build, pins, env=None):
+    """``env`` sets ``EMMY_*`` vars for the case's compile — the way a KERNEL-tier policy knob
+    (the ``FAST_MATH`` precision family) is selected, since it is not a schedule family and so
+    cannot ride ``pins``."""
+    import contextlib
+
     from emmy.commands.run import _pinned_knobs
 
     g = build()
@@ -225,6 +258,13 @@ def run_case(name, build, pins):
         leaves = flatten_leaves(fp.options)
         return leaves[0]
 
+    with contextlib.ExitStack() as stack:
+        for var, val in (env or {}).items():
+            stack.enter_context(mock.patch.dict(os.environ, {var: val}))
+        return _render_case(name, g, pins, decide, _pinned_knobs)
+
+
+def _render_case(name, g, pins, decide, _pinned_knobs):
     with _pinned_knobs(pins):
         out, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(g, decide)
     lines, realized = [], []
@@ -265,11 +305,11 @@ def main():
     check = "--check" in argv
     only = [a for a in argv if not a.startswith("-")] or None
     failures, lines, dead = 0, [], []
-    for name, build, pins in CASES:
+    for name, build, pins, *rest in CASES:
         if only and name not in only:
             continue
         try:
-            case_lines, verdict = run_case(name, build, pins)
+            case_lines, verdict = run_case(name, build, pins, rest[0] if rest else None)
             lines.extend(case_lines)
             if verdict:
                 dead.append(verdict)

@@ -17,13 +17,27 @@
 #
 # WHY THESE EXIST: the offline prior mis-ranks the decode band's split width on a cold compile.
 # The band partitions the contraction across CTAs (`gNk` = N-way cross-CTA split, `coop-t/r16` =
-# 32 lanes sweeping the output axis over the tile's 16 register rows), and the WIDEST split that
-# divides the tile count wins at every shape measured — but greedy takes g8k / g4k, leaving
-# 19-27% on the table. The two entries below are exactly that correction.
+# 32 lanes sweeping the output axis over the tile's 16 register rows), and greedy takes a split
+# 2-4x too narrow, leaving 19-27% on the table. The three entries below are exactly that
+# correction.
+#
+# WHAT THE OPTIMUM IS, now that the ladder reaches past the powers of two (`DECODE_BAND_STEPS`):
+# NOT simply "the widest". Wider means more CTAs, but the split's finalize also reads a `cta x N`
+# f32 workspace whose bytes over the codes' are `2 / (steps * k_bits)` — a quarter of the code
+# traffic at 4 tile steps per CTA, an eighth at 8. The measured optimum is at 8-32 steps, and it
+# moves with how L2-resident the codes are: the two 11 MB projections peak at 8 steps (`gate_up`
+# g32k, `down` g86k) while the 121 MB square peaks at 32 (g43k), where the workspace is 3% of the
+# traffic rather than 12%. Both lanes (see the next note) agree on every winner.
+#
+# LANE: measured in the DEFAULT (f32) lane. The f16-pair fold (`EMMY_F16_REDUCE_F32_ACC` / the
+# `FAST_MATH` umbrella, `060_pair_decode_accum`) is 13-18% faster at every entry here and picks
+# the SAME split at every one of them, so one recorded schedule serves both lanes. Its numbers,
+# for reference: 123.2 / 12.3 / 12.9 us against the 142.4 / 15.0 / 15.3 recorded below.
 #
 # MEASUREMENT METHOD: `emmy run -c "<snippet>" --bench --bench-backends emmy --warmup 10
-# --iters 100 --ab "REDUCE=g32k/coop-t/r16,WORK=t32" --ab ...` over the g{32,16,8,4}k ladder,
-# 3 reps. `emmy_us` is the SPLIT PAIR's total (partial + finalize), matching the olmoe file.
+# --iters 100 --ab "REDUCE=g32k/coop-t/r16,WORK=t32" --ab ...` over each shape's WHOLE offered
+# ladder (`decode_band_moves(K // 16)` — the wide arm plus the fixed one), 3 reps. `emmy_us` is
+# the SPLIT PAIR's total (partial + finalize), matching the olmoe file.
 # `--bench-backends emmy` is REQUIRED for a coded shape: the eager reference is the numpy
 # reference decode (`loader/exl3.decode_trellis`), correct but ~0.7 s per call at 4096x11008, so
 # the default eager lane would re-decode once per bench iteration.
@@ -47,20 +61,17 @@
 # CODE RATE: `k_bits` is part of the ShapeKey, so a shape holds one entry PER RATE and the
 # 2.25-optimized rung's mixed allocation cannot collide. That matters here concretely — the pinned
 # checkpoint stores `mlp.shared_experts.gate_proj` at 2, 3 AND 4 bits across its layers at one
-# (M, N, K), and q/k/v/o at 4 and 3. Every entry must record the rate it was measured at; both
-# entries below are k_bits=2 / cb=0. The op side stamps `S_trellis_k_bits` off the decode leaves.
+# (M, N, K), and q/k/v/o at 4 and 3. Every entry must record the rate it was measured at; all
+# three entries below are k_bits=2 / cb=0. The op side stamps `S_trellis_k_bits` off the decode leaves.
 #
 # `model:` HEADER: tagged with the rung's own branch (`<repo>@<revision>`), because the rungs
 # differ in exactly the bit allocation the keys carry — auditing 2.25 goldens against the 2.0
 # checkpoint would key every shape at 2 bits. `eval golden --in-model` builds the weight-free
-# twins from `config.json` + the checkpoint's allocation sidecar and spells the coded contractions
-# with the same speller serving uses, one twin per rate profile. The `pastl2_22016` control shape
-# is NOT a model shape, so it opts out with a per-entry `model: null`.
+# twins from `config.json` + `quantization_config.json` and spells the coded contractions with
+# the same speller serving uses, one twin per rate profile. The `pastl2_22016` control shape is
+# NOT a model shape, so it opts out with a per-entry `model: null`.
 #
 # NOT COVERED, with reasons (the full Phase 4 sweep owes these):
-#  * `down` (11008 -> 4096, M=1) — the decode band offers exactly ONE split there (`g16k`), so the
-#    fork has no choice to make and a golden could never be consulted. The narrow split window is
-#    a compiler-side residual, not a seeding one.
 #  * prefill / warp-tier coded matmuls — the fork offers ~3.8k rows; that is a real sweep.
 #  * the attention projections (q/k/v at 4 and 3 bits, o_proj at 4 and 3) — the coded twins now
 #    expose them, nobody has swept them.
@@ -74,8 +85,10 @@ compute_cap:
 configs:
   # ---- dense MLP gate/up projection, decode phase (M=1) ----------------------------------------
   # GLM-4.5-Air hidden 4096 -> intermediate 10944, stored 128-padded to 11008. Codes 11.3 MB
-  # (L2-resident in this bench — see HOW TO READ). Greedy takes g8k at 19.5 us; g32k is 15.8.
-  # Reps: 15.70 / 15.87 / 15.75 us (spread 1.1%); greedy 19.60 / 19.52 / 19.52.
+  # (L2-resident in this bench — see HOW TO READ). Greedy takes g8k at 18.7 us; g32k is 15.0.
+  # Ladder (3 reps, best): g32k 14.99 / g16k 14.90 / g8k 18.69 — g16k's min is a single outlier
+  # (16.00 / 14.90 / 16.10) against g32k's 15.02 / 14.99 / 15.03, so the stable row is g32k.
+  # Re-measured 2026-08-07 after the one-LOP3 codebook fix (15.8 -> 15.0); split unchanged.
   - kernel: matmul
     name: glm45air.mlp_gate_up.m1
     M: 1
@@ -86,14 +99,38 @@ configs:
     cb: 0
     trans_b: true
     knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 15.8
+    emmy_us: 15.0
     cublas_us: 55.0
+  # ---- dense MLP down projection, decode phase (M=1) -------------------------------------------
+  # GLM-4.5-Air intermediate 10944 (128-padded to 11008) -> hidden 4096. The shape the widened
+  # split ladder unlocked: 11008/16 = 688 = 16*43, so the power-of-two ladder stopped at g16k and
+  # this shape offered ONE row — a fork with nothing to decide, and no golden. The wide arm's
+  # g86k (688/8) reaches 11008 CTAs against g16k's 2048.
+  # Ladder (3 reps, best): g86k 15.26 / g43k 15.96 / g16k 19.54. Reps: 15.28 / 15.29 / 15.26
+  # (spread 0.2%). g86k also flips this projection from BEHIND its f16 twin (19.5 vs 18.5) to
+  # 1.21x ahead — the only entry here where the split choice changes the sign of the comparison.
+  - kernel: matmul
+    name: glm45air.mlp_down.m1
+    M: 1
+    N: 4096
+    K: 11008
+    dtype: 'trellis'
+    k_bits: 2
+    cb: 0
+    trans_b: true
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g86k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 15.3
+    cublas_us: 59.0
   # ---- past-L2 reference square, decode phase (M=1) --------------------------------------------
   # Not a GLM projection: a deliberate 121 MB codes slab (past the 5090's 96 MB L2), the only shape
   # in this file that measures the format the way a 29 GB trunk experiences it. Keep it — it is the
   # control that tells the parity readings above apart from real wins, and it carries the largest
-  # correction (greedy g4k 215.3 us -> g32k 157.9, 1.36x).
-  # Reps: 158.10 / 157.72 / 157.76 us (spread 0.24%); greedy 216.0 / 215.5 / 214.4.
+  # correction (greedy 157.3 us -> g43k 142.4).
+  # Ladder (3 reps, best): g172k 145.55 / g86k 142.44 / g43k 142.41 / g32k 144.63 / g16k 157.29.
+  # Reps: 142.41 / 142.65 / 143.17 us (spread 0.5%). g43k and g86k tie in this lane; g43k is
+  # recorded because the f16-pair lane separates them (122.4 vs 126.7).
+  # Re-measured 2026-08-07 after the one-LOP3 codebook fix and the ladder widening (g32k 157.9 ->
+  # g43k 142.4); the split CHANGED, so this entry supersedes the seeded g32k row.
   - kernel: matmul
     name: glm45air.pastl2_22016.m1
     model: null  # a synthetic past-L2 control, not a GLM projection — never audited in-model
@@ -104,6 +141,6 @@ configs:
     k_bits: 2
     cb: 0
     trans_b: true
-    knobs: {WORK: 't32', TILE: '', REDUCE: 'g32k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 157.9
+    knobs: {WORK: 't32', TILE: '', REDUCE: 'g43k/coop-t/r16', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 142.4
     cublas_us: 586.0

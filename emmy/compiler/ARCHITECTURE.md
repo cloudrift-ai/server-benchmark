@@ -213,13 +213,22 @@ carrier), which keeps a decoded B's golden / DB rows from joining its f16 twin's
 on the 5090 at M=1, K=2, against the same-shape f16 matvec: N=K=22016 (past L2) **214 µs vs 580** — 2.7x ahead,
 and 157 µs at the band's best pinned split; the L2-resident GLM dense projections land at f16 parity (gate/up
 4096→11008: 19.6 vs 18.6; down 11008→4096: 20.5 vs 18.7), where f16 reads its weights out of L2 at 4.9 TB/s and
-the comparison flatters it. NCU puts the residual on instruction issue, not bandwidth: 11.5 warp-instructions
-per decoded weight, SM throughput 69 % against DRAM 35 %. The band's split widths are a catalog
-(`space.decode_band_moves`, widest first), so a recorded golden's partition is a catalog member like every other
-kind's — and it needs to be one: the offline prior mis-ranks the width cold (it takes `g8k`/`g4k` where `g32k` wins),
-which is 19–27 % at the seeded shapes, and `goldens/rtx5090_sm120_glm45air.yaml` is that correction. The window is
-narrow enough that some real shapes offer only ONE width and so have no fork to decide (`down`, 11008→4096 at M=1) —
-widening it is a compiler-side follow-up, not a seeding one.
+the comparison flatters it. NCU put the residual on instruction issue, not bandwidth: 11.5 warp-instructions
+per decoded weight, SM throughput 69 % against DRAM 35 %. Three follow-ups took that down to 8.25 and rebalanced
+the kernel (SM 65 % / DRAM 46 %) — the codebook's mask/XOR as ONE `lop3` (exact, ungated), the widened split
+ladder below, and the `F16_REDUCE_F32_ACC` f16-pair fold (`060_pair_decode_accum`, a `FAST_MATH`-family precision
+gate: `__half2` products summed over the tile column in fp16 with one f32 promote per tile step, ~5e-4 rel and
+flat in K). Greedy on the 5090 now: past-L2 square **142.2 µs f32 lane / 122.6 f16-pair vs f16's 581.7**
+(4.1x / 4.7x, 852 / 988 GB/s of codes off DRAM), gate/up 14.9 / 12.3 vs 18.7, down 15.3 / 12.9 vs 18.5.
+
+The band's split widths are a catalog (`space.decode_band_moves(tiles)`, widest first), so a recorded golden's
+partition is a catalog member like every other kind's — and it needs to be one: the offline prior mis-ranks the
+width cold, which is 19–27 % at the seeded shapes, and `goldens/rtx5090_sm120_glm45air.yaml` is that correction.
+The catalog has a WIDE arm keyed on the trellis-tile count (`width = tiles // steps`) ahead of the fixed
+power-of-two ladder, because a matvec's tile count is the contraction dim over 16 and routinely carries an odd
+factor: without it `down` (11008→4096, 688 = 16·43 tiles) offered ONE width — no fork to decide, hence no golden —
+and ran 19.5 µs where `g86k` runs 15.3. Wider is not monotone, since the split's finalize reads a `cta × N` f32
+workspace worth `2 / (steps · k_bits)` of the code traffic, so the arm starts at 8 tile steps per CTA.
 
 **Activation-side basis restore.** Only `W_hat` decodes in-kernel, so under the same `EMMY_TRELLIS_EXPAND` gate
 `spell_trellis_constants` rewrites the CONSUMING LINEAR instead of the weight constant, moving the checkpoint's

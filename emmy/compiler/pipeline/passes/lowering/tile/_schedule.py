@@ -94,7 +94,6 @@ from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction, make_cone
 from emmy.compiler.pipeline.search.space import (
-    DECODE_BAND_CTAS,
     DECODE_BAND_TILE,
     RASTER,
     REDUCE,
@@ -103,6 +102,7 @@ from emmy.compiler.pipeline.search.space import (
     WARP_LANES,
     WORK,
     coop_reduce_moves,
+    decode_band_moves,
     map_tile_moves,
     raster_moves,
     scalar_tile_moves,
@@ -884,20 +884,21 @@ def _decode_band_specs(term: _Term, node, k_static, inner, epilogue) -> list[Red
     lane's register copies walk 16 CONSECUTIVE k — one tile column, which the decode reads with a
     single code fetch instead of one per element (``055_fuse_trellis_runs``). Warp-wide blocks
     alone cannot fill the card on a matvec grid, so every row pairs with the cross-CTA split, and
-    the WIDEST legal split leads: a decode band with no split is 3–8x off its own floor at the GLM
-    projection shapes. A split whose slice is not tile-aligned is skipped rather than offered —
-    the run would not fuse and the row would be a per-element decode under a transposed band, the
-    worst of both."""
+    the WIDEST legal split leads. The widths come from :func:`decode_band_moves` — the wide arm
+    keyed on the tile count first (a contraction dim with an odd factor has no power-of-two split
+    that fills the card), then the fixed ladder. A split whose slice is not tile-aligned is skipped
+    rather than offered — the run would not fuse and the row would be a per-element decode under a
+    transposed band, the worst of both."""
     if not _decoded_b(term, node) or k_static is None or k_static % DECODE_BAND_TILE:
         return []
     warps = max(1, _free_cells(term.place) // WARP_LANES)
     out: list[ReducePlan] = []
-    for cta in DECODE_BAND_CTAS:
+    for p in decode_band_moves(k_static // DECODE_BAND_TILE):
+        cta = p.cta
         if k_static % (DECODE_BAND_TILE * cta) or k_static // (DECODE_BAND_TILE * cta) < _DECODE_MIN_STEPS:
             continue
         if out and warps * cta < _DECODE_MIN_CTAS:
             continue  # the widest legal split always leads; narrower ones only while they fill
-        p = ReducePlan.of(cta=cta, coop=WARP_LANES, coop_transposed=True, reg=DECODE_BAND_TILE)
         if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
             continue
         if not legal.enforce(epilogue, pinned=False) or p in out:

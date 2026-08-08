@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 MODEL_ID = "Qwen/Qwen3.5-122B-A10B"
 MODEL_REVISION = "dc4d348443bc740c68e2d77492492c11606384d5"
 ENGINE_NAME = "1Cat-vLLM"
-ENGINE_REVISION = "644d8a7cd05ed4ecd1cd188e3c05b4bbd074f504"
-IMAGE_REFERENCE = "cloudriftai/1cat-vllm-sm70:1.2.2"
+ENGINE_REVISION = "91aca502d2bb1f05d9208ab2edec9fae53ff0d0b"
+IMAGE_REFERENCE = "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
 GPU_NAME = "NVIDIA Tesla V100 SXM3 32GB"
 
 WORKLOADS = {

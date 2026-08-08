@@ -13,7 +13,7 @@ engine:
     context_length: 32768
     max_concurrent_requests: 1
     vllm:
-      image: "cloudriftai/1cat-vllm-sm70:1.2.2"
+      image: "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
       extra_args: >-
         --dtype half
         --revision dc4d348443bc740c68e2d77492492c11606384d5

@@ -17,7 +17,7 @@ command:
       --env EMMY_CUBIN_CACHE=/artifacts/cubins \
       --env EMMY_TUNE_DB=/artifacts/autotune.db \
       --env EMMY_ONLINE_FILE=/artifacts/online.json \
-      cloudriftai/1cat-vllm-sm70:1.2.2 \
+      cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift \
       -lc 'set -euo pipefail
     export PYTHONPATH=/workspace
     cd /workspace

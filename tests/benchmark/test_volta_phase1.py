@@ -30,23 +30,33 @@ def test_volta_command_workloads_are_strict_and_single_gpu(project_root) -> None
 def test_onecat_image_is_reproducibly_pinned(project_root) -> None:
     dockerfile = Path(project_root, "docker/1cat-vllm-sm70/Dockerfile").read_text()
     assert "12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa" in dockerfile
-    assert "ONECAT_VERSION=1.2.2" in dockerfile
-    assert "ONECAT_SHA256=8a628983ad9d675559910372643220c418b307ddc7fd52ac65a7f5fbcb104bc6" in dockerfile
-    assert "/tmp/1cat_vllm-${ONECAT_VERSION}-cp312-cp312-linux_x86_64.whl" in dockerfile
+    assert "ONECAT_REPO=https://github.com/cloudrift-ai/1Cat-vLLM.git" in dockerfile
+    assert "ONECAT_COMMIT=91aca502d2bb1f05d9208ab2edec9fae53ff0d0b" in dockerfile
+    assert "ONECAT_BASE_REF=cloudrift/v1.2.2" in dockerfile
+    assert "ONECAT_BASE_TAG=v1.2.2" in dockerfile
+    assert 'test "$(git -C /src rev-parse HEAD)" = "${ONECAT_COMMIT}"' in dockerfile
+    assert "python -m build --wheel --no-isolation --outdir /wheels" in dockerfile
+    assert "CMAKE_BUILD_TYPE=Release python -m build" in dockerfile
+    assert "--mount=from=builder,source=/wheels,target=/tmp/wheels,ro" in dockerfile
+    assert "TORCH_CUDA_ARCH_LIST=7.0" in dockerfile
+    assert "FLASH_ATTN_V100_CUDA_ARCH_LIST=7.0" in dockerfile
     assert "catboost==1.2.10" in dockerfile
     assert "cupy-cuda12x==14.1.1" in dockerfile
-    assert "apache-tvm-ffi==0.1.10" in dockerfile
-    assert "tilelang==0.1.10" in dockerfile
+    assert "apt-get install -y --no-install-recommends curl" in dockerfile
+    assert "strip --strip-unneeded" in dockerfile
     assert "VLLM_SM70_FLASHQLA_ORIGINAL_PREFILL=0" in dockerfile
-    assert "patch_onecat.py" in dockerfile
+    assert "patch_onecat.py" not in dockerfile
 
 
-def test_onecat_patch_fails_closed_on_the_pinned_profile_blocks(project_root) -> None:
-    patch = Path(project_root, "docker/1cat-vllm-sm70/patch_onecat.py").read_text()
-    assert "expected exactly one {label} block" in patch
-    assert "return None, None" in patch
-    assert '"_dummy_run return non-last PP rank"' in patch
-    assert "assert last_hidden_states is not None" in patch
+def test_onecat_stack_qualifies_fork_fixes_on_sm70(project_root) -> None:
+    recipe = load_recipe(_path(project_root, "experiments/volta-sm70-stack"))
+    run = recipe.command.run
+    assert "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift" in run
+    assert 'importlib.metadata.version("tilelang") == "0.1.10"' in run
+    assert 'importlib.metadata.version("apache-tvm-ffi") == "0.1.10"' in run
+    assert '"_dummy_run return non-last PP rank" in runner_source' in run
+    assert '"-arch=sm_70"' in run
+    assert "curl --version" in run
 
 
 def test_qwen_serving_recipe_is_one_exact_fp16_pp8_tp2_variant(project_root) -> None:

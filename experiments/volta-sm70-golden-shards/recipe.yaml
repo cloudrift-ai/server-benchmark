@@ -13,7 +13,7 @@ command:
       --entrypoint bash \
       --volume "$$repo_path:/workspace:ro" \
       --volume "$$task_path:/artifacts" \
-      cloudriftai/1cat-vllm-sm70:1.2.2 \
+      cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift \
       -lc 'set -euo pipefail
     export PYTHONPATH=/workspace
     cd /workspace

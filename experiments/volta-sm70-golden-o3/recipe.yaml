@@ -11,8 +11,8 @@ command:
     mkdir -p $task_dir/o3
     repo_path=$$(realpath $repo_dir)
     task_path=$$(realpath $task_dir)
-    image=cloudriftai/1cat-vllm-sm70:1.2.2
-    expected_image=sha256:7a62dcfeb1622665035eab501ffe0aea159662cb63872730c0c1ea0d61f43b2e
+    image=cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift
+    expected_image=sha256:5013ff1de122674f88b311de16b160051147651077b4d7172c33d22698fc5012
     actual_image=$$(docker image inspect --format '{{.Id}}' "$$image")
     test "$$actual_image" = "$$expected_image"
     docker run --rm --name volta-golden-o3 --gpus all \

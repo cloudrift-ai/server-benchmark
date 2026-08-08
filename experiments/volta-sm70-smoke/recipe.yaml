@@ -19,7 +19,7 @@ command:
       --env EMMY_WORK=w1x1 \
       --env EMMY_STAGE= \
       --env EMMY_REDUCE= \
-      cloudriftai/1cat-vllm-sm70:1.2.2 \
+      cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift \
       -lc 'set -euo pipefail
     export PYTHONPATH=/workspace
     cd /workspace

@@ -178,3 +178,14 @@ runs) plus a flat `lanes.json`. Power and peak VRAM ride alongside each point as
   reference, comparable to Phase 0's 6.306: the served configuration has 22 MiB free and OOMs producing logits over
   a 151,552 vocab, so that run needs either an offline harness over emmy's compiled forward or a boot with the head
   reclaimed.
+
+## What is committed here, and what is not
+
+`results_<date>/` keeps the **recorded** reps only: each point's `--save-result` JSON and its 1 Hz
+power/VRAM poll, plus a `manifest.json` per lane carrying the host, checkpoint, engine versions,
+serving config, KV pool, client invocation, handicaps and quality datum. Every number in the
+findings report and in any article table traces to one of those files.
+
+The discarded warmup run of each point and the client's raw stdout capture are **not** committed —
+they are run snapshots, redundant with the JSON, and the repo keeps PRs to durable artifacts. Re-run
+`scripts/bench_serve_sweep.py` to regenerate them; it writes all three per point.

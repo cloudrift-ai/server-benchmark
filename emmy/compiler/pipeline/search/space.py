@@ -311,6 +311,10 @@ WARP_LANES = 32
 # fragment no longer fits the register file at any useful occupancy.
 MAX_FRAGMENT_CELLS = 32
 
+# The corresponding accumulator-register budget. Existing m16n8 f32 cells spend four registers,
+# so 32 cells remain legal; Volta's logical 16x16 cell spends eight and is capped at 16 cells.
+MAX_FRAGMENT_REGISTERS = 128
+
 # The scalar register-tile candidate SPACE: ``(par_n, par_m)`` parallel thread-tile widths ×
 # ``(reg_n, reg_m)`` per-thread register sub-tile widths, generated from the one constraint that
 # bounds it — the CTA thread budget, which a scalar tile spends ``par_n·par_m`` of. The register
@@ -379,7 +383,11 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     moves = []
     for name in atom_names:
         atom = ATOM_REGISTRY[name]
-        moves.extend(TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"]) for p in _WARP_TILE_SPACE)
+        moves.extend(
+            TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"])
+            for p in _WARP_TILE_SPACE
+            if p["fm"] * p["fn"] * atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
+        )
     return moves
 
 

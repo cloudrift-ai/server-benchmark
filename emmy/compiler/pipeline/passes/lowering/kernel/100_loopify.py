@@ -375,7 +375,7 @@ def _rewrite_tree(body: Body, min_run: int, frag_stems: set[str], to_array: dict
             if sp is not None and sp[0] in to_array:
                 stem, idx = sp
                 if idx == 0:  # array at the family's first decl; drop the siblings (idx > 0)
-                    out.append(RegFragment(name=stem, role=s.role, shape=s.shape, dtype=s.dtype, count=to_array[stem]))
+                    out.append(RegFragment(name=stem, role=s.role, shape=s.shape, dtype=s.dtype, count=to_array[stem], nregs=s.nregs))
                 i += 1
                 continue
         nested = s.nested()

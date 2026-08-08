@@ -517,6 +517,13 @@ reuse it on flash's nested QK^T / PV; flash's score IS a role=CONTRACTION **fold
 kv stream (its PV twin synthesized in the derived blocked evaluation), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
 
+An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
+16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It is global-memory-direct only: SM70
+has no `ldmatrix`, so staging, computed operand edges, C-to-A repacking, and flash decline this atom. Target capability
+predicates select this family below SM80 and the established `m16n8k16` families on SM80 and newer; an incompatible
+atom or copy-transport pin fails instead of lowering through instructions the target cannot execute.
+
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order; the historical acc-unspecified
 spellings stay as parse aliases for the f32-accumulate atoms): on the consumer GeForce dies (sm_86/89/120)

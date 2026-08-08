@@ -171,6 +171,41 @@ def coop_band_epilogue(tail) -> str | None:
 # ---- the warp tier's K step -------------------------------------------------------------------- #
 
 
+def warp_atom_target(atom, ctx) -> str | None:
+    """Whether ``atom`` belongs to the target's selected MMA instruction family."""
+    if atom.available_on(ctx):
+        return None
+    return (
+        f"warp TILE: atom {atom.name} requires target feature {atom.target_feature}, which is unavailable "
+        f"on sm_{ctx.compute_capability[0]}{ctx.compute_capability[1]}"
+    )
+
+
+def warp_atom_edges(node: Fold, atom) -> str | None:
+    """Whether the atom can consume this contraction's materialized/computed operand edges."""
+    if not atom.gmem_direct_only:
+        return None
+    if not isinstance(node.a, Load) or any(not isinstance(ch.b, Load) for ch in node.channels):
+        return f"warp TILE: atom {atom.name} is gmem-direct only and cannot consume a computed A or B edge"
+    return None
+
+
+def stage_target(stage: Stage, ctx) -> str | None:
+    """Whether ``stage`` names a copy instruction family present on ``ctx``."""
+    if stage.transport == "cp.async" and not ctx.has_cp_async:
+        return f"STAGE {stage.spell()}: cp.async requires sm_80 or newer"
+    if stage.transport == "tma" and not ctx.has_tma:
+        return f"STAGE {stage.spell()}: TMA requires sm_90 or newer"
+    return None
+
+
+def warp_atom_stage(atom, stage: Stage) -> str | None:
+    """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
+    if atom.gmem_direct_only:
+        return f"STAGE {stage.spell()}: atom {atom.name} has only a gmem-direct fragment loader"
+    return None
+
+
 def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
     """The inner mma K-step ``atom_k·bk`` must tile a STATIC contraction K: the warp K-loop has no
     static-K tail masking, so a partial final step reads past the operand and silently corrupts the
@@ -310,6 +345,8 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
+    if atom.gmem_direct_only:
+        return None
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
@@ -430,6 +467,8 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape."""
     atom = tile.atom
+    if atom.gmem_direct_only:
+        return None
     if atom.operand_dtype("a").nbytes < 2:
         return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
@@ -685,11 +724,15 @@ __all__ = [
     "splitk_width",
     "splitkv_slice",
     "stage_split_groups",
+    "stage_target",
     "strip_width",
     "twisted_atom",
     "twisted_block",
     "twisted_sites_agree",
     "twisted_warp_columns",
     "warp_k_step",
+    "warp_atom_edges",
+    "warp_atom_stage",
+    "warp_atom_target",
     "warp_operand_dtype",
 ]

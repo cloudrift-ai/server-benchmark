@@ -195,6 +195,112 @@ static __device__ __forceinline__ float emmy_trellis_decode(
 }
 """
 
+_MMA_M8N8K4_PRELUDE = """\
+// Volta m8n8k4: one warp instruction performs four independent 8x8 MMAs.
+// The lane's four-lane computation group selects one quadrant of a logical
+// 16x16 output cell; groups in the same quadrant row/column duplicate A/B.
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_a_impl(
+    unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    if (row >= rows_left) row = rows_left - 1;
+    #pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        int k = p << 1;
+        unsigned packed = 0;
+        if (k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
+        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
+        r[p] = packed;
+    }
+}
+
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_impl(
+    unsigned* r, const T* g, int ldm, int cols_left, int k_left, bool trans) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    if (col >= cols_left) col = cols_left - 1;
+    #pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        int k = p << 1;
+        unsigned packed = 0;
+        if (k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
+        if (k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
+        r[p] = packed;
+    }
+}
+
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_a_gmem(unsigned* r, const T* g, int ldm) {
+    emmy_mma884_load_a_impl<T, F>(r, g, ldm, 16, 4);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int left) {
+    emmy_mma884_load_a_impl<T, F>(r, g, ldm, left, 4);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_a_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
+    emmy_mma884_load_a_impl<T, F>(r, g, ldm, 16, k_left);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_a_gmem_mclamp_kzero(
+    unsigned* r, const T* g, int ldm, int left, int k_left) {
+    emmy_mma884_load_a_impl<T, F>(r, g, ldm, left, k_left);
+}
+
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem(unsigned* r, const T* g, int ldm) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, 16, 4, false);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_nclamp(unsigned* r, const T* g, int ldm, int left) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, left, 4, false);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, 16, k_left, false);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_nclamp_kzero(
+    unsigned* r, const T* g, int ldm, int left, int k_left) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, left, k_left, false);
+}
+
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans(unsigned* r, const T* g, int ldm) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, 16, 4, true);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp(unsigned* r, const T* g, int ldm, int left) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, left, 4, true);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_kzero(unsigned* r, const T* g, int ldm, int k_left) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, 16, k_left, true);
+}
+template <typename T, typename F = T>
+static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp_kzero(
+    unsigned* r, const T* g, int ldm, int left, int k_left) {
+    emmy_mma884_load_b_impl<T, F>(r, g, ldm, left, k_left, true);
+}
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(
+    float* d, const unsigned* a, const unsigned* b, const float* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
+                 "{%0, %1, %2, %3, %4, %5, %6, %7}, {%8, %9}, {%10, %11}, "
+                 "{%12, %13, %14, %15, %16, %17, %18, %19};\\n"
+                 : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]),
+                   "=f"(d[4]), "=f"(d[5]), "=f"(d[6]), "=f"(d[7])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
+                   "f"(c[4]), "f"(c[5]), "f"(c[6]), "f"(c[7]));
+}
+"""
+
+
 _MMA_SYNC_PRELUDE = """\
 static __device__ __forceinline__ void emmy_ldmatrix_x4(unsigned* r, const void* smem) {
     unsigned addr = __cvta_generic_to_shared(smem);
@@ -911,8 +1017,10 @@ def render_kernelop(
     # NVRTC needs no ``<mma.h>`` (the legacy ``nvcuda::wmma`` family is gone).
     from emmy.compiler.ir.kernel.ir import CpAsyncCommit, CpAsyncCopy, CpAsyncWait, MmaSyncPtx  # noqa: PLC0415
 
-    uses_mma_sync = any(isinstance(s, MmaSyncPtx) for s in kernel_op.body.iter())
-    mma_sync_prelude = _MMA_SYNC_PRELUDE if uses_mma_sync else ""
+    mma_stmts = tuple(s for s in kernel_op.body.iter() if isinstance(s, MmaSyncPtx))
+    uses_m8n8k4 = any(s.shape == (8, 8, 4) for s in mma_stmts)
+    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts)
+    mma_sync_prelude = (_MMA_M8N8K4_PRELUDE if uses_m8n8k4 else "") + (_MMA_SYNC_PRELUDE if uses_modern_mma else "")
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
     # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate). The
     # staged byte-slab drain helpers likewise join only when a byte-slab drain is present.

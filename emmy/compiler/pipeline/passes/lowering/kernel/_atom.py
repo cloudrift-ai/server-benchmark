@@ -309,6 +309,7 @@ def _staged_inner_atom_loop(
                         swizzle=swz,
                         b_trans=role == "b" and is_row,
                         byte_slab=b8,
+                        fragment_layout=atom.fragment_layout,
                     )
                 )
         return reads
@@ -319,7 +320,7 @@ def _staged_inner_atom_loop(
                 c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
                 a_frag=f"_a{i}{suffix}",
                 b_frag=f"{_fold_frag(f'_b{j}', f)}{suffix}",
-                shape=atom.shape,
+                shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
             )
@@ -953,15 +954,34 @@ class _MmaOps(_AtomOps):
         # shared-A / per-channel-accumulate drain).
         n_folds = len(self.channels)
         decls: list[Stmt] = [
-            RegFragment(name=nm, role="a", shape=atom.shape, dtype=atom.operand_dtype("a")) for nm in frags(lambda i: f"_a{i}", m.reg)
+            RegFragment(
+                name=nm,
+                role="a",
+                shape=atom.ptx_shape,
+                dtype=atom.operand_dtype("a"),
+                nregs=atom.fragment_nregs("a"),
+            )
+            for nm in frags(lambda i: f"_a{i}", m.reg)
         ]
         for f in range(n_folds):
             decls += [
-                RegFragment(name=nm, role="b", shape=atom.shape, dtype=atom.operand_dtype("b"))
+                RegFragment(
+                    name=nm,
+                    role="b",
+                    shape=atom.ptx_shape,
+                    dtype=atom.operand_dtype("b"),
+                    nregs=atom.fragment_nregs("b"),
+                )
                 for nm in frags(lambda i, ff=f: _fold_frag(f"_b{i}", ff), n.reg)
             ]
         decls += [
-            RegFragment(name=_fold_frag(_mma_c_base(atom, i, j), f), role="c", shape=atom.shape, dtype=atom.operand_dtype("c"))
+            RegFragment(
+                name=_fold_frag(_mma_c_base(atom, i, j), f),
+                role="c",
+                shape=atom.ptx_shape,
+                dtype=atom.operand_dtype("c"),
+                nregs=atom.fragment_nregs("c"),
+            )
             for f in range(n_folds)
             for i in range(m.reg)
             for j in range(n.reg)
@@ -999,7 +1019,14 @@ class _MmaOps(_AtomOps):
             idx = tuple(Sigma({m.axis.name: cell}).apply(e) for e in a_load.index)
             return [
                 LdmatrixLoad(
-                    frag=f"_a{i}", src_buffer=a_load.input, src_index=idx, role="a", staged=False, gmem_guard=_guard(m, cell), k_zero=k_zero
+                    frag=f"_a{i}",
+                    src_buffer=a_load.input,
+                    src_index=idx,
+                    role="a",
+                    staged=False,
+                    gmem_guard=_guard(m, cell),
+                    k_zero=k_zero,
+                    fragment_layout=atom.fragment_layout,
                 )
             ]
 
@@ -1016,6 +1043,7 @@ class _MmaOps(_AtomOps):
                     b_trans=b_trans,
                     gmem_guard=_guard(n, cell),
                     k_zero=k_zero,
+                    fragment_layout=atom.fragment_layout,
                 )
             ]
 
@@ -1025,7 +1053,7 @@ class _MmaOps(_AtomOps):
                     c_frag=_mma_c_base(atom, i, j),
                     a_frag=f"_a{i}",
                     b_frag=f"_b{j}",
-                    shape=atom.shape,
+                    shape=atom.ptx_shape,
                     ab_dtype=atom.ab_dtype,
                     c_dtype=atom.operand_dtype("c").name,
                 )
@@ -1079,6 +1107,7 @@ class _MmaOps(_AtomOps):
                     m_guard=_guard(m, mcell),
                     n_guard=_guard(n, ncell),
                     atomic=by_acc[acc].atomic,
+                    fragment_layout=atom.fragment_layout,
                 )
                 for acc, frag in zip(accs, frags, strict=True)
             ]
@@ -1096,6 +1125,7 @@ class _MmaOps(_AtomOps):
                 m_guard=_guard(m, mcell),
                 n_guard=_guard(n, ncell),
                 atomic=write.atomic,
+                fragment_layout=atom.fragment_layout,
             )
         ]
 

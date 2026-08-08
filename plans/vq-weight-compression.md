@@ -538,16 +538,42 @@ weights arrive as program inputs.
 Run the documented release workflow in `docker/vllm-emmy-serve/ARCHITECTURE.md` end to end — it is the authority;
 do not improvise. `make serve-config → serve-goldens → serve-warm → serve-image → serve-verify → serve-push`.
 
-- Create `models/<slug>.env` with the pinned serving config, including the checkpoint revision. **The config seals
-  the cache key and cannot change after warming.**
+### GATE — the `lm_head` decision, before anything else
+
+**The KV budget does not close without it, so this is a gate and not a bullet.** `lm_head` is vLLM-owned and has no
+`.weight` in an EXL3 checkpoint (only `lm_head.trellis`), so `EmmyGenModel.load_weights` finds nothing to load and
+something has to decide what the head becomes. The arithmetic, all measured (Phase 3.4 above): the card is
+31.843 GiB and emmy-owned resident is 28.888 GiB. A decoded fp16 head adds 1.156 GiB — **30.044 GiB total, which
+leaves no usable KV pool at all** once the CUDA context and emmy's activation arena are paid, and vLLM refuses to
+boot when `max-model-len` exceeds the pool. The coded head is 0.434 GiB, and KV costs 0.090 MiB/token at
+`fp8_e4m3`. So the head is worth roughly 8,000 KV tokens, which is the whole context budget this release has.
+Settle it before the sweep: the sweep measures whatever the head already is.
+
+### Prerequisites for the config
+
+The three release-pipeline gaps that made "run the documented workflow" untrue for this model are CLOSED — the
+support is in `serve.sh` / `warm.sh` / `verify.sh`, so what is owed here is setting the keys, not fixing scripts:
+
+- `SERVE_REVISION=6a309ed6d606fc0154e6e1aeb0912cd3c25534fe`. The slug does not encode the rung, and an unpinned id
+  resolves to the repo default — the 2.00 rung, which FAILED the Phase 0 quality gate. `warm.sh` now refuses an
+  unpinned revision on a multi-branch repo, so this cannot be forgotten silently; pin the sha, not `2.25bpw`.
+- `SERVE_QUANT=exl3` — adds `"quantization_config": null` to the `--hf-overrides`. Without it vLLM rejects the
+  config outright (`Unknown quantization method: exl3`) and the warm dies before compiling anything.
+- `SERVE_CAPTURE_SIZES=[1]` — the MoE capture ladder. The power-of-two default either fails capture or wastes warm
+  time, and the runner's own boot guard rejects it.
+- `SERVE_EXTRA_ARGS="--kv-cache-dtype fp8_e4m3"` — quantized KV is mandatory scope (Phase 0 outcome), and it moves
+  which programs the plugin builds (`_attn_aliased` bails when KV scales are active), so it must be pinned in the
+  config and warmed with, not passed at deploy time.
+
+### Then the workflow
+
+- Create `models/<slug>.env` with the pinned serving config, the four keys above included. **The config seals the
+  cache key and cannot change after warming.**
 - Memory headroom is the delicate step here. Measured budget on the 31.843 GiB card: emmy-owned weights are
   28.888 GiB (see the Phase 3.4 arithmetic above), leaving ~2.95 GiB for vLLM's `lm_head`, the CUDA context,
   emmy's activation arena and the KV cache. KV costs 0.180 MiB/token at fp16 and 0.090 MiB/token at
   `fp8_e4m3` — so the fp8 KV cache is what makes the context budget non-trivial, and the answer is small.
   Sweep and pin the largest passing `max_num_batched_tokens` / bucket configuration.
-- **`lm_head` is vLLM-owned and has no `.weight` in an EXL3 checkpoint** (only `lm_head.trellis`, 0.434 GiB coded,
-  1.156 GiB decoded). `EmmyGenModel.load_weights` will find nothing to load. Decide before the bake: decode it once
-  at load (costs 1.156 GiB resident, headroom drops to ~1.8 GiB) or give the head to the runner coded.
 - Clear every gate: golden coverage, HF-parity validation, offline zero-recompile verify.
 - **Pause for human approval before `serve-push`.**
 
@@ -561,8 +587,12 @@ do not improvise. `make serve-config → serve-goldens → serve-warm → serve-
 2. `experiments/GLM-4.5-Air-EXL3/serving_rtx5090/recipe.yaml` — the benchmark grid: emmy vs exllamav3/tabbyAPI on the
    identical checkpoint, matrices over `benchmark.max_concurrency` {1,4,8,16} and `benchmark.random_input_len`.
    Add a llama.cpp lane at matched bpw, and a stock-vLLM lane that is expected to fail to load (record the failure —
-   it is a result).
-3. Reuse the Phase 0 client invocation exactly so baseline numbers are comparable.
+   it is a result). That is THREE recipe files, not one: `engine.llm` and `command` are mutually exclusive in a
+   recipe (`_validate_and_build` raises if both are set), so the vLLM lanes (emmy + stock) are one inference recipe
+   while exllamav3/tabbyAPI and llama.cpp are `command` recipes of their own.
+3. Reuse the Phase 0 client invocation and workload grid verbatim — the PROTOCOL is what carries over. The recorded
+   Phase 0 numbers do NOT: they were measured on the 2.00 rung, so they are a 2.00-vs-2.25 reference point, and the
+   contender's baseline must be re-measured on 2.25 before any table quotes it.
 4. Run each point 3× and report mean ± stddev; capture power and peak VRAM.
 5. Re-run the quality gate on the served model: our PPL/KL must match exllamav3's on the same checkpoint.
 

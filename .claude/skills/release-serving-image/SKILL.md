@@ -162,6 +162,13 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
 - `SERVE_GPU` is the card actually swept. `warm.sh` and `verify.sh` compare the live card against it and refuse a
   mismatch (`GPU_DEVICE=<index>` selects the card on a multi-GPU box; `SKIP_GPU_CHECK=1` overrides, and wanting to
   use it is a sign something is wrong).
+- Optional per-checkpoint keys, each defaulting to a dense unquantized default-branch release (`serve.sh` documents
+  them in full): `SERVE_REVISION` the commit sha to serve — `warm.sh` REFUSES an unpinned revision on any repo with
+  more than one branch, because the default branch may be a different variant entirely; `SERVE_QUANT=exl3` for a
+  checkpoint whose quantization method vLLM does not have; `SERVE_CAPTURE_SIZES` for the cudagraph ladder, which an
+  MoE model must cap at `[1]`; `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`).
+  Set these BEFORE the headroom sweep — they change what the sweep measures — and sweep with the same
+  `--revision <sha>` so `emmy serve` derives the same arms from the same checkpoint.
 
 After writing it, run `make serve-config MODEL=<id>` and confirm every line reads back as intended — that is the
 cheap check that both readers agree before a multi-hour warm depends on it.

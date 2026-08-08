@@ -122,6 +122,10 @@ SERVE_TAG ?= cloudriftai/vllm-emmy-$(MODEL_SLUG):$(patsubst v%,%,$(VLLM_VERSION)
 # `subst`, not `patsubst`: patsubst matches per WORD, and a quoted multi-word value is
 # several words to make, so `"%"` never matches and the quotes survive into the argv.
 SERVE_GPU_NAME := $(subst ",,$(SERVE_GPU))
+# Same treatment for the two per-checkpoint values that also carry spaces (serve.sh documents
+# them): the cudagraph capture ladder and any further pinned vLLM flags.
+SERVE_CAPTURE_SIZES_VALUE := $(subst ",,$(SERVE_CAPTURE_SIZES))
+SERVE_EXTRA_ARGS_VALUE := $(subst ",,$(SERVE_EXTRA_ARGS))
 
 # What a `make serve-* MODEL=<id>` would act on. The release workflow prints this first, so
 # the model / card / tag under test are on the record before any multi-hour step starts.
@@ -132,7 +136,11 @@ serve-config: serve-config-guard
 	@echo "image tag  = $(SERVE_TAG)"
 	@echo "base image = $(VLLM_EMMY_TAG)"
 	@echo "target GPU = $(SERVE_GPU_NAME)"
+	@echo "revision   = $(if $(SERVE_REVISION),$(SERVE_REVISION),unpinned - the repo default branch)"
 	@echo "serve      = --max-model-len $(SERVE_MAX_MODEL_LEN) --max-num-batched-tokens $(SERVE_MAX_NUM_BATCHED_TOKENS) --gpu-memory-utilization $(SERVE_GPU_MEM_UTIL) (decode bucket $(SERVE_DECODE_BUCKET))"
+	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
+	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
+	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
 
 serve-models:
 	@echo "Models with a pinned release config ($(SERVE_DIR)/models/):"
@@ -170,6 +178,10 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg MAX_NUM_BATCHED_TOKENS=$(SERVE_MAX_NUM_BATCHED_TOKENS) \
 		--build-arg GPU_MEM_UTIL=$(SERVE_GPU_MEM_UTIL) \
 		--build-arg DECODE_BUCKET=$(SERVE_DECODE_BUCKET) \
+		--build-arg REVISION=$(SERVE_REVISION) \
+		--build-arg QUANT=$(SERVE_QUANT) \
+		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
+		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
 		-t $(SERVE_TAG) $(SERVE_DIR)
 
 serve-verify: serve-config-guard

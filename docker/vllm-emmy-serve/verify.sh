@@ -33,6 +33,19 @@ if [ -n "${SERVE_GPU:-}" ] && [ -z "${SKIP_GPU_CHECK:-}" ]; then
 fi
 
 : "${IMAGE:?set IMAGE to the baked serving image to verify}"
+
+# The pinned checkpoint revision is baked into the image ENV, so every boot below already
+# serves the right rung — but only if this tag was built from THIS config. A tag built
+# before the pin landed (or from another rung) serves different weights and still passes
+# every check in this script: the cubin set is closed, the pack hits, the completion reads
+# fine. Compare the two, once, off the image metadata.
+baked_rev=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^SERVE_REVISION=//p' | head -1)
+if [ "${baked_rev:-}" != "${SERVE_REVISION:-}" ]; then
+    echo "[verify] FAIL — $IMAGE bakes revision '${baked_rev:-<unpinned>}', the config pins '${SERVE_REVISION:-<unpinned>}'." >&2
+    echo "  The image was built from a different config; re-bake with 'make serve-image MODEL=$MODEL'." >&2
+    exit 1
+fi
+
 PORT="${PORT:-8000}"
 GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
 NAME="emmy-verify-$SLUG"

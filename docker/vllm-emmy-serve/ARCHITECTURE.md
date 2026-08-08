@@ -23,6 +23,15 @@ that disagreed between the warm and the bake would silently load two different c
 cache-key parity failure the rest of this document exists to prevent. Onboarding a model is therefore one new
 `models/<slug>.env` — no new Makefile targets, no new Dockerfile, no new scripts.
 
+**The slug does not encode the revision.** An HF id that publishes several variants under one repo — an EXL3
+checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every one
+of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and
+it separates them only inside the config: two rungs of one repo cannot be released side by side without distinct
+image names. Pin it by **commit sha**, never a branch name — a branch can be re-cut under the same name (which
+would move the weights under a config that claims to be sealed), and an offline boot resolves `snapshots/<sha>`
+directly. A config that pins nothing warms whatever the default branch points at, so `warm.sh` refuses an unpinned
+revision on any repo with more than one branch.
+
 Every step is `make <target> MODEL=<hf-id>`; `make serve-config MODEL=<id>` prints the resolved slug, config, tag
 and target GPU, and `make serve-models` lists the models that already have a pinned config.
 
@@ -46,8 +55,11 @@ Hence the warm: one real serving run on the target card, inside the image. The f
 - `source` — live-probed target-card featurization + the real program enumeration (above).
 - `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
 - `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set (tune's `-Xcicc -O1` would poison the key).
-- The serving config (model / dtype / max-model-len / max-num-batched-tokens / decode bucket) changes **which
-  programs exist and their shapes** — warm and release must use identical values.
+- The serving config (model / revision / dtype / max-model-len / max-num-batched-tokens / decode bucket / cudagraph
+  capture ladder / any pinned flag that moves the plugin's path, such as `--kv-cache-dtype`) changes **which
+  programs exist and their shapes** — warm and release must use identical values. The revision is the one whose
+  absence is silent: the wrong rung boots, verifies and publishes with nothing flagging it, which is why it has its
+  own gate in `warm.sh` and its own image-vs-config comparison in `verify.sh`.
 
 The preflight script is the flip side: the *toolchain acceptance* question ("does this nvcc compile every
 kernel family for `sm_120`?") IS answerable by cross-compilation, so that part runs anywhere, before the rental.
@@ -98,15 +110,29 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
 ## Files
 
 - `models/<slug>.env` — the pinned serving config, one file per model (the filename IS the slug). Every value is cache-key-relevant; it must be **final before warming**
-  (re-measure memory headroom on the card first — see the workflow). Make-includable `VAR=value` syntax.
+  (re-measure memory headroom on the card first — see the workflow). Make-includable `VAR=value` syntax. Six keys
+  are required (`SERVE_MODEL`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_BATCHED_TOKENS`, `SERVE_GPU_MEM_UTIL`,
+  `SERVE_DECODE_BUCKET`, `SERVE_GPU`); the rest are per-checkpoint opt-ins whose defaults reproduce a dense,
+  unquantized, default-branch release exactly — `SERVE_WARM_SHAPES` (above), plus the four `serve.sh` documents:
+  `SERVE_REVISION`, `SERVE_QUANT`, `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`. A test rejects any other key, because
+  a misspelled one reads as a value nothing consumes.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
   compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
-  `SERVE_*` config; keep in sync with `_generate_compile_args` in `emmy/commands/serve.py`).
+  `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
+  CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
+  seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
+  quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
+  every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
+  cap at `[1]`**: single-token steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
+  while wider decode steps keep the routed dispatch, which host-syncs and stays eager.
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`
-  (the execution-plan pack the first boot writes).
+  (the execution-plan pack the first boot writes). Before any of it, two refusals: the live GPU against `SERVE_GPU`,
+  and an unpinned `SERVE_REVISION` against the repo's branch list (one HTTP call to the HF refs API; unreachable
+  refs skip the check rather than fail it, since warming offline off a pre-seeded snapshot is supported).
+  `SKIP_REVISION_CHECK=1` overrides, for the case where the default branch really is the target.
 - `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` + `COPY warm/pack` to `/opt/emmy`, bakes
   the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
   on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
@@ -115,8 +141,10 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
   generated compose and skips the download step entirely. Deploy used to override `HF_HOME` unconditionally, which
   hid the baked snapshot while offline mode stayed on — the download then failed outright and no deploy from a
   prebuilt image was possible.
-- `verify.sh` — cold-starts the **baked** image with no token, issues one completion, and diffs the cubin file set
-  before/after: an empty diff proves 100% cache hit (zero compiles), and the offline boot proves zero downloads.
+- `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
+  serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
+  issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% cache hit (zero
+  compiles), and the offline boot proves zero downloads.
   When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
   the cubin check while re-paying the frontend on every customer boot). The hit signal is the runner's "pack hit"
   line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a log handler under
@@ -197,7 +225,12 @@ The full release session on a rented card (each step from the repo checkout; hos
        --max-model-len 2048 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.97
    ```
 
-   Write the largest passing values into `models/<slug>.env`, including `SERVE_GPU`.
+   Write the largest passing values into `models/<slug>.env`, including `SERVE_GPU` — and, before the sweep rather
+   than after it, the per-checkpoint keys, since they decide what the sweep is even measuring: `SERVE_REVISION` (the
+   commit sha; sweep the rung you will ship), `SERVE_QUANT`, `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`. The sweep
+   command above is `emmy serve --generate`, which derives the same three from the checkpoint itself — pass
+   `--revision <sha>` there so it derives them from the right one. Then `make serve-config MODEL=<id>` prints the
+   whole resolved config, revision included; read it back before starting a multi-hour warm.
 4. Correctness gate at the pinned config (A/B vs HF eager; the Phase-A exit check):
 
    ```bash

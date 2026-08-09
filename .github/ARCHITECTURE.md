@@ -57,7 +57,7 @@ detector constructs the supported Emmy command from validated experiment paths a
 
 ## Model discovery and onboarding
 
-All discovery paths use the tracked `discover-new-models` skill and select at most one open-weight Hugging Face model
+All discovery paths use the tracked `discover-models` skill and select at most one open-weight Hugging Face model
 without an existing recipe for one exact GPU name and count. Discovery is read-only: the workflow checks that the
 agent did not modify the checkout, then `.github/scripts/discovery_selection.py` validates the model ID, target,
 rationale, and absence of an existing recipe.

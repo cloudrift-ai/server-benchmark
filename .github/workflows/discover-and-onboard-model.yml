@@ -50,7 +50,7 @@ jobs:
       - name: Install Emmy
         run: make setup
 
-      - name: Run discover-new-models agent
+      - name: Run discover-models agent
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
@@ -58,7 +58,7 @@ jobs:
           import os
           from pathlib import Path
 
-          Path(os.environ["AGENT_PROMPT"]).write_text(f"""Use the discover-new-models skill read-only.
+          Path(os.environ["AGENT_PROMPT"]).write_text(f"""Use the discover-models skill read-only.
 
           Consider only the exact target {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}. Select at
           most one interesting open-weight model for which this checkout has no recipe. Weight current community
@@ -76,7 +76,7 @@ jobs:
           unset CLOUDRIFT_API_KEY
           exec env -u CLOUDRIFT_API_KEY ./venv/bin/python .github/scripts/cloudrift_agent.py \
             --api-key-file "$AGENT_KEY_FILE" \
-            --skill .claude/skills/discover-new-models/SKILL.md \
+            --skill .claude/skills/discover-models/SKILL.md \
             --prompt "$AGENT_PROMPT" \
             --model "$AGENT_MODEL" \
             --output "$AGENT_OUTPUT"

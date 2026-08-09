@@ -1,12 +1,12 @@
 ---
-name: discover-new-models
+name: discover-models
 description: >-
   Use this skill when the user asks what new models to try or benchmark, wants newly released open models discovered,
   or wants trending models mapped to suitable GPU hardware. It produces a ranked shortlist ready for the
   `onboard-model` skill, using keyless discovery data, web search, and a VRAM fit calculation.
 ---
 
-# Discover New Models to Explore
+# Discover Models to Explore
 
 Turn "what new models are worth our GPU hours?" into a concrete, ranked shortlist: newly-released open-weight
 models emmy **doesn't support yet**, filtered to the ones with real demand/hype, each tagged with the GPU

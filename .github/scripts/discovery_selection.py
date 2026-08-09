@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate one model selected by the discover-new-models agent run."""
+"""Validate one model selected by the discover-models agent run."""
 
 from __future__ import annotations
 

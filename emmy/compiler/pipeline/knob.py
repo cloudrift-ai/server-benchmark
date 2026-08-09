@@ -603,12 +603,17 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     transport resolves) can be absent from ``op.knobs`` entirely — a recording must still pin it
     as declined, or the entry drifts when a later planner starts filling it. A family with no
     registered OFF is skipped rather than invented."""
+    # Read the canonical family declarations directly. Besides making this helper
+    # independent of golden-module import side effects, this remains correct when a
+    # test temporarily replaces the registry after ``space`` has already loaded.
+    from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
+
     out = dict(tuning_knob_items(knobs))
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:
             continue
-        kn = get(fam)
+        kn = getattr(_space, fam, None)
         if kn is not None and kn.off is not _UNSET:
             out[fam] = str(kn.off)
     return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))

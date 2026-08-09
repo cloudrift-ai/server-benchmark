@@ -53,9 +53,9 @@ class Dataset:
         another card's config under the same name (cards with no recorded golden fall
         back to the full set; ``tune`` rejects that fallback via
         :func:`live_recorded_goldens` — golden tuning targets the live card only)."""
-        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, goldens_for_live_gpu  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, goldens_for_live_gpu  # noqa: PLC0415
 
-        configs = list(goldens_for_live_gpu() if live_gpu else GOLDEN_CONFIGS)
+        configs = list(goldens_for_live_gpu() if live_gpu else GOLDEN_RECORDS)
         if name is not None:
             configs = [g for g in configs if g.name == name]
         if kernel:

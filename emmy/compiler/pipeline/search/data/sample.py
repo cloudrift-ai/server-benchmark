@@ -11,20 +11,17 @@ featurizer (:func:`features.knob_features`) on that merge, so a ``Sample`` repro
 the feature vector each source built inline today.
 
 Featurization fidelity (the load-bearing invariant): a trained ``OnlinePrior``
-regresses on the full ``S_*`` histogram stamped by ``992_stamp_structural_features``.
-DB / prior rows carry that histogram inline already; golden rows only know
-``(M,N,K)``, so the full histogram is derived by compiling the snippet
-(:func:`compiled_s_features`, cached) and passed as ``compile_s_feats=True`` —
-*only* when a online prior is the consumer. The cheap arithmetic
-:meth:`ShapeKey.s_features_arith` suffices for the cold ``OfflinePrior`` (it reads
-only ``D_*`` derived from the extents) and for grouping.
+regresses on the full ``S_*`` histogram stamped by
+``992_stamp_structural_features``. DB / prior rows carry that histogram inline;
+golden rows derive it by lowering their embedded frontend program and selecting
+the target through provenance. Neither the histogram nor ``ShapeKey`` is part of
+the stable golden format.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
@@ -49,61 +46,6 @@ def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:
     return tunable, ctx, s
 
 
-@lru_cache(maxsize=256)
-def compiled_s_features(
-    M: int, N: int, K: int, dtype: str, compute_cap: tuple[int, int], dynamic: tuple[str, ...] = (), trans_b: bool = False
-) -> tuple[tuple[str, float], ...]:
-    """The full ``S_*`` structural histogram for a matmul shape — by compiling its
-    snippet to the loop dialect (where ``992_stamp_structural_features`` runs) and
-    scraping the stamped ``S_*`` knobs off the nodes. This is what a trained
-    ``OnlinePrior`` was fit on for that shape; the cheap arithmetic extents are a
-    subset of it. ``dynamic`` carries a dynamic golden's ``--dynamic`` specs so the
-    trace goes symbolic and the histogram comes from the masked-tile graph (symbolic
-    axis excluded from the extent products, ``S_ext_n_symbolic_axis`` set) — the
-    same signature a DB-trained prior saw. Cached (the compile is ~seconds) and
-    returned as sorted items so the result is hashable / frozen-friendly. Heavy
-    imports are deferred to here so importing this module stays torch-free."""
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import matmul_snippet  # noqa: PLC0415
-    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
-
-    dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dynamic))) if dynamic else None
-    graph, _, _ = graph_from_code(matmul_snippet(M, N, K, dtype, trans_b), dynamic_shapes=dynamic_shapes)
-    compiled = Pipeline.build(LOOP_PASSES).run(graph)  # loop dialect — S_* stamped, no codegen
-    s_feats: dict[str, float] = {}
-    for n in compiled.nodes.values():
-        s_feats.update({k: v for k, v in (getattr(n.op, "knobs", {}) or {}).items() if k.startswith(STRUCT_PREFIX)})
-    return tuple(sorted(s_feats.items()))
-
-
-@lru_cache(maxsize=256)
-def traced_s_features(snippet: str, dynamic: tuple[str, ...], key: ShapeKey) -> tuple[tuple[str, float], ...] | None:
-    """The full ``S_*`` histogram of the ONE traced op keying to ``key`` — the
-    kind-generic sibling of :func:`compiled_s_features` (which merges every node's
-    stamps: correct for a single-op matmul snippet, wrong for the multi-op graphs the
-    other golden kinds trace — a ``linear_norm`` snippet realizes a producer matmul
-    beside the norm op, an attention trace a plain QKᵀ beside the flash op). Per
-    stamped op the histogram keys through :meth:`ShapeKey.from_s_features` — the
-    sanctioned golden↔measured join — and the first match wins (same-key twins carry
-    the same histogram). ``None`` when no op matches: the caller degrades to
-    :meth:`ShapeKey.s_features_arith`. GPU-free (``LOOP_PASSES`` stop before codegen),
-    cached — the goldens-format measurement-freeze loader pays it once per distinct
-    shape. Heavy imports deferred so importing this module stays torch-free."""
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
-
-    dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dynamic))) if dynamic else None
-    graph, _, _ = graph_from_code(snippet, dynamic_shapes=dynamic_shapes)
-    compiled = Pipeline.build(LOOP_PASSES).run(graph)
-    for n in compiled.nodes.values():
-        s = {k: v for k, v in (getattr(n.op, "knobs", {}) or {}).items() if k.startswith(STRUCT_PREFIX)}
-        if s and ShapeKey.from_s_features(s).joins(key):
-            return tuple(sorted(s.items()))
-    return None
-
-
 @dataclass(frozen=True)
 class Sample:
     """One ``(config, latency, identity)`` row, normalized across sources.
@@ -111,8 +53,8 @@ class Sample:
     ``knobs`` holds *only* tunable knobs (``S_*`` / ``H_*`` live in ``s_full`` /
     ``context``); ``shape`` is the arithmetic identity; ``ref_us`` is the cuBLAS /
     torch reference (golden only, ``None`` elsewhere); ``pretty`` / ``name`` carry
-    the kernel C identifier for DB rows; ``snippet`` reproduces a golden's torch
-    expression. ``source`` ∈ ``{"golden", "db", "prior"}`` marks provenance for the
+    the kernel C identifier for DB rows. ``source`` ∈ ``{"golden", "db", "prior"}``
+    marks provenance for the
     orthogonality fail-fast (``dataset_args.require_source``)."""
 
     knobs: dict
@@ -123,13 +65,10 @@ class Sample:
     ref_us: float | None = None
     context: dict = field(default_factory=dict)
     pretty: str | None = None
-    snippet: str | None = None
     source: str = "db"
-    s_full: dict | None = None  # full compiled S_* histogram when known (db/prior rows, or golden compile_s_feats)
+    s_full: dict | None = None  # full compiled/derived S_* histogram when known
     error: str | None = None  # bench_fail failure text (db rows only; None on ok rows)
-    dynamic: tuple[str, ...] | None = None  # --dynamic NAME@INPUT:AXIS specs (dynamic goldens only; None = static)
-    # The config-side FLOP count (``GoldenConfig.flops()`` — never an overestimate; golden samples
-    # only). The intensity-floor gate reads THIS, not a ShapeKey reconstruction: the join key
+    # Optional exact work count. The intensity-floor gate reads THIS, not a ShapeKey reconstruction: the join key
     # excludes symbolic axes on the matmul side but includes them on the reduce-tier side, so no
     # one hint-multiplier formula over it can be right for both.
     flops: float | None = None
@@ -156,37 +95,28 @@ class Sample:
 
     @classmethod
     def from_golden(cls, cfg, *, compile_s_feats: bool = False) -> Sample:
-        """A golden config (matmul / reduce / pointwise — every kind carries
-        ``shape_key()`` / ``snippet()`` / ``dtype`` / ``dynamic_specs()``) as a
-        ``Sample``. ``compile_s_feats`` derives the full ``S_*`` histogram (for the
-        online-prior featurization; matmul-only — the arithmetic key suffices for
-        the other kinds); leave it off for the cold-offline / grouping / bench paths."""
+        """A program-backed golden record as a normalized measurement sample.
+
+        ``compile_s_feats`` remains an accepted no-op for callers that used to
+        request snippet compilation. Structural features are lazily derived from the
+        embedded program and provenance target.
+        """
         from emmy.compiler.context import Context  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig  # noqa: PLC0415
 
         tunable, _ctx, _s = _split_by_prefix(cfg.knobs)
-        dyn_specs = tuple(cfg.dynamic_specs())
-        s_full = (
-            dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs, cfg.trans_b))
-            if compile_s_feats and isinstance(cfg, MatmulGoldenConfig)
-            else None
-        )
         return cls(
             knobs=tunable,
             latency_us=cfg.emmy_us,
-            shape=cfg.shape_key(),
+            shape=cfg.shape_key,
             name=cfg.name,
             dtype=cfg.dtype,
-            ref_us=cfg.cublas_us,
-            flops=cfg.flops(),
+            ref_us=cfg.reference_us,
             # gpu_name pins the device-physical features (H_sm_count / smem / …) to
             # the golden's OWN card's memorized specs, not the live device's — so a
             # PRO 6000 golden ranked on a 5090 (both cc 12.0) gets 188 SMs, not 170.
             context=Context.from_target(cfg.compute_cap, gpu_name=cfg.gpu_name).features(),
-            snippet=cfg.snippet(),
             source="golden",
-            s_full=s_full,
-            dynamic=dyn_specs or None,
+            s_full=dict(cfg.structural_features),
         )
 
     @classmethod

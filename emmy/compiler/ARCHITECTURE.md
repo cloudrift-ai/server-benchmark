@@ -205,5 +205,5 @@ through. Multi-op labels sort dominant-first (descending piece count, lexical ti
 of fusion merge order — the attention kernel is `k_sdpa_linear_reduce`, its QKV-prologue twin `k_linear_sdpa_reduce`.
 Layout/plumbing origins (`_WEAK_KINDS`: transpose / reshape / unsqueeze / cat / slice) label a kernel only when no
 strong op is present — RoPE plumbing fused into attention doesn't pollute the name, while a standalone copy kernel
-still reads `k_cat_…` instead of the node-id fallback. `pipeline/dump._dump_torch_repro` slices the pristine frontend graph by a kernel's origins into a runnable
-`<kname>.torch.json`; `backend/torch_ref` runs that slice through real torch for the `run --ir` vs-torch comparison.
+still reads `k_cat_…` instead of the node-id fallback. Compiler dumps retain provenance-selected frontend slices in
+memory for tune benchmarking; stable persistence of those programs belongs exclusively to golden YAML.

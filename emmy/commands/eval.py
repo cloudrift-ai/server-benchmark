@@ -296,10 +296,10 @@ def _in_model_audit(model_filter: str | None) -> None:
     disagree: the gemma-4 cast-splice regression reproduced 68/68 pinned while the
     in-model deploys drifted, which is exactly what this mode exists to catch."""
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
     from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
 
-    tagged = sorted({g.model for g in GOLDEN_CONFIGS if g.model})
+    tagged = sorted({g.model for g in GOLDEN_RECORDS if g.model})
     if model_filter and model_filter not in tagged:
         logger.error("no golden entries are tagged `model: %s` (tagged: %s)", model_filter, ", ".join(tagged) or "none")
         sys.exit(2)
@@ -312,7 +312,7 @@ def _in_model_audit(model_filter: str | None) -> None:
     for model in models:
         print(f"=== {model}: tracing serving twins (weight-free) ===")
         graphs = capture_twin_graphs(model)
-        for gpu_name, cap in sorted({(g.gpu_name, tuple(g.compute_cap)) for g in GOLDEN_CONFIGS if g.model == model}):
+        for gpu_name, cap in sorted({(g.gpu_name, tuple(g.compute_cap)) for g in GOLDEN_RECORDS if g.model == model}):
             res = audit_card(graphs, gpu_name, cap)
             counts = summarize(res)
             print(
@@ -582,9 +582,9 @@ def _emit_golden_features(kernel_filter: str | None) -> None:
 
     from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu  # noqa: PLC0415
 
-    configs = [g for g in goldens_for_live_gpu() if isinstance(g, MatmulGoldenConfig)]
+    configs = [g for g in goldens_for_live_gpu() if g.is_matmul]
     if kernel_filter:
         configs = [g for g in configs if kernel_filter in g.name]
 
@@ -622,9 +622,9 @@ def _golden_configs(kernel_filter: str | None):
     views about the card in hand when a multi-GPU goldens dir is checked in — a name
     recurs once per card and the GPU-blind ``ShapeKey`` join would otherwise mix
     cards (5090 / PRO 6000 even share ``compute_cap``)."""
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu  # noqa: PLC0415
 
-    configs = [g for g in goldens_for_live_gpu() if isinstance(g, MatmulGoldenConfig)]
+    configs = [g for g in goldens_for_live_gpu() if g.is_matmul]
     if kernel_filter:
         configs = [g for g in configs if kernel_filter in g.name]
     return configs
@@ -640,7 +640,7 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
 
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_eval import evaluate_golden  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import evaluate_record  # noqa: PLC0415
 
     configs = _golden_configs(kernel_filter)
     ranks: list[int] = []
@@ -648,9 +648,8 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
     for g in configs:
         gold = dict(tuning_knob_items(g.knobs))
         try:
-            dyn = bool(getattr(g, "dynamic", None))
             ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
-            got, rank, pool, _ = evaluate_golden(g.M, g.N, g.K, g.dtype, gold, ctx, dynamic=dyn)
+            got, rank, pool, _ = evaluate_record(g, ctx)
         except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
             entries.append(("err", g.name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
             continue
@@ -824,19 +823,12 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
     import logging as _logging  # noqa: PLC0415
 
     from emmy import config  # noqa: PLC0415
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     def tunable(knobs: dict) -> dict:
         return {k: v for k, v in knobs.items() if not k.startswith(("S_", "H_"))}
 
-    def picked(snippet: str, dynamic: tuple[str, ...] = ()) -> dict:
-        # A dynamic golden's greedy pick must come from the symbolic (masked-tile)
-        # trace — a static trace would compare the static twin's pick against the
-        # dynamic golden's knobs (a different artifact / variant space).
-        dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dynamic))) if dynamic else None
-        graph, _, _ = graph_from_code(snippet, dynamic_shapes=dynamic_shapes)
+    def picked(graph) -> dict:
         compiled = Pipeline.build(TILE_PASSES).run(graph)  # tile dialect only — no codegen/nvcc
         knobs: dict = {}
         for node in compiled.nodes.values():
@@ -862,7 +854,7 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
     # Group configs sharing a shape (same name → same snippet → same greedy pick) so the
     # table carries one row per shape, not one per recorded golden. Each shape's pick is
     # compared against its *closest* golden (the config it reproduces the most knobs of).
-    # A shape's FAST-MATH entries (``GoldenConfig.fast_math`` — precision-trading knobs) form
+    # A shape's FAST-MATH entries (derived from precision-trading knobs) form
     # their own row (``<name> [fm]``): their greedy pick runs under the pinned
     # ``F16_MMA_F32_ACC`` gate (the only enumeration that offers their forks), and the
     # standard row's pick never mixes with them — each regime reproduces against its own
@@ -887,7 +879,7 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
                 label = f"{name} [fm]" if fm else name
                 try:
                     with F16_MMA_F32_ACC.pinned("1") if fm else nullcontext():
-                        got = picked(sub[0].snippet(), tuple(getattr(sub[0], "dynamic_specs", list)()))
+                        got = picked(sub[0].target_program.copy())
                 except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
                     entries.append(("err", label, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
                     continue
@@ -933,9 +925,9 @@ def _offer_audit_configs(kernel_filter: str | None) -> list:
     optionally name-filtered. Broader than :func:`_golden_configs` (matmul-only): a pin-only
     row on any forking kind — the 4090 ``attention.hd512.s4096`` split-KV row — falls through
     the deploy's golden floor exactly like a matmul one."""
-    from emmy.compiler.pipeline.search.golden import EmbeddingGoldenConfig, RopeGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu  # noqa: PLC0415
 
-    configs = [g for g in goldens_for_live_gpu() if not isinstance(g, (RopeGoldenConfig, EmbeddingGoldenConfig))]
+    configs = list(goldens_for_live_gpu())
     if kernel_filter:
         configs = [g for g in configs if kernel_filter in g.name]
     return configs
@@ -967,10 +959,8 @@ def _emit_offer_audit(configs: list) -> bool:
     import logging as _logging  # noqa: PLC0415
     from contextlib import nullcontext  # noqa: PLC0415
 
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
-    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     def label_of(name: str, fm: bool) -> str:
         return f"{name} [fm]" if fm else name
@@ -1003,9 +993,7 @@ def _emit_offer_audit(configs: list) -> bool:
                 graphs: dict[str, object] = {}
                 for name, sub in groups.items():
                     try:
-                        dyn = sub[0].dynamic_specs()
-                        shapes = build_torch_dynamic_shapes(parse_position_specs(dyn)) if dyn else None
-                        graphs[name], _, _ = graph_from_code(sub[0].snippet(), dynamic_shapes=shapes)
+                        graphs[name] = sub[0].target_program.copy()
                     except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the audit
                         logger.info("  %-44s  ERR  %s", label_of(name, fm), " ".join(f"{type(e).__name__}: {e}".split())[:100])
                 if not graphs:
@@ -1022,7 +1010,7 @@ def _emit_offer_audit(configs: list) -> bool:
                         continue
                     n_shapes += 1
                     n_entries += len(sub)
-                    key = sub[0].shape_key()
+                    key = sub[0].shape_key
                     hits = [r for r in recs if r["key"] == key]
                     if not hits:
                         logger.warning(

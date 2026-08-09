@@ -103,7 +103,7 @@ async def _handle_foo(args):
 ```
 
 The compiler commands (`trace`, `compile`, `run`, and `tune`) share the same input loader and model-adapter selector.
-They accept a Hugging Face model, pre-traced JSON IR, or inline `--code`; `causal-lm` is the default and
+They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm` is the default and
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
@@ -116,18 +116,12 @@ and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. 
 `run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
 handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
 
-`emmy trace MODEL --golden-output PATH` additionally lowers the traced graph through the post-fusion Loop IR and
-writes a working golden YAML inventory without constructing a backend or measuring a kernel. Its target grouping
-matches the two-level tuner's fold-aware inner search: a flash-attention score producer is absorbed into its consumer
-rather than emitted as a second target, and the consumer reproducer carries both nodes' frontend provenance. Remaining
-kernels are deduplicated by structural cache key and point to relative `<stem>.kernels/*.torch.json` reproducers that
-`emmy tune` can load directly. These are working-only `kernel: traced` entries: tracing records neither knobs nor
-timings and refuses to replace either an existing YAML or its sidecar directory. A golden-only invocation writes no
-auto-named Graph JSON; explicit `--output` requests both artifacts, while ordinary trace without a golden keeps its
-auto-named Graph output.
+`emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
+The YAML embeds stable frontend Torch IR programs and identifies targets only by frontend provenance origins. Flash
+score producers absorbed into their consumer are not emitted as separate targets. Trace records neither knobs nor
+timings, refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
 
-`emmy tune --golden-file PATH` consumes that working YAML directly. Recognized specialized entries reconstruct their
-snippet; `kernel: traced` entries load the relative reproducer. Rows for the same target are grouped as candidate knob
+`emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance target are grouped as candidate knob
 sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
 remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize

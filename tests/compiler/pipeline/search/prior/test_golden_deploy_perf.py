@@ -24,8 +24,8 @@ def _single_gpu_goldens(monkeypatch):
     latencies (5090 / PRO 6000 even share ``compute_cap (12, 0)``), making these
     shape-keyed assertions depend on which goldens dir is checked in. Off-GPU here,
     so ``goldens_for_live_gpu`` can't auto-scope — inject the single-card set."""
-    one = [g for g in golden_mod.GOLDEN_CONFIGS if g.gpu_name == "NVIDIA GeForce RTX 5090"]
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", one)
+    one = [g for g in golden_mod.GOLDEN_RECORDS if g.gpu_name == "NVIDIA GeForce RTX 5090"]
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", one)
 
 
 class _FakePrior:

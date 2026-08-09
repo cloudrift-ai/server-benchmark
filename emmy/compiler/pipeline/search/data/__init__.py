@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from emmy.compiler.pipeline.search.data.dataset import Dataset
 from emmy.compiler.pipeline.search.data.freeze import FREEZE_KIND, FREEZE_VER, freeze_reason, load_freeze, load_node_rows, write_freeze
-from emmy.compiler.pipeline.search.data.sample import KERNEL_NAME_RE, Sample, compiled_s_features
+from emmy.compiler.pipeline.search.data.sample import KERNEL_NAME_RE, Sample
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
 __all__ = [
@@ -18,7 +18,6 @@ __all__ = [
     "Dataset",
     "Sample",
     "ShapeKey",
-    "compiled_s_features",
     "freeze_reason",
     "load_freeze",
     "load_node_rows",

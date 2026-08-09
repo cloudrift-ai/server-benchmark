@@ -1,89 +1,519 @@
+format_version: 2
 gpu_name: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-compute_cap: [12, 0]
+compute_cap:
+- 12
+- 0
+programs:
+  sha256:b04e839ac3f77acdf736c46762fba4ab13c8a94fc5075d365a4fd3e3211ed4a6:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f32
+        shape:
+        - const: 512
+        - const: 512
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f32
+        shape:
+        - const: 512
+        - const: 512
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f32
+        shape:
+        - const: 512
+        - const: 512
+  sha256:eeb50041e63ff3b23a097725f346f3e41a82131388b8b98dd62c5429eacdfdd4:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f32
+        shape:
+        - const: 1024
+        - const: 1024
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f32
+        shape:
+        - const: 1024
+        - const: 1024
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f32
+        shape:
+        - const: 1024
+        - const: 1024
+  sha256:71d3b67cb81e6946f69b03d4524098355b66cc9ba3156ca378b95a6d5c7e1cc5:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f32
+        shape:
+        - const: 2048
+        - const: 2048
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f32
+        shape:
+        - const: 2048
+        - const: 2048
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f32
+        shape:
+        - const: 2048
+        - const: 2048
+  sha256:eaf8d923ffebb790fc0af0119fa1dd7e3bbc5b142bc368c85106f4fd2da6c1fe:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f32
+        shape:
+        - const: 4096
+        - const: 4096
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f32
+        shape:
+        - const: 4096
+        - const: 4096
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f32
+        shape:
+        - const: 4096
+        - const: 4096
+  sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 512
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 512
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 512
+  sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 1024
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 1024
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 1024
+  sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 2048
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 2048
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 2048
+  sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 4096
+        - const: 4096
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 4096
+        - const: 4096
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f16
+        shape:
+        - const: 4096
+        - const: 4096
+  sha256:09e9b9843e98baca18710745c021c41e85de8c0a64fb078c5ac1959b19390772:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - matmul
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f32
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 512
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f32
+        shape:
+        - const: 512
+        - const: 512
+    - id: matmul
+      op: torch.matmul
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: matmul
+        dtype: f32
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 512
 configs:
-  - kernel: matmul
-    name: matmul.square.512
-    M: 512
-    N: 512
-    K: 512
-    knobs: {WORK: 't16x8', TILE: 'f2x6', RASTER: '', STAGE: 'd2/tma'}
+- name: matmul.square.512
+  program: sha256:b04e839ac3f77acdf736c46762fba4ab13c8a94fc5075d365a4fd3e3211ed4a6
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t16x8
+    TILE: f2x6
+    RASTER: ''
+    STAGE: d2/tma
+  measurements:
     emmy_us: 11.0
-    cublas_us: 12.6
-  - kernel: matmul
-    name: matmul.square.1024
-    M: 1024
-    N: 1024
-    K: 1024
-    knobs: {WORK: 't16x16', TILE: 'f4x6', RASTER: '', STAGE: 'd4/tma'}
+    reference_us: 12.6
+    reference_backend: cublas
+- name: matmul.square.1024
+  program: sha256:eeb50041e63ff3b23a097725f346f3e41a82131388b8b98dd62c5429eacdfdd4
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t16x16
+    TILE: f4x6
+    RASTER: ''
+    STAGE: d4/tma
+  measurements:
     emmy_us: 49.2
-    cublas_us: 55.6
-  - kernel: matmul
-    name: matmul.square.2048
-    M: 2048
-    N: 2048
-    K: 2048
-    knobs: {WORK: 't32x16', TILE: 'f4x12', RASTER: '', STAGE: 'd2/tma'}
+    reference_us: 55.6
+    reference_backend: cublas
+- name: matmul.square.2048
+  program: sha256:71d3b67cb81e6946f69b03d4524098355b66cc9ba3156ca378b95a6d5c7e1cc5
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t32x16
+    TILE: f4x12
+    RASTER: ''
+    STAGE: d2/tma
+  measurements:
     emmy_us: 357.6
-    cublas_us: 324.8
-  - kernel: matmul
-    name: matmul.square.4096
-    M: 4096
-    N: 4096
-    K: 4096
-    knobs: {WORK: 't32x16', TILE: 'f4x6', RASTER: '', STAGE: 'd3/tma'}
+    reference_us: 324.8
+    reference_backend: cublas
+- name: matmul.square.4096
+  program: sha256:eaf8d923ffebb790fc0af0119fa1dd7e3bbc5b142bc368c85106f4fd2da6c1fe
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t32x16
+    TILE: f4x6
+    RASTER: ''
+    STAGE: d3/tma
+  measurements:
     emmy_us: 3021.4
-    cublas_us: 2426.0
-  - kernel: matmul
-    name: matmul.square.512.fp16
-    M: 512
-    N: 512
-    K: 512
-    dtype: fp16
-    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', RASTER: '', STAGE: 'd3/tma'}
+    reference_us: 2426.0
+    reference_backend: cublas
+- name: matmul.square.512.fp16
+  program: sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w2x2
+    TILE: mma_m16n8k16_f16_f32/f2x2/k4
+    RASTER: ''
+    STAGE: d3/tma
+  measurements:
     emmy_us: 3.8
-    cublas_us: 6.1
-  - kernel: matmul
-    name: matmul.square.512.fp16
-    M: 512
-    N: 512
-    K: 512
-    dtype: fp16
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', RASTER: '', STAGE: 'd2/tma'}
+    reference_us: 6.1
+    reference_backend: cublas
+- name: matmul.square.512.fp16
+  program: sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w1x4
+    TILE: mma_m16n8k16_f16_f32/f2x2/k4
+    RASTER: ''
+    STAGE: d2/tma
+  measurements:
     emmy_us: 3.7
-    cublas_us: 6.1
-  - kernel: matmul
-    name: matmul.square.1024.fp16
-    M: 1024
-    N: 1024
-    K: 1024
-    dtype: fp16
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x2/k2', RASTER: '', STAGE: 'd4/tma'}
+    reference_us: 6.1
+    reference_backend: cublas
+- name: matmul.square.1024.fp16
+  program: sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w1x4
+    TILE: mma_m16n8k16_f16_f32/f4x2/k2
+    RASTER: ''
+    STAGE: d4/tma
+  measurements:
     emmy_us: 13.9
-    cublas_us: 12.5
-  - kernel: matmul
-    name: matmul.square.2048.fp16
-    M: 2048
-    N: 2048
-    K: 2048
-    dtype: fp16
-    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', RASTER: '', STAGE: 'd2/tma'}
+    reference_us: 12.5
+    reference_backend: cublas
+- name: matmul.square.2048.fp16
+  program: sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w4x2
+    TILE: mma_m16n8k16_f16_f32/f2x4/k2
+    RASTER: ''
+    STAGE: d2/tma
+  measurements:
     emmy_us: 78.6
-    cublas_us: 69.9
-  - kernel: matmul
-    name: matmul.square.4096.fp16
-    M: 4096
-    N: 4096
-    K: 4096
-    dtype: fp16
-    knobs: {WORK: 'w8x2', TILE: 'mma_m16n8k16_f16_f32/f2x8/k4', RASTER: '', STAGE: 'd2/tma'}
+    reference_us: 69.9
+    reference_backend: cublas
+- name: matmul.square.4096.fp16
+  program: sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w8x2
+    TILE: mma_m16n8k16_f16_f32/f2x8/k4
+    RASTER: ''
+    STAGE: d2/tma
+  measurements:
     emmy_us: 515.9
-    cublas_us: 467.2
-  - kernel: matmul
-    name: matmul.square.512.dynM
-    M: 512
-    N: 512
-    K: 512
-    dynamic: true
-    knobs: {WORK: 't16x8', TILE: 'f2x6', REDUCE: 'g2a', RASTER: '', STAGE: 'd4/tma'}
+    reference_us: 467.2
+    reference_backend: cublas
+- name: matmul.square.512.dynM
+  program: sha256:09e9b9843e98baca18710745c021c41e85de8c0a64fb078c5ac1959b19390772
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t16x8
+    TILE: f2x6
+    REDUCE: g2a
+    RASTER: ''
+    STAGE: d4/tma
+  measurements:
     emmy_us: 10.2
-    cublas_us: 12.6
+    reference_us: 12.6
+    reference_backend: cublas

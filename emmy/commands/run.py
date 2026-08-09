@@ -150,18 +150,6 @@ def register_run_command(subparsers):
             "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
         ),
     )
-    parser.add_argument(
-        "--record-shape",
-        default=None,
-        metavar="JSON",
-        help=(
-            "Declarative identity of the benched shape, spelled like a golden YAML entry minus knobs/latencies "
-            '(e.g. \'{"kernel": "matmul", "M": 512, "N": 512, "K": 512, "dtype": "fp16", "trans_b": false, '
-            '"dynamic": false}\'). Recorded rows whose stamped extents match carry it as their shape_spec — the '
-            "identity the goldens-format measurement freeze keeps. Passed by the golden-neighborhood collection "
-            "sweep; no effect with --no-record-nodes."
-        ),
-    )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
     parser.add_argument("--debug", action="store_true", help="Per-launch tensor dumps in the emmy backend.")
     parser.add_argument(
@@ -209,7 +197,7 @@ def handle_run(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    resolve_golden_arg(args)  # --golden NAME → --code <snippet>
+    resolve_golden_arg(args)
     if sum(x is not None for x in (args.input, args.code, args.ir)) > 1:
         logger.error("input / --code / --ir are mutually exclusive")
         sys.exit(1)
@@ -232,15 +220,6 @@ def handle_run(args):
         except ValueError as exc:
             logger.error("--ab: %s", exc)
             sys.exit(2)
-    if args.record_shape is not None:
-        from emmy.compiler.pipeline.search.bench_record import parse_record_shape  # noqa: PLC0415
-
-        try:
-            parse_record_shape(args.record_shape)  # fail fast, before any compile/bench spend
-        except ValueError as exc:
-            logger.error("%s", exc)
-            sys.exit(2)
-
     if not torch.cuda.is_available():
         logger.error("CUDA GPU required")
         sys.exit(1)
@@ -250,8 +229,12 @@ def handle_run(args):
         _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
+    if hasattr(args, "_golden_graph"):
+        _handle_run_ir(args, CudaBackend, CompilerDump)
+        return
+
     if args.input is None and args.code is None:
-        logger.error("Either a model ID / .json input, --code, or --ir is required")
+        logger.error("Either a model ID / .json input, --code, --golden, or --ir is required")
         sys.exit(1)
 
     # Model ID or --code: trace to a frontend graph + keep the runnable module
@@ -426,7 +409,7 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, parse_record_shape, record_bench_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -440,11 +423,8 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
     if not leaves:
         return
-    # Re-parse (validated at arg-check time): the declarative identity the sweep passes,
-    # attached per matching leaf inside record_bench_leaves.
-    shape = parse_record_shape(args.record_shape) if getattr(args, "record_shape", None) else None
     db_path = resolve_tune_db()
-    n = record_bench_leaves(db_path, Context.probe(), leaves, shape=shape)
+    n = record_bench_leaves(db_path, Context.probe(), leaves)
     print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 
@@ -572,8 +552,7 @@ def _intensity_floor_flag(sample, total_us: float) -> str | None:
     bench (skipped finalize, silent failure), not a fast kernel (the 8.2 µs "2 PFLOP/s"
     2048³ golden row of the sixth sweep). Returns a flag string, or ``None`` when clean /
     ungateable (no shape, no FLOPs, unknown device peak)."""
-    # The CONFIG-side FLOP count (``GoldenConfig.flops()`` via ``Sample.from_golden`` — never an
-    # overestimate, dynamic axes already sized at their benched hint). Never reconstructed from
+    # Use a FLOP count only when the sample source can derive one without guessing. Never reconstruct it from
     # the ShapeKey: the join key excludes symbolic axes on the matmul side but includes them on
     # the reduce-tier/attention side, so the old hint-multiplier formula overcounted reduce-tier
     # ``.dynM`` replays 512× and flagged every one "impossible" at its correct recorded value.
@@ -638,7 +617,7 @@ def _ab_samples(specs, dynamic=None):
     return [SimpleNamespace(name=f"ab {raw}", knobs=parse_knob_spec(raw), shape=None, dynamic=dyn) for raw in specs]
 
 
-async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters, ref=None):
+async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
     row beside the greedy pick. ``golden_configs`` are
@@ -680,13 +659,18 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
     for sample in golden_configs or []:
-        dyn = getattr(sample, "dynamic", None)
+        # String sources must be retraced at the recorded symbolic shape. An
+        # embedded stable program already carries its symbolic dimensions.
+        dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
         flags = []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
             with pinned_knobs(sample.knobs):
-                # Fresh graph; knobs baked into the kernel source here.
-                graph, _, _ = graph_from_code(code, dynamic_shapes=dynamic_shapes)
+                # Fresh graph; lowering mutates it and bakes the pins into the kernel.
+                if isinstance(source, str):
+                    graph, _, _ = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                else:
+                    graph = source.copy()
                 g_compiled = backend.compile(graph)
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
@@ -1616,10 +1600,14 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline import Pipeline
 
-    path = Path(args.ir)
-    with open(path) as f:
-        data = json.load(f)
-    graph = Graph.from_dict(data)
+    embedded = getattr(args, "_golden_graph", None)
+    path = Path(args.ir) if embedded is None else None
+    if embedded is None:
+        with open(path) as f:
+            data = json.load(f)
+        graph = Graph.from_dict(data)
+    else:
+        graph = embedded.copy()
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --ir (the trace is already complete)")
         sys.exit(2)
@@ -1634,7 +1622,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
 
     # Snapshot the pre-lowering frontend graph so we can build a torch
     # reference (eager + torch.compile) and compare accuracy/latency vs torch —
-    # the same table the --code path produces, now for a dumped .torch.json.
+    # the same table the --code path produces for a debug Graph IR input.
     # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench.
     frontend = graph.copy() if torch_ref.is_runnable(graph) else None
 
@@ -1702,7 +1690,19 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]
-            if args.ab and tail:
+            pinned = list(getattr(args, "golden_configs", None) or [])
+            if pinned and tail:
+                if greedy_fail:
+                    logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
+                ab_benches = await _bench_golden_variants(
+                    backend,
+                    embedded,
+                    pinned,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                )
+            elif args.ab and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; --ab rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)

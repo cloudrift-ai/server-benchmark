@@ -9,7 +9,7 @@ Three sections, one subject:
 - **Proxy desaturation** — the retired ``±80`` QUALITY clip inside the exp squash sat in the middle
   of the live range (at scale 0.1 thousands of good warp tiles score past 80): every such row
   collapsed onto one ``exp(-8)`` plateau, greedy's argmin fell through to emission order (the
-  ``w1x1`` gemma misdeploys, 12-29x off the golden on a real 4090), and ``evaluate_golden``'s
+  ``w1x1`` gemma misdeploys, 12-29x off the golden on a real 4090), and the evaluator's
   strictly-greater rank reported 0 for every tied row — the "prior finds the goldens" illusion. The
   clip now guards only the exp argument's float-safety bound, and the rank counts earlier-emitted
   ties against the golden.
@@ -29,10 +29,14 @@ import math
 
 import pytest
 
+from emmy.compiler import dtype as _dt
 from emmy.compiler.context import Context
+from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline.search import golden_eval
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
-from emmy.compiler.pipeline.search.golden_eval import _enumerate
+from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, _PARAM_KEYS
@@ -146,6 +150,20 @@ def _prior(scale: float = 0.1) -> OfflinePrior:
     return OfflinePrior(weights={"D_q": 1.0}, weights_dynamic={"D_q": 1.0}, scale=scale, **_GATES_OFF)
 
 
+def _matmul_graph(M: int, N: int, K: int, dtype: str) -> Graph:
+    graph = Graph()
+    dt = _dt.get({"fp16": "f16", "fp32": "f32"}.get(dtype, dtype))
+    graph.add_node(InputOp(), [], Tensor("a", (M, K), dt), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (K, N), dt), node_id="b")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("o", (M, N), dt), node_id="o")
+    graph.inputs, graph.outputs = ["a", "b"], ["o"]
+    return graph
+
+
+def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context) -> list[dict]:
+    return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE")
+
+
 def test_qualities_past_the_old_clip_stay_strictly_ordered():
     """Qualities 85 and 120 both sat past the retired ±80 clip and scored the identical
     exp(-8); they must now rank strictly (higher quality → lower latency proxy)."""
@@ -190,7 +208,7 @@ def test_fallback_tilt_multiplier_stays_bounded(monkeypatch):
     assert hi == 100.0 * math.exp(8.0), "multiplier must clamp at e**+8, not blow up the µs anchor"
 
 
-def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
+def test_evaluate_record_rank_is_tie_pessimistic(monkeypatch):
     """A golden tied with earlier-emitted rows loses the greedy argmin to them — the
     rank must count those ties, so a tie plateau can never report rank 0."""
     rows = [
@@ -199,10 +217,13 @@ def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
         {"TILE@a0": "f4x8", "WORK": "t32x16"},  # the golden, emitted third
         {"TILE@a0": "f4x8", "WORK": "t64x16"},
     ]
-    monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx: rows)
+    monkeypatch.setattr(golden_eval, "enumerate_graph", lambda graph, ctx: rows)
     golden = {"TILE": "f4x8", "WORK": "t32x16"}
+    from types import SimpleNamespace
 
-    _, rank_tied, pool, rank_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=lambda r: 1.0)
+    record = SimpleNamespace(knobs=golden, target_program=Graph())
+
+    _, rank_tied, pool, rank_opt = golden_eval.evaluate_record(record, ctx=None, scorer=lambda r: 1.0)
     assert pool == 4
     assert rank_tied == 2, "two earlier-emitted ties must count against the golden"
     assert rank_opt == 0, "the optimistic count forgives the whole tie plateau"
@@ -211,7 +232,7 @@ def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
     def favors_golden(r):
         return 2.0 if r is rows[2] else 1.0
 
-    _, rank_best, _, rank_best_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=favors_golden)
+    _, rank_best, _, rank_best_opt = golden_eval.evaluate_record(record, ctx=None, scorer=favors_golden)
     assert rank_best == 0, "a strict winner still ranks 0"
     assert rank_best_opt == 0, "no plateau, no gap"
 

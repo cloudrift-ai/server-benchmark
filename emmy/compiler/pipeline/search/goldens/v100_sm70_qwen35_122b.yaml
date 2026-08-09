@@ -1,458 +1,2537 @@
+format_version: 2
 gpu_name: NVIDIA Tesla V100 SXM3 32GB
-compute_cap: [7, 0]
-# Isolated FP16 projection seeds derived from the Qwen3.5-122B-A10B architecture for M >= 32.
-# They are not tagged as observed in-model coverage: the current Emmy model runner cannot emit
-# this architecture. These provisional V100 entries retain the best reviewed schedules available
-# even below the 0.95 performance bar; the selection evidence lives in the findings report.
+compute_cap:
+- 7
+- 0
+programs:
+  sha256:116e7c9d46b79672bc60d62becb680984610c90344e56f6fd285de9c577e6d84:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 16384
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 16384
+  sha256:2b7ab46d7cc92e69ef669f57e8c5156a5ad1af2cf5e9f8bbe6fddb18c12b9dca:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 16384
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 16384
+  sha256:72e479e21fa582a5df03a2b400c8116f5e1e45d379a7e7e71e4fcb436b758405:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 16384
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 16384
+  sha256:b5f167e64d45c32c732b6c5c8d22d420dc46c4d25b4c07978d2fbb788afd1c75:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 16384
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 16384
+  sha256:bc834efa82ae57e3d3f814cd0c6b60ca79d91367a60fa273e2a9122023144707:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 512
+  sha256:44b86fecef10e425c088ffbf3446b77c07bb6cc9ad332cf0edc761da31f174d8:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 512
+  sha256:7aebeb15e81e5bbb5dbc40c5ab0ed5cae26675e3ce7189e6c436448937284ef8:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 512
+  sha256:aa7d2a81ce7bb47fa045ec381360026f48473f36485e0aa7267efb856bdc55d8:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 512
+  sha256:fbda93838008b749850c28ff9e7b6ef7186135ab449536fa472e020c581c2317:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 8192
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 8192
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+  sha256:981539a468a78f88a3dac682f08e7ad67ff81556bc831bb3295ec52dace381d3:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 8192
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 8192
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+  sha256:0d9b622485eff53f82c9b8afe036da94dd68d883563835d6df183f83cede476c:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 8192
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 8192
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+  sha256:26e124930ff33bd92fd8a2a3eeb50384ad0dbf785e92e2ea2ffc3a01618aff9f:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 8192
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 8192
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+  sha256:723515191d6d6f4ee0f504a144c88df62dfb7fc8ba5bdca473384e8fd3d5c4b9:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 12288
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 12288
+  sha256:fa775b64e3cd3e0e63604374028dc09dea37e584f21d249254994b2311d47977:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 12288
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 12288
+  sha256:af4cec429880d0a43210d8e3b10f18646f9c6cbeb2ddc62be3d9b0014bcd6f25:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 12288
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 12288
+  sha256:b7534f79956e299b6b3a9def4fd36fa97fc0000a78e88a035d656ac9fe98bee2:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 12288
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 12288
+  sha256:b8d932edd4de19648becc7f26063b6b3da352ef797e2b37ea2d4908fa47a3de1:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 8192
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 8192
+  sha256:c3853f8496f74c6a7af7f2f1a9d8931721495356b87586431adeba691604b93c:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 8192
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 8192
+  sha256:0276293965728eebc4e70e1fe5e3c092d5cab5d491f1f2ff034d4ef1ab8a3b61:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 8192
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 8192
+  sha256:f9d3dc098e3aa71b5a1085fcc7b280e8a58c577b25eebb7c1e2382ae0eaec1b9:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 8192
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 8192
+  sha256:810bcc61814aa44b471452d3de8ba6a3bf7e1ca4bf5403472501c4541621933e:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 64
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 64
+  sha256:ae2a7aa271c88957319e28100397eea929cdb52218e8385be3a14363f7f3ad65:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 64
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 64
+  sha256:f111f899886874facc4899f5314b35425695772e936d4b19360289629d1e486a:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 64
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 64
+  sha256:7a014e98cf9fac92f90e7998c6d5a57b5a60201979c911b67167e726f3e8655a:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 64
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 64
+  sha256:3fc0f22f7524985e8acce1c280b708f61c8ff9c69016a0eca97c982688a0ed6e:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 256
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 256
+  sha256:22f80fe434ded22226f8e06f97aadf32a4527a82174433004e4e47ff7dbe6ccf:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 256
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 256
+  sha256:cad6b4b757d553e3dc631728300c193cddcb412e3dbdabbeb53257db189af204:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 256
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 256
+  sha256:0fef2fc176d431dc056f7731e958e3347f8a5650c2ac2bb162ef824bee48b13b:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 256
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 256
+  sha256:cf5a9eebda05fc9a34a0af64a4529a734818bfc45aef686f58dc43a9a996a8d1:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 2048
+  sha256:19631110eb276c976710da470d3ea0922d9d4ed4aefd4ae37d6c29aaa8dd77bc:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 2048
+  sha256:de79eb920cb6f7f687b7a7f3bfd7eec4ce964b88f65a2a5361faf781dc99284d:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 2048
+  sha256:f702f4b2d2a36dcf3012ddbd70dccad5ddc29aee7918d44e9eadbe7c47eafd7d:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 2048
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 2048
+  sha256:6867e0565b53906286284534f57f0e7adfefc6523602691546365d54f3b8c731:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 1024
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 1024
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+  sha256:3f2c62324806c8eb88570c9e2359ded70009587e70c0af1956650d9ec964c6b9:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 1024
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 1024
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+  sha256:e66f2bb3add22940bad7bc4260303b7566790a34e1230b8515bce4e6550aeab9:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 1024
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 1024
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+  sha256:59003a01a87f0d840c72b0266b0d1cabddef7497645b95ae4315ff24c47f01eb:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 1024
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 3072
+        - const: 1024
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+  sha256:0479da76822500c4192530eacaef1966683d75ad85d956d0c28009c5a6aa082c:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 1024
+  sha256:3fd071201a540e917c600dc2c448da68d752f6e1eb1b17196c33fc518fe61348:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 1024
+  sha256:1b057ad65f49e41ed5e00b46bc1781d4dcacc4c286a42187d1530a97be7a63d1:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 1024
+  sha256:d51af1774f8e75034be84916b03e96d75fcd4043faef742feb14deaba1ab0e21:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 1024
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 1024
+  sha256:de63e5129bb0007145e1a41d24c830d41b05183d93394a483d195db61208082a:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 248320
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 32
+        - const: 248320
+  sha256:ac1811a363f48850b224beb66ecd674c75a9cfa72ead7fcc17099d6a487e7de8:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 248320
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 128
+        - const: 248320
+  sha256:253c3658286f782ebb1f92e52d83781df85a9f637b3edf09f1c5dae642ab47f4:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 248320
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - const: 512
+        - const: 248320
+  sha256:6ada6b3df3bda723d3a6299235bfb448e370ba177efa1dae991f53c8f68455c9:
+    ir_version: 1
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - linear
+    nodes:
+    - id: x0
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x0
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 3072
+    - id: x1
+      op: input
+      attrs: {}
+      inputs: []
+      outputs:
+      - name: x1
+        dtype: f16
+        shape:
+        - const: 248320
+        - const: 3072
+    - id: linear
+      op: torch.linear
+      attrs:
+        has_bias: false
+      inputs:
+      - x0
+      - x1
+      outputs:
+      - name: linear
+        dtype: f16
+        shape:
+        - sym: seq_len
+          hint: 512
+        - const: 248320
 configs:
-  - kernel: matmul
-    name: qwen35_122b.attn_q.m32.lin
-    M: 32
-    N: 16384
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+- name: qwen35_122b.attn_q.m32.lin
+  program: sha256:116e7c9d46b79672bc60d62becb680984610c90344e56f6fd285de9c577e6d84
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 950.272
-    cublas_us: 201.728
-  - kernel: matmul
-    name: qwen35_122b.attn_q.m128.lin
-    M: 128
-    N: 16384
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 201.728
+    reference_backend: cublas
+- name: qwen35_122b.attn_q.m128.lin
+  program: sha256:2b7ab46d7cc92e69ef669f57e8c5156a5ad1af2cf5e9f8bbe6fddb18c12b9dca
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 1938.432
-    cublas_us: 386.560
-  - kernel: matmul
-    name: qwen35_122b.attn_q.m512.lin
-    M: 512
-    N: 16384
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 8181.760
-    cublas_us: 656.896
-  - kernel: matmul
-    name: qwen35_122b.attn_q.lin.dynM
-    M: 512
-    N: 16384
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k2', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 386.56
+    reference_backend: cublas
+- name: qwen35_122b.attn_q.m512.lin
+  program: sha256:72e479e21fa582a5df03a2b400c8116f5e1e45d379a7e7e71e4fcb436b758405
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w4x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 8181.76
+    reference_us: 656.896
+    reference_backend: cublas
+- name: qwen35_122b.attn_q.lin.dynM
+  program: sha256:b5f167e64d45c32c732b6c5c8d22d420dc46c4d25b4c07978d2fbb788afd1c75
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w4x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k2
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 7615.488
-    cublas_us: 668.160
-  - kernel: matmul
-    name: qwen35_122b.attn_kv.m32.lin
-    M: 32
-    N: 512
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x4', TILE: 'mma_m8n8k4_f16_f32/f2x1/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 668.16
+    reference_backend: cublas
+- name: qwen35_122b.attn_kv.m32.lin
+  program: sha256:bc834efa82ae57e3d3f814cd0c6b60ca79d91367a60fa273e2a9122023144707
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x4
+    TILE: mma_m8n8k4_f16_f32/f2x1/k8
+    REDUCE: g8a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 78.297
-    cublas_us: 12.530
-  - kernel: matmul
-    name: qwen35_122b.attn_kv.m128.lin
-    M: 128
-    N: 512
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w8x1', TILE: 'mma_m8n8k4_f16_f32/f1x4/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 12.53
+    reference_backend: cublas
+- name: qwen35_122b.attn_kv.m128.lin
+  program: sha256:44b86fecef10e425c088ffbf3446b77c07bb6cc9ad332cf0edc761da31f174d8
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w8x1
+    TILE: mma_m8n8k4_f16_f32/f1x4/k8
+    REDUCE: g8a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 214.835
-    cublas_us: 20.864
-  - kernel: matmul
-    name: qwen35_122b.attn_kv.m512.lin
-    M: 512
-    N: 512
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f2x2/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 20.864
+    reference_backend: cublas
+- name: qwen35_122b.attn_kv.m512.lin
+  program: sha256:7aebeb15e81e5bbb5dbc40c5ab0ed5cae26675e3ce7189e6c436448937284ef8
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x2
+    TILE: mma_m8n8k4_f16_f32/f2x2/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 604.672
-    cublas_us: 47.360
-  - kernel: matmul
-    name: qwen35_122b.attn_kv.lin.dynM
-    M: 512
-    N: 512
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w1x2', TILE: 'mma_m8n8k4_f16_f32/f4x2/k2', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 47.36
+    reference_backend: cublas
+- name: qwen35_122b.attn_kv.lin.dynM
+  program: sha256:aa7d2a81ce7bb47fa045ec381360026f48473f36485e0aa7267efb856bdc55d8
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x2
+    TILE: mma_m8n8k4_f16_f32/f4x2/k2
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 720.896
-    cublas_us: 49.664
-  - kernel: matmul
-    name: qwen35_122b.attn_gdn_out.m32.lin
-    M: 32
-    N: 3072
-    K: 8192
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 49.664
+    reference_backend: cublas
+- name: qwen35_122b.attn_gdn_out.m32.lin
+  program: sha256:fbda93838008b749850c28ff9e7b6ef7186135ab449536fa472e020c581c2317
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 984.064
-    cublas_us: 90.624
-  - kernel: matmul
-    name: qwen35_122b.attn_gdn_out.m128.lin
-    M: 128
-    N: 3072
-    K: 8192
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 90.624
+    reference_backend: cublas
+- name: qwen35_122b.attn_gdn_out.m128.lin
+  program: sha256:981539a468a78f88a3dac682f08e7ad67ff81556bc831bb3295ec52dace381d3
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 1110.016
-    cublas_us: 140.800
-  - kernel: matmul
-    name: qwen35_122b.attn_gdn_out.m512.lin
-    M: 512
-    N: 3072
-    K: 8192
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 4080.640
-    cublas_us: 317.440
-  - kernel: matmul
-    name: qwen35_122b.attn_gdn_out.lin.dynM
-    M: 512
-    N: 3072
-    K: 8192
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k2', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 140.8
+    reference_backend: cublas
+- name: qwen35_122b.attn_gdn_out.m512.lin
+  program: sha256:0d9b622485eff53f82c9b8afe036da94dd68d883563835d6df183f83cede476c
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 4080.64
+    reference_us: 317.44
+    reference_backend: cublas
+- name: qwen35_122b.attn_gdn_out.lin.dynM
+  program: sha256:26e124930ff33bd92fd8a2a3eeb50384ad0dbf785e92e2ea2ffc3a01618aff9f
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k2
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 5706.752
-    cublas_us: 326.144
-  - kernel: matmul
-    name: qwen35_122b.gdn_qkv.m32.lin
-    M: 32
-    N: 12288
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x2/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 326.144
+    reference_backend: cublas
+- name: qwen35_122b.gdn_qkv.m32.lin
+  program: sha256:723515191d6d6f4ee0f504a144c88df62dfb7fc8ba5bdca473384e8fd3d5c4b9
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f2x2/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 777.216
-    cublas_us: 127.488
-  - kernel: matmul
-    name: qwen35_122b.gdn_qkv.m128.lin
-    M: 128
-    N: 12288
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x2/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: 'gm8'}
+    reference_us: 127.488
+    reference_backend: cublas
+- name: qwen35_122b.gdn_qkv.m128.lin
+  program: sha256:fa775b64e3cd3e0e63604374028dc09dea37e584f21d249254994b2311d47977
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f2x2/k4
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: gm8
+  measurements:
     emmy_us: 2586.624
-    cublas_us: 311.296
-  - kernel: matmul
-    name: qwen35_122b.gdn_qkv.m512.lin
-    M: 512
-    N: 12288
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w2x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 311.296
+    reference_backend: cublas
+- name: qwen35_122b.gdn_qkv.m512.lin
+  program: sha256:af4cec429880d0a43210d8e3b10f18646f9c6cbeb2ddc62be3d9b0014bcd6f25
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 6203.392
-    cublas_us: 486.400
-  - kernel: matmul
-    name: qwen35_122b.gdn_qkv.lin.dynM
-    M: 512
-    N: 12288
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 6154.240
-    cublas_us: 485.888
-  - kernel: matmul
-    name: qwen35_122b.gdn_z.m32.lin
-    M: 32
-    N: 8192
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x2/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: 'gm8'}
+    reference_us: 486.4
+    reference_backend: cublas
+- name: qwen35_122b.gdn_qkv.lin.dynM
+  program: sha256:b7534f79956e299b6b3a9def4fd36fa97fc0000a78e88a035d656ac9fe98bee2
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w4x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k4
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 6154.24
+    reference_us: 485.888
+    reference_backend: cublas
+- name: qwen35_122b.gdn_z.m32.lin
+  program: sha256:b8d932edd4de19648becc7f26063b6b3da352ef797e2b37ea2d4908fa47a3de1
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x2/k4
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: gm8
+  measurements:
     emmy_us: 813.056
-    cublas_us: 121.344
-  - kernel: matmul
-    name: qwen35_122b.gdn_z.m128.lin
-    M: 128
-    N: 8192
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x8/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 121.344
+    reference_backend: cublas
+- name: qwen35_122b.gdn_z.m128.lin
+  program: sha256:c3853f8496f74c6a7af7f2f1a9d8931721495356b87586431adeba691604b93c
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x8/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 2098.176
-    cublas_us: 234.496
-  - kernel: matmul
-    name: qwen35_122b.gdn_z.m512.lin
-    M: 512
-    N: 8192
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 13952.000
-    cublas_us: 351.744
-  - kernel: matmul
-    name: qwen35_122b.gdn_z.lin.dynM
-    M: 512
-    N: 8192
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w2x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 234.496
+    reference_backend: cublas
+- name: qwen35_122b.gdn_z.m512.lin
+  program: sha256:0276293965728eebc4e70e1fe5e3c092d5cab5d491f1f2ff034d4ef1ab8a3b61
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 13952.0
+    reference_us: 351.744
+    reference_backend: cublas
+- name: qwen35_122b.gdn_z.lin.dynM
+  program: sha256:f9d3dc098e3aa71b5a1085fcc7b280e8a58c577b25eebb7c1e2382ae0eaec1b9
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 4360.192
-    cublas_us: 361.984
-  - kernel: matmul
-    name: qwen35_122b.gdn_ba.m32.lin
-    M: 32
-    N: 64
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 12.480
-    cublas_us: 7.332
-  - kernel: matmul
-    name: qwen35_122b.gdn_ba.m128.lin
-    M: 128
-    N: 64
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 361.984
+    reference_backend: cublas
+- name: qwen35_122b.gdn_ba.m32.lin
+  program: sha256:810bcc61814aa44b471452d3de8ba6a3bf7e1ca4bf5403472501c4541621933e
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: t64
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 12.48
+    reference_us: 7.332
+    reference_backend: cublas
+- name: qwen35_122b.gdn_ba.m128.lin
+  program: sha256:ae2a7aa271c88957319e28100397eea929cdb52218e8385be3a14363f7f3ad65
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: t64
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 38.321
-    cublas_us: 9.183
-  - kernel: matmul
-    name: qwen35_122b.gdn_ba.m512.lin
-    M: 512
-    N: 64
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x2/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 9.183
+    reference_backend: cublas
+- name: qwen35_122b.gdn_ba.m512.lin
+  program: sha256:f111f899886874facc4899f5314b35425695772e936d4b19360289629d1e486a
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f2x2/k8
+    REDUCE: g8a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 96.461
-    cublas_us: 13.163
-  - kernel: matmul
-    name: qwen35_122b.gdn_ba.lin.dynM
-    M: 512
-    N: 64
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 13.163
+    reference_backend: cublas
+- name: qwen35_122b.gdn_ba.lin.dynM
+  program: sha256:7a014e98cf9fac92f90e7998c6d5a57b5a60201979c911b67167e726f3e8655a
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 159.232
-    cublas_us: 14.643
-  - kernel: matmul
-    name: qwen35_122b.router.m32.lin
-    M: 32
-    N: 256
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 14.643
+    reference_backend: cublas
+- name: qwen35_122b.router.m32.lin
+  program: sha256:3fc0f22f7524985e8acce1c280b708f61c8ff9c69016a0eca97c982688a0ed6e
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1/k8
+    REDUCE: g8a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 46.127
-    cublas_us: 9.194
-  - kernel: matmul
-    name: qwen35_122b.router.m128.lin
-    M: 128
-    N: 256
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 9.194
+    reference_backend: cublas
+- name: qwen35_122b.router.m128.lin
+  program: sha256:22f80fe434ded22226f8e06f97aadf32a4527a82174433004e4e47ff7dbe6ccf
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: t64
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 144.677
-    cublas_us: 17.566
-  - kernel: matmul
-    name: qwen35_122b.router.m512.lin
-    M: 512
-    N: 256
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1/k4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 17.566
+    reference_backend: cublas
+- name: qwen35_122b.router.m512.lin
+  program: sha256:cad6b4b757d553e3dc631728300c193cddcb412e3dbdabbeb53257db189af204
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1/k4
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 531.968
-    cublas_us: 39.168
-  - kernel: matmul
-    name: qwen35_122b.router.lin.dynM
-    M: 512
-    N: 256
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 529.920
-    cublas_us: 44.288
-  - kernel: matmul
-    name: qwen35_122b.gate_up.m32.lin
-    M: 32
-    N: 2048
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m8n8k4_f16_f32/f4x2/k8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 39.168
+    reference_backend: cublas
+- name: qwen35_122b.router.lin.dynM
+  program: sha256:0fef2fc176d431dc056f7731e958e3347f8a5650c2ac2bb162ef824bee48b13b
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 529.92
+    reference_us: 44.288
+    reference_backend: cublas
+- name: qwen35_122b.gate_up.m32.lin
+  program: sha256:cf5a9eebda05fc9a34a0af64a4529a734818bfc45aef686f58dc43a9a996a8d1
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x8
+    TILE: mma_m8n8k4_f16_f32/f4x2/k8
+    REDUCE: g8a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 180.053
-    cublas_us: 40.875
-  - kernel: matmul
-    name: qwen35_122b.gate_up.m128.lin
-    M: 128
-    N: 2048
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g4a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 40.875
+    reference_backend: cublas
+- name: qwen35_122b.gate_up.m128.lin
+  program: sha256:19631110eb276c976710da470d3ea0922d9d4ed4aefd4ae37d6c29aaa8dd77bc
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: g4a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 365.909
-    cublas_us: 63.829
-  - kernel: matmul
-    name: qwen35_122b.gate_up.m512.lin
-    M: 512
-    N: 2048
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k4', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 63.829
+    reference_backend: cublas
+- name: qwen35_122b.gate_up.m512.lin
+  program: sha256:de79eb920cb6f7f687b7a7f3bfd7eec4ce964b88f65a2a5361faf781dc99284d
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k4
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 999.424
-    cublas_us: 135.680
-  - kernel: matmul
-    name: qwen35_122b.gate_up.lin.dynM
-    M: 512
-    N: 2048
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: 'g2a', STAGE: '', LOOPIFY: '0', RASTER: ''}
-    emmy_us: 1141.760
-    cublas_us: 138.752
-  - kernel: matmul
-    name: qwen35_122b.down.m32.lin
-    M: 32
-    N: 3072
-    K: 1024
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 135.68
+    reference_backend: cublas
+- name: qwen35_122b.gate_up.lin.dynM
+  program: sha256:f702f4b2d2a36dcf3012ddbd70dccad5ddc29aee7918d44e9eadbe7c47eafd7d
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: g2a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
+    emmy_us: 1141.76
+    reference_us: 138.752
+    reference_backend: cublas
+- name: qwen35_122b.down.m32.lin
+  program: sha256:6867e0565b53906286284534f57f0e7adfefc6523602691546365d54f3b8c731
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 125.952
-    cublas_us: 18.432
-  - kernel: matmul
-    name: qwen35_122b.down.m128.lin
-    M: 128
-    N: 3072
-    K: 1024
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f2x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 18.432
+    reference_backend: cublas
+- name: qwen35_122b.down.m128.lin
+  program: sha256:3f2c62324806c8eb88570c9e2359ded70009587e70c0af1956650d9ec964c6b9
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f2x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 234.752
-    cublas_us: 32.256
-  - kernel: matmul
-    name: qwen35_122b.down.m512.lin
-    M: 512
-    N: 3072
-    K: 1024
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 32.256
+    reference_backend: cublas
+- name: qwen35_122b.down.m512.lin
+  program: sha256:e66f2bb3add22940bad7bc4260303b7566790a34e1230b8515bce4e6550aeab9
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 500.736
-    cublas_us: 73.728
-  - kernel: matmul
-    name: qwen35_122b.down.lin.dynM
-    M: 512
-    N: 3072
-    K: 1024
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k2', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 73.728
+    reference_backend: cublas
+- name: qwen35_122b.down.lin.dynM
+  program: sha256:59003a01a87f0d840c72b0266b0d1cabddef7497645b95ae4315ff24c47f01eb
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k2
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 503.296
-    cublas_us: 73.472
-  - kernel: matmul
-    name: qwen35_122b.shared_gate_or_up.m32.lin
-    M: 32
-    N: 1024
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f1x1', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 73.472
+    reference_backend: cublas
+- name: qwen35_122b.shared_gate_or_up.m32.lin
+  program: sha256:0479da76822500c4192530eacaef1966683d75ad85d956d0c28009c5a6aa082c
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f1x1
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 164.352
-    cublas_us: 20.147
-  - kernel: matmul
-    name: qwen35_122b.shared_gate_or_up.m128.lin
-    M: 128
-    N: 1024
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 't16x16', TILE: 'f4x8', REDUCE: 'g8a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 20.147
+    reference_backend: cublas
+- name: qwen35_122b.shared_gate_or_up.m128.lin
+  program: sha256:3fd071201a540e917c600dc2c448da68d752f6e1eb1b17196c33fc518fe61348
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: t16x16
+    TILE: f4x8
+    REDUCE: g8a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 385.707
-    cublas_us: 31.744
-  - kernel: matmul
-    name: qwen35_122b.shared_gate_or_up.m512.lin
-    M: 512
-    N: 1024
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f8x2', REDUCE: 'g4a', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 31.744
+    reference_backend: cublas
+- name: qwen35_122b.shared_gate_or_up.m512.lin
+  program: sha256:1b057ad65f49e41ed5e00b46bc1781d4dcacc4c286a42187d1530a97be7a63d1
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f8x2
+    REDUCE: g4a
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 746.496
-    cublas_us: 83.456
-  - kernel: matmul
-    name: qwen35_122b.shared_gate_or_up.lin.dynM
-    M: 512
-    N: 1024
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 83.456
+    reference_backend: cublas
+- name: qwen35_122b.shared_gate_or_up.lin.dynM
+  program: sha256:d51af1774f8e75034be84916b03e96d75fcd4043faef742feb14deaba1ab0e21
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 624.128
-    cublas_us: 77.824
-  - kernel: matmul
-    name: qwen35_122b.lm_head.m32.lin
-    M: 32
-    N: 248320
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 77.824
+    reference_backend: cublas
+- name: qwen35_122b.lm_head.m32.lin
+  program: sha256:de63e5129bb0007145e1a41d24c830d41b05183d93394a483d195db61208082a
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 10541.056
-    cublas_us: 2369.024
-  - kernel: matmul
-    name: qwen35_122b.lm_head.m128.lin
-    M: 128
-    N: 248320
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w1x1', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 2369.024
+    reference_backend: cublas
+- name: qwen35_122b.lm_head.m128.lin
+  program: sha256:ac1811a363f48850b224beb66ecd674c75a9cfa72ead7fcc17099d6a487e7de8
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x1
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 26258.432
-    cublas_us: 4995.072
-  - kernel: matmul
-    name: qwen35_122b.lm_head.m512.lin
-    M: 512
-    N: 248320
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 4995.072
+    reference_backend: cublas
+- name: qwen35_122b.lm_head.m512.lin
+  program: sha256:253c3658286f782ebb1f92e52d83781df85a9f637b3edf09f1c5dae642ab47f4
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w4x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 100307.968
-    cublas_us: 8044.544
-  - kernel: matmul
-    name: qwen35_122b.lm_head.lin.dynM
-    M: 512
-    N: 248320
-    K: 3072
-    dtype: fp16
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m8n8k4_f16_f32/f4x4/k8', REDUCE: '', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 8044.544
+    reference_backend: cublas
+- name: qwen35_122b.lm_head.lin.dynM
+  program: sha256:6ada6b3df3bda723d3a6299235bfb448e370ba177efa1dae991f53c8f68455c9
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w4x2
+    TILE: mma_m8n8k4_f16_f32/f4x4/k8
+    REDUCE: ''
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 100302.849
-    cublas_us: 8079.360
+    reference_us: 8079.36
+    reference_backend: cublas

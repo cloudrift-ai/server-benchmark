@@ -77,15 +77,15 @@ def main() -> int:
     ap.add_argument("--gpu", default=None, help="GPU name to check (default: the live card)")
     args = ap.parse_args()
 
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, live_recorded_goldens
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, live_recorded_goldens
 
     target = model_slug(args.model)
 
     if args.gpu:
         card = args.gpu
-        on_card = [g for g in GOLDEN_CONFIGS if g.gpu_name == card]
+        on_card = [g for g in GOLDEN_RECORDS if g.gpu_name == card]
         if not on_card:
-            known = sorted({g.gpu_name for g in GOLDEN_CONFIGS if g.gpu_name})
+            known = sorted({g.gpu_name for g in GOLDEN_RECORDS if g.gpu_name})
             print(f"FAIL: no goldens recorded for {card!r}.")
             print(f"  cards with goldens: {', '.join(known) or '(none)'}")
             return 1
@@ -113,7 +113,7 @@ def main() -> int:
         print("  Releasing anyway bakes cold-greedy fork picks into the image's cubins and pack.")
         return 1
 
-    kinds = Counter(type(g).__name__ for g in matched)
+    kinds = Counter("+".join(g.origin_ops) for g in matched)
     print(f"OK: {len(matched)} golden(s) on {card} cover {args.model!r} (slug {target!r}).")
     print(f"  kinds: {', '.join(f'{k}={n}' for k, n in sorted(kinds.items()))}")
     provenance = sorted({g.model for g in matched if g.model})

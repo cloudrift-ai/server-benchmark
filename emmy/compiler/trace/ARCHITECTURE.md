@@ -145,8 +145,9 @@ shared with CausalLM traces.
   adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
 - Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
   `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, groups
-  fold-aware tuning targets, and writes the YAML plus reproducer sidecars. `commands.trace` only validates CLI paths
-  and reports the resulting artifacts.
+  fold-aware tuning targets, and embeds the complete stable Torch IR program once in the golden YAML. Each target is
+  selected by frontend origins; its smaller tuning reproducer is derived in memory when the working file is loaded.
+  `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,
   `trace_module(build_layer_wrapper(block, …), (x,), dynamic_shapes={"x": {1: Dim("seq_len")}})`.

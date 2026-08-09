@@ -436,6 +436,52 @@ def moe_expert_layout(experts):
     )
 
 
+def replace_moe_with_traceable_expert(block) -> bool:
+    """Replace token routing with one representative expert for trace inventory.
+
+    Routing (top-k/sort/group/combine) is host orchestration in Emmy serving and
+    is not a tuneable tensor kernel.  Inventory tracing still needs the routed
+    expert algebra, so use expert zero with the same per-expert weights and keep
+    any always-on shared expert.  The replacement is intentionally limited to
+    the biasless, concatenated ``F.linear`` layout used by DeepSeek/OLMoE; other
+    layouts retain their normal module and return ``False``.
+    """
+    import torch.nn as nn
+
+    parts = moe_block_parts(getattr(block, "mlp", None))
+    if parts is None:
+        return False
+    _router, experts = parts
+    transposed, interleaved, has_bias = moe_expert_layout(experts)
+    act_fn = getattr(experts, "act_fn", None)
+    if transposed or interleaved or has_bias or act_fn is None:
+        return False
+    shared_experts = next(
+        (module for attr in ("shared_experts", "shared_expert") if (module := getattr(block.mlp, attr, None)) is not None),
+        None,
+    )
+
+    class RepresentativeExpert(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Parameter views share the already-materialized layer storage; no
+            # additional multi-gigabyte expert tensor is allocated.
+            self.w_gate_up = nn.Parameter(experts.gate_up_proj[0], requires_grad=False)
+            self.w_down = nn.Parameter(experts.down_proj[0], requires_grad=False)
+            self.act_fn = act_fn
+            self.shared_experts = shared_experts
+
+        def forward(self, x, input_ids=None):  # noqa: ARG002 — block API compatibility
+            gate, up = nn.functional.linear(x, self.w_gate_up).chunk(2, dim=-1)
+            output = nn.functional.linear(self.act_fn(gate) * up, self.w_down)
+            if self.shared_experts is not None:
+                output = output + self.shared_experts(x)
+            return output
+
+    block.mlp = RepresentativeExpert()
+    return True
+
+
 def deinterleave_gate_up(t):
     """De-interleave a gate-up tensor's LAST axis from even/odd gate/up columns into
     concatenated ``[gate | up]`` halves — a one-time exact column permutation applied at
@@ -871,7 +917,10 @@ def load_quantized_twin(model_dir, dtype):
     config = AutoConfig.from_pretrained(model_dir)
     if getattr(config, "quantization_config", None) is not None:
         delattr(config, "quantization_config")
-    model = AutoModelForCausalLM.from_config(config).to(dtype)
+    # Construct directly in the trace dtype.  Building in the framework default
+    # (normally fp32) and converting afterwards briefly holds both copies; that is
+    # enough to OOM even very large-memory hosts on checkpoints such as DeepSeek V4.
+    model = AutoModelForCausalLM.from_config(config, dtype=dtype)
     state: dict = {}
     for k, v in load_dequantized_state_dict(model_dir).items():
         t = torch.from_numpy(np.ascontiguousarray(v))
@@ -884,5 +933,49 @@ def load_quantized_twin(model_dir, dtype):
     if missing:
         logger.info("quantized twin: %d module tensors not in checkpoint (e.g. %s)", len(missing), missing[0])
     model.tie_weights()
+    model.eval()
+    return model
+
+
+def load_quantized_trace_twin(model_dir, dtype, layer: int | None):
+    """Shape-only architecture twin for ``emmy trace`` on a quantized checkpoint.
+
+    A golden trace persists frontend programs and target shapes; it does not persist
+    parameter values.  Materializing every decoded checkpoint tensor is therefore
+    unnecessary for a single-layer inventory and can require multiple terabytes for
+    models such as DeepSeek V4.  Build the complete architecture on ``meta`` so the
+    requested layer keeps its original index/configuration, then materialize only that
+    block.  The checkpoint-backed quantization speller still runs after export.
+
+    Whole-model tracing retains :func:`load_quantized_twin`, because every layer is
+    executed and an architecture-only materialization would no longer be bounded.
+    """
+    if layer is None:
+        return load_quantized_twin(model_dir, dtype)
+
+    import torch  # noqa: PLC0415
+    import torch.nn as nn  # noqa: PLC0415
+    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
+
+    config = AutoConfig.from_pretrained(model_dir)
+    if getattr(config, "quantization_config", None) is not None:
+        delattr(config, "quantization_config")
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config, dtype=dtype)
+
+    decoder = None
+    for _name, module in model.named_modules():
+        if isinstance(getattr(module, "layers", None), nn.ModuleList) and hasattr(module, "rotary_emb"):
+            decoder = module
+    if decoder is None:
+        raise ValueError(f"could not locate a text decoder in {type(model).__name__}")
+    if not 0 <= layer < len(decoder.layers):
+        raise ValueError(f"layer {layer} not found (model has {len(decoder.layers)} layers)")
+
+    # ``to_empty`` allocates storage without touching every parameter page.  Export runs
+    # under FakeTensor mode, so values are neither observed nor needed.
+    decoder.layers[layer].to_empty(device="cpu")
+    rotary_type = type(decoder.rotary_emb)
+    decoder.rotary_emb = rotary_type(config)
     model.eval()
     return model

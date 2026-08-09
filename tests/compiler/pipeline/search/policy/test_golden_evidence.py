@@ -33,7 +33,8 @@ import pytest
 from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import golden as golden_mod
-from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.golden import fast_math_knobs
 from emmy.compiler.pipeline.search.policy.greedy import (
     _fork_shape_key,
     _golden_evidence_index,
@@ -54,23 +55,26 @@ _FM_TILE = "mma_m16n8k16_f16_f16/f4x8/k2"
 _W1X1_TILE = "mma_m16n8k16_f16_f32/f1x1"
 
 
-def _golden(name="gemma4_12b.q_proj", knobs=None, us=78.0, *, dynamic=False, gpu=CARD, cap=CAP):
-    return MatmulGoldenConfig(
+def _record(name, shape_key, knobs, us, *, gpu=CARD, cap=CAP):
+    return SimpleNamespace(
         name=name,
-        M=512,
-        N=4096,
-        K=3840,
-        dtype="fp16",
-        dynamic=dynamic,
-        knobs=knobs or {"TILE": _STD_TILE, "STAGE": "d2/cp/p2", "REDUCE": "", "RASTER": ""},
+        shape_key=shape_key,
+        knobs=knobs,
         emmy_us=us,
         gpu_name=gpu,
         compute_cap=cap,
+        is_routing=False,
+        fast_math=fast_math_knobs(knobs),
     )
 
 
+def _golden(name="gemma4_12b.q_proj", knobs=None, us=78.0, *, dynamic=False, gpu=CARD, cap=CAP):
+    knobs = knobs or {"TILE": _STD_TILE, "STAGE": "d2/cp/p2", "REDUCE": "", "RASTER": ""}
+    return _record(name, ShapeKey.from_matmul(512, 4096, 3840, "fp16", dynamic=dynamic), knobs, us, gpu=gpu, cap=cap)
+
+
 def _index(monkeypatch, goldens, gpu=CARD):
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", list(goldens))
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", list(goldens))
     return _golden_evidence_index(Context.from_target(CAP, gpu_name=gpu))
 
 
@@ -123,7 +127,7 @@ def test_card_scoping(monkeypatch):
     other_card = _golden(gpu="NVIDIA GeForce RTX 5090", cap=(12, 0))
     assert _index(monkeypatch, [other_card]) == {}
     # No card identity on the ctx (off-GPU pure-logic run) -> no consultation.
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [_golden()])
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [_golden()])
     assert _golden_evidence_index(Context.from_target(CAP)) == {}
 
 
@@ -153,7 +157,7 @@ class _FakeFP(SimpleNamespace):
 
 
 def _decide_once(prior, monkeypatch, goldens, leaves):
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", list(goldens))
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", list(goldens))
     fp = _FakeFP(
         ctx=Context.from_target(CAP, gpu_name=CARD),
         options=list(leaves),
@@ -260,12 +264,10 @@ def test_tune_path_never_routes_through_the_deploy_pick():
 
 
 # --- attention / norm kinds (the ShapeKey ``kind`` extension) -----------------------------------
-# Stamp bases measured off the real traced ops (see test_shape_key_kinds): the flash op is a sweep
+# Stamp bases measured off real traced operations: the flash op is a sweep
 # (S_loop_depth < n_free + n_reduce + n_sym) with exp + 3 free loops -> kind="flash"; RMSNorm sweeps
 # with rsqrt -> kind="rms_norm". Fork leaves captured off the live flash enumeration key
 # TILE@dd + TILE@pj (+ REDUCE@kv / STAGE@kv) for BOTH the static and masked forms.
-
-from emmy.compiler.pipeline.search.golden import AttentionGoldenConfig, RmsNormGoldenConfig  # noqa: E402
 
 _FLASH_SIG = {
     "S_ext_free_prod": 2097152.0,
@@ -316,17 +318,12 @@ def _flash_row(dd, pj, work, stage="d2/cp", base=None):
 
 
 def _attention(name="gemma4_12b.attention.hd256", knobs=None, us=44.3, *, dynamic=False):
-    return AttentionGoldenConfig(
-        name=name,
-        n_heads=16,
-        seq=512,
-        head_dim=256,
-        dtype="fp16",
-        dynamic=dynamic,
-        knobs=knobs or {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "WORK": "w4x1", "STAGE": "d2/cp"},
-        emmy_us=us,
-        gpu_name=CARD,
-        compute_cap=CAP,
+    knobs = knobs or {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "WORK": "w4x1", "STAGE": "d2/cp"}
+    return _record(
+        name,
+        ShapeKey(4096 if dynamic else 16 * 512 * 256, 0 if dynamic else 512, True, dynamic, "flash"),
+        knobs,
+        us,
     )
 
 
@@ -384,9 +381,7 @@ def test_attention_fm_pv_plan_golden_self_excludes_gate_off(monkeypatch):
 
 
 def test_rms_norm_golden_decides_its_op(monkeypatch):
-    gold = RmsNormGoldenConfig(
-        name="rms_norm.k3840", M=512, K=3840, knobs={"REDUCE": "coop", "WORK": "t256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP
-    )
+    gold = _record("rms_norm.k3840", ShapeKey(512 * 3840, 3840, False, kind="rms_norm"), {"REDUCE": "coop", "WORK": "t256"}, 6.3)
     index = _index(monkeypatch, [gold])
     rows = [{**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t32"}, {**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t256"}]
     assert _golden_pick(index, rows, "n0") == (1, 6.3)
@@ -424,9 +419,7 @@ def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
     the aspect and the key must keep it (see the collision test below).
     (``_norm_linear`` / ``_FUSED_SIG`` below are the POST-split fused op the classifier already kinds;
     this is the PRE-split fork the classifier misses.)"""
-    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
-
-    fused_key = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={}).shape_key()
+    fused_key = ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096)
     key = _fork_shape_key([_CONE_ROW])
     assert key == fused_key
     assert key.kind == "fused" and key.is_warp and key.free_max == 4096
@@ -446,10 +439,8 @@ def test_fused_key_separates_aspect_equal_free_prod_cones():
     (32x4096) and the M=256 GLOBAL norm→kv (256x512) share free_prod=131072 AND reduce_max=3840.
     Without the aspect the global prefill cone silently deployed the local decode cone's golden and
     reported its 24.1 us. ``free_max`` must keep them apart on BOTH builders."""
-    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
-
-    local_q = NormLinearGoldenConfig(name="q", M=32, H=3840, N=4096, knobs={}).shape_key()
-    global_kv = NormLinearGoldenConfig(name="kv", M=256, H=3840, N=512, knobs={}).shape_key()
+    local_q = ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096)
+    global_kv = ShapeKey(256 * 512, 3840, True, kind="fused", free_max=512)
     assert local_q.free_prod == global_kv.free_prod == 131072
     assert local_q.reduce_max == global_kv.reduce_max == 3840
     assert local_q != global_kv and (local_q.free_max, global_kv.free_max) == (4096, 512)
@@ -461,9 +452,7 @@ def test_fused_key_separates_aspect_equal_free_prod_cones():
 def test_dynamic_fused_key_normalizes_the_aspect_away():
     """A symbolic-M cone has no static aspect — ``free_max`` must normalize to 0 so the dynamic twin
     keeps joining its golden (the static/dynamic split stays the only discriminator)."""
-    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
-
-    dyn = NormLinearGoldenConfig(name="q", M=512, H=3840, N=4096, knobs={}, dynamic=True).shape_key()  # M = DEFAULT_SEQ_HINT
+    dyn = ShapeKey(4096, 3840, True, True, "fused")
     assert dyn.is_dyn and dyn.free_max == 0
     # bf16 operands rebuild identically — the offer-keyed rebuild is dtype-blind.
     bf16 = _fork_shape_key([{**{k: v for k, v in _CONE_ROW.items() if k != "S_dtype_f16"}, "S_dtype_bf16": 1.0}])
@@ -487,8 +476,12 @@ def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):
     cross: the flash op's sweep stamps classify kind="flash", the contraction's stamps
     kind="" — each key joins only its own kind."""
     # Matmul golden whose extents collide with the flash op's (free 2097152, K 512, warp).
-    collide = _golden(name="matmul.sq512ish", knobs={"TILE": _STD_TILE, "STAGE": "d2/cp"})
-    object.__setattr__(collide, "K", 512)  # frozen dataclass; forge the colliding reduce extent
+    collide = _record(
+        "matmul.sq512ish",
+        ShapeKey(2097152, 512, True),
+        {"TILE": _STD_TILE, "STAGE": "d2/cp"},
+        78.0,
+    )
     index = _index(monkeypatch, [collide])
     flash_rows = [_flash_row(_DD_W4X1_SITE, _PJ_SITE, "w4x1")]
     assert _golden_pick(index, flash_rows, "n0") is None  # matmul golden never decides a flash op
@@ -506,8 +499,6 @@ def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):
 # contraction) -> kind="fused". S_dtype_f32 present (the real 12B model's f32 statistic constants):
 # is_warp is FORCED True for the kind (a computed-A contraction is a warp mma). The fork leaves are
 # axis-keyed TILE@a3 + STAGE@a3 + REDUCE@a3 over the ``sync`` compute-fill (d1/d2/sync, not tma).
-
-from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig  # noqa: E402
 
 _FUSED_SIG = {
     "S_ext_free_prod": 131072.0,
@@ -531,16 +522,12 @@ def _fused_row(tile, stage="d2/sync", reduce="g4k"):
 
 
 def _norm_linear(name="gemma4_12b.q_proj_fused", knobs=None, us=34.8):
-    return NormLinearGoldenConfig(
-        name=name,
-        M=32,
-        H=3840,
-        N=4096,
-        dtype="fp16",
-        knobs=knobs or {"TILE": _FUSED_TILE, "STAGE": "d2/sync", "REDUCE": "g4k", "RASTER": ""},
-        emmy_us=us,
-        gpu_name=CARD,
-        compute_cap=CAP,
+    knobs = knobs or {"TILE": _FUSED_TILE, "STAGE": "d2/sync", "REDUCE": "g4k", "RASTER": ""}
+    return _record(
+        name,
+        ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096),
+        knobs,
+        us,
     )
 
 
@@ -563,9 +550,7 @@ def test_fused_golden_never_crosses_rms_norm_or_matmul(monkeypatch):
     mm_rows = _rows(_ROW_GOLD)
     assert _golden_pick(index, mm_rows, "n0") is None
     # And a bare rms_norm golden must not decide the fused op.
-    rms_gold = RmsNormGoldenConfig(
-        name="rms.k3840", M=512, K=3840, knobs={"REDUCE": "coop", "WORK": "t256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP
-    )
+    rms_gold = _record("rms.k3840", ShapeKey(512 * 3840, 3840, False, kind="rms_norm"), {"REDUCE": "coop", "WORK": "t256"}, 6.3)
     assert _golden_pick(_index(monkeypatch, [rms_gold]), [_fused_row(_FUSED_TILE)], "n0") is None
 
 
@@ -577,7 +562,7 @@ def test_fused_golden_never_crosses_rms_norm_or_matmul(monkeypatch):
 
 
 def _decide_no_prior(monkeypatch, goldens, leaves, blocked=None):
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", list(goldens))
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", list(goldens))
     with config.nvcc_flags_override(""):  # the deployable -O3 regime (H_opt=3) golden consultation is gated on
         ctx = Context.from_target(CAP, gpu_name=CARD)
     fp = _FakeFP(ctx=ctx, options=list(leaves), root_op=SimpleNamespace(knobs=dict(_SIG)), node_id="n0", match=None)
@@ -759,23 +744,18 @@ def _offered_flash_form(rows: list[dict]) -> dict:
 def _decoy():
     """An off-shape golden keeping the evidence index non-empty during the probe
     resolve — the tier (and so the spy) only runs when the card has recorded goldens."""
-    return AttentionGoldenConfig(
-        name="attention.hd64.decoy",
-        n_heads=2,
-        seq=512,
-        head_dim=64,
-        dtype="fp16",
-        knobs={"TILE@dd": "mma_m16n8k16_f16_f32/f1x2/k16", "WORK": "w1x1"},
-        emmy_us=1.0,
-        gpu_name=CARD,
-        compute_cap=CAP,
+    return _record(
+        "attention.hd64.decoy",
+        ShapeKey(2 * 512 * 64, 512, True, kind="flash"),
+        {"TILE@dd": "mma_m16n8k16_f16_f32/f1x2/k16", "WORK": "w1x1"},
+        1.0,
     )
 
 
 @pytest.mark.parametrize("dyn", [[], _SDPA_DYN], ids=["static", "dynM"])
 def test_attention_golden_decides_the_live_flash_fork(monkeypatch, dyn):
     # Probe resolve: capture the flash fork's offered rows (decoy keeps the tier live).
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [_decoy()])
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [_decoy()])
     rows_sink: list = []
     picks_sink: list = []
     _spying(monkeypatch, rows_sink, picks_sink)
@@ -789,19 +769,13 @@ def test_attention_golden_decides_the_live_flash_fork(monkeypatch, dyn):
         if dyn
         else {"TILE@dd": form["TILE@dd"], "TILE@pj": form["TILE@pj"], "STAGE": form.get("STAGE@kv", "")}
     )
-    gold = AttentionGoldenConfig(
-        name="attention.hd256.test",
-        n_heads=16,
-        seq=512,
-        head_dim=256,
-        dtype="fp16",
-        dynamic=bool(dyn),
-        knobs=knobs,
-        emmy_us=44.3,
-        gpu_name=CARD,
-        compute_cap=CAP,
+    gold = _record(
+        "attention.hd256.test",
+        ShapeKey(4096 if dyn else 16 * 512 * 256, 0 if dyn else 512, True, bool(dyn), "flash"),
+        knobs,
+        44.3,
     )
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [gold])
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [gold])
     rows_sink.clear()
     picks_sink.clear()
     graph = _resolve(_SDPA, dyn)
@@ -815,7 +789,7 @@ def test_attention_golden_decides_the_live_flash_fork(monkeypatch, dyn):
 
 
 def test_rms_norm_golden_decides_the_live_reduce_fork(monkeypatch):
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [_decoy()])
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [_decoy()])
     rows_sink: list = []
     picks_sink: list = []
     _spying(monkeypatch, rows_sink, picks_sink)
@@ -825,16 +799,13 @@ def test_rms_norm_golden_decides_the_live_reduce_fork(monkeypatch):
         pytest.skip("the rms_norm lowering offers no REDUCE fork on this pipeline")
     form = reduce_rows[-1]  # any non-head row: the stub prior prefers emission order
     fam_key = next(k for k in form if k.startswith("REDUCE@"))
-    gold = RmsNormGoldenConfig(
-        name="rms_norm.k3840.test",
-        M=512,
-        K=3840,
-        knobs={"REDUCE": form[fam_key]},
-        emmy_us=6.3,
-        gpu_name=CARD,
-        compute_cap=CAP,
+    gold = _record(
+        "rms_norm.k3840.test",
+        ShapeKey(512 * 3840, 3840, False, kind="rms_norm"),
+        {"REDUCE": form[fam_key]},
+        6.3,
     )
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [gold])
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [gold])
     picks_sink.clear()
     _resolve(_RMS, [])
     assert any(got is not None and got[1] == 6.3 for _, got in picks_sink), f"rms_norm golden never decided: {picks_sink}"

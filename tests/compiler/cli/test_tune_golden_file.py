@@ -9,7 +9,9 @@ import pytest
 
 from emmy.commands import tune
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
@@ -19,6 +21,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     realized_tuning_knobs,
     validate_working_gpu,
 )
+from emmy.compiler.torch_wire import intern_program
 
 
 def _args(path, **over):
@@ -37,58 +40,59 @@ def _args(path, **over):
 
 def _matmul(name: str, *, knobs=None, emmy_us=None, cublas_us=None):
     entry = {
-        "kernel": "matmul",
         "name": name,
-        "M": 16,
-        "N": 32,
-        "K": 64,
-        "dtype": "fp16",
+        "target": {"origins": ["matmul"]},
     }
     if knobs is not None:
         entry["knobs"] = knobs
     if emmy_us is not None:
-        entry["emmy_us"] = emmy_us
-        entry["cublas_us"] = cublas_us
+        entry["measurements"] = {
+            "emmy_us": emmy_us,
+            "reference_us": cublas_us,
+            "reference_backend": "cublas",
+        }
     return entry
 
 
-def test_working_file_groups_candidate_rows_and_resolves_traced_reproducer(tmp_path):
-    repro = tmp_path / "trace.kernels" / "k.torch.json"
-    repro.parent.mkdir()
-    repro.write_text("{}")
+def _document(*entries):
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16, 64), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (64, 32), "f16"), node_id="w")
+    graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (16, 32), "f16"), node_id="matmul")
+    graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
+    programs = {}
+    program_id = intern_program(programs, graph)
+    rows = []
+    for entry in entries:
+        row = dict(entry)
+        row["program"] = program_id
+        rows.append(row)
+    return {"format_version": 2, "compute_cap": [8, 9], "programs": programs, "configs": rows}
+
+
+def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
     path = tmp_path / "trace.yaml"
-    dump_golden_file(
-        {
-            "format_version": 1,
-            "configs": [
-                _matmul("mm"),
-                _matmul("mm", knobs={"TILE": "f2x2"}),
-                {"kernel": "traced", "name": "k", "reproducer": "trace.kernels/k.torch.json"},
-            ],
-        },
-        path,
-    )
+    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
 
     document, targets = load_working_targets(path)
 
     assert document["configs"][0]["name"] == "mm"
-    assert len(targets) == 2
-    mm = next(target for target in targets if target.label == "mm")
-    assert mm.code.startswith("torch.matmul(") and mm.input is None
+    assert len(targets) == 1
+    mm = targets[0]
+    assert mm.code is None and mm.input is None and isinstance(mm.program.nodes["matmul"].op, MatmulOp)
     assert mm.entry_indexes == [0, 1]
     assert mm.proposals == [(1, {"TILE": "f2x2"})]
-    traced = next(target for target in targets if target.label == "k")
-    assert traced.code is None and traced.input == str(repro.resolve())
 
 
 def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file({"format_version": 1, "configs": [_matmul("mm"), _matmul("mm", knobs={})]}, path)
+    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={})), path)
 
-    _document, targets = load_working_targets(path)
+    loaded_document, targets = load_working_targets(path)
 
     assert targets[0].entry_indexes == [0, 1]
     assert targets[0].proposals == [(1, {})]
+    assert loaded_document["format_version"] == 2
 
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():
@@ -101,14 +105,12 @@ def test_multi_cuda_realized_knobs_must_be_conflict_free():
     assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
-def test_working_file_rejects_missing_traced_reproducer(tmp_path):
+def test_working_file_rejects_legacy_reproducer_field(tmp_path):
     path = tmp_path / "trace.yaml"
-    dump_golden_file(
-        {"format_version": 1, "configs": [{"kernel": "traced", "name": "k", "reproducer": "missing.json"}]},
-        path,
-    )
-    with pytest.raises(ValueError, match="does not exist"):
-        load_working_targets(path)
+    document = _document(_matmul("mm"))
+    document["configs"][0]["reproducer"] = "missing.json"
+    with pytest.raises(ValueError, match="unknown field"):
+        dump_golden_file(document, path)
 
 
 def test_working_file_rejects_missing_yaml_cleanly(tmp_path):
@@ -118,7 +120,7 @@ def test_working_file_rejects_missing_yaml_cleanly(tmp_path):
 
 def test_working_file_is_mutually_exclusive_with_direct_input(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file({"format_version": 1, "configs": [_matmul("mm")]}, path)
+    dump_golden_file(_document(_matmul("mm")), path)
     with pytest.raises(SystemExit) as exc:
         tune.handle_tune(_args(path, code="torch.ones(1)", max_candidates=None))
     assert exc.value.code == 2
@@ -128,7 +130,7 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     path = tmp_path / "working.yaml"
     verified = _matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0)
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
-    document = {"format_version": 1, "configs": [verified, proposal]}
+    document = _document(verified, proposal)
     dump_golden_file(document, path)
     document, targets = load_working_targets(path)
     target = targets[0]
@@ -152,26 +154,28 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
 
     got = load_golden_file(path)
     assert "ranking" not in got["configs"][0]
-    assert got["configs"][0]["emmy_us"] == 9.0
+    assert got["configs"][0]["measurements"]["emmy_us"] == 9.0
     assert got["configs"][1]["ranking"]["source"] == "proposal"
     assert got["configs"][1]["ranking"]["latency_us"] == 8.0
     winner = got["configs"][2]
     assert winner["knobs"] == {"TILE": "f8x2"}
     assert winner["ranking"]["source"] == "tune"
     assert winner["ranking"]["tune_winner"] is True
-    assert "emmy_us" not in winner and "cublas_us" not in winner
+    assert "measurements" not in winner
 
 
 def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file({"format_version": 1, "configs": [_matmul("mm")]}, path)
+    dump_golden_file(_document(_matmul("mm")), path)
     document, targets = load_working_targets(path)
     result = SimpleNamespace(best_reward=SimpleNamespace(searched_winner=lambda: None), assembled=object())
 
     persist_tune_winner(path, document, targets[0], result.best_reward.searched_winner(), compile_flags="-O1")
 
     got = load_golden_file(path)
-    assert got["configs"] == [_matmul("mm")]
+    assert len(got["configs"]) == 1
+    assert got["configs"][0]["name"] == "mm"
+    assert got["configs"][0]["target"] == {"origins": ["matmul"]}
 
 
 def test_working_file_rejects_canonical_path_and_symlink(tmp_path):
@@ -185,7 +189,7 @@ def test_working_file_rejects_canonical_path_and_symlink(tmp_path):
             load_working_targets(path)
 
 
-def test_copied_rtx4080_provisional_rows_resolve_as_working_candidates(tmp_path):
+def test_copied_repository_rows_resolve_as_working_candidates(tmp_path):
     from emmy.compiler.pipeline.search import golden
 
     canonical = golden._GOLDENS_DIR / "rtx4080_sm89.yaml"
@@ -195,10 +199,8 @@ def test_copied_rtx4080_provisional_rows_resolve_as_working_candidates(tmp_path)
 
     _loaded, targets = load_working_targets(copied)
 
-    provisional_indexes = {i for i, entry in enumerate(document["configs"]) if entry.get("provisional")}
     proposal_indexes = {i for target in targets for i, _knobs in target.proposals}
-    assert len(provisional_indexes) == 3
-    assert provisional_indexes <= proposal_indexes
+    assert proposal_indexes == set(range(len(document["configs"])))
 
 
 def test_working_gpu_guard_allows_portable_trace_and_rejects_mismatch():

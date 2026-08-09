@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LayerNormOp,
@@ -482,6 +482,8 @@ def _handle_getitem(fx_node: Any, node_map: dict[str, NodeRef]) -> None:
         raise NotImplementedError("operator.getitem on an aten.chunk result requires a constant integer tuple index")
     index = raw_index if raw_index >= 0 else len(ref) + raw_index
     if not 0 <= index < len(ref):
+        if hasattr(fx_node, "users") and not fx_node.users:
+            return  # torch.export may leave a dead getitem for an unused tuple result
         raise IndexError(f"aten.chunk tuple index {raw_index} is out of range for {len(ref)} outputs")
     node_map[fx_node.name] = ref[index]
 
@@ -550,6 +552,183 @@ def _handle_chunk(
     node_map[fx_node.name] = tuple(output_ids)
 
 
+def _handle_split_with_sizes(
+    g: Graph,
+    fx_node: Any,
+    node_map: dict[str, NodeRef],
+    *,
+    sym_rename: dict[str, str] | None = None,
+) -> None:
+    """Materialize a static ``aten.split_with_sizes`` tuple as slices."""
+    if len(fx_node.args) < 2:
+        raise ValueError("aten.split_with_sizes requires a size list")
+    source = fx_node.args[0]
+    source_ref = node_map.get(getattr(source, "name", None))
+    if not isinstance(source_ref, str):
+        raise ValueError("aten.split_with_sizes input did not resolve to a tensor")
+
+    raw_sizes = fx_node.args[1]
+    if not isinstance(raw_sizes, (list, tuple)) or any(
+        not isinstance(size, int) or isinstance(size, bool) or size < 0 for size in raw_sizes
+    ):
+        raise NotImplementedError("aten.split_with_sizes requires a static list of non-negative integer sizes")
+
+    raw_dim = fx_node.args[2] if len(fx_node.args) > 2 else 0
+    if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
+        raise NotImplementedError("aten.split_with_sizes requires a constant integer dimension")
+    source_node = g.nodes[source_ref]
+    rank = len(source_node.output.shape)
+    dim = raw_dim if raw_dim >= 0 else rank + raw_dim
+    if not 0 <= dim < rank:
+        raise ValueError(f"aten.split_with_sizes dimension {raw_dim} is out of range for rank-{rank} input")
+
+    values = fx_node.meta.get("val")
+    if not isinstance(values, (list, tuple)) or len(values) != len(raw_sizes):
+        raise NotImplementedError("aten.split_with_sizes requires matching FX tuple output metadata")
+
+    output_ids: list[str] = []
+    offset = 0
+    for index, (size, value) in enumerate(zip(raw_sizes, values, strict=True)):
+        if not hasattr(value, "shape") or value.shape[dim] != size:
+            raise ValueError(f"aten.split_with_sizes output {index} metadata does not match declared size {size}")
+        shape = _wrap_shape(tuple(value.shape), sym_rename)
+        dtype = str(value.dtype).replace("torch.", "")
+        output_name = f"{fx_node.name}_{index}"
+        output_id = g.add_node(
+            op=SliceOp(shape=_dim_tuple_to_op_shape(shape), dim=dim, start=offset),
+            inputs=[source_ref],
+            output=Tensor(output_name, shape, dtype),
+            node_id=output_name,
+        )
+        output_ids.append(output_id)
+        offset += size
+
+    input_extent = source_node.output.shape[dim]
+    if getattr(input_extent, "is_static", False) and offset != input_extent.as_static():
+        raise ValueError(f"aten.split_with_sizes sizes cover {offset} elements but input dimension has {input_extent.as_static()}")
+    node_map[fx_node.name] = tuple(output_ids)
+
+
+def _handle_unbind(
+    g: Graph,
+    fx_node: Any,
+    node_map: dict[str, NodeRef],
+    *,
+    sym_rename: dict[str, str] | None = None,
+) -> None:
+    """Materialize static ``aten.unbind`` outputs as axis-fixing index maps."""
+    if not fx_node.args:
+        raise ValueError("aten.unbind requires an input tensor")
+    source = fx_node.args[0]
+    source_ref = node_map.get(getattr(source, "name", None))
+    if not isinstance(source_ref, str):
+        raise ValueError("aten.unbind input did not resolve to a tensor")
+
+    raw_dim = fx_node.args[1] if len(fx_node.args) > 1 else 0
+    if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
+        raise NotImplementedError("aten.unbind requires a constant integer dimension")
+    source_node = g.nodes[source_ref]
+    rank = len(source_node.output.shape)
+    dim = raw_dim if raw_dim >= 0 else rank + raw_dim
+    if not 0 <= dim < rank:
+        raise ValueError(f"aten.unbind dimension {raw_dim} is out of range for rank-{rank} input")
+
+    values = fx_node.meta.get("val")
+    if not isinstance(values, (list, tuple)):
+        raise NotImplementedError("aten.unbind requires FX-provided static tuple output metadata")
+    input_extent = source_node.output.shape[dim]
+    if getattr(input_extent, "is_static", False) and len(values) != input_extent.as_static():
+        raise ValueError(f"aten.unbind produced {len(values)} outputs but input dimension has {input_extent.as_static()} elements")
+
+    output_ids: list[str] = []
+    for index, value in enumerate(values):
+        if not hasattr(value, "shape") or len(value.shape) != rank - 1:
+            raise NotImplementedError("aten.unbind output metadata must contain rank-reduced tensor shapes")
+        shape = _wrap_shape(tuple(value.shape), sym_rename)
+        dtype = str(value.dtype).replace("torch.", "")
+        coord_map = []
+        output_dim = 0
+        for input_dim in range(rank):
+            if input_dim == dim:
+                coord_map.append(Literal(index, "int"))
+            else:
+                coord_map.append(placeholder(output_dim))
+                output_dim += 1
+        output_name = f"{fx_node.name}_{index}"
+        output_id = g.add_node(
+            op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=tuple(coord_map)),)),
+            inputs=[source_ref],
+            output=Tensor(output_name, shape, dtype),
+            node_id=output_name,
+        )
+        output_ids.append(output_id)
+    node_map[fx_node.name] = tuple(output_ids)
+
+
+def _handle_max_dim_values(
+    g: Graph,
+    fx_node: Any,
+    node_map: dict[str, NodeRef],
+    *,
+    sym_rename: dict[str, str] | None = None,
+) -> None:
+    """Lower ``aten.max.dim`` when the graph consumes only its values tuple item."""
+    for user in fx_node.users:
+        uses_values = (
+            user.target is operator.getitem
+            and len(user.args) >= 2
+            and isinstance(user.args[1], int)
+            and (user.args[1] == 0 or (user.args[1] == 1 and not user.users))
+        )
+        if not uses_values:
+            raise NotImplementedError("aten.max.dim argmax indices are not supported by Torch IR")
+
+    source = fx_node.args[0] if fx_node.args else None
+    source_ref = node_map.get(getattr(source, "name", None))
+    if not isinstance(source_ref, str):
+        raise ValueError("aten.max.dim input did not resolve to a tensor")
+    raw_dim = fx_node.args[1] if len(fx_node.args) > 1 else -1
+    if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
+        raise NotImplementedError("aten.max.dim requires a constant integer dimension")
+    raw_keepdim = fx_node.args[2] if len(fx_node.args) > 2 else False
+    if not isinstance(raw_keepdim, bool):
+        raise NotImplementedError("aten.max.dim requires a constant keepdim flag")
+
+    values = fx_node.meta.get("val")
+    if not isinstance(values, (list, tuple)) or len(values) != 2 or not hasattr(values[0], "shape"):
+        raise NotImplementedError("aten.max.dim requires FX-provided values/indices output metadata")
+    value = values[0]
+    shape = _wrap_shape(tuple(value.shape), sym_rename)
+    dtype = str(value.dtype).replace("torch.", "")
+    input_shape = tuple(g.nodes[source_ref].output.shape)
+    axis = raw_dim if raw_dim >= 0 else len(input_shape) + raw_dim
+    keepdim_shape = _keepdim_shape(input_shape, axis)
+    reduce_op = ReduceOp(op=ElementwiseImpl("amax"), axis=axis)
+    value_name = f"{fx_node.name}_values"
+    if raw_keepdim:
+        value_id = g.add_node(
+            op=reduce_op,
+            inputs=[source_ref],
+            output=Tensor(value_name, shape, dtype),
+            node_id=value_name,
+        )
+    else:
+        reduce_id = g.add_node(
+            op=reduce_op,
+            inputs=[source_ref],
+            output=Tensor(f"{value_name}_keepdim", keepdim_shape, dtype),
+        )
+        value_id = g.add_node(
+            op=_squeeze_indexmap(keepdim_shape, shape, axis),
+            inputs=[reduce_id],
+            output=Tensor(value_name, shape, dtype),
+            node_id=value_name,
+        )
+    # Only tuple item zero is permitted above, so a one-element reference tuple
+    # faithfully services every downstream getitem without inventing argmax IR.
+    node_map[fx_node.name] = (value_id,)
+
+
 def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
     """Handle call_function nodes — faithful 1:1 capture of FX ops."""
     if fx_node.target is operator.getitem:
@@ -559,6 +738,15 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     op_name = _op_name(fx_node.target)
     if op_name == "chunk":
         _handle_chunk(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name == "split_with_sizes":
+        _handle_split_with_sizes(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name == "unbind":
+        _handle_unbind(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name == "max" and isinstance(fx_node.meta.get("val"), (list, tuple)):
+        _handle_max_dim_values(g, fx_node, node_map, sym_rename=sym_rename)
         return
 
     # ``aten.sym_size.int`` and similar shape-metadata ops return a
@@ -618,6 +806,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         "reciprocal",
         "pow",
         "silu",
+        "softplus",
         "relu",
         "tanh",
         "abs",
@@ -678,6 +867,12 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     if op_name in _ELEMENTWISE_SOURCES:
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
+        if op_name == "softplus":
+            beta = fx_node.args[1] if len(fx_node.args) > 1 else (fx_node.kwargs or {}).get("beta", 1)
+            threshold = fx_node.args[2] if len(fx_node.args) > 2 else (fx_node.kwargs or {}).get("threshold", 20)
+            if float(beta) != 1.0 or float(threshold) != 20.0:
+                raise NotImplementedError("aten.softplus currently supports only beta=1 and threshold=20")
+            input_ids = input_ids[:1]
         canonical = _ATEN_TO_NUMPY.get(op_name, op_name)
         # Disambiguate gelu's tanh approximation from the default erf form
         # — the FX node carries ``kwargs={'approximate': 'tanh'}`` only in
@@ -707,7 +902,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Matmul ---
-    if op_name in ("mm", "matmul"):
+    if op_name in ("mm", "matmul", "bmm"):
         nid = g.add_node(
             op=MatmulOp(),
             inputs=input_ids[:2],
@@ -818,10 +1013,16 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Reshape / view ---
-    if op_name in ("view", "reshape", "_unsafe_view"):
-        new_shape = fx_node.args[1] if len(fx_node.args) > 1 else shape
-        if isinstance(new_shape, (list, tuple)):
-            new_shape = _op_shape(new_shape, sym_rename)
+    if op_name in ("view", "reshape", "_unsafe_view", "flatten"):
+        if op_name == "flatten":
+            # aten.flatten carries start/end axes rather than the resulting
+            # dimensions. FakeTensor metadata has already calculated the exact
+            # output shape, including any symbolic dimensions.
+            new_shape = _dim_tuple_to_op_shape(shape)
+        else:
+            new_shape = fx_node.args[1] if len(fx_node.args) > 1 else shape
+            if isinstance(new_shape, (list, tuple)):
+                new_shape = _op_shape(new_shape, sym_rename)
         nid = g.add_node(
             op=ReshapeOp(shape=new_shape),
             inputs=input_ids[:1],
@@ -854,6 +1055,67 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
         node_map[name] = broadcast_to(g, input_ids[0], shape).id
+        return
+
+    if op_name == "repeat_interleave":
+        if not input_ids:
+            raise ValueError("aten.repeat_interleave input did not resolve to a tensor")
+        kw = fx_node.kwargs or {}
+        raw_repeats = kw.get("repeats", fx_node.args[1] if len(fx_node.args) > 1 else None)
+        raw_dim = kw.get("dim", fx_node.args[2] if len(fx_node.args) > 2 else None)
+        if not isinstance(raw_repeats, int) or isinstance(raw_repeats, bool) or raw_repeats <= 0:
+            raise NotImplementedError("aten.repeat_interleave requires a positive static integer repeat count")
+        if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
+            raise NotImplementedError("aten.repeat_interleave requires a constant integer dimension")
+        source_shape = tuple(g.nodes[input_ids[0]].output.shape)
+        rank = len(source_shape)
+        dim = raw_dim if raw_dim >= 0 else rank + raw_dim
+        if not 0 <= dim < rank:
+            raise ValueError(f"aten.repeat_interleave dimension {raw_dim} is out of range for rank-{rank} input")
+        coord_map = tuple(placeholder(axis) / Literal(raw_repeats, "int") if axis == dim else placeholder(axis) for axis in range(rank))
+        nid = g.add_node(
+            op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=coord_map),)),
+            inputs=input_ids[:1],
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        node_map[name] = nid
+        return
+
+    if op_name == "stack":
+        raw_tensors = fx_node.args[0] if fx_node.args else ()
+        if not isinstance(raw_tensors, (list, tuple)) or not raw_tensors:
+            raise ValueError("aten.stack requires a non-empty static tensor list")
+        tensor_ids = []
+        for tensor_arg in raw_tensors:
+            ref = node_map.get(getattr(tensor_arg, "name", None))
+            if not isinstance(ref, str):
+                raise ValueError("aten.stack input did not resolve to a tensor")
+            tensor_ids.append(ref)
+        kw = fx_node.kwargs or {}
+        raw_dim = kw.get("dim", fx_node.args[1] if len(fx_node.args) > 1 else 0)
+        if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
+            raise NotImplementedError("aten.stack requires a constant integer dimension")
+        output_rank = len(shape)
+        dim = raw_dim if raw_dim >= 0 else output_rank + raw_dim
+        if not 0 <= dim < output_rank:
+            raise ValueError(f"aten.stack dimension {raw_dim} is out of range for rank-{output_rank} output")
+        expected_input_shape = tuple(shape[:dim]) + tuple(shape[dim + 1 :])
+        for tensor_id in tensor_ids:
+            if tuple(g.nodes[tensor_id].output.shape) != expected_input_shape:
+                raise ValueError("aten.stack inputs must have the output shape with the stack axis removed")
+        sources = []
+        coord_map = tuple(placeholder(axis if axis < dim else axis + 1) for axis in range(output_rank - 1))
+        for index in range(len(tensor_ids)):
+            select = BinaryExpr("==", placeholder(dim), Literal(index, "int")) if index < len(tensor_ids) - 1 else None
+            sources.append(IndexSource(input_idx=index, coord_map=coord_map, select=select))
+        nid = g.add_node(
+            op=IndexMapOp(out_shape=shape, sources=tuple(sources)),
+            inputs=tensor_ids,
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        node_map[name] = nid
         return
 
     # --- Squeeze / permute ---
@@ -940,16 +1202,21 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Gather ---
-    if op_name in ("index_select", "gather", "embedding"):
+    if op_name in ("index_select", "gather", "embedding", "index"):
         axis = fx_node.args[1] if len(fx_node.args) > 1 and isinstance(fx_node.args[1], int) else 0
         # ``index_select(input, dim, index)`` / ``gather(input, dim, index)``
         # pass ``dim`` as a Python int in args[1] — ``_resolve_inputs`` has
         # captured it as a ConstantOp at input_ids[1]. ``GatherOp.axis``
         # already carries the dim value, so drop the spurious input or the
         # lift sees a 3-input gather (and picks the wrong node as idx).
-        # ``embedding`` keeps the original args (args[1] is the index tensor).
+        # ``embedding`` / simple ``index`` keep the original args (args[1]
+        # contains the index tensor). Advanced multi-axis indexing is rejected.
         if op_name in ("index_select", "gather") and len(input_ids) >= 3 and isinstance(fx_node.args[1], int):
             input_ids = [input_ids[0], *input_ids[2:]]
+        if op_name == "index":
+            raw_indices = fx_node.args[1] if len(fx_node.args) > 1 else ()
+            if not isinstance(raw_indices, (list, tuple)) or len(raw_indices) != 1 or raw_indices[0] is None:
+                raise NotImplementedError("aten.index currently supports one tensor index on axis 0")
         nid = g.add_node(
             op=GatherOp(axis=axis),
             inputs=input_ids,
@@ -1016,7 +1283,10 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     if input_ids:
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
-        input_ids = [broadcast_to(g, inp, shape) for inp in input_ids]
+        try:
+            input_ids = [broadcast_to(g, inp, shape) for inp in input_ids]
+        except ValueError as exc:
+            raise ValueError(f"cannot map fallback aten.{op_name} as elementwise for output shape {shape}") from exc
         nid = g.add_node(
             op=ElementwiseOp(op=op_name),
             inputs=input_ids,

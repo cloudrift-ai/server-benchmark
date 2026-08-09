@@ -490,7 +490,7 @@ async def run_two_level_tune(
     outer = TuningSearch(patience=patience, ucb_c=ucb_c, prior_model=prior, base_knobs=ctx.features())
     # The outer drives only the graph-changing passes (through the
     # pre-partition tile head) — no dump on this Run; the winning config's
-    # full stage artifacts (incl. per-kernel ``.torch.json`` reproducers) come
+    # full stage artifacts and in-memory frontend provenance slices come
     # from the final assembled CUDA_PASSES run below.
     outer_run = Run(pipeline=outer_pipeline(), ctx=ctx, search=outer, db=db)
 

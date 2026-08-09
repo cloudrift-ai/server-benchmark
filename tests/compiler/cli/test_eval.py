@@ -380,7 +380,6 @@ def test_prior_nodes_accepts_freeze_path(run_cli, tmp_path):
 
     db_path = tmp_path / "n.db"
     db = SearchDB(db_path)
-    spec = {"kernel": "matmul", "M": 64, "N": 64, "K": 64, "dtype": "fp32", "trans_b": False, "dynamic": False}
     s = {
         "H_cc": 120.0,
         "H_opt": 3.0,
@@ -393,8 +392,8 @@ def test_prior_nodes_accepts_freeze_path(run_cli, tmp_path):
     db.record_nodes(
         [
             NodeRow("P", None, "ctx", "mm", s, 1.0, 1, gpu=gpu, is_leaf=False),
-            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2, gpu=gpu, is_leaf=True, shape_spec=spec),
-            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2, gpu=gpu, is_leaf=True, shape_spec=spec),
+            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2, gpu=gpu, is_leaf=True),
+            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2, gpu=gpu, is_leaf=True),
         ]
     )
     db.close()
@@ -560,27 +559,24 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
     default), so the occupancy features priced tiles for a card that doesn't exist —
     the eval said rank 0 on gemma goldens the real 4090 misdeployed 12-29x. The fitter
     (now ``emmy fit``'s case builder) already passed it; this pins the eval side to match."""
-    import emmy.commands.eval as eval_cmd
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+    from types import SimpleNamespace
 
-    golden = MatmulGoldenConfig(
+    import emmy.commands.eval as eval_cmd
+
+    golden = SimpleNamespace(
         name="gemma4_12b.q_proj",
-        M=512,
-        N=4096,
-        K=3840,
-        dtype="fp16",
         knobs={"TILE": "mma_m16n8k16_f16_f32/f4x4/k2", "WORK": "w2x2"},
         gpu_name="NVIDIA GeForce RTX 4090",
         compute_cap=(8, 9),
     )
     seen: list = []
 
-    def fake_evaluate_golden(M, N, K, dtype, gold, ctx, *, dynamic=False):
+    def fake_evaluate_record(record, ctx):
         seen.append(ctx)
-        return dict(gold), 0, 1, 0
+        return dict(record.knobs), 0, 1, 0
 
     monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
-    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_golden", fake_evaluate_golden)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_record", fake_evaluate_record)
     eval_cmd._emit_offline_eval(None)
 
     assert len(seen) == 1
@@ -605,11 +601,29 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
     pytest.importorskip("torch")
     import emmy.commands.eval as eval_cmd
     import emmy.compiler.pipeline.search.golden as golden_mod
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.pipeline.search.golden import GoldenRecord
+    from emmy.compiler.torch_wire import graph_to_wire
 
     def cfg(name, m, knobs, us):
-        return MatmulGoldenConfig(
-            name=name, M=m, N=32, K=32, dtype="fp32", knobs=knobs, emmy_us=us, gpu_name="NVIDIA GeForce RTX 4090", compute_cap=(8, 9)
+        graph = Graph()
+        graph.add_node(InputOp(), [], Tensor("x", (m, 32)), node_id="x")
+        graph.add_node(InputOp(), [], Tensor("w", (32, 32)), node_id="w")
+        graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (m, 32)), node_id="matmul")
+        graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
+        return GoldenRecord(
+            name=name,
+            gpu_name="NVIDIA GeForce RTX 4090",
+            compute_cap=(8, 9),
+            model=None,
+            program_id=f"test:{name}:{m}",
+            program_wire=graph_to_wire(graph),
+            origins=("matmul",),
+            knobs=knobs,
+            measurements={"emmy_us": us, "reference_us": us, "reference_backend": "torch"},
+            ranking=None,
         )
 
     warp_pin = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2"}
@@ -618,9 +632,9 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
         cfg("audit.floored", 32, {}, 20.0),  # prefix-consistent with any offered row — the deploy floor
     ]
     orphan = [cfg("audit.orphan", 48, dict(warp_pin), 10.0)]  # ALL pin-only → falls through
-    # The compile-time golden index reads GOLDEN_CONFIGS scoped to the audited card — patch it
+    # The compile-time golden index reads GOLDEN_RECORDS scoped to the audited card — patch it
     # so the verdicts are hermetic (no dependence on the repo's real 4090 recordings).
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", floored + orphan)
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", floored + orphan)
 
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit(floored + orphan)

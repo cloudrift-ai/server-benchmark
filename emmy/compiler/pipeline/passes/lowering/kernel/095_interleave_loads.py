@@ -105,8 +105,11 @@ def _sink_loads(body: Body) -> Body:
         return body
 
     # For each Load index, find its first consumer position (or None).
-    # A consumer is any stmt downstream whose ``deps()`` references an
-    # SSA name this Load ``defines()``.
+    # A consumer is any downstream statement *or one of its nested body
+    # statements* whose ``deps()`` references an SSA name this Load defines.
+    # Block statements intentionally report only their own dependencies, so a
+    # plain ``stmt.deps()`` check can sink a loop-invariant load past a Loop
+    # that consumes it and generate an undefined local inside the loop.
     first_consumer: dict[int, int | None] = {}
     for i, s in enumerate(stmts):
         if not isinstance(s, Load):
@@ -114,7 +117,7 @@ def _sink_loads(body: Body) -> Body:
         names = frozenset(s.defines())
         first_consumer[i] = None
         for j in range(i + 1, len(stmts)):
-            if names.intersection(stmts[j].deps()):
+            if names.intersection(_nested_deps(stmts[j])):
                 first_consumer[i] = j
                 break
 
@@ -152,3 +155,12 @@ def _sink_loads(body: Body) -> Body:
 
     assert len(out) == len(stmts), f"sink_loads dropped stmts: {len(out)} vs {len(stmts)}"
     return Body(tuple(out))
+
+
+def _nested_deps(stmt: Stmt) -> frozenset[str]:
+    """Return SSA dependencies used anywhere in ``stmt``'s lexical subtree."""
+    deps = set(stmt.deps())
+    for nested in stmt.nested():
+        for child in nested:
+            deps.update(_nested_deps(child))
+    return frozenset(deps)

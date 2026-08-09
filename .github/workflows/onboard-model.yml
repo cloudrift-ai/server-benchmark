@@ -31,47 +31,6 @@ on:
         description: Optional open onboarding PR number to update (otherwise the selected workflow branch is detected)
         required: false
         type: string
-  workflow_call:
-    inputs:
-      model_id:
-        required: true
-        type: string
-      gpu:
-        required: true
-        type: string
-      gpu_count:
-        required: true
-        type: number
-      multimodal_mode:
-        required: false
-        default: auto
-        type: string
-      publish_image:
-        required: false
-        default: true
-        type: boolean
-      pull_request:
-        required: false
-        default: ""
-        type: string
-    secrets:
-      CLOUDRIFT_API_KEY:
-        required: true
-      EXPERIMENT_APP_ID:
-        required: true
-      EXPERIMENT_APP_PRIVATE_KEY:
-        required: true
-      HF_TOKEN:
-        required: false
-      DOCKERHUB_USERNAME:
-        required: false
-      DOCKERHUB_TOKEN:
-        required: false
-      GCP_SERVICE_ACCOUNT_KEY:
-        required: false
-      GCP_SERVICE_ACCOUNT:
-        required: false
-
 concurrency:
   group: onboard-${{ inputs.pull_request || inputs.model_id }}-${{ inputs.gpu }}-${{ inputs.gpu_count }}
   cancel-in-progress: false

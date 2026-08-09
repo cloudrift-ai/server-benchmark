@@ -12,9 +12,8 @@ tracked skills and CloudRift inference endpoint.
 | **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff, the test suite, and GitHub helper tests. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
 | **Run Experiment** | Authorized `/run-experiment` PR comment | GitHub-hosted | Runs selected cloud experiments and commits results to the PR branch. |
-| **Onboard model** | Manual dispatch or reusable-workflow call | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
-| **Discover and onboard model** | Manual dispatch | Self-hosted `agents` | Selects one model, then calls **Onboard model**. |
-| **Discover model nightly** | Nightly schedule or manual dispatch | Self-hosted `agents` | Selects one model and opens a capped plan PR without renting a VM. |
+| **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
+| **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Selects one model and opens a capped plan PR without renting a VM. |
 
 ## Pull-request checks
 
@@ -70,9 +69,8 @@ bounded. Discovery never provisions hardware.
 ### Direct onboarding
 
 **Onboard model** accepts an exact Hugging Face model ID, exact GPU name/count, multimodal qualification mode, optional
-existing onboarding PR, and explicit image-publication authorization. It is both manually dispatchable and callable
-by another workflow. The job has a six-hour limit and gives the agent an earlier deadline so artifact validation and
-cleanup retain time.
+existing onboarding PR, and explicit image-publication authorization. The job has a six-hour limit and gives the
+agent an earlier deadline so artifact validation and cleanup retain time.
 
 The workflow resolves an existing labeled onboarding PR or creates a new artifact branch, provisions exactly the
 requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
@@ -85,18 +83,12 @@ allowed recipe, experiment, serving-image, canonical-golden, and matching plan p
 output is rejected. The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable
 GitHub App credentials for the long-running push path.
 
-### Discover and immediately onboard
+### Discovery and plan PR
 
-**Discover and onboard model** takes an exact target and qualification mode. Its discovery job emits the selected
-model and target as outputs; when a model is found, it calls the reusable **Onboard model** workflow with image
-publication authorized. No onboarding job runs when discovery returns no suitable model.
-
-### Nightly discovery
-
-**Discover model nightly** defaults to one H200, with repository variables and manual inputs able to select another
-exact target. It creates no plan when three `model-onboarding` PRs are already open. After discovery it queries open
-PRs again, both to reject a duplicate model and to close the race in which another run reached the cap during
-discovery.
+**Discover model** runs nightly or by manual dispatch. It defaults to one H200, with repository variables and manual
+inputs able to select another exact target. It creates no plan when three `model-onboarding` PRs are already open.
+After discovery it queries open PRs again, both to reject a duplicate model and to close the race in which another
+run reached the cap during discovery.
 
 When allowed, the workflow commits one `plans/onboard-<model>.md` file on a new branch and opens a draft,
 `model-onboarding`-labeled PR. It never rents a VM. Running **Onboard model** from that branch, or with the PR number,
@@ -130,5 +122,5 @@ Agent and experiment workflows use these repository secrets as applicable:
 
 `ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
-`https://inference.cloudrift.ai/v1`. Nightly discovery defaults can be changed with `DISCOVERY_TARGET_GPU` and
+`https://inference.cloudrift.ai/v1`. Scheduled discovery defaults can be changed with `DISCOVERY_TARGET_GPU` and
 `DISCOVERY_TARGET_GPU_COUNT`.

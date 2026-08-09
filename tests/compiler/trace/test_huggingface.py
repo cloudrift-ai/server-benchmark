@@ -207,7 +207,6 @@ def test_static_layer_trace_selects_laguna_rope_tuple_from_config(monkeypatch):
     """Laguna's configured attention type selects one RoPE tuple, not the whole
     multi-RoPE mapping used by DeepSeek-style decoder blocks."""
     from types import SimpleNamespace
-
     import torch
     import torch.nn as nn
 
@@ -368,6 +367,61 @@ def test_trace_inventory_replaces_router_with_representative_expert():
 # ===================================================================
 # Quantized-twin state-dict adapters: encode-padding trim + per-expert packing
 # ===================================================================
+
+
+def test_quantized_architecture_loader_trusts_remote_code_only_when_required(monkeypatch):
+    """Custom quantized architectures get one explicit retry, while the default call
+    remains the only path for built-in architectures."""
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, _auto_model_from_config
+
+    config_calls = []
+    model_calls = []
+    config = object()
+    model = object()
+
+    def from_pretrained(path, **kwargs):
+        config_calls.append((path, kwargs))
+        if not kwargs.get("trust_remote_code"):
+            raise ValueError("set trust_remote_code=True to load this configuration")
+        return config
+
+    def from_config(actual_config, **kwargs):
+        model_calls.append((actual_config, kwargs))
+        if not kwargs.get("trust_remote_code"):
+            raise ValueError("set trust_remote_code=True to load this model")
+        return model
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", from_pretrained)
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_config", from_config)
+
+    assert _auto_config_from_pretrained("custom-model") is config
+    assert _auto_model_from_config(config, dtype="float16") is model
+    assert config_calls == [("custom-model", {}), ("custom-model", {"trust_remote_code": True})]
+    assert model_calls == [
+        (config, {"dtype": "float16"}),
+        (config, {"trust_remote_code": True, "dtype": "float16"}),
+    ]
+
+
+def test_quantized_architecture_loader_does_not_trust_other_value_errors(monkeypatch):
+    """Unrelated configuration failures retain their original exception and do not
+    authorize repository code execution."""
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import _auto_config_from_pretrained
+
+    calls = []
+
+    def from_pretrained(path, **kwargs):
+        calls.append((path, kwargs))
+        raise ValueError("invalid architecture")
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", from_pretrained)
+    with pytest.raises(ValueError, match="invalid architecture"):
+        _auto_config_from_pretrained("broken-model")
+    assert calls == [("broken-model", {})]
 
 
 def test_quantized_twin_constructs_directly_in_trace_dtype(monkeypatch, tmp_path):

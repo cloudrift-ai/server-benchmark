@@ -270,6 +270,142 @@ def test_trace_flatten_is_reshape():
     assert tuple(reshapes[0].output.shape) == (1, 8, 64)
 
 
+def test_trace_new_zeros_constructs_declared_shape_and_matches_eager():
+    """``Tensor.new_zeros`` constructs a tensor; its source is not an elementwise operand."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class NewZeros(nn.Module):
+        def forward(self, x):
+            return x.new_zeros((x.shape[0], x.shape[1], 8, 16))
+
+    x = torch.randn(1, 3, 4, 32)
+    graph = trace_module(NewZeros(), (x,))
+    assert tuple(graph.nodes[graph.outputs[0]].output.shape) == (1, 3, 8, 16)
+    assert any(isinstance(node.op, ConstantOp) and node.op.value == 0.0 for node in graph.nodes.values())
+    assert isinstance(graph.nodes[graph.outputs[0]].op, IndexMapOp)
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, NewZeros()(x).numpy())
+
+
+def test_trace_new_full_constructs_declared_shape_and_matches_eager():
+    """``Tensor.new_full`` uses a static fill scalar, not receiver values."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class NewFull(nn.Module):
+        def forward(self, x):
+            return x.new_full((x.shape[0], x.shape[1], 8, 16), float("-inf"))
+
+    x = torch.randn(1, 3, 4, 32)
+    graph = trace_module(NewFull(), (x,))
+    fill_nodes = [node for node in graph.nodes.values() if isinstance(node.op, ConstantOp) and node.op.value == float("-inf")]
+    assert len(fill_nodes) == 1
+    assert tuple(graph.nodes[graph.outputs[0]].output.shape) == (1, 3, 8, 16)
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, NewFull()(x).numpy())
+
+
+def test_trace_copy_uses_broadcast_source_values_and_matches_eager():
+    """``copy_(dest, src)`` produces broadcast source values; destination values are discarded."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Copy(nn.Module):
+        def forward(self, template, source):
+            return template.new_zeros((1, 3, 8, 16)).copy_(source)
+
+    template = torch.randn(1, 3, 4, 32)
+    source = torch.randn(1, 1, 8, 16)
+    graph = trace_module(Copy(), (template, source))
+    output = graph.nodes[graph.outputs[0]]
+    assert isinstance(output.op, IndexMapOp)
+    assert tuple(output.output.shape) == (1, 3, 8, 16)
+
+    backend = NumpyBackend()
+    input_data = {name: value.numpy() for name, value in zip(graph.inputs, (template, source), strict=True)}
+    result, _ = backend.run(backend.compile(graph), input_data=input_data)
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, Copy()(template, source).numpy())
+
+
+def test_trace_exports_in_inference_grad_mode_without_higher_order_wrapper():
+    """A ``no_grad`` helper must export its tensor ops directly, not as a tuple-valued HOP."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class NoGradPair(nn.Module):
+        @torch.no_grad()
+        def trig(self, x):
+            return x.cos(), x.sin()
+
+        def forward(self, x):
+            return self.trig(x)
+
+    x = torch.randn(2, 3)
+    graph = trace_module(NoGradPair(), (x,))
+    assert len(graph.outputs) == 2
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    for got, expected in zip(result.outputs.values(), NoGradPair()(x), strict=True):
+        np.testing.assert_allclose(got, expected.numpy(), rtol=1e-6, atol=1e-6)
+
+
+def test_trace_masked_fill_lowers_to_ternary_where_and_matches_eager():
+    """Scalar masked fill preserves ``-inf`` exactly; arithmetic selection would create NaNs."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class MaskedFill(nn.Module):
+        def forward(self, x, mask):
+            return x.masked_fill(mask, float("-inf"))
+
+    x = torch.randn(1, 3, 4)
+    mask = torch.tensor([[[False, True, False, True]]])
+    graph = trace_module(MaskedFill(), (x, mask))
+    where_nodes = [node for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp) and node.op.name == "where"]
+    assert len(where_nodes) == 1 and where_nodes[0].op.arity == 3
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    input_data = {name: value.numpy() for name, value in zip(compiled.inputs, (x, mask), strict=True)}
+    result, _ = backend.run(compiled, input_data=input_data)
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, MaskedFill()(x, mask).numpy())
+
+
 def test_trace_transpose():
     """aten.transpose traces to TransposeOp."""
     import torch

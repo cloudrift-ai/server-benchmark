@@ -33,7 +33,9 @@ def test_onecat_image_is_reproducibly_pinned(project_root) -> None:
     assert "ONECAT_COMMIT=91aca502d2bb1f05d9208ab2edec9fae53ff0d0b" in dockerfile
     assert "ONECAT_BASE_REF=cloudrift/v1.2.2" in dockerfile
     assert "ONECAT_BASE_TAG=v1.2.2" in dockerfile
+    assert 'fetch --depth 16 origin "refs/heads/${ONECAT_BASE_REF}:refs/tags/${ONECAT_BASE_TAG}"' in dockerfile
     assert 'test "$(git -C /src rev-parse HEAD)" = "${ONECAT_COMMIT}"' in dockerfile
+    assert 'merge-base --is-ancestor "${ONECAT_COMMIT}" "${ONECAT_BASE_TAG}"' in dockerfile
     assert "python -m build --wheel --no-isolation --outdir /wheels" in dockerfile
     assert "CMAKE_BUILD_TYPE=Release python -m build" in dockerfile
     assert "--mount=from=builder,source=/wheels,target=/tmp/wheels,ro" in dockerfile

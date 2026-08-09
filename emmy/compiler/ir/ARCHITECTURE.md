@@ -131,7 +131,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
-| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`exp`/`sin`/`cos`/…). |
+| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…). |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
@@ -161,6 +161,8 @@ behind the four sites that used to switch on the reduce op name (`Accum.render`'
 max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
 dtype an op is the decode cast for (the f8 family today) — the trait the tile binding
 arm's factor hoist queries instead of matching op names.
+Non-ufunc scalar functions whose arity cannot be read from NumPy declare it in the same module; ternary `where` is
+the current example. Its condition and both value operands are explicitly broadcast before the elementwise node.
 
 ## `loop/`
 

@@ -362,6 +362,7 @@ def build_attention_split_wrapper(block):
     Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``
     (in :func:`_build_pre_wrapper`): the carve has no seam for either and would silently drop
     them, corrupting outputs."""
+    import torch
     import torch.nn as nn
 
     pre = _build_pre_wrapper(block)  # carries the PLE / clip_qkv rejects — before any attribute reads
@@ -804,6 +805,35 @@ _EXL3_EXPERT_PROJ = {"gate_proj": "w_gate", "up_proj": "w_up", "down_proj": "w_d
 _EXL3_EXPERT_LEAF = {"trellis": "", "suh": "_suh", "svh": "_svh"}
 
 
+def _auto_config_from_pretrained(model_dir):
+    """Load an architecture config, trusting repository code only when required.
+
+    Keep the quantized-twin path aligned with the ordinary Hugging Face trace path:
+    built-in architectures stay on Transformers' implementation, while repositories
+    whose config explicitly requires custom code get one guarded retry.
+    """
+    from transformers import AutoConfig  # noqa: PLC0415
+
+    try:
+        return AutoConfig.from_pretrained(model_dir)
+    except ValueError as e:
+        if "trust_remote_code" not in str(e):
+            raise
+        return AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+
+
+def _auto_model_from_config(config, **kwargs):
+    """Build an auto model with the same guarded custom-code retry as its config."""
+    from transformers import AutoModelForCausalLM  # noqa: PLC0415
+
+    try:
+        return AutoModelForCausalLM.from_config(config, **kwargs)
+    except ValueError as e:
+        if "trust_remote_code" not in str(e):
+            raise
+        return AutoModelForCausalLM.from_config(config, trust_remote_code=True, **kwargs)
+
+
 def _expert_slot(key: str):
     """``(layer_index, program_input_name, expert_index)`` when ``key`` is a per-expert tensor of
     a MoE layer's experts module, else ``None``. ``expert_index`` is ``None`` for the
@@ -916,7 +946,6 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
 
     import torch  # noqa: PLC0415
     from safetensors import safe_open  # noqa: PLC0415
-    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
 
     from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard  # noqa: PLC0415
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
@@ -930,11 +959,11 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
     model_dir = Path(model_dir)
-    config = AutoConfig.from_pretrained(model_dir)
+    config = _auto_config_from_pretrained(model_dir)
     if getattr(config, "quantization_config", None) is not None:
         delattr(config, "quantization_config")
     with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config)
+        model = _auto_model_from_config(config)
 
     qc = _fp8_quant_config(model_dir) or {}
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
@@ -1206,17 +1235,16 @@ def load_quantized_twin(model_dir, dtype):
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
-    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import load_dequantized_state_dict  # noqa: PLC0415
 
-    config = AutoConfig.from_pretrained(model_dir)
+    config = _auto_config_from_pretrained(model_dir)
     if getattr(config, "quantization_config", None) is not None:
         delattr(config, "quantization_config")
     # Construct directly in the trace dtype.  Building in the framework default
     # (normally fp32) and converting afterwards briefly holds both copies; that is
     # enough to OOM even very large-memory hosts on checkpoints such as DeepSeek V4.
-    model = AutoModelForCausalLM.from_config(config, dtype=dtype)
+    model = _auto_model_from_config(config, dtype=dtype)
     state: dict = {}
     for k, v in load_dequantized_state_dict(model_dir).items():
         t = torch.from_numpy(np.ascontiguousarray(v))

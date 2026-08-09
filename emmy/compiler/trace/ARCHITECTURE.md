@@ -8,7 +8,7 @@ Layer-1 frontend ops.
 ### `torch.py` — FX → Graph IR
 
 `trace_module(module, args, kwargs=None) → Graph` runs
-`torch.export.export()` to get an FX graph, then walks each node and
+`torch.export.export()` under `torch.no_grad()` to get the inference FX graph, then walks each node and
 emits the matching frontend op (`LinearOp`, `MatmulOp`, `SdpaOp`,
 `ElementwiseOp`, `ReduceOp`, …). `trace_module_with_constants` returns
 the graph plus a `placeholder_name → attr_path` dict for resolving
@@ -18,6 +18,11 @@ Per-op handlers map aten names (`aten.add.Tensor`,
 `aten.linear.default`, …) to dialect op constructors; input shapes are
 pulled from the FX meta and fed into the op's `infer_output_shape` to
 stamp the output tensor.
+
+Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
+constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. `masked_fill` lowers to ternary
+`where(mask, fill, self)` so an unselected infinity is preserved instead of becoming NaN through arithmetic selection.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
@@ -77,6 +82,11 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   no seam for the `hidden * per_layer_input` multiply and would silently drop it
   (`tests/compiler/trace/test_huggingface.py`).
 
+  Rotary labels normally live on `self_attn.layer_type`. Laguna instead exposes only `self_attn.layer_idx`, so the
+  single-layer command derives the label from `config.layer_types[layer_idx]`. When that label is one of the rotary
+  module's own `layer_types`, the block receives its one `(cos, sin)` tuple; models whose rotary keys are independent
+  names (DeepSeek V4's `main` / `compress`) continue to receive the complete mapping.
+
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
   (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named
   `gate` (OLMoE/Qwen lineage) or `router` (gpt-oss) beside 3-D `gate_up_proj` / `down_proj` expert parameters).
@@ -102,6 +112,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
   coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
   input-side channel vector and the merged spelling would only add a concat the chunk split undoes.
+  A model's `routed_scaling_factor` multiplies only the routed expert result before that shared-expert addition.
+  Laguna's optional softplus `g_proj` attention gate is likewise retained in both dense and MoE post-attention
+  programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
@@ -124,6 +137,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
   round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
   the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).
+
+  Quantized architecture construction uses the same guarded remote-code rule as the ordinary model trace. It first
+  asks Transformers for its built-in config/model class and retries with `trust_remote_code=True` only when that call
+  raises the explicit trust-required `ValueError`; unrelated configuration failures propagate unchanged.
 
 - `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
   a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at

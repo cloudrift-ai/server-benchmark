@@ -199,6 +199,12 @@ def factorize(tile, root, store=None) -> Tile:
     # boundary straight off ``Fold.a``.
     from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
 
+    # An empty schedule fork deliberately leaves the term unmapped. Materialization is the
+    # guardrail's scalar fallback: bind one thread to every free-axis cell instead of carrying an
+    # empty grid into loop lowering while the body still references those coordinates.
+    if not tile.place.is_mapped:
+        tile = replace(tile, place=tile.place.on_grid())
+
     op = tile.op
     ctx = Ctx(
         grid=tuple(tile.place.grid),
@@ -234,9 +240,13 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tupl
         if stores:
             proj = effect_tail(proj, stores)
         return _factorize(op.operands[0], ctx, tail=(*proj, *tail), out_val=out_val, store=store)
+    if stores and isinstance(op, Fold) and op.axis is None:
+        # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
+        # its boundary stores only after that body is emitted so an output sweep wraps every stmt
+        # that reads the sweep coordinate.
+        return _bind(op, ctx, tail, out_val, store, boundary_stores=stores)
     if stores:
-        # A flat / bare root with boundary stores — plain root ``Write``\\ s only (a sweep store
-        # always rides a projecting zero-axis ``Fold``, whose peel above consumed it).
+        # A non-projection flat root can carry plain root ``Write``\\ s only.
         assert all(st.sweep is None for st in stores), "sweep stores ride a projecting zero-axis fold"
         tail = (*tail, *(st.write for st in stores))
     return _bind(op, ctx, tail, out_val, store)
@@ -265,7 +275,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_stores: tuple = ()) -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -338,7 +348,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             state, fold, close = _realize_chain(op, ctx, tail, csrc)
             bt = None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
-            state, fold, close, bt = [], with_store([*_emit(op, ctx).body, *tail], ctx.output, grid, out_val), [], None
+            body = [*_emit(op, ctx).body, *tail]
+            if boundary_stores:
+                body = effect_tail(body, boundary_stores)
+            state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
             # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with

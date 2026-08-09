@@ -108,7 +108,11 @@ def trace_module_with_constants(
     export_kwargs: dict[str, object] = {"kwargs": kwargs or {}, "dynamic_shapes": expanded_dynamic}
     if expanded_dynamic is not None:
         export_kwargs["prefer_deferred_runtime_asserts_over_guards"] = True
-    exported = torch.export.export(module, example_inputs, **export_kwargs)
+    # Emmy compiles inference graphs. Export under the matching grad mode so helpers decorated
+    # with ``torch.no_grad`` (notably advanced RoPE modules) inline as ordinary ATen operations
+    # instead of tuple-valued ``wrap_with_set_grad_enabled`` higher-order nodes.
+    with torch.no_grad():
+        exported = torch.export.export(module, example_inputs, **export_kwargs)
     gm = exported.graph_module
     t1 = time.monotonic()
     n_fx_nodes = sum(1 for _ in gm.graph.nodes)
@@ -766,6 +770,77 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     if op_name is None:
         if input_ids:
             node_map[name] = input_ids[0]
+        return
+
+    # --- Tensor constructors ---
+    # ``Tensor.new_zeros(shape)`` / ``new_full(shape, fill)`` use their receiver only as a
+    # dtype/device template; receiver values do not participate in the result. Represent the
+    # constructed tensor as a scalar plus an explicit broadcast so its FX metadata shape is
+    # preserved even when the receiver has an unrelated shape.
+    if op_name in ("new_zeros", "new_full"):
+        from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+
+        if op_name == "new_full":
+            fill = fx_node.args[2] if len(fx_node.args) > 2 else (fx_node.kwargs or {}).get("fill_value")
+            if not isinstance(fill, (int, float, bool)):
+                raise NotImplementedError(f"aten.new_full requires a static scalar fill value, got {fill!r}")
+            scalar_id = input_ids[-1] if input_ids and isinstance(g.nodes[input_ids[-1]].op, ConstantOp) else None
+        else:
+            fill = 0.0
+            scalar_id = None
+        if scalar_id is None:
+            scalar_name = f"{name}_scalar"
+            scalar_id = g.add_node(
+                op=ConstantOp(name=scalar_name, value=fill),
+                inputs=[],
+                output=Tensor(scalar_name, (1,), dtype),
+                node_id=scalar_name,
+            )
+        node_map[name] = broadcast_to(g, scalar_id, shape).id
+        return
+
+    # ``copy_(dest, src)`` returns destination-shaped source values. Torch export makes the
+    # mutation functional at this node, so the old destination values are not an operand; only
+    # source broadcasting and the destination dtype remain semantically observable.
+    if op_name == "copy_":
+        from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+
+        if len(input_ids) < 2:
+            raise ValueError("aten.copy_ requires resolved destination and source tensors")
+        copied = broadcast_to(g, input_ids[1], shape)
+        if copied.output.dtype == dtype:
+            node_map[name] = copied.id
+        else:
+            coord_map = tuple(placeholder(axis) for axis in range(len(shape)))
+            node_map[name] = g.add_node(
+                op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=coord_map),)),
+                inputs=[copied],
+                output=Tensor(name, shape, dtype),
+                node_id=name,
+            )
+        return
+
+    # Data-dependent selection is a ternary elementwise op. ``masked_fill(self, mask, fill)``
+    # is exactly ``where(mask, fill, self)``; spelling it as arithmetic would turn unselected
+    # infinities into NaNs through ``0 * inf``.
+    if op_name in ("where", "masked_fill"):
+        from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+
+        if op_name == "masked_fill":
+            if len(input_ids) < 3:
+                raise ValueError("aten.masked_fill requires resolved self, mask, and fill inputs")
+            select_ids = [input_ids[1], input_ids[2], input_ids[0]]
+        else:
+            if len(input_ids) < 3:
+                raise ValueError("aten.where requires resolved condition, true, and false inputs")
+            select_ids = input_ids[:3]
+        nid = g.add_node(
+            op=ElementwiseOp(op="where"),
+            inputs=[broadcast_to(g, inp, shape) for inp in select_ids],
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        node_map[name] = nid
         return
 
     # --- Elementwise ops ---

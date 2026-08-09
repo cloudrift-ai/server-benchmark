@@ -609,7 +609,8 @@ class Pipeline:
             n_terminals += 1
             if backend is not None:
                 logger.info("[tune] variant #%d  [%s]", n_terminals, variant_label(cand.graph))
-            stats, status = await _bench_terminal_async(cand, backend=backend, db=run.db)
+            stats, status, measured = await _bench_terminal_async(cand, backend=backend, db=run.db)
+            search.note_bench(measured=measured)
             search.observe(token, stats, status, candidate=cand)
             if backend is not None and getattr(search, "last_o3_worthy", False):
                 o3_us = await _rebench_o3_async(cand, backend)
@@ -1377,18 +1378,19 @@ class _TerminalBench:
 async def _bench_terminal_async(cand, *, backend, db):
     """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` /
     inventory / lowering rows, and return ``(stats, status)`` where ``stats`` is the
-    per-kernel ``PerfStats`` summed across the graph (total terminal latency). The
+    per-kernel ``PerfStats`` summed across the graph (total terminal latency), plus
+    whether a live backend measurement was required. The
     only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
     event loop; cache-hit / stub / persistence semantics live in :class:`_TerminalBench`."""
     b = _TerminalBench(cand, backend=backend, db=db)
     kind, payload = b.prelude()
     if kind == "done":
-        return payload
+        return *payload, False
     try:
         result = await backend.benchmark_async(b.graph, num_iters="auto")
     except Exception as exc:  # noqa: BLE001
-        return b.finalize_exc(exc)
-    return b.finalize_result(result)
+        return *b.finalize_exc(exc), True
+    return *b.finalize_result(result), True
 
 
 __all__ = ["Decision", "ForkPoint", "LoweringError", "Match", "Pass", "Pattern", "Pipeline", "Rule", "RuleSkipped"]

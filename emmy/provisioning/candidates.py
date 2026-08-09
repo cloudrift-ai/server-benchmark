@@ -17,11 +17,12 @@ Order:
      ``GPU_GCP_ZONES.get(gpu_name, [DEFAULT_GCP_ZONE])``, **all zones for
      this base_type before moving to the next entry**.
 
-Fallback never crosses the provider boundary of the initially-selected
-entry: if the caller passes ``--provider gcp`` (or implicitly via the
-first hardware-table entry), candidates stay within that provider.
+When the caller passes ``--provider gcp`` or ``--provider cloudrift``, the
+candidate list stays within that provider. Without a filter, entries retain
+the hardware table's cross-provider preference order.
 """
 
+import re
 from dataclasses import dataclass
 
 from emmy.hardware import (
@@ -54,7 +55,25 @@ class VmCandidate:
         return f"{self.provider} {self.instance_type}"
 
 
-def iter_candidates(gpu_name: str, gpu_count: int, provider: str | None) -> list[VmCandidate]:
+def instance_gpu_count(provider: str, instance_type: str) -> int:
+    """Return the physical GPU count encoded in a resolved instance type."""
+    if provider == "cloudrift":
+        return int(instance_type.rsplit(".", 1)[1])
+    if instance_type.startswith("g4-standard-"):
+        return int(instance_type.rsplit("-", 1)[1]) // 48
+    match = re.search(r"-(\d+)g$", instance_type)
+    if match is None:
+        raise ValueError(f"Cannot determine GPU count for {provider} instance type {instance_type}")
+    return int(match.group(1))
+
+
+def iter_candidates(
+    gpu_name: str,
+    gpu_count: int,
+    provider: str | None,
+    *,
+    exact_gpu_count: bool = False,
+) -> list[VmCandidate]:
     """Return the ordered list of candidates for a (GPU, count) pair.
 
     Args:
@@ -63,6 +82,8 @@ def iter_candidates(gpu_name: str, gpu_count: int, provider: str | None) -> list
         provider: optional provider filter (``"cloudrift"`` or ``"gcp"``).
             When set, only entries matching the provider are emitted, and
             an explicit ``ValueError`` is raised if no entry matches.
+        exact_gpu_count: reject instance types that contain more GPUs than
+            requested.
 
     Returns:
         A list of :class:`VmCandidate` in preference order. The orchestrator
@@ -86,10 +107,14 @@ def iter_candidates(gpu_name: str, gpu_count: int, provider: str | None) -> list
     candidates: list[VmCandidate] = []
     for entry_provider, base_type in entries:
         instance_type = resolve_instance_type(entry_provider, base_type, gpu_count)
+        if exact_gpu_count and instance_gpu_count(entry_provider, instance_type) != gpu_count:
+            continue
         if entry_provider == "gcp":
             zones = GPU_GCP_ZONES.get(gpu_name) or [DEFAULT_GCP_ZONE]
             for zone in zones:
                 candidates.append(VmCandidate(entry_provider, base_type, instance_type, zone))
         else:
             candidates.append(VmCandidate(entry_provider, base_type, instance_type, None))
+    if exact_gpu_count and not candidates:
+        raise ValueError(f"No provider offers exactly {gpu_count} x {gpu_name}")
     return candidates

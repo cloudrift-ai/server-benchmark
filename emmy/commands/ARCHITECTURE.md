@@ -9,12 +9,14 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
+commands/agent ─► agent (tracked skill runner and tool schemas)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
 - `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
+- `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
 - `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
   INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
@@ -100,13 +102,48 @@ async def _handle_foo(args):
     await ...
 ```
 
-The compiler commands (`compile`, `run`, and `tune`) share a model-adapter selector. `causal-lm` is the default and
+The compiler commands (`trace`, `compile`, `run`, and `tune`) share the same input loader and model-adapter selector.
+They accept a Hugging Face model, pre-traced JSON IR, or inline `--code`; `causal-lm` is the default and
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. A quantized checkpoint (config.json
-`quantization_config`, e.g. an FP8 release) resolves to its bf16 architecture twin for tracing; the loader
-dequantizes the real weights at bind time (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+and Emmy always rebuild the same module and example inputs. Dynamic-shape parsing, quantized architecture twins and
+their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
+identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+
+The trace/tune handlers delegate working-golden inventory construction, target reconstruction, proposal measurement,
+and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by
+`run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
+handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
+
+`emmy trace MODEL --golden-output PATH` additionally lowers the traced graph through the post-fusion Loop IR and
+writes a working golden YAML inventory without constructing a backend or measuring a kernel. Its target grouping
+matches the two-level tuner's fold-aware inner search: a flash-attention score producer is absorbed into its consumer
+rather than emitted as a second target, and the consumer reproducer carries both nodes' frontend provenance. Remaining
+kernels are deduplicated by structural cache key and point to relative `<stem>.kernels/*.torch.json` reproducers that
+`emmy tune` can load directly. These are working-only `kernel: traced` entries: tracing records neither knobs nor
+timings and refuses to replace either an existing YAML or its sidecar directory. A golden-only invocation writes no
+auto-named Graph JSON; explicit `--output` requests both artifacts, while ordinary trace without a golden keeps its
+auto-named Graph output.
+
+`emmy tune --golden-file PATH` consumes that working YAML directly. Recognized specialized entries reconstruct their
+snippet; `kernel: traced` entries load the relative reproducer. Rows for the same target are grouped as candidate knob
+sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
+is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
+remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize
+several CudaOps; conflicting multi-CudaOp knob rows are reported as ambiguous instead of being assigned an invented
+winner. Proposal feedback is written immediately after measurement, before MCTS, so an interruption preserves it.
+The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
+the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
+flags and never writes the trusted
+`emmy_us` / `cublas_us` fields. With multiple homogeneous `--devices`, independent working-file targets share one
+event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
+When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
+rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
+rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+
+For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
+knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
 
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
@@ -244,7 +281,9 @@ emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25
 
 ### `emmy deploy cloud`
 
-Provisions a cloud VM and deploys via SSH. Requires `--gpu` and `--gpu-count` to select the matching matrix entry from the recipe (no auto-detection — there is no host yet). When a GPU is offered by more than one provider, the first provider in `hardware.py`'s `GPU_INSTANCE_TYPES` table is chosen by default; pass `--provider {gcp,cloudrift}` to override.
+Provisions a cloud VM and deploys via SSH. Requires `--gpu` and `--gpu-count` to select the matching matrix entry from
+the recipe (no auto-detection — there is no host yet). When several providers offer a GPU, their hardware-table order
+sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the search to one provider.
 
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
@@ -328,7 +367,7 @@ Cleans up VMs left running by `bench --no-teardown`. Reads `instances.json` from
 emmy teardown <run_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
-### `emmy vm create / delete`
+### `emmy vm create / delete / audit`
 
 Manages cloud GPU VM lifecycles directly. Instances are ephemeral — `delete` removes them entirely. Run `emmy vm create {gpu,gcp,cloudrift} --help` for full flag lists.
 
@@ -349,6 +388,18 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
 ```
+
+Automated jobs can require an exact physical GPU count and persist an interrupt-safe ownership lease:
+
+```bash
+emmy vm create gpu --gpu "NVIDIA H200 141GB" --gpu-count 1 --exact-gpu-count \
+  --lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1 --json
+emmy vm delete lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1
+emmy vm audit lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1
+```
+
+The lease records the provider deletion handle before readiness polling, then adds SSH connection details. Delete and
+audit accept only the exact recorded owner and never enumerate unrelated provider resources.
 
 CloudRift attach to a specific network with `--network <name>` (on `vm create cloudrift`, `vm create gpu`, `deploy cloud`, and `bench`). The name must exist in the target datacenter; omit to let CloudRift pick a public network.
 
@@ -386,11 +437,29 @@ emmy vm create gpu --gpu "NVIDIA B200" --gpu-count 8 --provider gcp --provisioni
 
 #### Allocation strategy (shared by `deploy cloud`, `bench`, `vm create gpu`)
 
-All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud.py`. It enumerates *candidates* from `hardware.GPU_INSTANCE_TYPES` (preference-ordered) and, for GCP, fans out across the zones listed in `GPU_GCP_ZONES`. For each candidate it makes up to `SAME_CANDIDATE_RETRIES` attempts on transient failures, then advances. Providers signal "no capacity, try next" by raising `CapacityExhausted`; non-retryable errors raise `TerminalProvisionError` and abort. Fallback never silently crosses provider boundaries — `--provider` (or the first hardware-table entry) bounds the search.
+All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud.py`. It enumerates preference-ordered
+candidates from `hardware.GPU_INSTANCE_TYPES` and fans GCP entries across `GPU_GCP_ZONES`. Each candidate gets up to
+`SAME_CANDIDATE_RETRIES` transient attempts. `CapacityExhausted` advances; `TerminalProvisionError` aborts. Without a
+filter, fallback can cross providers in hardware-table order; `--provider` restricts the complete search.
 
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
+
+### `emmy agent`
+
+Runs a tracked repository skill non-interactively through an OpenAI-compatible Chat Completions endpoint. The API key
+must arrive through a one-use mode-`0600` file or inherited file descriptor and is removed from every tool subprocess.
+
+```bash
+emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
+emmy agent tools --output /tmp/emmy-agent-tools.json
+```
+
+Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
+from the same definitions the runner sends to the model. See `emmy/agent/ARCHITECTURE.md` for the security and
+workflow-ownership boundary.
 
 ### `emmy fit`
 

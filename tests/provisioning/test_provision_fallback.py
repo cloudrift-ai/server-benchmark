@@ -125,6 +125,31 @@ async def test_provisioning_model_defaults_to_hardware_table(mock_create, ssh_ke
 
 
 @patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_orchestrator_notifies_allocation_observer(mock_create, ssh_key):
+    connection = VMConnectionInfo(
+        host="1.2.3.4",
+        username="riftuser",
+        ssh_port=22222,
+        delete_info=("cloudrift", "instance-1"),
+    )
+    mock_create.return_value = connection
+    observer = AsyncMock()
+
+    result = await provision_cloud_vm(
+        gpu_name="NVIDIA GeForce RTX 4090",
+        gpu_count=1,
+        ssh_key=ssh_key,
+        provider="cloudrift",
+        allocation_observer=observer,
+    )
+
+    assert result is connection
+    observer.before_allocate.assert_awaited_once_with("cloudrift")
+    observer.ready.assert_awaited_once_with(connection)
+
+
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
 @patch("emmy.provisioning.cloud.asyncio.sleep", new_callable=AsyncMock)
 @patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
 async def test_transient_error_retries_same_candidate_then_advances(mock_create, mock_sleep, ssh_key, caplog):

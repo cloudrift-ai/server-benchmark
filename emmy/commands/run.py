@@ -9,7 +9,6 @@ the same shape as ``scripts/bench_block.py`` but for arbitrary inline ops.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import sys
@@ -18,6 +17,7 @@ from collections import namedtuple
 from pathlib import Path
 
 from emmy import config
+from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag
 
 logger = logging.getLogger(__name__)
 
@@ -623,85 +623,6 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
-def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
-    """Realized-vs-pinned gate for a golden / ``--ab`` row. A structurally invalid pin
-    yields an empty enumeration and the per-call-site fallback silently substitutes the
-    planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
-    while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
-    every pinned knob against the compiled graph's realized knobs: honored iff SOME
-    kernel carries a same-family key that satisfies the pin (``knob.pin_key_matches`` — a
-    bare ``TILE`` golden spelling matches the axis-stamped ``TILE@dd``) with an equal value (``knob.values_equal`` — registry-canonical, so
-    alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
-    "not applicable", never conflicts (``knob.is_off_value``). The any-kernel scan
-    tolerates a split main+finalize pair where a knob applies to one kernel only — the
-    accepted blind spot: a pin dropped on its target kernel that coincidentally matches
-    a sibling kernel's realized value passes undetected.
-
-    A REGISTERED family with no realized key on ANY kernel is ungateable, not a miss:
-    serialization drops ``op.knobs``, so on a reloaded ``--ir`` graph an absent stamp is
-    indistinguishable from a dropped pin (on a full compile the OFF fill keeps declared
-    knobs present, so a genuinely dropped pin still surfaces as ``(off)`` or a
-    conflicting value). An UNREGISTERED family with no realized key is a typo in the
-    pin and flags ``(unset)``. Returns a flag naming each dropped pin and what ran
-    instead, or ``None`` when clean / ungateable."""
-    from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
-
-    if not any(kernel_knobs):
-        return None
-    misses: list[str] = []
-    for name, want in pinned.items():
-        fam = family_of(name)
-        if fam == "PLACE":
-            # A realized cut leaves no knob stamp — the routed pieces are plain re-recognized
-            # kernels (the cut is visible as the ``__cut_`` workspace kernel, not a knob) — so
-            # a PLACE pin is ungateable here, never a miss.
-            continue
-        others: list[str] = []
-        saw_off = False
-        hit = False
-        for raw in kernel_knobs:
-            for key, got in raw.items():
-                if family_of(key) != fam:
-                    continue
-                if pin_key_matches(name, key) and values_equal(name, want, got):
-                    hit = True
-                elif is_off_value(fam, got):
-                    saw_off = True
-                else:
-                    spell = f"{key}={got}" if key != name else str(got)
-                    if spell not in others:
-                        others.append(spell)
-            if hit:
-                break
-        if hit:
-            continue
-        if not others and not saw_off and get(fam) is not None:
-            continue  # registered family, no stamp anywhere — ungateable (see docstring)
-        ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
-        misses.append(f"{name}={want} realized {ran}")
-    return f"unreproducible pin: {'; '.join(misses)}" if misses else None
-
-
-@contextlib.contextmanager
-def _pinned_knobs(knobs: dict):
-    """Pin ``EMMY_<KNOB>`` env vars for the duration of one compile, restoring
-    the prior environment on exit. A pinned knob collapses its fork to that value
-    (``Knob.narrow``), so ``backend.compile`` lowers exactly these knobs."""
-    saved: dict[str, str | None] = {}
-    try:
-        for name, value in knobs.items():
-            key = config.knob_var(name)
-            saved[key] = os.environ.get(key)
-            os.environ[key] = str(value)
-        yield
-    finally:
-        for key, prev in saved.items():
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
-
-
 def _ab_samples(specs, dynamic=None):
     """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` to pin
     (the ``EMMY_KNOBS`` grammar), ``.name`` the table label, ``.shape None`` —
@@ -739,7 +660,7 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     CUDA context stays clean, and the next row's job respawns a fresh child.
 
     **A pin matching no offered row fails the row loudly, before any GPU time**: the
-    realized-vs-pinned check (:func:`_unreproducible_pin_flag`) runs right after the pinned
+    realized-vs-pinned check (:func:`unreproducible_pin_flag`) runs right after the pinned
     compile, and a miss marks the row ``pin_unmatched`` / NOT benched. Benching the fallback
     realization would measure the planner's own pick under the pin's name — the silent-degrade
     class that misled the hd256 flash sweep (a misspelled pin read as a form refusal).
@@ -763,7 +684,7 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
         flags = []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
-            with _pinned_knobs(sample.knobs):
+            with pinned_knobs(sample.knobs):
                 # Fresh graph; knobs baked into the kernel source here.
                 graph, _, _ = graph_from_code(code, dynamic_shapes=dynamic_shapes)
                 g_compiled = backend.compile(graph)
@@ -771,7 +692,7 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
+        flag = unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1841,7 +1762,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     out = []
     for sample in _ab_samples(specs):
         try:
-            with _pinned_knobs(sample.knobs):
+            with pinned_knobs(sample.knobs):
                 g = Graph.from_dict(_json.loads(Path(ir_path).read_text()))
                 if tail:
                     g = Pipeline.build(tail).run(g, db=db)
@@ -1849,7 +1770,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             logger.warning("[ab] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
+        flag = unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
         if flag:
             logger.error("[ab] %s: %s — the pinned config did not realize; fix the pin spelling (row kept unbenched)", sample.name, flag)
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))
@@ -2303,8 +2224,7 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
         torch_fns["Eager PyTorch"] = lambda: module(*args, **kwargs)
     if "tcompile" in backends:
         try:
-            # Persistent bench processes (the SIGKILL-able worker, ``tune
-            # --dataset golden``'s in-process loop) compile a fresh closure of
+            # Persistent/repeated bench workers compile a fresh closure of
             # the SAME ``torch_ref`` ``fn`` code object per row; dynamo's
             # recompile limit is keyed per code object, so after ~8 rows it
             # silently stops compiling and the tcompile column quietly measures

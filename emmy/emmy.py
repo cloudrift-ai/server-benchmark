@@ -4,6 +4,7 @@
 import argparse
 from importlib.metadata import PackageNotFoundError, version
 
+from emmy.commands.agent import register_agent_command
 from emmy.commands.bench import register_bench_command
 from emmy.commands.compare import register_compare_command
 from emmy.commands.compile import register_compile_command
@@ -50,6 +51,7 @@ def main():
     register_serve_command(subparsers)
     register_teardown_command(subparsers)
     register_vm_command(subparsers)
+    register_agent_command(subparsers)
 
     # compiler workflow commands
     register_pull_command(subparsers)

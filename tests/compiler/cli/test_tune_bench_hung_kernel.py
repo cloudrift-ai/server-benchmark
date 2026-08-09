@@ -43,22 +43,35 @@ def _args() -> types.SimpleNamespace:
     )
 
 
-def _patch_common(monkeypatch, *, compare_raises: Exception | None) -> list[bool]:
+def _patch_common(
+    monkeypatch,
+    *,
+    compare_raises: Exception | None,
+    seen_devices: list[int | None] | None = None,
+    seen_contexts: list[object] | None = None,
+) -> list[bool]:
     """Stub the worker compare call + the per-kernel sweep; return a flag flipped iff per-kernel ran."""
     per_kernel_ran = [False]
 
     async def _fake_compare(**_kw):
+        if seen_devices is not None:
+            seen_devices.append(_kw.get("device_id"))
         if compare_raises is not None:
             raise compare_raises
         return {"Emmy": 1.0}, object(), True, False  # (results, bench, torch_available, captured)
 
     def _fake_per_kernel(*_a, **_k):
+        if seen_devices is not None:
+            seen_devices.append(_k.get("device_id"))
+        if seen_contexts is not None:
+            seen_contexts.append(_k.get("ctx"))
         per_kernel_ran[0] = True
         return [], []
 
     monkeypatch.setattr(backend_mod, "CudaBackend", _DummyBackend)
     monkeypatch.setattr(program_mod, "benchmark_compare_isolated_async", _fake_compare)
     monkeypatch.setattr(tune_mod, "_bench_per_kernel", _fake_per_kernel)
+    monkeypatch.setattr(tune_mod, "_context_for_device", lambda *_args, **_kwargs: "selected-o3-context")
     monkeypatch.setattr(run_mod, "_print_table", lambda *_a, **_k: None)
     monkeypatch.setenv(config.NVCC_FLAGS, "")  # registers cleanup of the flag _run_bench sets
     return per_kernel_ran
@@ -88,3 +101,22 @@ def test_run_bench_runs_per_kernel_on_success(monkeypatch) -> None:
     tune_mod._run_bench(_args(), ("module", "args", "kwargs"), assembled=None, dump=dump, html_dir=None)
 
     assert ran[0] is True, "per-kernel bench must run after a successful full-model bench"
+
+
+def test_run_bench_pins_full_and_per_kernel_workers(monkeypatch) -> None:
+    seen_devices: list[int | None] = []
+    seen_contexts: list[object] = []
+    _patch_common(monkeypatch, compare_raises=None, seen_devices=seen_devices, seen_contexts=seen_contexts)
+    dump = types.SimpleNamespace(dir="/tmp/does-not-matter")
+
+    tune_mod._run_bench(
+        _args(),
+        ("module", "args", "kwargs"),
+        assembled=None,
+        dump=dump,
+        html_dir=None,
+        device_id=3,
+    )
+
+    assert seen_devices == [3, 3]
+    assert seen_contexts == ["selected-o3-context"]

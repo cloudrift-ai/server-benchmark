@@ -20,8 +20,8 @@ because `emmy/compiler/pipeline/search/` has them, so a test for `policy/greedy.
 deploy-pick order invariance, or a process-wide cache over two subsystems — sit at the level that owns all of
 them, not inside one arbitrary child.
 
-Four directories break the mirror deliberately, because their organizing axis is the *kind* of test, not the
-source module:
+Five directories break the `emmy/` mirror deliberately, because their organizing axis is the *kind* of test or their
+source lives outside the package:
 
 | Directory | Axis |
 |---|---|
@@ -29,6 +29,7 @@ source module:
 | `compiler/cli/` | `emmy <command>` as a subprocess, via the `run_cli` fixture |
 | `compiler/fixtures/` | checked-in traces and model configs, not tests |
 | `perf/` | GPU perf comparison vs PyTorch, gated by the `perf` marker (see `tests/perf/ARCHITECTURE.md`) |
+| `github/` | unit tests for repository automation helpers under `.github/scripts/` |
 
 `compiler/passes/` and `compiler/perf/` carry their own `ARCHITECTURE.md`; read those before adding to them.
 
@@ -39,7 +40,8 @@ The suite runs in four layers, distinguished by what they touch rather than by w
 - **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. The bulk of the suite.
 - **CLI dry-run** — the full argument-parsing → config-loading → orchestration path invoked as a subprocess with
   `--dry-run`, stopping just before any real side effect (SSH, Docker, file writes). Covers `deploy ssh/local/cloud`,
-  `bench`, `teardown`, and `vm create/delete`. These use real recipes from `recipes/` so config drift fails a test.
+  `bench`, `teardown`, and `vm create/delete/audit`. These use real recipes from `recipes/` so config drift fails a
+  test.
 - **GPU** — guarded by `requires_cuda` / `requires_sm90` / `importorskip` so they skip cleanly off-GPU, and routed
   onto a serial worker chain by the root conftest (see **Running**).
 - **End-to-end** — a traced model or snippet through the whole compiler, compared against PyTorch eager or numpy.
@@ -157,7 +159,7 @@ transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ 
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
 gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin declines and the kernel stays
 gmem-direct, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp` siblings run on
-sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `--dataset golden` resolve against the
+sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `eval --dataset golden` resolve against the
 **live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_CONFIGS` with card-less
 fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
 `run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the

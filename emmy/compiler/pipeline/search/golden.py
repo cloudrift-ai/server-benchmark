@@ -30,8 +30,8 @@ regression anchors). A GPU may carry more than
 one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
 file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
 :func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
-the CLI golden workflow — ``emmy tune --golden NAME --bench`` records the
-winning knobs / latencies into the GPU's YAML, ``emmy eval golden`` validates.
+the golden workflow: working-file tuning discovers candidates, deployable repeated A/B measurements promote them,
+and ``emmy eval golden`` validates the reviewed repository rows.
 For the **fp32** configs the reference is
 pinned to **true fp32** (``allow_tf32 = False``) so the ratio compares emmy's
 CUDA-core FMA kernel against a real SGEMM, not the ~5-10x faster TF32 tensor-core
@@ -50,8 +50,14 @@ features over ``features.knob_features``).
 
 from __future__ import annotations
 
+import math
+import os
+import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from enum import StrEnum
+from numbers import Real
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -164,6 +170,10 @@ class GoldenConfig:
     # model. Model-tagged entries are what ``eval golden --in-model`` audits (it re-traces the
     # model's serving twins and checks each recorded golden still realizes in them).
     model: str | None = None
+    # Compatibility marker for the three RTX 4080 schedule seeds imported from the
+    # retired hardcoded table without measurements. New repository entries must never
+    # set this: the promotion validator accepts paired positive timings only.
+    provisional: bool = False
 
     @property
     def is_routing(self) -> bool:
@@ -836,6 +846,309 @@ _KERNEL_CLASSES = {
 }
 
 
+class GoldenEntryState(StrEnum):
+    """Measurement state encoded by one golden-format entry."""
+
+    INVENTORY = "inventory"
+    PROPOSAL = "proposal"
+    VERIFIED = "verified"
+
+
+class GoldenFileValidation(StrEnum):
+    """Validation boundary for a golden-format YAML document."""
+
+    WORKING = "working"
+    PROMOTION = "promotion"
+    REPOSITORY = "repository"
+
+
+def golden_entry_state(entry: Mapping) -> GoldenEntryState:
+    """Classify one entry as inventory, proposal, or verified.
+
+    Working files omit both timing fields until a candidate has been measured. A
+    verified entry carries both positive finite timings; a one-sided or zero-valued
+    pair is never accepted as a new measurement. The exact repository-validated
+    RTX 4080 compatibility seeds retain their historical zero pair and behave as
+    proposals when copied to a working file.
+    """
+    has_knobs = "knobs" in entry
+    knobs = entry.get("knobs")
+    if has_knobs and not isinstance(knobs, Mapping):
+        raise ValueError("knobs must be a mapping when present")
+    has_emmy = "emmy_us" in entry
+    has_reference = "cublas_us" in entry
+    if not has_emmy and not has_reference:
+        return GoldenEntryState.PROPOSAL if has_knobs else GoldenEntryState.INVENTORY
+    if has_emmy != has_reference:
+        raise ValueError("emmy_us and cublas_us must be recorded together")
+    if not has_knobs:
+        raise ValueError("a measured entry must carry a knobs mapping (which may be empty)")
+    if entry.get("provisional") is True and entry.get("emmy_us") == 0.0 and entry.get("cublas_us") == 0.0:
+        # File validation guards this marker by the three full immutable identities.
+        # Classifying it here keeps copied canonical files usable by tune's generic
+        # proposal plumbing without teaching that command another state machine.
+        return GoldenEntryState.PROPOSAL
+    for key in ("emmy_us", "cublas_us"):
+        value = entry[key]
+        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)) or value <= 0:
+            raise ValueError(f"{key} must be a positive finite number")
+    return GoldenEntryState.VERIFIED
+
+
+_LEGACY_PROVISIONAL = frozenset(
+    {
+        (
+            "NVIDIA GeForce RTX 4080",
+            (8, 9),
+            "matmul",
+            "dit_xl_2.attn_out_proj.s256",
+            "facebook/DiT-XL-2-256",
+            (256, 1152, 1152),
+            "fp16",
+            False,
+            True,
+            (
+                ("RASTER", ""),
+                ("REDUCE", ""),
+                ("STAGE", "d2/cp/p2"),
+                ("TILE", "mma_m16n8k16_f16_f32/f4x2/k4"),
+                ("WORK", "w1x4"),
+            ),
+        ),
+        (
+            "NVIDIA GeForce RTX 4080",
+            (8, 9),
+            "matmul",
+            "dit_xl_2.ff_out_proj.s256",
+            "facebook/DiT-XL-2-256",
+            (256, 1152, 4608),
+            "fp16",
+            False,
+            True,
+            (
+                ("RASTER", ""),
+                ("REDUCE", "g4k"),
+                ("STAGE", "d2/cp/p2"),
+                ("TILE", "mma_m16n8k16_f16_f32/f4x4/k2"),
+                ("WORK", "w1x2"),
+            ),
+        ),
+        (
+            "NVIDIA GeForce RTX 4080",
+            (8, 9),
+            "attention",
+            "dit_xl_2.attn.s256",
+            "facebook/DiT-XL-2-256",
+            (16, 256, 72),
+            "fp16",
+            False,
+            False,
+            (
+                ("REDUCE", ""),
+                ("STAGE", ""),
+                ("TILE@dd", "mma_m16n8k16_f16_f32/f2x8/k5"),
+                ("TILE@pj", "mma_m16n8k16_f16_f32/f2x9/k4"),
+                ("WORK", "w2x1"),
+            ),
+        ),
+    }
+)
+
+
+def _provisional_identity(entry: Mapping, gpu_name: str | None, compute_cap: tuple[int, int], file_model: str | None) -> tuple | None:
+    """Full immutable identity of a grandfathered provisional entry."""
+    kernel = entry.get("kernel")
+    if kernel == "matmul":
+        shape = (entry.get("M"), entry.get("N"), entry.get("K"))
+        layout = bool(entry.get("trans_b", False))
+    elif kernel == "attention":
+        shape = (entry.get("n_heads"), entry.get("seq"), entry.get("head_dim"))
+        layout = bool(entry.get("causal", True))
+    else:
+        return None
+    return (
+        gpu_name,
+        compute_cap,
+        kernel,
+        entry.get("name"),
+        entry.get("model", file_model),
+        shape,
+        entry.get("dtype"),
+        bool(entry.get("dynamic", False)),
+        layout,
+        tuple(sorted((str(k), str(v)) for k, v in (entry.get("knobs") or {}).items())),
+    )
+
+
+def _is_legacy_provisional(entry: Mapping, gpu_name: str | None, compute_cap: tuple[int, int], file_model: str | None) -> bool:
+    """Whether ``entry`` is one of the three explicitly grandfathered seeds."""
+    return (
+        _provisional_identity(entry, gpu_name, compute_cap, file_model) in _LEGACY_PROVISIONAL
+        and entry.get("provisional") is True
+        and bool(entry.get("knobs"))
+        and entry.get("emmy_us") == 0.0
+        and entry.get("cublas_us") == 0.0
+    )
+
+
+def _specialized_config(entry: Mapping, *, gpu_name: str, compute_cap: tuple[int, int], file_model: str | None) -> GoldenConfig:
+    """Instantiate one recognized golden kind, applying the file-level headers."""
+    payload = dict(entry)
+    kernel = payload.pop("kernel", None)
+    payload.pop("ranking", None)  # working-file -O1 feedback; never part of a specialized golden
+    cls = _KERNEL_CLASSES.get(kernel)
+    if cls is None:
+        raise ValueError(f"unknown specialized kernel kind {kernel!r} (expected one of {sorted(_KERNEL_CLASSES)})")
+    model = payload.pop("model", file_model)
+    try:
+        cfg = cls(gpu_name=gpu_name, compute_cap=compute_cap, model=model, **payload)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"invalid {kernel!r} entry: {e}") from e
+    _require_routing_split(cfg)
+    return cfg
+
+
+def golden_config_from_entry(document: Mapping, entry: Mapping) -> GoldenConfig | None:
+    """Instantiate a specialized working entry; return ``None`` for ``kernel: traced``.
+
+    Call this after :func:`load_golden_file`. File-level GPU/model headers are
+    applied exactly as they are for repository goldens.
+    """
+    if entry.get("kernel") == "traced":
+        return None
+    gpu_name = document.get("gpu_name")
+    cap = document.get("compute_cap")
+    default_gpu = GoldenConfig.__dataclass_fields__["gpu_name"].default
+    default_cap = GoldenConfig.__dataclass_fields__["compute_cap"].default
+    resolved_gpu = gpu_name if isinstance(gpu_name, str) and gpu_name else default_gpu
+    resolved_cap = tuple(cap) if isinstance(cap, (list, tuple)) and len(cap) == 2 else default_cap
+    return _specialized_config(entry, gpu_name=resolved_gpu, compute_cap=resolved_cap, file_model=document.get("model"))
+
+
+def validate_golden_file(document: Mapping, *, validation: GoldenFileValidation = GoldenFileValidation.WORKING) -> None:
+    """Validate a golden-format document at the requested trust boundary.
+
+    ``WORKING`` accepts inventory entries (no knobs or timings), proposals (knobs,
+    no timings), and verified measurements. ``PROMOTION`` accepts only recognized
+    specialized entries with paired positive timings. ``REPOSITORY`` is the import-time
+    compatibility boundary: it is identical to promotion except for explicitly marked
+    provisional zero-timing seeds already shipped in the repository.
+    """
+    if not isinstance(document, Mapping):
+        raise ValueError("golden file must contain a YAML mapping")
+    if document.get("format_version", 1) != 1:
+        raise ValueError(f"unsupported golden format_version {document.get('format_version')!r}")
+    configs = document.get("configs")
+    if not isinstance(configs, list):
+        raise ValueError("golden file must contain a configs list")
+
+    strict = validation in (GoldenFileValidation.PROMOTION, GoldenFileValidation.REPOSITORY)
+    gpu_name = document.get("gpu_name")
+    cap = document.get("compute_cap")
+    if strict:
+        if not isinstance(gpu_name, str) or not gpu_name:
+            raise ValueError("a repository golden file requires a non-empty gpu_name")
+        valid_cap = isinstance(cap, (list, tuple)) and len(cap) == 2
+        valid_cap = valid_cap and all(not isinstance(v, bool) and isinstance(v, int) and v >= 0 for v in cap)
+        if not valid_cap:
+            raise ValueError("a repository golden file requires compute_cap: [major, minor]")
+    default_gpu = GoldenConfig.__dataclass_fields__["gpu_name"].default
+    default_cap = GoldenConfig.__dataclass_fields__["compute_cap"].default
+    resolved_gpu = gpu_name if isinstance(gpu_name, str) and gpu_name else default_gpu
+    resolved_cap = tuple(cap) if isinstance(cap, (list, tuple)) and len(cap) == 2 else default_cap
+    file_model = document.get("model")
+
+    for index, entry in enumerate(configs):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"configs[{index}] must be a mapping")
+        if not isinstance(entry.get("kernel"), str) or not entry["kernel"]:
+            raise ValueError(f"configs[{index}] requires a non-empty kernel discriminator")
+        if not isinstance(entry.get("name"), str) or not entry["name"]:
+            raise ValueError(f"configs[{index}] requires a non-empty name")
+        if "ranking" in entry:
+            if not isinstance(entry["ranking"], Mapping):
+                raise ValueError(f"configs[{index}] ranking must be a mapping")
+            if strict:
+                raise ValueError(f"configs[{index}] working ranking metadata cannot be promoted")
+        exact_provisional = _is_legacy_provisional(entry, gpu_name, resolved_cap, file_model)
+        if entry.get("provisional") and not exact_provisional:
+            raise ValueError(f"configs[{index}] provisional is reserved for the three exact RTX 4080 compatibility seeds")
+        # The three exact compatibility rows are unmeasured proposals both when
+        # loaded from the repository and when that canonical YAML is copied to a
+        # mutable working file. Promotion remains rejected above; the full-identity
+        # matcher is what prevents any new provisional spelling from entering.
+        legacy = validation in (GoldenFileValidation.WORKING, GoldenFileValidation.REPOSITORY) and exact_provisional
+        try:
+            state = GoldenEntryState.PROPOSAL if legacy else golden_entry_state(entry)
+            if validation == GoldenFileValidation.PROMOTION and entry.get("provisional"):
+                raise ValueError("provisional entries cannot be promoted")
+            if strict and not legacy and state != GoldenEntryState.VERIFIED:
+                raise ValueError("repository promotion requires knobs and paired positive timings")
+            if not strict and entry["kernel"] not in _KERNEL_CLASSES:
+                if entry["kernel"] != "traced":
+                    raise ValueError("a working generic entry must use kernel: traced")
+                reproducer = entry.get("reproducer")
+                path = PurePosixPath(reproducer) if isinstance(reproducer, str) and reproducer else None
+                if path is None or path.is_absolute() or path == PurePosixPath(".") or ".." in path.parts or "\\" in reproducer:
+                    raise ValueError("a traced entry requires a non-empty relative reproducer path without traversal")
+            if strict or entry["kernel"] in _KERNEL_CLASSES:
+                _specialized_config(entry, gpu_name=resolved_gpu, compute_cap=resolved_cap, file_model=file_model)
+        except ValueError as e:
+            raise ValueError(f"configs[{index}] ({entry.get('name', '?')}): {e}") from e
+
+
+def load_golden_file(path: str | Path, *, validation: GoldenFileValidation = GoldenFileValidation.WORKING) -> dict:
+    """Load and validate one golden-format YAML file without mutating its entries."""
+    source = Path(path)
+    try:
+        document = yaml.safe_load(source.read_text())
+        validate_golden_file(document, validation=validation)
+    except (OSError, yaml.YAMLError, ValueError) as e:
+        raise ValueError(f"invalid golden file {source}: {e}") from e
+    return document
+
+
+def is_repository_golden_path(path: str | Path) -> bool:
+    """Whether ``path`` resolves inside the canonical repository golden tree.
+
+    Resolution deliberately follows symlinks: a working tune must never mutate
+    reviewed deployment evidence merely because it was reached through an alias.
+    """
+    resolved = Path(path).resolve()
+    repository = _GOLDENS_DIR.resolve()
+    return resolved == repository or repository in resolved.parents
+
+
+def dump_golden_file(
+    document: Mapping,
+    path: str | Path,
+    *,
+    validation: GoldenFileValidation = GoldenFileValidation.WORKING,
+    overwrite: bool = False,
+) -> Path:
+    """Validate and write one golden-format YAML file, refusing replacement by default."""
+    validate_golden_file(document, validation=validation)
+    destination = Path(path)
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = yaml.safe_dump(dict(document), sort_keys=False)
+    temporary = None
+    mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=destination.parent, prefix=f".{destination.name}.", delete=False) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+            temporary = Path(output.name)
+        temporary.chmod(mode)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return destination
+
+
 def _load_goldens() -> list[GoldenConfig]:
     """Load every per-GPU golden YAML under :data:`_GOLDENS_DIR` into one flat list.
 
@@ -850,20 +1163,18 @@ def _load_goldens() -> list[GoldenConfig]:
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards
     can share a capability (e.g. ``rtx5090_sm120.yaml`` and
     ``rtxpro6000_sm120.yaml`` are both ``(12, 0)``). The full ``(gpu_name,
-    compute_cap)`` pair is the GPU identity. The ``eval`` / ``tune --dataset golden``
-    paths currently iterate this flat list without filtering to the live GPU, so a
+    compute_cap)`` pair is the GPU identity. Some ``eval`` paths iterate this flat list
+    without filtering to the live GPU, so a
     multi-GPU goldens dir intermixes cards in those views and ``ShapeKey`` joins
     (which key on shape, not GPU) merge same-shape entries across cards — filtering
     the consumers to the live ``(gpu_name, compute_cap)`` is a known TODO."""
     out: list[GoldenConfig] = []
     for path in sorted(_GOLDENS_DIR.glob("*.yaml")):
-        doc = yaml.safe_load(path.read_text())
+        doc = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
         file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
         for c in doc["configs"]:
-            cfg = _KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c)
-            _require_routing_split(cfg)  # routing entries store cuts ONLY; schedule entries never spell PLACE
-            out.append(cfg)
+            out.append(_specialized_config(c, gpu_name=gpu_name, compute_cap=cap, file_model=file_model))
     return out
 
 

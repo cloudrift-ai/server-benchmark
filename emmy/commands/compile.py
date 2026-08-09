@@ -62,8 +62,8 @@ def resolve_tune_db() -> Path:
     return config.tune_db_path()
 
 
-def add_input_args(parser) -> None:
-    """Register the model/IR input arguments shared by ``compile`` and ``tune``."""
+def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
+    """Register the model/IR input arguments shared by compiler commands."""
     parser.add_argument("input", nargs="?", help="HuggingFace model ID or .json IR file. Mutually exclusive with --code.")
     parser.add_argument(
         "--adapter",
@@ -83,14 +83,14 @@ def add_input_args(parser) -> None:
             "nn.Module or a torch function. Full runnable example (SDPA): "
             'emmy compile -c "F.scaled_dot_product_attention('
             'torch.randn(1,8,128,64), torch.randn(1,8,128,64), torch.randn(1,8,128,64), is_causal=True)". '
-            "Traces the expression and compiles it in one step. Mutually exclusive with the positional input."
+            "Traces the expression as this command's input. Mutually exclusive with the positional input."
         ),
     )
     parser.add_argument(
         "--layer",
         type=int,
         default=None,
-        help="Layer index (when input is a model ID). Omit to compile the whole model.",
+        help="Layer index (when input is a model ID). Omit to process the whole model.",
     )
     parser.add_argument(
         "--seq-len",
@@ -119,7 +119,8 @@ def add_input_args(parser) -> None:
             "an ``int <NAME>`` runtime arg per dim. Example: ``--dynamic seq_len@x:1``."
         ),
     )
-    parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts")
+    if include_dump_dir:
+        parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts")
 
     from emmy.compiler.target import add_target_arg
 
@@ -127,15 +128,14 @@ def add_input_args(parser) -> None:
 
 
 def add_golden_arg(parser) -> None:
-    """Register ``--golden NAME`` (shared by ``tune`` / ``run`` / ``compile``) — a
+    """Register ``--golden NAME`` (shared by ``run`` / ``compile``) — a
     shorthand that resolves to ``--code <the named golden config's snippet>``. Pair
     with :func:`resolve_golden_arg` in the handler."""
     parser.add_argument(
         "--golden",
         metavar="NAME",
         help=(
-            "Compile / run / tune a golden config from GOLDEN_CONFIGS (shorthand for --code <its snippet>) — lets you "
-            "build the online prior up one shape at a time and `emmy eval golden` between runs. NAME is an exact "
+            "Compile / run a golden config from GOLDEN_CONFIGS (shorthand for --code <its snippet>). NAME is an exact "
             "golden name OR a name **substring** (the SAME identifier `emmy eval --kernel` filters on), as long as it "
             "names a single shape; an ambiguous substring lists the matched shapes and an unknown one lists all "
             "available names. Mutually exclusive with --code / positional input / --ir."
@@ -154,7 +154,7 @@ def resolve_golden_arg(args) -> None:
     ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
     golden name first, else a name **substring** — so the identifier used to inspect
     a golden (``eval golden --kernel <substr>``) can be reused verbatim to run /
-    compile / tune it. Because compile/run/tune build a single graph, the substring
+    compile it. Because compile/run build a single graph, the substring
     must name **one** shape: a match spanning several shapes exits 2 listing them.
     Exits 2 on an unknown name (listing the available names) or a conflict with
     ``--code`` / positional input / ``--ir`` / ``--dynamic``."""

@@ -266,6 +266,16 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         aliases=("NVIDIA A100-SXM4-80GB", "NVIDIA A100 80GB PCIe"),
     ),
     GpuSpec(
+        name="NVIDIA Tesla V100 SXM2 16GB",
+        pci_device_ids=("1db1",),
+        short_name="v100",
+        compute_capability=(7, 0),
+        sm_count=80,
+        smem_per_sm=98304,
+        vram_mib=16384,
+        aliases=("Tesla V100-SXM2-16GB",),
+    ),
+    GpuSpec(
         name="NVIDIA Tesla V100 SXM3 32GB",
         pci_device_ids=("1db8",),
         short_name="v100",

@@ -62,7 +62,7 @@ execution-plan pack**, where no later boot revisits them. A golden-less release 
 them — and offer the real options:
 
 - *the card has no goldens at all* → the card is untuned; releasing from it is not sensible. Record goldens first
-  (the `tune-golden` skill), or release on a card that has them.
+  (the `tune-kernels` skill), or release on a card that has them.
 - *the card is tuned, but not for this model* → the script lists which models it IS tuned for. Options: run a golden
   sweep for this model's shapes first (the honest fix, hours of tuning); release anyway and accept cold-greedy picks
   (only defensible for a throwaway or experimental image, and it must be said out loud in the release notes); or

@@ -132,10 +132,10 @@ default is a single device, which is exactly the sequential loop.
 
 ## See it yourself
 
-Tune one shape rather than a whole model — a golden configuration's own small program is the quickest thing to run:
+Tune one shape rather than a whole model — a small inline operation is the quickest thing to run:
 
 ```bash
-emmy tune --golden matmul.square.512 --patience 10 -v
+emmy tune --code "torch.matmul(torch.randn(512,512,device='cuda'), torch.randn(512,512,device='cuda'))" --patience 10 -v
 ```
 
 `-v` prints one line per step of the search instead of the live progress bar, so you can watch configurations being

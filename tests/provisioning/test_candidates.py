@@ -3,7 +3,7 @@
 import pytest
 
 from emmy.hardware import GPU_GCP_ZONES
-from emmy.provisioning.candidates import VmCandidate, iter_candidates
+from emmy.provisioning.candidates import VmCandidate, instance_gpu_count, iter_candidates
 
 
 def test_iter_candidates_cloudrift_rtx4090_lists_all_alternates():
@@ -56,6 +56,23 @@ def test_iter_candidates_gcp_b200_iterates_zones_before_advancing():
     assert {c.provider for c in cands} == {"gcp"}
     assert [c.zone for c in cands] == GPU_GCP_ZONES["NVIDIA B200"]
     assert all(c.instance_type == "a4-highgpu-8g" for c in cands)
+
+
+def test_exact_gpu_count_rejects_provider_overallocation():
+    with pytest.raises(ValueError, match="No provider offers exactly"):
+        iter_candidates("NVIDIA B200", 1, provider=None, exact_gpu_count=True)
+
+
+@pytest.mark.parametrize(
+    ("provider", "instance_type", "expected"),
+    [
+        ("cloudrift", "h200-8-generic.4", 4),
+        ("gcp", "a3-ultragpu-8g", 8),
+        ("gcp", "g4-standard-192", 4),
+    ],
+)
+def test_instance_gpu_count(provider, instance_type, expected):
+    assert instance_gpu_count(provider, instance_type) == expected
 
 
 def test_iter_candidates_unknown_gpu_raises():

@@ -267,8 +267,7 @@ def handle_eval_golden(args) -> None:
     actionable "did the pipeline reproduce the golden knobs?" view), then the pin-only
     offer audit (:func:`_emit_offer_audit`: does each recorded entry realize on its
     shape's UN-PINNED enumeration, or does the shape fall through the deploy's golden
-    floor?). Watch it while iteratively tuning golden shapes one at a time (``emmy tune
-    --golden <name>``). Use ``eval offline`` / ``eval online`` for the offline-prior
+    floor?). Run it after promoting or modifying reviewed golden rows. Use ``eval offline`` / ``eval online`` for the offline-prior
     rank and the online rank-under-prior diagnostics. Exits 1 when the audit finds a
     fall-through shape."""
     if args.in_model:
@@ -950,7 +949,7 @@ def _emit_offer_audit(configs: list) -> bool:
     reads per-entry realizability off the verdict records:
 
       PIN-ONLY      the entry's knobs realize only under an explicit pin (``EMMY_KNOBS`` /
-                    ``tune --golden``) — the un-pinned enumeration never offers them, so the
+                    working-file proposal measurement) — the un-pinned enumeration never offers them, so the
                     entry never deploys. Legal as a documented lever while an OFFERED sibling
                     floors the shape.
       FALL-THROUGH  NO entry of the shape realizes: a deploy logs "no offered candidate

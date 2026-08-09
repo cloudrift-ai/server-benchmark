@@ -30,6 +30,10 @@ A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse i
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
+# Trace a dynamic model layer into an unmeasured working golden for remote tuning
+emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 --golden-output _tune/qwen3/working.yaml
+# Measure proposed rows, then spend the remaining per-kernel budget on MCTS
+emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
 ```
 
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
@@ -239,6 +243,11 @@ matrices:
 ## Virtual Machine Management
 
 ```bash
+# GPU-based allocation with an interrupt-safe ownership lease
+emmy vm create gpu --gpu "NVIDIA H200 141GB" --gpu-count 1 --exact-gpu-count \
+  --lease /tmp/emmy-vm.json --owner local-run --json
+emmy vm delete lease /tmp/emmy-vm.json --owner local-run
+
 # GCP
 emmy vm create gcp --instance my-vm --zone us-central1-a --machine-type a2-highgpu-1g
 emmy vm delete gcp --instance my-vm --zone us-central1-a
@@ -246,6 +255,14 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 # CloudRift
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
+```
+
+## Agent Skills
+
+```bash
+emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
+emmy agent tools # the exact model tool definitions as JSON
 ```
 
 ## Development
@@ -270,16 +287,20 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 
 ## Project Structure
 
+- [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
+  (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
   - [emmy.py](emmy/emmy.py) — CLI entrypoint
   - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration
   - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
+  - [agent/](emmy/agent/) — tracked-skill runner and bounded model tools
+    (see [ARCHITECTURE.md](emmy/agent/ARCHITECTURE.md))
   - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
   - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
     - [deploy/](emmy/commands/deploy/) — `deploy local`, `deploy ssh`, `deploy cloud` commands
     - [bench/](emmy/commands/bench/) — `bench` command
-    - [vm/](emmy/commands/vm/) — `vm create/delete` commands (GCP, CloudRift)
+    - [vm/](emmy/commands/vm/) — `vm create/delete/audit` commands (GCP, CloudRift, owned leases)
     - [teardown.py](emmy/commands/teardown.py) — `teardown` command
     - [pull.py](emmy/commands/pull.py) — `pull` command (download HF model)
     - [trace.py](emmy/commands/trace.py) — `trace` command (PyTorch → Graph IR)

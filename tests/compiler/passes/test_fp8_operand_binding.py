@@ -236,10 +236,10 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     fragment epilogue — and the result matches the dequant reference."""
     import numpy as np
 
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.dtype import decode_f8
     from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(3)
@@ -252,7 +252,7 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     backend = CudaBackend()
     # STAGE pinned to gmem-direct: this test anchors the gmem-direct fragment-convert spelling
     # (the staged byte-slab forms are ``test_fp8_staged``'s).
-    with _pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_fp8_linear_graph(m, n, k))
 
     sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]

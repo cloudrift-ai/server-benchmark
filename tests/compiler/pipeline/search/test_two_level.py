@@ -29,6 +29,8 @@ from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.two_level import (
     LOWERING_PASSES,
+    InnerReward,
+    OpResult,
 )
 from tests.compiler.conftest import drain_tune, run_inner_reward, run_two_level
 
@@ -37,6 +39,22 @@ from tests.compiler.conftest import drain_tune, run_inner_reward, run_two_level
 # signal). Enough to exercise "Σ_k n_k, not the product" without paying for a
 # full tree drain — exhaustion (∞ effort) is covered directly in test_db.py.
 _PATIENCE = 8
+
+
+def test_searched_winner_requires_one_post_fusion_and_one_cuda_kernel() -> None:
+    one = OpResult(
+        name="k",
+        op_key="key",
+        best_us=4.0,
+        searched_knobs={"TILE": "f2x2"},
+        searched_us=5.0,
+        searched_cuda_ops=1,
+    )
+    assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE": "f2x2"}, 5.0)
+
+    multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
+    assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
+    assert InnerReward(total_us=8.0, ok=True, per_op=[one, one]).searched_winner() is None
 
 
 @pytest.fixture(autouse=True)

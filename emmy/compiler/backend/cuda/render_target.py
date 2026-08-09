@@ -32,6 +32,7 @@ _F8_DTYPES = ("f8e4m3", "f8e5m2")
 _INTRINSIC_F32: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
+    "log": "logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
     "cos": "cosf",

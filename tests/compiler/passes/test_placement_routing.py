@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import os
 import sys
-
-import pytest
+from dataclasses import replace
+from types import SimpleNamespace
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -25,11 +25,8 @@ from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.golden import (
-    MatmulGoldenConfig,
-    RmsNormGoldenConfig,
-    _require_routing_split,
-)
+from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 
 
 def _compile(graph, knobs_env: str | None, monkeypatch, ctx: Context | None = None):
@@ -75,17 +72,23 @@ def _norm_linear_graph(S: int = 32, H: int = 1024, inter: int = 3072) -> Graph:
 
 
 def test_is_routing_reads_place_only_knob_dicts() -> None:
-    routing = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut"})
-    sched = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"TILE": "f4x8", "WORK": "t16x8"})
+    base = GOLDEN_RECORDS[0]
+    routing = replace(base, knobs={"PLACE@a": "cut"})
+    sched = replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"})
     assert routing.is_routing and not sched.is_routing
-    assert not MatmulGoldenConfig(name="t", M=64, N=64, K=64).is_routing  # key-only: no knobs
+    assert not replace(base, knobs={}).is_routing
 
 
-def test_loader_rejects_a_mixed_routing_schedule_entry() -> None:
-    mixed = MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut", "TILE": "f4x8", "WORK": "t16x8"})
-    with pytest.raises(ValueError, match="routing"):
-        _require_routing_split(mixed)
-    _require_routing_split(MatmulGoldenConfig(name="t", M=64, N=64, K=64, knobs={"PLACE@a": "cut"}))  # pure routing OK
+def _routing_record(*, gpu_name: str, emmy_us: float = 3.8):
+    return SimpleNamespace(
+        name="rms.routing",
+        knobs={"PLACE": "cut"},
+        is_routing=True,
+        gpu_name=gpu_name,
+        compute_cap=(12, 0),
+        emmy_us=emmy_us,
+        shape_key=ShapeKey(free_prod=64 * 4096, reduce_max=4096, is_warp=False, kind="rms_norm"),
+    )
 
 
 def test_routing_entries_never_join_the_schedule_golden_tier(monkeypatch) -> None:
@@ -95,8 +98,8 @@ def test_routing_entries_never_join_the_schedule_golden_tier(monkeypatch) -> Non
     from emmy.compiler.pipeline.search import golden as golden_mod
     from emmy.compiler.pipeline.search.policy import greedy
 
-    entry = RmsNormGoldenConfig(name="t.routing", M=64, K=4096, knobs={"PLACE": "cut"}, emmy_us=1.0)
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [entry])
+    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090", emmy_us=1.0)
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
     ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
     assert greedy._golden_evidence_index(ctx) == {}
 
@@ -173,10 +176,8 @@ def test_routing_golden_cuts_without_a_pin(monkeypatch) -> None:
     from emmy import config
     from emmy.compiler.pipeline.search import golden as golden_mod
 
-    entry = RmsNormGoldenConfig(
-        name="rms.routing", M=64, K=4096, dtype="fp16", knobs={"PLACE": "cut"}, emmy_us=3.8, gpu_name="NVIDIA GeForce RTX 5090"
-    )
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [entry])
+    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090")
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
     # Goldens are -O3 truth: under make test's -Xcicc -O1 lane the routing consult (like the
     # schedule golden tier) is silent — force the deployable regime, the audit's own move.
     with config.nvcc_flags_override(""):
@@ -193,10 +194,8 @@ def test_schedule_pin_suppresses_the_routing_entry(monkeypatch) -> None:
     from emmy import config
     from emmy.compiler.pipeline.search import golden as golden_mod
 
-    entry = RmsNormGoldenConfig(
-        name="rms.routing", M=64, K=4096, dtype="fp16", knobs={"PLACE": "cut"}, emmy_us=3.8, gpu_name="NVIDIA GeForce RTX 5090"
-    )
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [entry])
+    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090")
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
     monkeypatch.setenv("EMMY_STAGE", "")  # the OFF spelling — any schedule-family pin, PLACE excluded
     with config.nvcc_flags_override(""):
         ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
@@ -207,10 +206,8 @@ def test_schedule_pin_suppresses_the_routing_entry(monkeypatch) -> None:
 def test_routing_golden_ignored_off_its_card(monkeypatch) -> None:
     from emmy.compiler.pipeline.search import golden as golden_mod
 
-    entry = RmsNormGoldenConfig(
-        name="rms.routing", M=64, K=4096, dtype="fp16", knobs={"PLACE": "cut"}, emmy_us=3.8, gpu_name="NVIDIA GeForce RTX 4090"
-    )
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [entry])
+    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
     ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
     out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
     assert len(_kernel_ids(out)) == 1

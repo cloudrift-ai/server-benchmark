@@ -1,7 +1,6 @@
-"""Trace a transformer layer (or an inline torch module) to our Graph IR."""
+"""Trace a transformer layer or inline module to self-contained golden YAML."""
 
 import ast
-import json
 import logging
 import sys
 from pathlib import Path
@@ -16,19 +15,10 @@ def register_trace_command(subparsers):
 
     parser = subparsers.add_parser(
         "trace",
-        help="Trace a model, pre-traced IR, or inline torch module to Graph IR",
+        help="Trace a model, debug IR, or inline torch module to golden YAML",
     )
     add_input_args(parser, include_dump_dir=False)
-    parser.add_argument("--output", "-o", help="Output JSON path (default: auto-generated)")
-    parser.add_argument(
-        "--golden-output",
-        metavar="PATH",
-        help=(
-            "Write a working golden YAML skeleton plus one relative .torch.json reproducer per "
-            "distinct post-fusion kernel. The skeleton contains no knobs or measurements and "
-            "refuses to replace an existing YAML or sidecar directory."
-        ),
-    )
+    parser.add_argument("--output", "-o", help="Output golden YAML path (default: <trace-name>.golden.yaml)")
     parser.set_defaults(func=handle_trace)
 
 
@@ -39,24 +29,25 @@ def handle_trace(args):
     if not args.code and not args.input:
         logger.error("either a positional model ID / IR file or --code is required")
         sys.exit(2)
-    if args.golden_output:
-        try:
-            preflight_trace_inventory(args.golden_output, graph_output=args.output)
-        except FileExistsError as e:
-            logger.error(str(e))
-            sys.exit(2)
-
     from emmy.commands.compile import load_or_trace  # noqa: PLC0415
     from emmy.compiler.target import apply_target_arg  # noqa: PLC0415
 
     apply_target_arg(args)
-    graph, basename, _ = load_or_trace(args)
-    _save(graph, args, default_basename=basename)
-    if args.golden_output:
-        input_path = Path(args.input) if args.input else None
-        model = args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
-        result = write_trace_inventory(graph, args.golden_output, graph_output=args.output, model=model)
-        logger.info("Saved working golden: %s (%d distinct kernel(s))", result.path, result.target_count)
+    # A trace inventory records programs and shapes, not checkpoint values.  On a
+    # On a multi-hundred-billion-parameter checkpoint, avoid materializing a
+    # full eager architecture twin merely to export one requested layer.
+    graph, basename, _ = load_or_trace(args, architecture_only=True)
+    destination = args.output or f"{basename}.golden.yaml"
+    try:
+        preflight_trace_inventory(destination)
+    except FileExistsError as e:
+        logger.error(str(e))
+        sys.exit(2)
+    _log_trace(graph)
+    input_path = Path(args.input) if args.input else None
+    model = args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
+    result = write_trace_inventory(graph, destination, model=model)
+    logger.info("Saved golden YAML: %s (%d distinct kernel(s))", result.path, result.target_count)
 
 
 def graph_from_code(code: str, dynamic_shapes: dict | None = None):
@@ -246,7 +237,7 @@ def _slugify(src: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in src).strip("_").lower() or "inline"
 
 
-def _save(graph, args, default_basename: str) -> None:
+def _log_trace(graph) -> None:
     ops_count: dict[str, int] = {}
     for n in graph.nodes.values():
         name = type(n.op).__name__
@@ -257,14 +248,3 @@ def _save(graph, args, default_basename: str) -> None:
         len(graph.nodes),
         ", ".join(f"{v} {k}" for k, v in sorted(ops_count.items())),
     )
-
-    # A working-golden-only invocation should not leave a second, auto-named
-    # Graph artifact. An explicit --output still requests both artifacts.
-    if args.output is None and args.golden_output:
-        return
-
-    output_path = args.output or f"{default_basename}.json"
-    with open(output_path, "w") as f:
-        json.dump(graph.to_dict(), f, indent=2)
-
-    logger.info("Saved: %s", output_path)

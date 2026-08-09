@@ -92,9 +92,9 @@ def _card_has_routing(gpu_name, cap) -> bool:
     if not gpu_name:
         return False
     try:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
 
-        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_CONFIGS)
+        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_RECORDS)
     except Exception:  # noqa: BLE001
         return False
 
@@ -126,7 +126,7 @@ def _routing_entry(ctx, knobs: dict, root=None):
     entries never fired in-model, so every ``mlp_down`` deployed the fused computed-A form —
     the m4096 chunk-prefill TTFT regression of the 2026-07-31 article-repro session."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
@@ -146,9 +146,7 @@ def _routing_entry(ctx, knobs: dict, root=None):
             key = replace(key, kind="fused", is_warp=True)
         cap = tuple(ctx.compute_capability)
         entries = [
-            g
-            for g in GOLDEN_CONFIGS
-            if g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap and key.joins(g.shape_key())
+            g for g in GOLDEN_RECORDS if g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap and key.joins(g.shape_key)
         ]
     except Exception:  # noqa: BLE001 — a routing consult failure must never break compile
         return None

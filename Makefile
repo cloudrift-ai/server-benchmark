@@ -22,13 +22,19 @@ help:
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
-setup:
-	@if [ ! -d "venv" ]; then \
+setup: venv/.setup-complete
+
+# Keep the completion marker inside the venv so an interrupted dependency install
+# cannot leave `make setup` permanently succeeding with an unusable environment.
+# pyproject.toml is a prerequisite so dependency edits also refresh the venv.
+venv/.setup-complete: pyproject.toml
+	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
-		echo "Installing Python dependencies..."; \
-		./venv/bin/pip install -e ".[dev]"; \
 	fi
+	@echo "Installing Python dependencies..."
+	./venv/bin/pip install -e ".[dev]"
+	@touch $@
 
 setup-ci:
 	python3.12 -m venv venv --prompt "emmy"

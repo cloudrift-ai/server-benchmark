@@ -1,184 +1,417 @@
-# OLMoE-1B-7B kernel shapes (hidden 2048, expert intermediate 1024, 16 Q / 16 KV heads, E=64 top-8
-# experts) on the RTX 5090 — seeded 2026-08-06 by a manual pinned --ab sweep (no tuner), each entry
-# 2-3x reproduced at <2% spread. cublas_us is the live `Eager PyTorch` row from the same
-# `run --bench` (cuBLAS HGEMM for the fp16 matmuls, torch RMSNorm eager for the norm kind).
-#
-# Why these exist: the MoE serving programs live at widths the tuned evidence never covered — the
-# M=1 expert twins (the fixed-slot c=1 decode path: 16 layers x 8 slots x 2 matmuls per step), the
-# M=16 decode-bucket dense/expert twins, the M=256 prefill expert twin, and the symbolic (.dynM)
-# expert fallback. Cold greedy lost 1.4-4.6x per kernel on every one of them (the worst: the
-# symbolic expert matmuls' hint-shaped big tiles at 141.5 vs 31.0 µs — the "symbolic grids are the
-# wrong shape" class the m256 twin exists to dodge).
-#
-# Layout note: every matmul here is the serving F.linear layout (trans_b — B given (N, K)); the
-# expert weights are graph INPUTS (per-expert slices of the 3-D expert tensors), so the transpose
-# stays in-graph and the b_trans staging serves it — the same ShapeKey as a constant-weight linear
-# of these extents (the layout-blind key caveat in MatmulGoldenConfig applies).
-#
-# Shape sharing: (16, 2048, 2048) serves the dense v_proj / o_proj decode twins AND the expert
-# bucket twin's gate_up (one entry covers all three); (16, 4096, 2048) is the merged q‖k
-# projection (the 035 concat rule fuses q_proj+k_proj; its split-K finalizes fuse the q/k norms);
-# rms_norm k2048 m16 covers the input and post-attention norms. All decode shapes are L2-resident
-# in this bench (see the HOW TO READ note in rtx5090_sm120_gemma4.yaml — same-shape comparisons
-# stay valid; the absolute µs are not in-model step predictions).
-#
-# std lane only: at these memory-bound decode/prefill widths the f16-accumulate atoms don't pay,
-# so no [fm] siblings were recorded.
 gpu_name: NVIDIA GeForce RTX 5090
-model: allenai/OLMoE-1B-7B-0125-Instruct
 compute_cap:
-  - 12
-  - 0
+- 12
+- 0
+model: allenai/OLMoE-1B-7B-0125-Instruct
+programs:
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [16, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [16, 4096]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [16, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [16, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [16, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [16, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [16, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [16, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [1, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [1, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [256, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [256, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [256, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [256, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
 configs:
-  # ---- expert FFN, M=1 (the fixed-slot c=1 decode path; gemv-class planar coop forms) ----------
-  # Greedy picked the t128 band on both; the narrower bands (t64 on K=2048, t32 on K=1024) win
-  # 1.4-1.8x — same coop reduce, more rows in flight per SM.
-  - kernel: matmul
-    name: olmoe_1b7b.expert_gate_up.m1
-    M: 1
-    N: 2048
-    K: 2048
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+- name: olmoe_1b7b.expert_gate_up.m1
+  program: 0
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: t64
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 3.3
-    cublas_us: 8.2
-  - kernel: matmul
-    name: olmoe_1b7b.expert_down.m1
-    M: 1
-    N: 2048
-    K: 1024
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 't32', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 8.2
+    reference_backend: cublas
+- name: olmoe_1b7b.expert_down.m1
+  program: 1
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: t32
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 2.5
-    cublas_us: 6.1
-  # ---- dense decode-bucket twins, M=16 (EMMY_GEN_DECODE_BUCKET=16) -----------------------------
-  # qk_cat: the merged q‖k projection (N = 2 x 2048). Cold greedy deployed w1x1/f2x4/k8 at 12%
-  # occupancy (14.0 µs); the w1x8 f1-row split-K family more than halves every M=16 shape.
-  # emmy_us records the split pair's total (main + finalize).
-  - kernel: matmul
-    name: olmoe_1b7b.qk_cat.m16
-    M: 16
-    N: 4096
-    K: 2048
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f1x2/k4', REDUCE: 'g4k', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 6.1
+    reference_backend: cublas
+- name: olmoe_1b7b.qk_cat.m16
+  program: 2
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x8
+    TILE: mma_m16n8k16_f16_f32/f1x2/k4
+    REDUCE: g4k
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 5.4
-    cublas_us: 10.2
-  # v_proj / o_proj / expert-bucket gate_up — one shape, three consumers (see header).
-  - kernel: matmul
-    name: olmoe_1b7b.o_proj.m16
-    M: 16
-    N: 2048
-    K: 2048
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f1x1/k4', REDUCE: 'g4k', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 10.2
+    reference_backend: cublas
+- name: olmoe_1b7b.o_proj.m16
+  program: 3
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x8
+    TILE: mma_m16n8k16_f16_f32/f1x1/k4
+    REDUCE: g4k
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 3.9
-    cublas_us: 8.2
-  - kernel: matmul
-    name: olmoe_1b7b.expert_down.m16
-    M: 16
-    N: 2048
-    K: 1024
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f1x1/k4', REDUCE: 'g4k', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 8.2
+    reference_backend: cublas
+- name: olmoe_1b7b.expert_down.m16
+  program: 4
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w1x8
+    TILE: mma_m16n8k16_f16_f32/f1x1/k4
+    REDUCE: g4k
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 2.9
-    cublas_us: 6.1
-  # Input + post-attention norms (and the merged-qk finalize's q/k-norm key at the same free/reduce
-  # extents). Greedy's t128 band left 2.4x on the table at 16 rows x K=2048. (t1024 measured 2.2 but
-  # sits outside the enumerable coop-reduce catalog — t512 is the widest deployable band.)
-  - kernel: rms_norm
-    name: olmoe_1b7b.rms_norm.k2048.m16
-    M: 16
-    K: 2048
-    knobs: {WORK: 't512', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 6.1
+    reference_backend: cublas
+- name: olmoe_1b7b.rms_norm.k2048.m16
+  program: 5
+  target:
+    origins:
+    - rms_norm
+  knobs:
+    WORK: t512
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 2.4
-    cublas_us: 4.1
-  # ---- dense M=1 twins (EMMY_GEN_M1_TIER; L*.pre.m1 / L*.post.m1) ------------------------------
-  # The dense m1 gemvs read CONSTANT weights, whose layout transpose folds at load — the k-major
-  # canonical layout (the ".m1.t" convention from rtx4090_sm89_gemma4.yaml), a DIFFERENT layout
-  # twin than the b_trans expert entries above (same layout-blind ShapeKey; the coop family flips
-  # per layout: plain `coop` wins b_trans, `g<n>k/coop-t` wins k-major — measured 75.2 vs 5.0 µs
-  # and 14.6 vs 3.3 µs cross-realized). Cold greedy deployed a knob-less scalar form at 42.1 µs on
-  # BOTH gemv shapes (pre1 96.4 / post1 47.1 µs e2e, ~2.3 ms/step across 16 layers).
-  # emmy_us records the split pair's total (main + finalize).
-  - kernel: matmul
-    name: olmoe_1b7b.qk_cat.m1.t
-    M: 1
-    N: 4096
-    K: 2048
-    dtype: 'fp16'
-    knobs: {WORK: 't128', TILE: '', REDUCE: 'g8k/coop-t', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 4.1
+    reference_backend: torch-eager
+- name: olmoe_1b7b.qk_cat.m1.t
+  program: 6
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t128
+    TILE: ''
+    REDUCE: g8k/coop-t
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 5.8
-    cublas_us: 10.8
-  # v_proj (pre.m1) and o_proj+residual (post.m1) — one shape, both consumers. (t128/g16k
-  # measured 3.7 but that pairing is outside the enumerable split-K catalog; t256/g8k is the
-  # fastest catalog member.)
-  - kernel: matmul
-    name: olmoe_1b7b.o_proj.m1.t
-    M: 1
-    N: 2048
-    K: 2048
-    dtype: 'fp16'
-    knobs: {WORK: 't256', TILE: '', REDUCE: 'g8k/coop-t', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 10.8
+    reference_backend: cublas
+- name: olmoe_1b7b.o_proj.m1.t
+  program: 7
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t256
+    TILE: ''
+    REDUCE: g8k/coop-t
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 4.0
-    cublas_us: 10.3
-  # Single-row norms: input/post-attn m1 sweeps AND the merged-qk m1 finalize's q/k-norm key
-  # (heads=1, free 2048 — same key).
-  - kernel: rms_norm
-    name: olmoe_1b7b.rms_norm.k2048.m1
-    M: 1
-    K: 2048
-    knobs: {WORK: 't512', TILE: '', REDUCE: 'coop', STAGE: '', LOOPIFY: '0', RASTER: ''}
+    reference_us: 10.3
+    reference_backend: cublas
+- name: olmoe_1b7b.rms_norm.k2048.m1
+  program: 8
+  target:
+    origins:
+    - rms_norm
+  knobs:
+    WORK: t512
+    TILE: ''
+    REDUCE: coop
+    STAGE: ''
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 1.9
-    cublas_us: 4.1
-  # ---- prefill expert twin, M=256 (the mean per-expert chunk width; moe.expert.m256) -----------
-  - kernel: matmul
-    name: olmoe_1b7b.expert_gate_up.m256
-    M: 256
-    N: 2048
-    K: 2048
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g4k', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 4.1
+    reference_backend: torch-eager
+- name: olmoe_1b7b.expert_gate_up.m256
+  program: 9
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x4
+    TILE: mma_m16n8k16_f16_f32/f2x2/k2
+    REDUCE: g4k
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 18.8
-    cublas_us: 16.8
-  - kernel: matmul
-    name: olmoe_1b7b.expert_down.m256
-    M: 256
-    N: 2048
-    K: 1024
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g2k', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 16.8
+    reference_backend: cublas
+- name: olmoe_1b7b.expert_down.m256
+  program: 10
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x4
+    TILE: mma_m16n8k16_f16_f32/f2x2/k2
+    REDUCE: g2k
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 11.2
-    cublas_us: 10.3
-  # ---- symbolic (.dynM) expert fallback — rows > 256 at prefill (hot experts / stragglers) -----
-  # The biggest cold-greedy losses of the set: the masked big-tile picks (w4x2/f4x8/k2, 17%
-  # occupancy) ran 4.1-4.6x over the pinned configs at the hint width.
-  - kernel: matmul
-    name: olmoe_1b7b.expert_gate_up.dynM
-    M: 512
-    N: 2048
-    K: 2048
-    dtype: 'fp16'
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g4k', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 10.3
+    reference_backend: cublas
+- name: olmoe_1b7b.expert_gate_up.dynM
+  program: 11
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w2x4
+    TILE: mma_m16n8k16_f16_f32/f2x2/k2
+    REDUCE: g4k
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 31.0
-    cublas_us: 30.6
-  - kernel: matmul
-    name: olmoe_1b7b.expert_down.dynM
-    M: 512
-    N: 2048
-    K: 1024
-    dtype: 'fp16'
-    trans_b: true
-    dynamic: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', STAGE: 'd2/tma', LOOPIFY: '0', RASTER: ''}
+    reference_us: 30.6
+    reference_backend: cublas
+- name: olmoe_1b7b.expert_down.dynM
+  program: 12
+  target:
+    origins:
+    - linear
+  knobs:
+    WORK: w4x2
+    TILE: mma_m16n8k16_f16_f32/f2x4/k2
+    REDUCE: ''
+    STAGE: d2/tma
+    LOOPIFY: '0'
+    RASTER: ''
+  measurements:
     emmy_us: 17.8
-    cublas_us: 17.0
+    reference_us: 17.0
+    reference_backend: cublas

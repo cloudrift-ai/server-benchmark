@@ -8,15 +8,15 @@ persistence. CLI commands only validate argument combinations and report errors.
 from __future__ import annotations
 
 import copy
-import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     dump_golden_file,
-    golden_config_from_entry,
     golden_entry_state,
+    golden_record_from_entry,
     is_repository_golden_path,
     load_golden_file,
 )
@@ -30,6 +30,7 @@ class WorkingGoldenTarget:
     code: str | None
     input: str | None
     dynamic: list[str] | None
+    program: object | None = None
     entry_indexes: list[int] = field(default_factory=list)
     proposals: list[tuple[int, dict]] = field(default_factory=list)
 
@@ -39,47 +40,35 @@ class TraceInventoryResult:
     """Artifacts written for one trace-generated working inventory."""
 
     path: Path
-    sidecar_dir: Path
     target_count: int
 
 
-def golden_sidecar_dir(destination: Path) -> Path:
-    """Deterministic sibling directory holding a working inventory's reproducers."""
-    return destination.with_name(f"{destination.stem}.kernels")
-
-
-def preflight_trace_inventory(path: str | Path, *, graph_output: str | Path | None = None) -> tuple[Path, Path]:
-    """Resolve a fresh trace-inventory destination and reject collisions."""
+def preflight_trace_inventory(path: str | Path) -> Path:
+    """Resolve a fresh trace-inventory destination and reject replacement."""
     destination = Path(path)
-    sidecars = golden_sidecar_dir(destination)
-    if graph_output is not None and Path(graph_output).resolve() == destination.resolve():
-        raise FileExistsError("--output and --golden-output must name different files")
-    existing = [candidate for candidate in (destination, sidecars) if candidate.exists()]
-    if existing:
-        raise FileExistsError(f"refusing to replace existing golden artifact(s): {', '.join(str(p) for p in existing)}")
-    return destination, sidecars
-
-
-def _safe_filename(name: str) -> str:
-    return "".join(character if character.isalnum() or character in "._-" else "_" for character in name)
+    if destination.exists():
+        raise FileExistsError(f"refusing to replace existing golden artifact: {destination}")
+    return destination
 
 
 def write_trace_inventory(
     graph,
     path: str | Path,
     *,
-    graph_output: str | Path | None = None,
     model: str | None = None,
     ctx=None,
 ) -> TraceInventoryResult:
-    """Lower a trace through fusion and write inventory-only target reproducers."""
+    """Lower a trace through fusion and write a self-contained target inventory."""
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline  # noqa: PLC0415
+    from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+    from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
-    destination, sidecars = preflight_trace_inventory(path, graph_output=graph_output)
+    destination = preflight_trace_inventory(path)
     provenance.seed(graph)
     input_graph = graph.copy()
     ctx = ctx or Context.probe()
@@ -95,46 +84,59 @@ def write_trace_inventory(
         for producer_id in fused_producer_ids(fused, node):
             absorbed[producer_id] = node_id
 
-    representatives: dict[str, tuple[str, object]] = {}
+    targets: list[tuple[str, object]] = []
     for node_id in fused.topological_order():
         node = fused.nodes[node_id]
         if not isinstance(node.op, LoopOp) or node_id in absorbed:
             continue
-        key = node.op.cache_key()
-        if key is None:
-            continue
-        current = representatives.get(key)
-        label = node.op.name or node_id
-        if current is None or (label, node_id) < ((current[1].op.name or current[0]), current[0]):
-            representatives[key] = (node_id, node)
+        targets.append((node_id, node))
 
-    reproducers: list[tuple[dict, object]] = []
-    for key, (node_id, node) in sorted(representatives.items(), key=lambda item: ((item[1][1].op.name or item[1][0]), item[0])):
+    programs: list[dict] = []
+    # Persist the pristine program once.  Per-target frontend slices are useful
+    # ephemeral tuning views, but they can change fusion when independently
+    # lowered (especially sibling linears and computed-A cones).  Provenance
+    # selectors must therefore resolve against the original trace context.
+    program_ref = intern_program(programs, input_graph)
+    loops: list[dict] = []
+    entries: list[dict] = []
+    inventory = []
+    for node_id, node in targets:
         folded = [fused.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
-        reproducer = CompilerDump.torch_reproducer_graph(input_graph, node, absorbed=folded)
-        if reproducer is None:
-            raise ValueError(f"post-fusion kernel {node.op.name or node_id!r} has no frontend provenance")
-        name = f"{node.op.name or node_id}.{key[:12]}"
-        filename = f"{_safe_filename(name)}.torch.json"
-        relative = (golden_sidecar_dir(Path(destination.name)) / filename).as_posix()
-        reproducers.append(({"kernel": "traced", "name": name, "reproducer": relative}, reproducer))
+        target_prov = provenance.union(*(provenance.get(item) for item in (node, *folded)))
+        origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
+        inventory.append((node_id, node, folded, origins))
+    origin_counts = Counter(origins for _node_id, _node, _folded, origins in inventory if origins)
+
+    for node_id, node, folded, origins in inventory:
+        key = node.op.cache_key()
+        suffix = key[:12] if key is not None else node_id
+        name = f"{node.op.name or node_id}.{suffix}"
+        if origins and origin_counts[origins] == 1:
+            target = {"origins": list(origins)}
+        else:
+            loop_graph = single_node_graph(fused, node_id, absorb=frozenset(item.id for item in folded))
+            target = {"loop": intern_loop_program(loops, loop_graph)}
+        entry = {
+            "name": name,
+            "program": program_ref,
+            "target": target,
+        }
+        entries.append(entry)
 
     document: dict = {
-        "format_version": 1,
         "compute_cap": list(ctx.compute_capability),
-        "configs": [entry for entry, _reproducer in reproducers],
+        "programs": programs,
+        "configs": entries,
     }
+    if loops:
+        document["loops"] = loops
     if ctx.gpu_name:
         document["gpu_name"] = ctx.gpu_name
     if model:
         document["model"] = model
 
-    sidecars.mkdir(parents=True)
-    for entry, reproducer in reproducers:
-        filename = Path(entry["reproducer"]).name
-        (sidecars / filename).write_text(json.dumps(reproducer.to_dict(), indent=2) + "\n")
     dump_golden_file(document, destination)
-    return TraceInventoryResult(path=destination, sidecar_dir=sidecars, target_count=len(reproducers))
+    return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
 def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tuple[dict, list[WorkingGoldenTarget]]:
@@ -144,26 +146,17 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
         raise ValueError(f"working golden cannot point inside the canonical repository goldens: {source}")
     document = load_golden_file(source)
 
-    by_source: dict[tuple, WorkingGoldenTarget] = {}
+    by_source: dict[tuple[int, tuple], WorkingGoldenTarget] = {}
     for index, entry in enumerate(document["configs"]):
         if kernel and kernel not in entry["name"]:
             continue
-        config = golden_config_from_entry(document, entry)
-        if config is None:
-            reproducer = (source.parent / entry["reproducer"]).resolve()
-            if not reproducer.is_file():
-                raise ValueError(f"{entry['name']}: traced reproducer does not exist: {reproducer}")
-            code, input_path, dynamic = None, str(reproducer), None
-        else:
-            code, input_path = config.snippet(), None
-            dynamic = config.dynamic_specs() or None
-        key = (code, input_path, tuple(dynamic or ()))
+        record = golden_record_from_entry(document, entry)
+        key = (record.program_index, record.target_key)
         target = by_source.get(key)
         if target is None:
-            target = WorkingGoldenTarget(label=entry["name"], code=code, input=input_path, dynamic=dynamic)
+            target = WorkingGoldenTarget(label=entry["name"], code=None, input=None, dynamic=None, program=record.target_program)
             by_source[key] = target
         target.entry_indexes.append(index)
-        # Validation already checked exact provisional identities in file context.
         if "knobs" in entry:
             target.proposals.append((index, dict(entry["knobs"])))
 
@@ -259,7 +252,7 @@ def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingG
     configs = document["configs"]
     for (entry_index, _pins), ranking in zip(target.proposals, rankings, strict=True):
         entry = configs[entry_index]
-        if not entry.get("provisional") and golden_entry_state(entry) == GoldenEntryState.VERIFIED:
+        if golden_entry_state(entry) == GoldenEntryState.VERIFIED:
             continue
         entry["ranking"] = {**ranking, "source": "proposal"}
     dump_golden_file(document, path, overwrite=True)
@@ -293,11 +286,7 @@ def persist_tune_winner(
             if "knobs" in configs[index] and canonical_row_key(configs[index]["knobs"]) == winner_key
         ]
         writable = next(
-            (
-                index
-                for index in matching
-                if configs[index].get("provisional") or golden_entry_state(configs[index]) != GoldenEntryState.VERIFIED
-            ),
+            (index for index in matching if golden_entry_state(configs[index]) != GoldenEntryState.VERIFIED),
             None,
         )
         if writable is not None:
@@ -309,7 +298,7 @@ def persist_tune_winner(
             }
         elif not matching:
             seed = copy.deepcopy(configs[target.entry_indexes[0]])
-            for key in ("knobs", "emmy_us", "cublas_us", "provisional", "ranking"):
+            for key in ("knobs", "measurements", "ranking"):
                 seed.pop(key, None)
             seed["knobs"] = winner_knobs
             seed["ranking"] = {**winner_ranking, "tune_winner": True}

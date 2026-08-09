@@ -511,7 +511,7 @@ def _golden_evidence_index(ctx: Context) -> dict:
     caches written by local tunes). Goldens are consulted, never inserted into
     the reservoir or the online prior's training data. Best-effort: any load
     failure returns an empty index (deploys fall back to the normal hierarchy)."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
     if not gpu_name:
@@ -519,12 +519,12 @@ def _golden_evidence_index(ctx: Context) -> dict:
     index: dict = {}
     try:
         cap = tuple(ctx.compute_capability)
-        for g in GOLDEN_CONFIGS:
+        for g in GOLDEN_RECORDS:
             if g.gpu_name != gpu_name or tuple(g.compute_cap) != cap:
                 continue
             if g.is_routing:
                 continue  # a ROUTING entry (PLACE-only) decides cuts pre-schedule — never a fork row
-            index.setdefault(g.shape_key(), []).append(g)
+            index.setdefault(g.shape_key, []).append(g)
         for entries in index.values():
             entries.sort(key=lambda g: g.emmy_us or float("inf"))  # unmeasured entries rank last
     except Exception:  # noqa: BLE001 — a golden consult failure must never break compile
@@ -652,7 +652,7 @@ def golden_audit(records: list[dict]):
     ``MATCH`` (a recorded golden realized on an offered candidate), ``DRIFT`` (goldens
     keyed to the fork's shape but none realizes — a graph/enumeration change invalidated
     them), ``GAP`` (no golden recorded for the shape). ``unrealized`` (MATCH/DRIFT only;
-    ``None`` on GAP) lists the shape's recorded :class:`GoldenConfig` entries that NO
+    ``None`` on GAP) lists the shape's recorded golden entries that NO
     offered candidate realizes — the per-entry "pin-only" signal the ``eval golden``
     offer audit reads (an entry can be individually unrealizable while a sibling still
     MATCHes and floors the deploy)."""
@@ -721,7 +721,7 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str, base: dict | None 
         "them — the golden(s) no longer realize under the current enumeration; falling through to the normal "
         "evidence hierarchy. Investigate enumeration drift for: %s",
         node_id,
-        goldens[0].shape_key(),
+        goldens[0].shape_key,
         len(goldens),
         "y" if len(goldens) == 1 else "ies",
         ", ".join(g.name for g in goldens),

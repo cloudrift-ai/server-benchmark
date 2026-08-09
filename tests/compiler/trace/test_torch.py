@@ -252,6 +252,24 @@ def test_trace_reshape():
     assert len(reshapes) >= 1
 
 
+def test_trace_flatten_is_reshape():
+    """aten.flatten changes rank and must not enter the elementwise fallback."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.ir.frontend.ir import ReshapeOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class FlattenModule(nn.Module):
+        def forward(self, x):
+            return x.flatten(2)
+
+    g = trace_module(FlattenModule(), (torch.randn(1, 8, 4, 16),))
+    reshapes = [n for n in g.nodes.values() if isinstance(n.op, ReshapeOp)]
+    assert len(reshapes) == 1
+    assert tuple(reshapes[0].output.shape) == (1, 8, 64)
+
+
 def test_trace_transpose():
     """aten.transpose traces to TransposeOp."""
     import torch
@@ -308,6 +326,82 @@ def test_trace_linear_with_bias():
     linear_nodes = [n for n in g.nodes.values() if isinstance(n.op, LinearOp)]
     assert len(linear_nodes) == 1
     assert linear_nodes[0].op.has_bias, "Linear with bias should have has_bias=True"
+
+
+def test_trace_bmm_produces_matmul_and_matches_eager():
+    """aten.bmm is the fixed-rank spelling of the existing batched MatmulOp."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class BatchMatmul(nn.Module):
+        def forward(self, a, b):
+            return torch.bmm(a, b)
+
+    a = torch.randn(2, 3, 4)
+    b = torch.randn(2, 4, 5)
+    graph = trace_module(BatchMatmul(), (a, b))
+    assert sum(isinstance(node.op, MatmulOp) for node in graph.nodes.values()) == 1
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(
+        compiled,
+        input_data={compiled.inputs[0]: a.numpy(), compiled.inputs[1]: b.numpy()},
+    )
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_allclose(got, torch.bmm(a, b).numpy(), rtol=1e-5, atol=1e-5)
+
+
+def test_trace_default_softplus_is_stable_frontend_op():
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Softplus(nn.Module):
+        def forward(self, x):
+            return F.softplus(x)
+
+    graph = trace_module(Softplus(), (torch.randn(2, 8),))
+    ops = [node.op.name for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp)]
+    assert ops == ["softplus"]
+
+
+def test_trace_simple_tensor_index_is_gather_and_matches_eager():
+    """``table[index]`` is the axis-zero embedding form of GatherOp."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import GatherOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Index(nn.Module):
+        def forward(self, table, indices):
+            return table[indices]
+
+    table = torch.randn(10, 6)
+    indices = torch.tensor([3, 1, 7, 3], dtype=torch.long)
+    graph = trace_module(Index(), (table, indices))
+    gathers = [node for node in graph.nodes.values() if isinstance(node.op, GatherOp)]
+    assert len(gathers) == 1 and gathers[0].op.axis == 0
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(
+        compiled,
+        input_data={compiled.inputs[0]: table.numpy(), compiled.inputs[1]: indices.numpy()},
+    )
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, table[indices].numpy())
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +523,156 @@ def test_trace_chunk_getitem_routes_to_selected_slice():
     assert isinstance(output.op, SliceOp)
     assert output.op.start == 3
     assert output.output.shape[-1].as_static() == 3
+
+
+def test_trace_split_with_sizes_materializes_static_slices_and_matches_eager():
+    """Non-uniform static splits use the same cumulative-slice representation as chunk."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.frontend.ir import SliceOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Split(nn.Module):
+        def forward(self, x):
+            return torch.split(x, (2, 3, 1), dim=-1)
+
+    x = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+    graph = trace_module(Split(), (x,))
+    slices = [node for node in graph.nodes.values() if isinstance(node.op, SliceOp)]
+    assert tuple(node.op.start for node in slices) == (0, 2, 5)
+    assert tuple(node.output.shape[-1].as_static() for node in slices) == (2, 3, 1)
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+    for got, expected in zip(result.outputs.values(), torch.split(x, (2, 3, 1), dim=-1), strict=True):
+        np.testing.assert_array_equal(got, expected.numpy())
+
+
+def test_trace_unbind_materializes_axis_index_maps_and_matches_eager():
+    """Unbind results fix the removed input coordinate to each tuple index."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Unbind(nn.Module):
+        def forward(self, x):
+            return torch.unbind(x, dim=1)
+
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    graph = trace_module(Unbind(), (x,))
+    maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp)]
+    assert len(maps) == 3
+    assert all(tuple(node.output.shape) == (2, 4) for node in maps)
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+    for got, expected in zip(result.outputs.values(), torch.unbind(x, dim=1), strict=True):
+        np.testing.assert_array_equal(got, expected.numpy())
+
+
+def test_trace_repeat_interleave_materializes_index_map_and_matches_eager():
+    """A scalar repeat maps each output coordinate back by integer division."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Repeat(nn.Module):
+        def forward(self, x):
+            return torch.repeat_interleave(x, 2, dim=-1)
+
+    x = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3)
+    graph = trace_module(Repeat(), (x,))
+    maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp)]
+    assert len(maps) == 1
+    assert tuple(maps[0].output.shape) == (2, 2, 6)
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, torch.repeat_interleave(x, 2, dim=-1).numpy())
+
+
+def test_trace_stack_materializes_multi_source_index_map_and_matches_eager():
+    """Stack selects one source by the inserted output-axis coordinate."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Stack(nn.Module):
+        def forward(self, x, y, z):
+            return torch.stack((x, y, z), dim=1)
+
+    inputs = tuple(torch.arange(8, dtype=torch.float32).reshape(2, 4) + offset for offset in (0, 10, 20))
+    graph = trace_module(Stack(), inputs)
+    maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp)]
+    assert len(maps) == 1
+    assert tuple(maps[0].output.shape) == (2, 3, 4)
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    input_data = {name: value.numpy() for name, value in zip(compiled.inputs, inputs, strict=True)}
+    result, _ = backend.run(compiled, input_data=input_data)
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, torch.stack(inputs, dim=1).numpy())
+
+
+def test_trace_max_dim_values_lowers_reduction_and_matches_eager():
+    """The values item of max.dim is a normal maximum reduction."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ReduceOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class MaxValues(nn.Module):
+        def forward(self, x):
+            return x.max(dim=-1, keepdim=True).values
+
+    x = torch.randn(2, 3, 8)
+    graph = trace_module(MaxValues(), (x,))
+    reduces = [node for node in graph.nodes.values() if isinstance(node.op, ReduceOp)]
+    assert len(reduces) == 1
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_allclose(got, x.max(dim=-1, keepdim=True).values.numpy(), rtol=1e-6, atol=1e-6)
+
+
+def test_trace_max_dim_indices_rejected():
+    """Argmax indices need their own stable IR semantics; never alias them to values."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class MaxIndices(nn.Module):
+        def forward(self, x):
+            return x.max(dim=-1).indices
+
+    with pytest.raises(NotImplementedError, match="argmax indices"):
+        trace_module(MaxIndices(), (torch.randn(2, 8),))
 
 
 @pytest.mark.parametrize(("chunks", "dim", "message"), [(object(), 1, "chunk count"), (3, object(), "dimension")])

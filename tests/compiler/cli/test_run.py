@@ -211,11 +211,11 @@ def test_run_ab_rejects_malformed_spec(run_cli):
     assert "missing '='" in (stdout + stderr)
 
 
-def test_run_record_shape_rejects_bad_spec(run_cli):
-    """``--record-shape`` fails fast (before any compile/bench spend) on an invalid spec."""
+def test_run_record_shape_option_is_retired(run_cli):
+    """The obsolete shape-identity surface is no longer accepted by the parser."""
     rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--record-shape", '{"kernel": "warp_drive"}')
     assert rc == 2
-    assert "unknown kernel kind" in (stdout + stderr)
+    assert "unrecognized arguments: --record-shape" in (stdout + stderr)
 
 
 def test_ab_samples_parse_label_and_shape():
@@ -272,7 +272,7 @@ def test_intensity_floor_flags_impossible_row(monkeypatch):
     """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
     recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
     plausible latency passes, and an unregistered device degrades to no gate. The gate reads
-    ``Sample.flops`` (``GoldenConfig.flops()`` — never overestimated, hint-free) rather than
+    ``Sample.flops`` (an exact measured-work count, never a ``ShapeKey`` estimate) rather than
     reconstructing from the ShapeKey: the join key excludes symbolic axes on the matmul side
     but includes them on the reduce-tier side, so the old hint-multiplier reconstruction
     flagged every reduce-tier ``.dynM`` replay 512× over (the golden-audit false positive)."""

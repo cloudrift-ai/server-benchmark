@@ -1,137 +1,274 @@
 gpu_name: NVIDIA GeForce RTX 4080
-compute_cap: [8, 9]
+compute_cap:
+- 8
+- 9
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
 configs:
-  - kernel: matmul
-    name: matmul.square.512
-    M: 512
-    N: 512
-    K: 512
-    knobs: {WORK: 't32x8', TILE: 'f2x8', RASTER: '', STAGE: 'd2/cp'}
+- name: matmul.square.512
+  program: 0
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t32x8
+    TILE: f2x8
+    RASTER: ''
+    STAGE: d2/cp
+  measurements:
     emmy_us: 15.0
-    cublas_us: 18.0
-  - kernel: matmul
-    name: matmul.square.1024
-    M: 1024
-    N: 1024
-    K: 1024
-    knobs: {WORK: 't32x16', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp'}
+    reference_us: 18.0
+    reference_backend: cublas
+- name: matmul.square.1024
+  program: 1
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t32x16
+    TILE: f4x8
+    RASTER: ''
+    STAGE: d2/cp
+  measurements:
     emmy_us: 85.2
-    cublas_us: 77.0
-  - kernel: matmul
-    name: matmul.square.2048
-    M: 2048
-    N: 2048
-    K: 2048
-    knobs: {WORK: 't32x8', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp'}
+    reference_us: 77.0
+    reference_backend: cublas
+- name: matmul.square.2048
+  program: 2
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t32x8
+    TILE: f4x8
+    RASTER: ''
+    STAGE: d2/cp
+  measurements:
     emmy_us: 587.8
-    cublas_us: 499.0
-  - kernel: matmul
-    name: matmul.square.4096
-    M: 4096
-    N: 4096
-    K: 4096
-    knobs: {WORK: 't32x16', TILE: 'f4x10', RASTER: '', STAGE: 'd2/cp'}
+    reference_us: 499.0
+    reference_backend: cublas
+- name: matmul.square.4096
+  program: 3
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: t32x16
+    TILE: f4x10
+    RASTER: ''
+    STAGE: d2/cp
+  measurements:
     emmy_us: 4636.7
-    cublas_us: 3922.0
-  - kernel: matmul
-    name: matmul.square.512.fp16
-    M: 512
-    N: 512
-    K: 512
-    dtype: fp16
-    knobs: {WORK: 'w2x1', TILE: 'mma_m16n8k16_f16_f32/f1x4/k2', RASTER: '', STAGE: 'd4/cp'}
+    reference_us: 3922.0
+    reference_backend: cublas
+- name: matmul.square.512.fp16
+  program: 4
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w2x1
+    TILE: mma_m16n8k16_f16_f32/f1x4/k2
+    RASTER: ''
+    STAGE: d4/cp
+  measurements:
     emmy_us: 8.3
-    cublas_us: 6.0
-  - kernel: matmul
-    name: matmul.square.1024.fp16
-    M: 1024
-    N: 1024
-    K: 1024
-    dtype: fp16
-    knobs: {WORK: 'w2x1', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', RASTER: '', STAGE: 'd1/cp'}
+    reference_us: 6.0
+    reference_backend: cublas
+- name: matmul.square.1024.fp16
+  program: 5
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w2x1
+    TILE: mma_m16n8k16_f16_f32/f4x4/k2
+    RASTER: ''
+    STAGE: d1/cp
+  measurements:
     emmy_us: 35.7
-    cublas_us: 27.0
-  - kernel: matmul
-    name: matmul.square.1024.fp16
-    M: 1024
-    N: 1024
-    K: 1024
-    dtype: fp16
-    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', RASTER: '', STAGE: 'd2/cp/p2'}
+    reference_us: 27.0
+    reference_backend: cublas
+- name: matmul.square.1024.fp16
+  program: 5
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w4x1
+    TILE: mma_m16n8k16_f16_f32/f4x4/k2
+    RASTER: ''
+    STAGE: d2/cp/p2
+  measurements:
     emmy_us: 32.8
-    cublas_us: 27.0
-  - kernel: matmul
-    name: matmul.square.2048.fp16
-    M: 2048
-    N: 2048
-    K: 2048
-    dtype: fp16
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', RASTER: '', STAGE: 'd2/cp'}
+    reference_us: 27.0
+    reference_backend: cublas
+- name: matmul.square.2048.fp16
+  program: 6
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w1x4
+    TILE: mma_m16n8k16_f16_f32/f4x4
+    RASTER: ''
+    STAGE: d2/cp
+  measurements:
     emmy_us: 188.4
-    cublas_us: 197.0
-  - kernel: matmul
-    name: matmul.square.4096.fp16
-    M: 4096
-    N: 4096
-    K: 4096
-    dtype: fp16
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', RASTER: '', STAGE: 'd2/cp'}
+    reference_us: 197.0
+    reference_backend: cublas
+- name: matmul.square.4096.fp16
+  program: 7
+  target:
+    origins:
+    - matmul
+  knobs:
+    WORK: w1x4
+    TILE: mma_m16n8k16_f16_f32/f4x4
+    RASTER: ''
+    STAGE: d2/cp
+  measurements:
     emmy_us: 1399.8
-    cublas_us: 1350.0
-  - kernel: attention
-    name: attention.hd256.dynM
-    n_heads: 16
-    seq: 512
-    head_dim: 256
-    dtype: 'fp16'
-    causal: true
-    dynamic: true
-    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x2/k16', STAGE: 'd2/cp'}  # retired knob dropped: PLACE: 'fuse'
+    reference_us: 1350.0
+    reference_backend: cublas
+- name: attention.hd256.dynM
+  program: 8
+  target:
+    origins:
+    - scaled_dot_product_attention
+  knobs:
+    WORK: w4x1
+    TILE: mma_m16n8k16_f16_f32/f1x2/k16
+    STAGE: d2/cp
+  measurements:
     emmy_us: 68.4
-    cublas_us: 49.0
-  # --- DiT-XL-2-256 transformer block (s256, hidden 1152) — the measured #431 deploy winners.
-  # These were carried as a hardcoded table in ``tile/_schedule.py``; they belong here, where the
-  # deploy evidence tier already reads recorded winners. The knobs are the enumeration's own row
-  # values, captured verbatim off the live fork. NOT benched into this file: #431 recorded the
-  # winning schedule but no latencies, so both entries stay unmeasured (``emmy_us: 0.0`` — the
-  # evidence index ranks unmeasured entries last, which is correct: any later A/B that DOES record
-  # µs for these shapes should outrank them). Re-tune with ``emmy tune`` on a 4080 to fill them in.
-  - kernel: matmul
-    name: dit_xl_2.attn_out_proj.s256
-    model: facebook/DiT-XL-2-256
-    M: 256
-    N: 1152
-    K: 1152
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/p2'}
-    emmy_us: 0.0
-    cublas_us: 0.0
-    provisional: true
-  # Four K slices restore enough CTA parallelism for this small-M, long-K shape.
-  - kernel: matmul
-    name: dit_xl_2.ff_out_proj.s256
-    model: facebook/DiT-XL-2-256
-    M: 256
-    N: 1152
-    K: 4608
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/p2'}
-    emmy_us: 0.0
-    cublas_us: 0.0
-    provisional: true
-  # The block's SDPA (16 heads x s256 x hd72, non-causal) — the flash winner #431 measured, moved
-  # off the `_rtx4080_dit_flash_deploy` code path. Unmeasured, like the projections above.
-  - kernel: attention
-    name: dit_xl_2.attn.s256
-    model: facebook/DiT-XL-2-256
-    n_heads: 16
-    seq: 256
-    head_dim: 72
-    dtype: 'fp16'
-    causal: false
-    knobs: {WORK: 'w2x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f2x8/k5', 'TILE@pj': 'mma_m16n8k16_f16_f32/f2x9/k4', REDUCE: '', STAGE: ''}
-    emmy_us: 0.0
-    cublas_us: 0.0
-    provisional: true
+    reference_us: 49.0
+    reference_backend: torch-eager

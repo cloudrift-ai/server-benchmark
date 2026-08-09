@@ -2,7 +2,7 @@
 reference for ``emmy run --ir``.
 
 Each frontend / tensor-IR op is mapped to the equivalent torch op (the numpy
-``forward()`` has a torch twin), so a dumped ``.torch.json`` reproducer can be
+``forward()`` has a torch twin), so a provenance-recovered frontend program can be
 accuracy-checked and timed against torch — including torch.compile fusion — not
 just numpy. ``IndexMapOp`` (the post-decomposition layout primitive — broadcast,
 transpose/reshape/slice/cat, RoPE rotate) is supported as a vectorized
@@ -98,6 +98,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "tanh": lambda a: torch.tanh(a[0]),
         "sigmoid": lambda a: torch.sigmoid(a[0]),
         "silu": lambda a: F.silu(a[0]),
+        "softplus": lambda a: F.softplus(a[0]),
         "relu": lambda a: F.relu(a[0]),
         "erf": lambda a: torch.erf(a[0]),
         "gelu": lambda a: F.gelu(a[0]),

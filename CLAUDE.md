@@ -42,7 +42,10 @@ answering — they hold the detail that is no longer in this file or the README.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
-- `EMMY_DUMP_DIR` environment variable (optional) — when set, all compiler stages dump intermediate artifacts (graphs, CUDA kernels, execution plans) to this directory for debugging. Per kernel, the dump also writes a `<kname>.torch.json` reproducer — the original PyTorch ops that kernel implements (sliced by op provenance), with an `i/N` coverage header (full vs partial) — runnable via `emmy run --ir <kname>.torch.json --bench` to reproduce accuracy / latency vs torch for that op. Kernels are named after the ops they realize (`k_rms_norm`, `k_sdpa_reduce`)
+- `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
+  (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
+  in memory; stable Torch IR is persisted only inside golden YAML. Kernels are named after the operations they realize
+  (`k_rms_norm`, `k_sdpa_reduce`).
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
   resolve forks through the deploy evidence hierarchy — the live card's recorded goldens first (the repo-shipped
@@ -111,9 +114,8 @@ Quick test models / scripts (for local iteration):
   serving-validated on a 4080, tuned TPOT 1.28x stock; defaults to thinking mode — pass `enable_thinking: false`
   in chat probes for terse outputs). `TinyLlama/TinyLlama-1.1B-Chat-v1.0` stays as the ungated **Llama-arch**
   smoke model. GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
-- Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_model_kernels.py`, `bench_golden_set.py`,
-  `bench_gen_*.py`, `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`,
-  `remote_node_collect.py`, `golden_neighbor_bench.py`, `digest_kernels.py` — the kernel-source byte-identity
+- Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_golden_set.py`, `bench_gen_*.py`,
+  `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `digest_kernels.py` — the kernel-source byte-identity
   gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
   usage;
   the skills that drive them document the flows.

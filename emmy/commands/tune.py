@@ -52,9 +52,9 @@ def register_tune_command(subparsers):
         "--golden-file",
         metavar="PATH",
         help=(
-            "Tune every target in a working golden YAML file. Specialized entries are reconstructed from their "
-            "shape fields; traced entries load their relative reproducer. Entries with a knobs mapping are measured before "
-            "MCTS and ranking results are written back to the working file."
+            "Tune every target in a working golden YAML file. Each target is reconstructed from embedded stable "
+            "Torch IR plus provenance, or from its Loop IR fallback. Entries with a knobs mapping are measured before MCTS and ranking "
+            "results are written back to the working file."
         ),
     )
     parser.add_argument("--output", "-o", help="Output path for the tuned CUDA IR")
@@ -108,7 +108,7 @@ def register_tune_command(subparsers):
         action="store_true",
         help=(
             "After tuning, re-bench the winner at -O3 (deployable numbers, NOT the -O1 ranking pass): the full "
-            "compiled model and each individual kernel (via its provenance .torch.json reproducer) vs eager "
+            "compiled model and each individual kernel (via its in-memory frontend provenance slice) vs eager "
             "PyTorch / torch.compile / Emmy, then print a comparison table. Writes an HTML per-kernel chart "
             "to <dump-dir>/kernels.html when a dump dir is set. Can take minutes on a large model."
         ),
@@ -418,8 +418,8 @@ def _target_artifact_name(index: int, label: str) -> str:
 
 
 def _bench_dump(args, *, target_dir: str | None = None):
-    """Per-target dump dir. ``--bench`` reads the ``.torch.json`` provenance
-    reproducers from a dump dir; route through a temp dir when no ``--dump-dir`` was
+    """Per-target artifact collector. ``--bench`` reads frontend provenance
+    slices from memory; route other dump artifacts through a temp dir when no ``--dump-dir`` was
     given (HTML is only written for a real ``--dump-dir`` / ``EMMY_DUMP_DIR``).
     Returns ``(dump, tmp_dir_or_None)``."""
     from emmy.compiler.pipeline.dump import CompilerDump
@@ -450,6 +450,15 @@ def _cleanup_temp_dump(path: Path | None) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _select_tune_target(args, target: WorkingGoldenTarget) -> None:
+    """Install either a normal trace source or an embedded working-golden program."""
+    args.code, args.input, args.dynamic = target.code, target.input, target.dynamic
+    if target.program is not None:
+        args._golden_graph = target.program
+    elif hasattr(args, "_golden_graph"):
+        del args._golden_graph
+
+
 def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -> int:
     """Tune independent working-golden targets concurrently across GPU slots.
 
@@ -466,7 +475,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
     temp_dumps: list[Path] = []
     try:
         for index, target in enumerate(targets):
-            args.code, args.input, args.dynamic = target.code, target.input, target.dynamic
+            _select_tune_target(args, target)
             dump, tmp_dump = _bench_dump(args, target_dir=_target_artifact_name(index, target.label))
             if tmp_dump is not None:
                 temp_dumps.append(tmp_dump)
@@ -545,7 +554,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
     try:
         results = asyncio.run(run_all())
         for (target, _graph, bench_bundle, dump, tmp_dump), result in zip(prepared, results, strict=True):
-            args.code, args.input, args.dynamic = target.code, target.input, target.dynamic
+            _select_tune_target(args, target)
             if result.best_reward is not None:
                 if args.output and result.assembled is not None:
                     Path(args.output).write_text(format_stage(result.assembled, "cuda"))
@@ -672,8 +681,8 @@ def handle_tune(args):
         sys.stderr.write(f"[tune] {len(targets)} shape(s) into {db_path}{' (--clean)' if args.clean else ''}\n")
     done = 0
     for i, target in enumerate(targets):
-        label, code, inp, dyn = target.label, target.code, target.input, target.dynamic
-        args.code, args.input, args.dynamic = code, inp, dyn
+        label, code = target.label, target.code
+        _select_tune_target(args, target)
         if multi:
             sys.stderr.write(f"\n[tune] === {i + 1}/{len(targets)}: {label} → {code} ===\n")
         target_dir = _target_artifact_name(i, label) if multi else None
@@ -792,7 +801,7 @@ _PER_KERNEL_BENCH_WALL_S = 120.0
 def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int | None = None) -> None:
     """``tune --bench``: re-bench the tuned winner at -O3 (deployable numbers, NOT the
     -O1 ranking pass) — full model **against the real torch module** (eager /
-    torch.compile / Emmy) and each per-kernel ``.torch.json`` reproducer against
+    torch.compile / Emmy) and each in-memory per-kernel frontend slice against
     its torch-ref reconstruction, each in the SIGKILL-able bench worker so a hung kernel
     can't wedge the run. Prints both tables and (when ``html_dir`` is set) writes an HTML
     per-kernel chart. ``bench_bundle = (module, args, kwargs) | None``; when ``None`` (an
@@ -813,15 +822,13 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int 
     sys.stderr.write(f"\n[tune] --bench: re-benching at -O3 ({bench_flags or 'nvcc default -O3'}) — deployable numbers\n")
 
     # Build the bench backend with EMMY_DUMP_DIR cleared: CudaBackend defaults its
-    # dump to CompilerDump.from_env(), whose __post_init__ would rmtree the dump dir —
-    # destroying the .torch.json reproducers the assembled tuning run just wrote there
-    # (and which the per-kernel bench reads). Clearing it also avoids per-launch dump
-    # noise during benching. (No-op when tuning used a temp dump — the env wasn't set.)
+    # dump to CompilerDump.from_env(), whose __post_init__ would replace the dump dir.
+    # Clearing it also avoids per-launch dump noise during benching.
     saved_dump_env = os.environ.pop(config.DUMP_DIR, None)
     # ``backend`` here is only the handle to resolve the tune DB (for the per-kernel re-lowering);
     # the benches themselves run in the SIGKILL-able worker (``benchmark_compare_isolated_async``), which
     # builds its own backend. DUMP_DIR is cleared so CudaBackend's default CompilerDump doesn't
-    # rmtree the reproducer dir the per-kernel bench reads.
+    # replace the artifact dir while the bench is using its in-memory slices.
     backend = CudaBackend(tune_db="auto")
     if saved_dump_env is not None:
         os.environ[config.DUMP_DIR] = saved_dump_env
@@ -866,9 +873,9 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int 
             # parent device stays clean — per-kernel runs in its own worker — so continue.
             sys.stderr.write(f"[tune] full-model bench failed ({exc}); continuing to per-kernel\n")
     else:
-        sys.stderr.write("\n[tune] full-model bench skipped (no runnable module — --ir JSON path)\n")
+        sys.stderr.write("\n[tune] full-model bench skipped (the embedded program has no runnable eager module)\n")
 
-    rows, fallback = _bench_per_kernel(args, dump.dir, db, device_id=device_id, ctx=bench_ctx)
+    rows, fallback = _bench_per_kernel(args, dump, db, device_id=device_id, ctx=bench_ctx)
     if rows:
         _print_per_kernel_table(rows)
         if fallback:
@@ -877,22 +884,19 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int 
             render_kernel_chart(rows, Path(html_dir) / "kernels.html")
 
 
-def _bench_per_kernel(args, dump_dir, db, *, device_id: int | None = None, ctx=None):
-    """Bench each kernel's ``.torch.json`` provenance reproducer (re-lowered greedily so the tuned
+def _bench_per_kernel(args, dump, db, *, device_id: int | None = None, ctx=None):
+    """Bench each kernel's frontend provenance slice (re-lowered greedily so the tuned
     DB-best forks are picked) vs eager / torch.compile / emmy at -O3 — each in the SIGKILL-able
     worker (``benchmark_compare_isolated_async``). Re-lowering runs in the parent (CPU; greedy forks read
     the DB); only the GPU bench is isolated, so a hung / failed kernel skips just that reproducer and
     the sweep continues. Returns ``(rows, fallback)`` — ``rows`` is ``[(label, {backend: us})]``,
     ``fallback`` the labels that benched without CUDA graph capture (dispatch-inclusive timings)."""
-    import json
-
     from emmy.commands.run import _detect_stage, _passes_after_stage
     from emmy.compiler.backend import torch_ref
     from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
-    from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline import Pipeline
 
-    repros = final_kernel_repros(dump_dir)
+    repros = dump.frontend_reproducers()
     if not repros:
         return [], []
     bench_flags = os.environ.get(config.NVCC_FLAGS, "")
@@ -900,11 +904,10 @@ def _bench_per_kernel(args, dump_dir, db, *, device_id: int | None = None, ctx=N
     rows: list[tuple[str, dict]] = []
     fallback: list[str] = []
     records: list[dict] = []  # persisted as 62_kernel_bench.json — the `emmy compare` input
-    for repro in repros:
-        label = _short_kernel(repro.name)
+    for name, frontend in sorted(repros.items()):
+        label = _short_kernel(name)
         try:
-            with open(repro) as f:
-                g = Graph.from_dict(json.load(f))
+            g = frontend.copy()
             fe = g.copy() if torch_ref.is_runnable(g) else None
             tail = _passes_after_stage(_detect_stage(g))
             # No dump here — re-creating a CompilerDump on the repro dir would rmtree it.
@@ -926,7 +929,7 @@ def _bench_per_kernel(args, dump_dir, db, *, device_id: int | None = None, ctx=N
             sys.stderr.write(f"[tune]   {label}: skipped ({exc})\n")
             continue
         rows.append((label, results))
-        records.append({"kernel": repro.name.removesuffix(".torch.json"), "label": label, "captured": captured, "backends": results})
+        records.append({"kernel": name, "label": label, "captured": captured, "backends": results})
         if not captured:
             fallback.append(label)
         dp = results.get("Emmy")
@@ -934,22 +937,17 @@ def _bench_per_kernel(args, dump_dir, db, *, device_id: int | None = None, ctx=N
     if records:
         # Per-kernel -O3 bench results in machine-readable form, beside the table /
         # kernels.html — the per-kernel input `emmy compare <dumpA> <dumpB>` diffs.
-        (Path(dump_dir) / "62_kernel_bench.json").write_text(json.dumps(records, indent=2, default=str))
+        import json
+
+        (dump.dir / "62_kernel_bench.json").write_text(json.dumps(records, indent=2, default=str))
     return rows, fallback
 
 
-def final_kernel_repros(dump_dir):
-    """The ``.torch.json`` provenance reproducers from the last (CUDA) stage dump."""
-    dump_dir = Path(dump_dir)
-    kernel_dirs = sorted(dump_dir.glob("*.kernels"))
-    return sorted(kernel_dirs[-1].glob("*.torch.json")) if kernel_dirs else []
-
-
 def _short_kernel(name: str) -> str:
-    """Readable kernel label: drop the ``.torch.json`` suffix + trailing structural hash."""
+    """Readable kernel label with its trailing structural hash removed."""
     import re
 
-    return re.sub(r"_[0-9a-f]{6}$", "", name.removesuffix(".torch.json"))
+    return re.sub(r"_[0-9a-f]{6}$", "", name)
 
 
 def _fmt_us(us) -> str:
@@ -987,7 +985,7 @@ def render_kernel_chart(rows, out_html) -> None:
         ],
         value_name="latency (µs) — lower is faster",
         title="tune --bench — per-kernel latency (-O3)",
-        subtitle=f"{len(rows)} kernels benched from their .torch.json reproducers ({n_vs} torch-comparable, rest emmy-only).",
+        subtitle=f"{len(rows)} kernels benched from frontend provenance slices ({n_vs} torch-comparable, rest emmy-only).",
         orientation="horizontal",
     )
     out_html = Path(out_html)

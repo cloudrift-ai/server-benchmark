@@ -42,9 +42,9 @@ if ! names=$(CUDA_VISIBLE_DEVICES= MODEL="$MODEL" "$PY" -c "
 import os, sys
 sys.path.insert(0, 'scripts')
 from check_serving_goldens import covers, model_slug
-from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 target = model_slug(os.environ['MODEL'])
-print('\n'.join(sorted({g.name for g in GOLDEN_CONFIGS if covers(g.model, target)})))
+print('\n'.join(sorted({g.name for g in GOLDEN_RECORDS if covers(g.model, target)})))
 "); then
   # A non-zero enumeration may still have printed a PARTIAL list on stdout. Preflighting a
   # silent subset is worse than not preflighting: it gates a rental on a green summary that

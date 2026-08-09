@@ -23,7 +23,6 @@ import glob
 import os
 
 import pytest
-import yaml
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -38,6 +37,7 @@ from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "../../../../emmy/compiler/pipeline/search/goldens")
 
@@ -172,33 +172,56 @@ def _entries():
     files = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))
     assert files, f"no golden YAMLs under {_GOLDEN_DIR}"
     for f in files:
-        with open(f) as fh:
-            doc = yaml.safe_load(fh)
-        for cfg in doc.get("configs", []):
-            yield os.path.basename(f), cfg
+        doc = load_golden_file(f)
+        for record in load_golden_records(doc):
+            yield os.path.basename(f), record
+
+
+def _tree_kind(record) -> str | None:
+    """Derive the reference tree from the persisted frontend target.
+
+    Golden v2 deliberately stores no kernel-class discriminator.  The current
+    compiler category is an index over the stable origin operations, just like
+    ShapeKey and the structural features.
+    """
+    origins = record.origin_ops
+    if "torch.sdpa" in origins:
+        return "attention"
+    if record.shape_key.kind == "fused":
+        contractions = sum(op in {"torch.linear", "torch.matmul"} for op in origins)
+        return "mlp_geglu" if contractions > 1 else "norm_linear"
+    if record.shape_key.kind in {"rms_norm", "softmax"}:
+        return record.shape_key.kind
+    if "tensor.reduce" in origins:
+        return "reduce"
+    if any(op in {"torch.linear", "torch.matmul"} for op in origins):
+        return "matmul"
+    if origins == ("tensor.elementwise",):
+        return "pointwise"
+    return None
 
 
 def test_every_stored_golden_spelling_is_canonical(trees):
     checked = 0
     for fname, cfg in _entries():
-        kind = cfg["kernel"]
+        kind = _tree_kind(cfg)
         if kind not in trees:
             # rope / embedding entries carry no tree-path families — nothing to resolve.
-            path_keys = [k for k in cfg.get("knobs", {}) if family_of(k) in PATH_FAMILIES]
-            assert not path_keys, f"{fname}:{cfg['name']}: kind {kind!r} has path-family keys but no reference tree"
+            path_keys = [k for k in cfg.knobs if family_of(k) in PATH_FAMILIES]
+            assert not path_keys, f"{fname}:{cfg.name}: derived kind {kind!r} has path-family keys but no reference tree"
             continue
         root = trees[kind]
         all_sites = sites(root)
-        for key, value in cfg.get("knobs", {}).items():
+        for key, value in cfg.knobs.items():
             if family_of(key) not in PATH_FAMILIES:
                 continue
-            ctx = f"{fname}:{cfg['name']}: {key}={value!r}"
+            ctx = f"{fname}:{cfg.name}: {key}={value!r}"
             if key == family_of(key):  # bare — the canonical spelling of the primary site
                 if kind == "attention" and key == "TILE":
                     # The documented exception: a dynamic attention golden records ONE bare TILE
                     # (its PV plan) — ambiguous on the tree by design, matched any-of by the
                     # golden layer. Assert the exception holds exactly (dynamic entries only).
-                    assert cfg.get("dynamic"), f"{ctx}: a STATIC attention golden must spell TILE@dd/TILE@pj"
+                    assert cfg.dynamic, f"{ctx}: a STATIC attention golden must spell TILE@dd/TILE@pj"
                     with pytest.raises(ValueError, match="ambiguous"):
                         resolve(root, key, all_sites=all_sites)
                     continue

@@ -2,15 +2,10 @@
 
 Two surfaces in one file: the Graphviz DOT emitter (``_graph_to_dot``,
 checked at the source-string level — rendering to SVG/PNG is left to the
-``dot`` binary), and the per-kernel Torch reproducer dump
-(``CompilerDump`` writes ``<kname>.torch.json`` + ``.torch.txt`` slices
-of the pristine pre-decomposition graph keyed by each kernel's prov
-origins).
+``dot`` binary), and in-memory frontend slices recovered from kernel provenance.
 """
 
 from __future__ import annotations
-
-import json
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
@@ -139,44 +134,31 @@ def _rms_graph() -> Graph:
     return g
 
 
-def test_torch_repro_is_whole_op_and_loadable(tmp_path):
+def test_frontend_reproducer_is_whole_op_and_in_memory(tmp_path):
     g = _rms_graph()
     dump = CompilerDump(dir=tmp_path)
     dump.dump_input_graph(g)
     Pipeline.build(TILE_PASSES).run(g, dump=dump)
 
-    repros = sorted(tmp_path.glob("*.kernels/*.torch.json"))
-    assert repros, "expected a per-kernel .torch.json reproducer"
+    repros = dump.frontend_reproducers()
+    assert repros
+    assert not list(tmp_path.rglob("*.torch.json"))
 
     # Sliced from the pristine graph → contains the whole original RmsNormOp,
     # not its decomposed primitives.
-    sub = Graph.from_dict(json.loads(repros[-1].read_text()))
+    sub = next(reversed(repros.values()))
     kinds = {type(n.op).__name__ for n in sub.nodes.values()}
     assert "RmsNormOp" in kinds
     assert sub.outputs == ["rms_norm_0"]
     assert set(sub.inputs) == {"x", "w"}  # the rms_norm's own inputs become boundaries
 
 
-def test_torch_repro_coverage_header(tmp_path):
-    g = _rms_graph()
-    dump = CompilerDump(dir=tmp_path)
-    dump.dump_input_graph(g)
-    Pipeline.build(TILE_PASSES).run(g, dump=dump)
-
-    txts = sorted(tmp_path.glob("*.kernels/*.torch.txt"))
-    assert txts
-    body = txts[-1].read_text()
-    assert "rms_norm_0 (RmsNormOp):" in body
-    # rms_norm fully fuses at this shape → full coverage.
-    assert "— full" in body
-
-
 def test_no_repro_without_input_graph(tmp_path):
-    """A dump that never captured the input graph writes no reproducers."""
+    """A dump that never captured the input graph retains no frontend slices."""
     g = _rms_graph()
     dump = CompilerDump(dir=tmp_path)  # no dump_input_graph call
     Pipeline.build(TILE_PASSES).run(g, dump=dump)
-    assert not list(tmp_path.glob("*.kernels/*.torch.json"))
+    assert dump.frontend_reproducers() == {}
 
 
 def test_repro_keeps_constant_derived_boundaries(tmp_path):
@@ -202,7 +184,7 @@ def test_repro_keeps_constant_derived_boundaries(tmp_path):
 
     dump = CompilerDump(dir=tmp_path)
     dump.dump_input_graph(g)
-    sub = dump._torch_repro_subgraph({"p"})  # slice to the pow op only
+    sub = dump._frontend_repro_subgraph({"p"})  # slice to the pow op only
 
     kinds = {nid: type(n.op).__name__ for nid, n in sub.nodes.items()}
     assert kinds["exp_c"] == "ConstantOp", "constant leaf must be preserved"

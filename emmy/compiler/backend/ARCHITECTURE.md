@@ -34,11 +34,10 @@ unsupported, so `run --ir` falls back to emmy-only benchmarking for non-frontend
 input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
-shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic-trace `<kname>.torch.json`
-reproducer gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
+shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
+gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 `commands/run.py::bench_lowered_vs_torch`, which sizes its random inputs by hint-resolving symbolic dims). Used to
-turn a dumped `<kname>.torch.json` reproducer into an accuracy + latency comparison vs torch — see `../provenance.py`
-and `commands/run.py:_handle_run_ir`.
+benchmark decoded golden programs and in-memory provenance slices against torch.
 
 ## Backend ABC (`base.py`)
 

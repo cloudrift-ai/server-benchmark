@@ -28,15 +28,9 @@ from pathlib import Path
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.golden import (
-    GOLDEN_CONFIGS,
-    MatmulGoldenConfig,
-    PointwiseGoldenConfig,
-    ReduceGoldenConfig,
-)
-from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
+from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.prior.fit import Group, fit_two_stage, topk_table
-from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
@@ -83,37 +77,8 @@ def register_fit_command(subparsers) -> None:
     parser.set_defaults(func=handle_fit)
 
 
-def _base(ctx: Context, M: int, N: int, K: int, *, dynamic: bool = False) -> dict:
-    """The shape / regime features the planner stamps and the prior featurizes —
-    merged into each candidate row before ``knob_features`` so the occupancy terms
-    (``#CTAs``, waves) and tier-aware BK targets fire. A dynamic (symbolic-M)
-    golden mirrors the 992 stamp: the symbolic axis is EXCLUDED from the free-dim
-    product and counted in ``S_ext_n_symbolic_axis`` — the same features the
-    deployed featurization computes, and the flag the ``OfflinePrior`` selects
-    its dynamic weight set on."""
-    free = float(N) if dynamic else float(M * N)
-    base = {**ctx.features(), "S_ext_free_prod": free, "S_ext_reduce_prod": float(K), "S_ext_reduce_max": float(K)}
-    if dynamic:
-        base["S_ext_n_symbolic_axis"] = 1.0
-    return base
-
-
-def _snippet_rows(snippet: str, ctx: Context) -> list[dict]:
-    """A non-matmul golden's candidate rows — trace the golden's torch snippet
-    (``torch.sum`` / ``torch.relu`` have no dedicated frontend op, so the graph comes from the real
-    trace) and capture the RESTORED schedule fork's leaf rows via the same live-fork capture the
-    matmul path uses (``golden_eval.enumerate_graph``). A reduce offers its ``REDUCE@<axis>``
-    partitions; a pointwise kernel forks nothing today, so its pool is empty and the golden is
-    reported un-enumerable — reflecting the live search space rather than reconstructing
-    one that no longer exists."""
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-
-    graph = graph_from_code(snippet)[0]
-    return enumerate_graph(graph, ctx)
-
-
 def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Group], list[tuple[str, str, str]]]:
-    """Reconstruct each golden's candidate enumeration, pin the golden's index, and
+    """Enumerate each embedded golden program, pin its recorded row, and
     featurize every row, as :class:`Group` records (name, tier, card, golden index,
     per-row features filtered through the ``features_spec`` view; ``key`` is ``"<gpu>/<name>"``,
     parity duplicates suffixed ``#2``, ``#3``, … in dataset order). The second return is
@@ -149,37 +114,20 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
     # dataset build pays each pool once. The fm-pinned enumeration keys apart on its own: the
     # precision gate rides the pool key's pin fingerprint.
     ctxs: dict[tuple, Context] = {}
-    for g in GOLDEN_CONFIGS:
+    for g in GOLDEN_RECORDS:
         card = (tuple(g.compute_cap), g.gpu_name)
         ctx = ctxs.get(card)
         if ctx is None:
             ctx = ctxs[card] = Context.from_target(tuple(g.compute_cap), gpu_name=g.gpu_name)
-        if isinstance(g, ReduceGoldenConfig):
-            # The reduce's free axis (the ``M`` rows) maps to the planner's N axis
-            # (the tuned ``FN`` register tile sweeps it): trace E_M=1, E_N=M, E_K=K.
-            base = _base(ctx, 1, g.M, g.K)
-            rows, tier = _snippet_rows(g.snippet(), ctx), "reduce"
-        elif isinstance(g, PointwiseGoldenConfig):
-            base = _base(ctx, g.M, g.N, 1)
-            rows, tier = _snippet_rows(g.snippet(), ctx), "pointwise"
-        elif isinstance(g, MatmulGoldenConfig):
-            dyn = bool(g.dynamic)
-            base = _base(ctx, g.M, g.N, g.K, dynamic=dyn)
-            # A fast-math golden's row only exists in the gate-on enumeration (the same
-            # gate pinning ``golden_eval.evaluate_golden`` uses) — pin the gate for the
-            # reconstruction so the f16-accumulate rows are present and the fit anchors
-            # their ``MMA_acc_bits`` discriminator.
-            if g.fast_math:
-                from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
+        base = {**ctx.features(), **g.structural_features}
+        if g.fast_math:
+            from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
 
-                with F16_MMA_F32_ACC.pinned("1"):
-                    rows = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
-            else:
-                rows = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
-            tier = "dyn" if dyn else ("thread" if g.dtype == "fp32" else "warp")
+            with F16_MMA_F32_ACC.pinned("1"):
+                rows = enumerate_graph(g.target_program.copy(), ctx)
         else:
-            skipped.append((g.gpu_name, g.name, fit_cv.OUT_OF_SCOPE))
-            continue
+            rows = enumerate_graph(g.target_program.copy(), ctx)
+        tier = "dyn" if g.dynamic else (g.shape_key.kind or ("warp" if g.shape_key.is_warp else "thread"))
         if not rows:
             logger.info("  !! %s: nothing enumerated — skipping", g.name)
             skipped.append((g.gpu_name, g.name, "nothing enumerated"))

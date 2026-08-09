@@ -88,14 +88,14 @@ def _golden_coverage(groups: dict) -> tuple[int, int]:
     keys*, not per-config rows, so multiple knob sets for one shape — and the same
     shape recurring across per-GPU golden files (``ShapeKey`` is GPU-blind) — count
     once."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
 
     have = set()
     for sig in groups:
         d = dict(sig)
         if _matmul_sig(d):
             have.add(ShapeKey.from_s_features(d))
-    golden_keys = {g.shape_key() for g in GOLDEN_CONFIGS if isinstance(g, MatmulGoldenConfig)}
+    golden_keys = {g.shape_key for g in GOLDEN_RECORDS if g.is_matmul}
     covered = sum(1 for k in golden_keys if k in have)
     return covered, len(golden_keys)
 
@@ -120,9 +120,9 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     first); the faithful deploy check is ``eval golden``'s real greedy compile."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search import golden_eval  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu  # noqa: PLC0415
 
-    GOLDEN_CONFIGS = goldens_for_live_gpu()  # live card only — see golden_deploy_perf
+    GOLDEN_RECORDS = goldens_for_live_gpu()  # live card only — see golden_deploy_perf
 
     # Index the matmul op groups by ShapeKey (free-dim product, reduce extent,
     # dtype flag — both sides built by the ShapeKey constructors, so the fp32/fp16
@@ -135,16 +135,14 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
             continue
         index.setdefault(ShapeKey.from_s_features(d), {k: v for k, v in d.items() if k.startswith("S_")})
 
-    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
-
     rows, skipped = [], []
     lines = ["[prior] golden selection — golden's rank under the prior over the full gated enumeration:"]
-    for g in GOLDEN_CONFIGS:
-        if not isinstance(g, MatmulGoldenConfig):
+    for g in GOLDEN_RECORDS:
+        if not g.is_matmul:
             continue
         if kernel_filter and kernel_filter not in g.name:
             continue
-        s_feats = index.get(g.shape_key())
+        s_feats = index.get(g.shape_key)
         if s_feats is None:
             # A silent skip here hid the fp16 lockout in the 2026-06-12 sweep —
             # every unjoinable shape gets a per-shape line instead.
@@ -152,12 +150,9 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
             continue
         ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
         base = {**ctx.features(), **s_feats}
-        gold = dict(tuning_knob_items(g.knobs))  # native codec knobs (TILE/REDUCE/STAGE), tier-agnostic
-        # ``evaluate_golden`` ranks by descending score; the prior predicts latency
+        # ``evaluate_record`` ranks by descending score; the prior predicts latency
         # (lower = better), so negate to rank the predicted-fastest config first.
-        _, rank, pool, _ = golden_eval.evaluate_golden(
-            g.M, g.N, g.K, g.dtype, gold, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r})
-        )
+        _, rank, pool, _ = golden_eval.evaluate_record(g, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r}))
         if rank is None:
             skipped.append((g.name, f"recorded knobs not in the enumeration ({pool} rows) — pin/dtype mismatch?"))
             continue
@@ -195,9 +190,9 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
     goldens dir doesn't make a name's per-card entries collide on the GPU-blind
     ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, fast_math_knobs, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import fast_math_knobs, goldens_for_live_gpu  # noqa: PLC0415
 
-    GOLDEN_CONFIGS = goldens_for_live_gpu()
+    GOLDEN_RECORDS = goldens_for_live_gpu()
 
     # Deployable (-O3) measured rows per matmul op group, indexed by ShapeKey.
     # An fp32 square and its ``.fp16`` twin share (free_prod, reduce), so the key's
@@ -214,12 +209,12 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
         index.setdefault(ShapeKey.from_s_features(d), []).extend(o3)
 
     out: dict[str, float] = {}
-    for g in GOLDEN_CONFIGS:
-        if not isinstance(g, MatmulGoldenConfig) or not g.emmy_us:
+    for g in GOLDEN_RECORDS:
+        if not g.is_matmul or not g.emmy_us:
             continue
         if kernel_filter and kernel_filter not in g.name:
             continue
-        leaves = index.get(g.shape_key())
+        leaves = index.get(g.shape_key)
         if not leaves:
             continue
         best_i, _ = prior.pick([s.all_knobs() for s in leaves])
@@ -525,12 +520,12 @@ def _golden_cards_without_rows(cards_in_store: set[str], kernel_filter: str | No
     unanchorable, e.g. goldens seeded on a box whose node data was never collected)."""
     from collections import Counter  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
 
     counts = Counter(
         g.gpu_name
-        for g in GOLDEN_CONFIGS
-        if isinstance(g, MatmulGoldenConfig) and g.gpu_name not in cards_in_store and (not kernel_filter or kernel_filter in g.name)
+        for g in GOLDEN_RECORDS
+        if g.is_matmul and g.gpu_name not in cards_in_store and (not kernel_filter or kernel_filter in g.name)
     )
     return [f"{gpu} ({n} golden(s))" for gpu, n in sorted(counts.items())]
 
@@ -682,10 +677,10 @@ def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | Non
     it enters only the -O3 endpoint: the prior's pick over the op's ``H_opt=3`` regime
     rows vs ``emmy_us``, same-regime by construction (and skipped on a fast-math
     regime mismatch, the ``golden_deploy_perf`` convention)."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig, fast_math_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, fast_math_knobs  # noqa: PLC0415
 
     if goldens is None:
-        goldens = [g for g in GOLDEN_CONFIGS if isinstance(g, MatmulGoldenConfig) and g.gpu_name == gpu]
+        goldens = [g for g in GOLDEN_RECORDS if g.is_matmul and g.gpu_name == gpu]
     if kernel_filter:
         goldens = [g for g in goldens if kernel_filter in g.name]
     if not goldens:
@@ -699,7 +694,7 @@ def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | Non
     w = max(30, *(len(g.name) + 5 for g in goldens))
     for g in goldens:
         name = g.name + (" [fm]" if g.fast_math else "")
-        op_nodes = [n for n in gnodes if _matmul_sig(n.features) and ShapeKey.from_s_features(n.features) == g.shape_key()]
+        op_nodes = [n for n in gnodes if _matmul_sig(n.features) and ShapeKey.from_s_features(n.features) == g.shape_key]
         if not op_nodes:
             no_data += 1
             lines.append(f"      {name:{w}}  NO TREE DATA for this shape on this card")

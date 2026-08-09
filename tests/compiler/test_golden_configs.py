@@ -52,7 +52,7 @@ def test_repository_format_has_no_legacy_or_derived_target_fields() -> None:
 
 def test_production_tree_has_no_retired_golden_surfaces() -> None:
     root = Path(__file__).parents[2]
-    forbidden = ("GoldenConfig", "GOLDEN_CONFIGS", "_KERNEL_CLASSES", "golden_sidecar_dir", ".torch.json")
+    forbidden = ("GoldenConfig", "GOLDEN_CONFIGS", "_KERNEL_CLASSES", "golden_sidecar_dir", "golden_v2", ".torch.json")
     paths = [*sorted((root / "emmy").rglob("*.py")), *sorted((root / "scripts").glob("*.py")), *sorted((root / "scripts").glob("*.sh"))]
     for path in paths:
         text = path.read_text()

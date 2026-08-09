@@ -161,7 +161,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
-| `search/golden.py`, `search/golden_v2.py` | Generic program-backed records, repository indexing, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
+| `search/golden.py` | Generic program-backed records, repository indexing, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
 | `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and the CI gate (see Part 7). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -1090,7 +1090,7 @@ A golden record is a reviewed, per-GPU measurement of a frontend program target.
 are, how a golden's layout has to match the fork it is meant to decide, the two audits that catch a golden that no
 longer deploys, and the checks that keep the A/B honest.
 
-`golden_v2.py` holds one generic `GoldenRecord`. Each record references a stable frontend Torch IR program by its
+`golden.py` holds one generic `GoldenRecord`. Each record references a stable frontend Torch IR program by its
 document-local list index and selects its target only by frontend provenance origins. Current lowering derives the `S_*` histogram,
 `ShapeKey`, dtype classification, dynamic status, and operation kind lazily. Trace inventories retain the complete
 frontend program so these selectors re-lower in their original fusion context; standalone tuning slices are derived

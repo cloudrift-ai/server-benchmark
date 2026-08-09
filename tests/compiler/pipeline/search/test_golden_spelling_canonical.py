@@ -37,7 +37,7 @@ from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.golden_v2 import load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "../../../../emmy/compiler/pipeline/search/goldens")
 

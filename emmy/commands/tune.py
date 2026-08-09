@@ -187,6 +187,14 @@ def _tune_backend(device_id: int | None = None):
     return CudaBackend(bench_compile_timeout_s=12.0, bench_run_timeout_s=2.0, bench_wall_timeout_s=16.0, device_id=device_id)
 
 
+async def _warm_tune_backends(backends) -> None:
+    """Ramp multi-GPU workers without charging startup to a candidate timeout."""
+    if len(backends) < 2:
+        return
+    for start in range(0, len(backends), 2):
+        await asyncio.gather(*(backend.warm_async_worker() for backend in backends[start : start + 2]))
+
+
 def _resolve_devices(args) -> list[int | None]:
     """Resolve ``--gpus`` / ``--devices`` into a device-id list (``--devices`` wins).
     Default ``[None]`` → a single unpinned slot = today's serial behavior. Two or
@@ -336,6 +344,7 @@ def _tune_one(
     async def run():
         from emmy.compiler.pipeline.search.prior import load_prior
 
+        await _warm_tune_backends(backends)
         prior = load_prior(seed=args.seed)
         rankings = await measure_proposals(
             graph,
@@ -474,6 +483,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
     explore_eps = args.explore_eps if args.explore_eps is not None else config.tune_eps(0.0)
 
     async def run_all():
+        await _warm_tune_backends(backends)
         prior = load_prior(seed=args.seed)
         # Pins are process-global. Measure proposals before starting concurrent
         # MCTS tasks, rotating their isolated jobs across the available GPUs.

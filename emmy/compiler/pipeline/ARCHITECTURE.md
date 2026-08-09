@@ -809,6 +809,8 @@ one indexed target subdirectory so concurrent compiler artifacts never overwrite
 - A backend pins its async worker to a physical GPU via the child spawn env (`CUDA_VISIBLE_DEVICES`, plus a per-device
   `EMMY_GPU_LOCK` suffix), never mutating the parent `os.environ`.
 - Parallelism is bounded by the unique-kernel count; devices must be homogeneous.
+- Multi-GPU tune initializes isolated workers two at a time before measuring candidates. CUDA-context startup uses a
+  separate readiness budget, so host import pressure cannot become a false 16-second candidate failure on larger pools.
 
 ### Working-golden proposals and measured-candidate budgets
 

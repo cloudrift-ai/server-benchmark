@@ -272,7 +272,13 @@ def test_tune_one_measures_proposals_before_mcts_and_deducts_reserved_slots(monk
 
 
 def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypatch):
-    backends = [SimpleNamespace(name="gpu0"), SimpleNamespace(name="gpu1")]
+    async def warm_worker():
+        return None
+
+    backends = [
+        SimpleNamespace(name="gpu0", warm_async_worker=warm_worker),
+        SimpleNamespace(name="gpu1", warm_async_worker=warm_worker),
+    ]
     targets = [
         WorkingGoldenTarget("a", "code-a", None, None),
         WorkingGoldenTarget("b", "code-b", None, None),

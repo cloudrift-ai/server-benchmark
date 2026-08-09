@@ -10,6 +10,7 @@ or touching CUDA.
 from __future__ import annotations
 
 import os
+from unittest.mock import AsyncMock
 
 from emmy import config
 from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
@@ -49,6 +50,13 @@ def test_child_env_no_lock_suffix_when_base_unset(monkeypatch) -> None:
     env = _AsyncBenchWorker(device_id=1)._child_env()
     # No base lock → no per-device suffix (one worker per GPU has its own context).
     assert "EMMY_GPU_LOCK" not in env
+
+
+async def test_worker_warmup_uses_separate_readiness_request() -> None:
+    worker = _AsyncBenchWorker(device_id=1)
+    worker.run_job = AsyncMock(return_value={"warmed": True})
+    await worker.warmup(wall_timeout_s=45.0)
+    worker.run_job.assert_awaited_once_with({"worker_warmup": True}, wall_timeout_s=45.0)
 
 
 @requires_cuda

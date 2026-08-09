@@ -1709,6 +1709,12 @@ class _AsyncBenchWorker:
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 
+    async def warmup(self, *, wall_timeout_s: float = 60.0) -> None:
+        """Initialize the child CUDA context outside a candidate's wall budget."""
+        response = await self.run_job({"worker_warmup": True}, wall_timeout_s=wall_timeout_s)
+        if not response.get("warmed"):
+            raise RuntimeError("bench worker did not acknowledge CUDA warmup")
+
     def _tail_suffix(self) -> str:
         """The drained stderr tail as an error-message suffix ('' when the child was quiet)."""
         return f"; child stderr tail:\n{self._stderr_tail}" if self._stderr_tail.strip() else ""

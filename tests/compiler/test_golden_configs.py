@@ -53,6 +53,19 @@ def test_v100_reported_name_canonicalizes_live_golden_key(monkeypatch):
     assert _live_gpu_key() == ("NVIDIA Tesla V100 SXM3 32GB", (7, 0))
 
 
+def test_v100_sxm2_reported_name_canonicalizes_live_golden_key(monkeypatch):
+    """The exact SXM2 16GB runtime spelling must remain separate from SXM3 evidence."""
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "Tesla V100-SXM2-16GB")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (7, 0))
+
+    gpu = by_name("Tesla V100-SXM2-16GB")
+    assert gpu is not None and gpu.name == "NVIDIA Tesla V100 SXM2 16GB"
+    assert _live_gpu_key() == ("NVIDIA Tesla V100 SXM2 16GB", (7, 0))
+
+
 def test_matmul_snippet_fp32_has_no_dtype_kwarg():
     assert matmul_snippet(2048, 2048, 2048) == "torch.matmul(torch.randn(2048,2048), torch.randn(2048,2048))"
     # Non-square: lhs is (M,K), rhs is (K,N).

@@ -8,11 +8,28 @@ device-properties call.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from emmy.commands import tune
+
+
+async def test_worker_readiness_ramps_at_two_backends() -> None:
+    active = 0
+    peak = 0
+
+    class Backend:
+        async def warm_async_worker(self):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+
+    await tune._warm_tune_backends([Backend() for _ in range(7)])
+    assert peak == 2
 
 
 def _args(*, gpus=None, devices=None):

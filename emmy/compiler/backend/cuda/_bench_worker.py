@@ -21,6 +21,7 @@ Protocol (length-prefixed pickle on stdin/stdout):
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None}``
   or ``{"ok": False, "error": str, "traceback": str}`` on exception.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
+- A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -95,6 +96,14 @@ async def _run_job(req: dict) -> dict:
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
     the compile at a given opt level (the cubin cache key folds it in)."""
+    if req.get("worker_warmup"):
+        import cupy as cp
+
+        cp.cuda.Device().use()
+        cp.cuda.runtime.free(0)
+        cp.cuda.runtime.deviceSynchronize()
+        return {"warmed": True}
+
     from emmy import config
 
     with config.nvcc_flags_override(req.get("nvcc_flags")):

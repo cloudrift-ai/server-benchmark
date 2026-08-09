@@ -21,9 +21,8 @@ import yaml
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
 
-FORMAT_VERSION = 2
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
-_PROGRAM_GRAPH_CACHE: dict[str, object] = {}
+_PROGRAM_GRAPH_CACHE: dict[int, object] = {}
 
 
 class GoldenEntryState(StrEnum):
@@ -82,7 +81,7 @@ class GoldenRecord:
     gpu_name: str
     compute_cap: tuple[int, int]
     model: str | None
-    program_id: str
+    program_index: int
     program_wire: dict
     origins: tuple[str, ...]
     knobs: dict
@@ -91,11 +90,12 @@ class GoldenRecord:
 
     @cached_property
     def program(self):
-        """Decode the stable Torch IR payload once per content-addressed program."""
-        graph = _PROGRAM_GRAPH_CACHE.get(self.program_id)
+        """Decode the stable Torch IR payload once per embedded program."""
+        key = id(self.program_wire)
+        graph = _PROGRAM_GRAPH_CACHE.get(key)
         if graph is None:
             graph = graph_from_wire(self.program_wire)
-            _PROGRAM_GRAPH_CACHE[self.program_id] = graph
+            _PROGRAM_GRAPH_CACHE[key] = graph
         return graph
 
     @cached_property
@@ -206,9 +206,7 @@ def validate_golden_file(
 ) -> None:
     if not isinstance(document, Mapping):
         raise ValueError("golden document must be a mapping")
-    _require_keys(document, {"format_version", "gpu_name", "compute_cap", "model", "programs", "configs"}, "golden document")
-    if document.get("format_version") != FORMAT_VERSION:
-        raise ValueError(f"unsupported golden format_version {document.get('format_version')!r}; expected {FORMAT_VERSION}")
+    _require_keys(document, {"gpu_name", "compute_cap", "model", "programs", "configs"}, "golden document")
     gpu_name = document.get("gpu_name")
     if gpu_name is not None and (not isinstance(gpu_name, str) or not gpu_name):
         raise ValueError("gpu_name must be a non-empty string")
@@ -237,7 +235,7 @@ def validate_golden_file(
         if entry.get("model") is not None and not isinstance(entry["model"], str):
             raise ValueError(f"{where}.model must be a string")
         program_ref = entry.get("program")
-        if program_ref not in programs:
+        if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
             raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
         try:
             graph_from_wire(programs[program_ref])
@@ -290,7 +288,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping) -> GoldenRecord:
         gpu_name=document.get("gpu_name") or "",
         compute_cap=tuple(document["compute_cap"]),
         model=entry.get("model", document.get("model")),
-        program_id=entry["program"],
+        program_index=entry["program"],
         program_wire=document["programs"][entry["program"]],
         origins=tuple(target["origins"]),
         knobs=dict(entry.get("knobs") or {}),
@@ -305,14 +303,14 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
 _PROGRAM_TARGET_CACHE: dict[
-    tuple[str, tuple[int, int], str],
+    tuple[int, tuple[int, int], str],
     dict[frozenset[str], set[tuple[tuple[str, float], ...]]],
 ] = {}
 
 
 def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
     """Lower one persisted frontend target and recover its unique ``S_*`` row."""
-    key = (record.program_id, record.origins, record.compute_cap)
+    key = (id(record.program_wire), record.origins, record.compute_cap)
     cached = _STRUCTURAL_CACHE.get(key)
     if cached is not None:
         return cached
@@ -325,7 +323,7 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
 
     wanted = set(record.origins)
-    program_key = (record.program_id, record.compute_cap, record.gpu_name)
+    program_key = (id(record.program_wire), record.compute_cap, record.gpu_name)
     target_index = _PROGRAM_TARGET_CACHE.get(program_key)
     if target_index is None:
         graph = record.program.copy()

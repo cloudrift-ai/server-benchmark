@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from emmy.compiler.pipeline.search.golden_v2 import (
     _GOLDENS_DIR,
-    FORMAT_VERSION,
     GoldenEntryState,
     GoldenFileValidation,
     GoldenRecord,
@@ -65,7 +64,6 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
 
 
 __all__ = [
-    "FORMAT_VERSION",
     "GOLDEN_RECORDS",
     "GoldenEntryState",
     "GoldenFileValidation",

@@ -618,7 +618,7 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
             gpu_name="NVIDIA GeForce RTX 4090",
             compute_cap=(8, 9),
             model=None,
-            program_id=f"test:{name}:{m}",
+            program_index=0,
             program_wire=graph_to_wire(graph),
             origins=("matmul",),
             knobs=knobs,

@@ -39,16 +39,15 @@ from emmy.compiler.ir.tensor.ir import (
 )
 from emmy.compiler.tensor import Tensor
 from emmy.compiler.torch_wire import (
-    canonical_program_bytes,
     dim_from_wire,
     dim_to_wire,
     expr_from_wire,
     expr_to_wire,
     graph_from_wire,
     graph_to_wire,
+    intern_program,
     op_from_wire,
     op_to_wire,
-    program_id,
 )
 
 
@@ -130,12 +129,18 @@ def _program() -> Graph:
     return graph
 
 
-def test_program_round_trip_and_digest_are_deterministic():
+def test_program_round_trip_is_deterministic():
     wire = graph_to_wire(_program())
+    assert set(wire) == {"inputs", "outputs", "nodes"}
     restored = graph_from_wire(json.loads(json.dumps(wire)))
     assert graph_to_wire(restored) == wire
-    assert canonical_program_bytes(copy.deepcopy(wire)) == canonical_program_bytes(wire)
-    assert program_id(copy.deepcopy(wire)) == program_id(wire)
+
+
+def test_program_pool_uses_document_local_indexes_and_deduplicates():
+    programs = []
+    assert intern_program(programs, _program()) == 0
+    assert intern_program(programs, _program()) == 0
+    assert programs == [graph_to_wire(_program())]
 
 
 def test_constant_nested_load_ops_and_source_program_round_trip():
@@ -156,7 +161,7 @@ def test_constant_nested_load_ops_and_source_program_round_trip():
     assert op_to_wire(restored) == wire
 
 
-def test_program_rejects_unknown_ops_fields_and_digest_changes():
+def test_program_rejects_unknown_ops_and_fields():
     wire = graph_to_wire(_program())
     unknown_op = copy.deepcopy(wire)
     unknown_op["nodes"][-1]["op"] = "torch.future"
@@ -168,13 +173,7 @@ def test_program_rejects_unknown_ops_fields_and_digest_changes():
     with pytest.raises(ValueError, match="unknown field"):
         graph_from_wire(unknown_field)
 
-    changed = copy.deepcopy(wire)
-    changed["nodes"][-1]["attrs"]["op"] = {"__elementwise__": "multiply"}
-    assert program_id(changed) != program_id(wire)
-
-
-def test_older_operation_payload_uses_new_optional_defaults():
-    """Adding an optional Torch IR attribute does not invalidate old payloads."""
-    restored = op_from_wire({"op": "torch.matmul", "attrs": {}})
-    assert isinstance(restored, MatmulOp)
-    assert restored.has_bias is False
+    removed_version = copy.deepcopy(wire)
+    removed_version["ir_version"] = 1
+    with pytest.raises(ValueError, match="unknown field"):
+        graph_from_wire(removed_version)

@@ -26,7 +26,9 @@ def test_repository_golden_deserializes(path: Path) -> None:
     document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
     records = load_golden_records(document)
     assert records
-    assert document["format_version"] == 2
+    assert "format_version" not in document
+    assert isinstance(document["programs"], list)
+    assert all("ir_version" not in program for program in document["programs"])
     for record in records:
         assert record.program.nodes
         assert record.origins
@@ -82,9 +84,8 @@ def test_working_states_and_repository_requires_measurements() -> None:
     validate_golden_file(inventory)
 
 
-def test_program_digest_mismatch_is_rejected() -> None:
+def test_program_index_must_resolve_in_document() -> None:
     document = copy.deepcopy(load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY))
-    program_id = next(iter(document["programs"]))
-    document["programs"][program_id]["nodes"][-1]["attrs"]["has_bias"] = True
-    with pytest.raises(ValueError, match="digest mismatch"):
+    document["configs"][0]["program"] = len(document["programs"])
+    with pytest.raises(ValueError, match="does not resolve"):
         validate_golden_file(document)

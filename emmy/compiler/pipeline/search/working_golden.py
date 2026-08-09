@@ -94,7 +94,7 @@ def write_trace_inventory(
         if current is None or (label, node_id) < ((current[1].op.name or current[0]), current[0]):
             representatives[key] = (node_id, node)
 
-    programs: dict[str, dict] = {}
+    programs: list[dict] = []
     # Persist the pristine program once.  Per-target frontend slices are useful
     # ephemeral tuning views, but they can change fusion when independently
     # lowered (especially sibling linears and computed-A cones).  Provenance
@@ -116,7 +116,6 @@ def write_trace_inventory(
         entries.append(entry)
 
     document: dict = {
-        "format_version": 2,
         "compute_cap": list(ctx.compute_capability),
         "programs": programs,
         "configs": entries,
@@ -142,7 +141,7 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
         if kernel and kernel not in entry["name"]:
             continue
         record = golden_record_from_entry(document, entry)
-        key = (record.program_id, record.origins)
+        key = (record.program_index, record.origins)
         target = by_source.get(key)
         if target is None:
             target = WorkingGoldenTarget(label=entry["name"], code=None, input=None, dynamic=None, program=record.target_program)

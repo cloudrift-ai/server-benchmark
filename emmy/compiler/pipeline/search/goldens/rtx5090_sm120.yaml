@@ -1,1646 +1,1573 @@
-format_version: 2
 gpu_name: NVIDIA GeForce RTX 5090
 compute_cap:
 - 12
 - 0
 programs:
-  sha256:b04e839ac3f77acdf736c46762fba4ab13c8a94fc5075d365a4fd3e3211ed4a6:
-    ir_version: 1
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 512
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 512
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 512
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 512
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 512
-  sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54:
-    ir_version: 1
+    - name: matmul
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 512
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-  sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1024
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1024
+      - const: 1024
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1024
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1024
-        - const: 1024
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 1024
-        - const: 1024
-  sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 1024
+      - const: 1024
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-  sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-  sha256:c0921ebbb14132697323054df04799fc9e683dc276369d91ddc811e815cadded:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 512
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 512
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 512
-  sha256:178069f8988e142a784109387414bc520358071f90884de0ffd7ed7dbc2b607b:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 512
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 12288
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 12288
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 12288
-  sha256:da0a0ae49d93aaa4ad217fd8f478864b037d323c74d8245179f67f06f3ec3bc4:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 12288
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 4096
-  sha256:ffda4b27da1f4c44ebb0cdf539cedf4a49a855253b6db6774ac396a4d940cfc8:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 28672
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 28672
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 28672
-  sha256:4d33629cd2ace0b7cbb213f9da41a503228448689a67d5dce9d816f3802e6b79:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 28672
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 14336
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 14336
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 14336
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 14336
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 4096
-  sha256:70966658fc05614667f377e643391a7ae0475b4e96eda3ed3b24fda0da1a8418:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 12288
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 12288
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 12288
-  sha256:58095e5e5b41ea26186fc203d251d5efa063641ba18cefa36e17ee388ca59394:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 12288
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-  sha256:5bc5601b5fec1ecfa762c9ec2404e2a7dbcef4f43d754bfbbe58b08a768c277e:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 28672
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 28672
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 28672
-  sha256:3a7c1d296227365f96241738b95463dac13a1401c40c39744fd7c39ef6c98040:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 28672
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 14336
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 14336
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 14336
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 14336
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-  sha256:cb110bf0d1c859518e26b75a1e6652a5d06d2b0b62e11c426256e92d9338cb3e:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+- inputs:
+  - x
+  outputs:
+  - softmax
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 2048
+  - id: softmax
+    op: torch.softmax
+    attrs:
+      axis: -1
     inputs:
     - x
     outputs:
-    - softmax
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 2048
-    - id: softmax
-      op: torch.softmax
-      attrs:
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: softmax
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 2048
-  sha256:673b4462d7e41a186c5803f4016c30158581052245188831ec6e61aaf185446a:
-    ir_version: 1
+    - name: softmax
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 2048
+- inputs:
+  - x
+  outputs:
+  - sum_1
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 2048
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs:
+      op:
+        __elementwise__: sum
+      axis: -1
     inputs:
     - x
     outputs:
-    - sum_1
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 2048
-    - id: sum_1_keepdim
-      op: tensor.reduce
-      attrs:
-        op:
-          __elementwise__: sum
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: sum_1_keepdim
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 1
-    - id: sum_1
-      op: tensor.index_map
-      attrs:
-        out_shape:
-          __tuple__:
-          - __dim__:
-              const: 512
-        sources:
-          __tuple__:
-          - __index_source__:
-              input_idx: 0
-              coord_map:
-              - var: out_coord_0
-              - literal:
-                  value: 0
-                  dtype: int
-              select: null
-      inputs:
-      - sum_1_keepdim
-      outputs:
-      - name: sum_1
-        dtype: f32
-        shape:
-        - const: 512
-  sha256:ca377de5f67b38fd565f052fabc57bf3d33fde5a14a55cb779f7171e1fe421d9:
-    ir_version: 1
+    - name: sum_1_keepdim
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 1
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+        __tuple__:
+        - __dim__:
+            const: 512
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - var: out_coord_0
+            - literal:
+                value: 0
+                dtype: int
+            select: null
+    inputs:
+    - sum_1_keepdim
+    outputs:
+    - name: sum_1
+      dtype: f32
+      shape:
+      - const: 512
+- inputs:
+  - x
+  outputs:
+  - softmax
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 8192
+  - id: softmax
+    op: torch.softmax
+    attrs:
+      axis: -1
     inputs:
     - x
     outputs:
-    - softmax
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 8192
-    - id: softmax
-      op: torch.softmax
-      attrs:
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: softmax
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 8192
-  sha256:0604845f3199cac23529dc0175891e176465754ce7b8345be9c84e3cc011bb13:
-    ir_version: 1
+    - name: softmax
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 8192
+- inputs:
+  - x
+  outputs:
+  - sum_1
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 8192
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs:
+      op:
+        __elementwise__: sum
+      axis: -1
     inputs:
     - x
     outputs:
-    - sum_1
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 8192
-    - id: sum_1_keepdim
-      op: tensor.reduce
-      attrs:
-        op:
-          __elementwise__: sum
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: sum_1_keepdim
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 1
-    - id: sum_1
-      op: tensor.index_map
-      attrs:
-        out_shape:
-          __tuple__:
-          - __dim__:
-              const: 512
-        sources:
-          __tuple__:
-          - __index_source__:
-              input_idx: 0
-              coord_map:
-              - var: out_coord_0
-              - literal:
-                  value: 0
-                  dtype: int
-              select: null
-      inputs:
-      - sum_1_keepdim
-      outputs:
-      - name: sum_1
-        dtype: f32
-        shape:
-        - const: 512
-  sha256:a8311323973aa2e9c9372b7a5f81566f53d958154f95441787f9464c1e190cad:
-    ir_version: 1
+    - name: sum_1_keepdim
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 1
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+        __tuple__:
+        - __dim__:
+            const: 512
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - var: out_coord_0
+            - literal:
+                value: 0
+                dtype: int
+            select: null
+    inputs:
+    - sum_1_keepdim
+    outputs:
+    - name: sum_1
+      dtype: f32
+      shape:
+      - const: 512
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 2048
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 2048
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 2048
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
+    inputs:
+    - x
+    - p_weight
+    outputs:
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 2048
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 4096
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 4096
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 4096
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
+    inputs:
+    - x
+    - p_weight
+    outputs:
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 4096
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 8192
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 8192
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 8192
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
+    inputs:
+    - x
+    - p_weight
+    outputs:
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 8192
+- inputs:
+  - x
+  outputs:
+  - relu
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 4096
+  - id: relu
+    op: tensor.elementwise
+    attrs:
+      op:
+        __elementwise__: relu
     inputs:
     - x
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 2048
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 2048
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 2048
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 2048
-  sha256:5f049bf741858f5146b20af5d133bcb15ea25e4442efe97a4ed45cf717258aa8:
-    ir_version: 1
+    - name: relu
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 4096
+- inputs:
+  - x
+  outputs:
+  - relu
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 16384
+  - id: relu
+    op: tensor.elementwise
+    attrs:
+      op:
+        __elementwise__: relu
     inputs:
     - x
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 4096
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 4096
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 4096
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 4096
-  sha256:071c376a8caa7bf257acb36461570343a4414eaad37923b362def93c7e189a01:
-    ir_version: 1
+    - name: relu
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 16384
+- inputs:
+  - x
+  outputs:
+  - softmax
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+  - id: softmax
+    op: torch.softmax
+    attrs:
+      axis: -1
     inputs:
     - x
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 8192
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 8192
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 8192
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 8192
-  sha256:d630510d3c4d912aa43918db498d370b3d2f59277c2382104245f1c2cd34dcee:
-    ir_version: 1
+    - name: softmax
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+- inputs:
+  - x
+  outputs:
+  - sum_1
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs:
+      op:
+        __elementwise__: sum
+      axis: -1
     inputs:
     - x
     outputs:
-    - relu
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 4096
-    - id: relu
-      op: tensor.elementwise
-      attrs:
-        op:
-          __elementwise__: relu
-      inputs:
-      - x
-      outputs:
-      - name: relu
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 4096
-  sha256:008ac0d4cad1dd83883fa5c06c8bab4e6ea1366de60f32cfe1e6666b035627df:
-    ir_version: 1
+    - name: sum_1_keepdim
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 1
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+        __tuple__:
+        - __dim__:
+            sym: seq_len
+            hint: 512
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - var: out_coord_0
+            - literal:
+                value: 0
+                dtype: int
+            select: null
+    inputs:
+    - sum_1_keepdim
+    outputs:
+    - name: sum_1
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+- inputs:
+  - x
+  outputs:
+  - softmax
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 8192
+  - id: softmax
+    op: torch.softmax
+    attrs:
+      axis: -1
     inputs:
     - x
     outputs:
-    - relu
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 16384
-    - id: relu
-      op: tensor.elementwise
-      attrs:
-        op:
-          __elementwise__: relu
-      inputs:
-      - x
-      outputs:
-      - name: relu
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 16384
-  sha256:28147f6e83f663eff1ec0cf867d79a75aded6c628949274701348fb671899a06:
-    ir_version: 1
+    - name: softmax
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 8192
+- inputs:
+  - x
+  outputs:
+  - sum_1
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 8192
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs:
+      op:
+        __elementwise__: sum
+      axis: -1
     inputs:
     - x
     outputs:
-    - softmax
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-    - id: softmax
-      op: torch.softmax
-      attrs:
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: softmax
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-  sha256:c3183eda39b4f01440ec935c42f6a4da50e13cc1b5a1d7d76318e8d165db8abd:
-    ir_version: 1
+    - name: sum_1_keepdim
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 1
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+        __tuple__:
+        - __dim__:
+            sym: seq_len
+            hint: 512
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - var: out_coord_0
+            - literal:
+                value: 0
+                dtype: int
+            select: null
+    inputs:
+    - sum_1_keepdim
+    outputs:
+    - name: sum_1
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 2048
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 2048
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
+    inputs:
+    - x
+    - p_weight
+    outputs:
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 4096
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 4096
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
+    inputs:
+    - x
+    - p_weight
+    outputs:
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 8192
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 8192
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 8192
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
+    inputs:
+    - x
+    - p_weight
+    outputs:
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 8192
+- inputs:
+  - x
+  outputs:
+  - relu
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+  - id: relu
+    op: tensor.elementwise
+    attrs:
+      op:
+        __elementwise__: relu
     inputs:
     - x
     outputs:
-    - sum_1
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-    - id: sum_1_keepdim
-      op: tensor.reduce
-      attrs:
-        op:
-          __elementwise__: sum
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: sum_1_keepdim
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 1
-    - id: sum_1
-      op: tensor.index_map
-      attrs:
-        out_shape:
-          __tuple__:
-          - __dim__:
-              sym: seq_len
-              hint: 512
-        sources:
-          __tuple__:
-          - __index_source__:
-              input_idx: 0
-              coord_map:
-              - var: out_coord_0
-              - literal:
-                  value: 0
-                  dtype: int
-              select: null
-      inputs:
-      - sum_1_keepdim
-      outputs:
-      - name: sum_1
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-  sha256:71c353c19d9e55c21427cd19ccd1bcf8d58d8fa94951ebc464b753e27ffb1af4:
-    ir_version: 1
+    - name: relu
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 4096
+- inputs:
+  - x
+  outputs:
+  - relu
+  nodes:
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 16384
+  - id: relu
+    op: tensor.elementwise
+    attrs:
+      op:
+        __elementwise__: relu
     inputs:
     - x
     outputs:
-    - softmax
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 8192
-    - id: softmax
-      op: torch.softmax
-      attrs:
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: softmax
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 8192
-  sha256:84fdab2f0f0be5bc0d972ca7a083b9ca04326fff8e3d93c0c7d90c9dea556983:
-    ir_version: 1
-    inputs:
-    - x
+    - name: relu
+      dtype: f32
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 16384
+- inputs:
+  - x0
+  - x1
+  - x2
+  outputs:
+  - scaled_dot_product_attention
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
     outputs:
-    - sum_1
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 8192
-    - id: sum_1_keepdim
-      op: tensor.reduce
-      attrs:
-        op:
-          __elementwise__: sum
-        axis: -1
-      inputs:
-      - x
-      outputs:
-      - name: sum_1_keepdim
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 1
-    - id: sum_1
-      op: tensor.index_map
-      attrs:
-        out_shape:
-          __tuple__:
-          - __dim__:
-              sym: seq_len
-              hint: 512
-        sources:
-          __tuple__:
-          - __index_source__:
-              input_idx: 0
-              coord_map:
-              - var: out_coord_0
-              - literal:
-                  value: 0
-                  dtype: int
-              select: null
-      inputs:
-      - sum_1_keepdim
-      outputs:
-      - name: sum_1
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-  sha256:294138fdb103638343277698193d468224dc1f19ff91847f629cb7f6939bf958:
-    ir_version: 1
-    inputs:
-    - x
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 64
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 2048
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 2048
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-  sha256:e66034b352ebacde987a8d5ea7f0e902f10a0a70fdd03fd9617f05e5d964842a:
-    ir_version: 1
-    inputs:
-    - x
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 64
+  - id: x2
+    op: input
+    attrs: {}
+    inputs: []
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 4096
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 4096
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-  sha256:5522c61cafd804313edd175f17b82d0a0fce7e949786283d8aaabe2fa89bf6f5:
-    ir_version: 1
-    inputs:
-    - x
-    outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 8192
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 8192
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 8192
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 8192
-  sha256:925304b70aa45e0a7eafb772fa5879be5a463032f9772248027bf996ebe618c2:
-    ir_version: 1
-    inputs:
-    - x
-    outputs:
-    - relu
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-    - id: relu
-      op: tensor.elementwise
-      attrs:
-        op:
-          __elementwise__: relu
-      inputs:
-      - x
-      outputs:
-      - name: relu
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 4096
-  sha256:61da690cb910aacab0c639e72291e743eb62d599a44e98a258d1cdcc9d1c4b3c:
-    ir_version: 1
-    inputs:
-    - x
-    outputs:
-    - relu
-    nodes:
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 16384
-    - id: relu
-      op: tensor.elementwise
-      attrs:
-        op:
-          __elementwise__: relu
-      inputs:
-      - x
-      outputs:
-      - name: relu
-        dtype: f32
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 16384
-  sha256:eaf4dc0273adcafe984f0052dcf92b1ae73e549e25e81dbce6266f8e9ecce031:
-    ir_version: 1
+    - name: x2
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 64
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs:
+      is_causal: false
+      sliding_window: null
+      scale: null
     inputs:
     - x0
     - x1
     - x2
     outputs:
-    - scaled_dot_product_attention
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 64
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 64
-    - id: x2
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x2
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 64
-    - id: scaled_dot_product_attention
-      op: torch.sdpa
-      attrs:
-        is_causal: false
-        sliding_window: null
-        scale: null
-      inputs:
-      - x0
-      - x1
-      - x2
-      outputs:
-      - name: scaled_dot_product_attention
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 64
-  sha256:7a4e2c021d8f59674b941ccf7173e8fcb69972e23764bec4498ba8be80c26d46:
-    ir_version: 1
+    - name: scaled_dot_product_attention
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 64
+- inputs:
+  - x0
+  - x1
+  - x2
+  outputs:
+  - scaled_dot_product_attention
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 128
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 128
+  - id: x2
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x2
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 128
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs:
+      is_causal: false
+      sliding_window: null
+      scale: null
     inputs:
     - x0
     - x1
     - x2
     outputs:
-    - scaled_dot_product_attention
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 128
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 128
-    - id: x2
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x2
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 128
-    - id: scaled_dot_product_attention
-      op: torch.sdpa
-      attrs:
-        is_causal: false
-        sliding_window: null
-        scale: null
-      inputs:
-      - x0
-      - x1
-      - x2
-      outputs:
-      - name: scaled_dot_product_attention
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - const: 512
-        - const: 128
-  sha256:5b0d0423457aa37d43ab2bd55bea1a61b78619bd4991df096f29982259442cab:
-    ir_version: 1
+    - name: scaled_dot_product_attention
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - const: 512
+      - const: 128
+- inputs:
+  - x0
+  - x1
+  - x2
+  outputs:
+  - scaled_dot_product_attention
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 64
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 64
+  - id: x2
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x2
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 64
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs:
+      is_causal: false
+      sliding_window: null
+      scale: null
     inputs:
     - x0
     - x1
     - x2
     outputs:
-    - scaled_dot_product_attention
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 64
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 64
-    - id: x2
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x2
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 64
-    - id: scaled_dot_product_attention
-      op: torch.sdpa
-      attrs:
-        is_causal: false
-        sliding_window: null
-        scale: null
-      inputs:
-      - x0
-      - x1
-      - x2
-      outputs:
-      - name: scaled_dot_product_attention
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 64
-  sha256:9bac5c1b433580a1d56d7369516ac4ba3bf349d2c323ce71c4ddafdf44ac98b2:
-    ir_version: 1
+    - name: scaled_dot_product_attention
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 64
+- inputs:
+  - x0
+  - x1
+  - x2
+  outputs:
+  - scaled_dot_product_attention
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 128
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 128
+  - id: x2
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x2
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 128
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs:
+      is_causal: false
+      sliding_window: null
+      scale: null
     inputs:
     - x0
     - x1
     - x2
     outputs:
-    - scaled_dot_product_attention
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 128
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 128
-    - id: x2
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x2
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 128
-    - id: scaled_dot_product_attention
-      op: torch.sdpa
-      attrs:
-        is_causal: false
-        sliding_window: null
-        scale: null
-      inputs:
-      - x0
-      - x1
-      - x2
-      outputs:
-      - name: scaled_dot_product_attention
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 8
-        - sym: seq_len
-          hint: 512
-        - const: 128
+    - name: scaled_dot_product_attention
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 8
+      - sym: seq_len
+        hint: 512
+      - const: 128
 configs:
 - name: matmul.square.512
-  program: sha256:b04e839ac3f77acdf736c46762fba4ab13c8a94fc5075d365a4fd3e3211ed4a6
+  program: 0
   target:
     origins:
     - matmul
@@ -1658,7 +1585,7 @@ configs:
     reference_us: 12.28
     reference_backend: cublas
 - name: matmul.square.512.fp16
-  program: sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54
+  program: 1
   target:
     origins:
     - matmul
@@ -1676,7 +1603,7 @@ configs:
     reference_us: 6.14
     reference_backend: cublas
 - name: matmul.square.512.fp16
-  program: sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54
+  program: 1
   target:
     origins:
     - matmul
@@ -1691,7 +1618,7 @@ configs:
     reference_us: 6.14
     reference_backend: cublas
 - name: matmul.square.1024
-  program: sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe
+  program: 2
   target:
     origins:
     - matmul
@@ -1709,7 +1636,7 @@ configs:
     reference_us: 14.51
     reference_backend: cublas
 - name: matmul.square.2048
-  program: sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5
+  program: 3
   target:
     origins:
     - matmul
@@ -1724,7 +1651,7 @@ configs:
     reference_us: 98.36
     reference_backend: cublas
 - name: matmul.square.2048
-  program: sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5
+  program: 3
   target:
     origins:
     - matmul
@@ -1739,7 +1666,7 @@ configs:
     reference_us: 98.36
     reference_backend: cublas
 - name: matmul.square.4096
-  program: sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8
+  program: 4
   target:
     origins:
     - matmul
@@ -1757,7 +1684,7 @@ configs:
     reference_us: 640.93
     reference_backend: cublas
 - name: matmul.square.4096
-  program: sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8
+  program: 4
   target:
     origins:
     - matmul
@@ -1775,7 +1702,7 @@ configs:
     reference_us: 640.93
     reference_backend: cublas
 - name: matmul.square.4096
-  program: sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8
+  program: 4
   target:
     origins:
     - matmul
@@ -1790,7 +1717,7 @@ configs:
     reference_us: 640.93
     reference_backend: cublas
 - name: matmul.square.512.dynM
-  program: sha256:c0921ebbb14132697323054df04799fc9e683dc276369d91ddc811e815cadded
+  program: 5
   target:
     origins:
     - matmul
@@ -1808,7 +1735,7 @@ configs:
     reference_us: 6.14
     reference_backend: cublas
 - name: matmul.square.512.dynM
-  program: sha256:c0921ebbb14132697323054df04799fc9e683dc276369d91ddc811e815cadded
+  program: 5
   target:
     origins:
     - matmul
@@ -1826,7 +1753,7 @@ configs:
     reference_us: 6.14
     reference_backend: cublas
 - name: matmul.qkv.h4096
-  program: sha256:178069f8988e142a784109387414bc520358071f90884de0ffd7ed7dbc2b607b
+  program: 6
   target:
     origins:
     - matmul
@@ -1844,7 +1771,7 @@ configs:
     reference_us: 250.54
     reference_backend: cublas
 - name: matmul.qkv.h4096
-  program: sha256:178069f8988e142a784109387414bc520358071f90884de0ffd7ed7dbc2b607b
+  program: 6
   target:
     origins:
     - matmul
@@ -1862,7 +1789,7 @@ configs:
     reference_us: 250.54
     reference_backend: cublas
 - name: matmul.o_proj.h4096
-  program: sha256:da0a0ae49d93aaa4ad217fd8f478864b037d323c74d8245179f67f06f3ec3bc4
+  program: 7
   target:
     origins:
     - matmul
@@ -1877,7 +1804,7 @@ configs:
     reference_us: 95.22
     reference_backend: cublas
 - name: matmul.o_proj.h4096
-  program: sha256:da0a0ae49d93aaa4ad217fd8f478864b037d323c74d8245179f67f06f3ec3bc4
+  program: 7
   target:
     origins:
     - matmul
@@ -1892,7 +1819,7 @@ configs:
     reference_us: 95.22
     reference_backend: cublas
 - name: matmul.mlp_gate_up.h4096
-  program: sha256:ffda4b27da1f4c44ebb0cdf539cedf4a49a855253b6db6774ac396a4d940cfc8
+  program: 8
   target:
     origins:
     - matmul
@@ -1910,7 +1837,7 @@ configs:
     reference_us: 557.94
     reference_backend: cublas
 - name: matmul.mlp_gate_up.h4096
-  program: sha256:ffda4b27da1f4c44ebb0cdf539cedf4a49a855253b6db6774ac396a4d940cfc8
+  program: 8
   target:
     origins:
     - matmul
@@ -1925,7 +1852,7 @@ configs:
     reference_us: 557.94
     reference_backend: cublas
 - name: matmul.mlp_gate_up.h4096
-  program: sha256:ffda4b27da1f4c44ebb0cdf539cedf4a49a855253b6db6774ac396a4d940cfc8
+  program: 8
   target:
     origins:
     - matmul
@@ -1940,7 +1867,7 @@ configs:
     reference_us: 557.94
     reference_backend: cublas
 - name: matmul.mlp_down.h4096
-  program: sha256:4d33629cd2ace0b7cbb213f9da41a503228448689a67d5dce9d816f3802e6b79
+  program: 9
   target:
     origins:
     - matmul
@@ -1958,7 +1885,7 @@ configs:
     reference_us: 296.95
     reference_backend: cublas
 - name: matmul.mlp_down.h4096
-  program: sha256:4d33629cd2ace0b7cbb213f9da41a503228448689a67d5dce9d816f3802e6b79
+  program: 9
   target:
     origins:
     - matmul
@@ -1973,7 +1900,7 @@ configs:
     reference_us: 296.95
     reference_backend: cublas
 - name: matmul.qkv.h4096.dynM
-  program: sha256:70966658fc05614667f377e643391a7ae0475b4e96eda3ed3b24fda0da1a8418
+  program: 10
   target:
     origins:
     - matmul
@@ -1991,7 +1918,7 @@ configs:
     reference_us: 249.82
     reference_backend: cublas
 - name: matmul.qkv.h4096.dynM
-  program: sha256:70966658fc05614667f377e643391a7ae0475b4e96eda3ed3b24fda0da1a8418
+  program: 10
   target:
     origins:
     - matmul
@@ -2006,7 +1933,7 @@ configs:
     reference_us: 249.82
     reference_backend: cublas
 - name: matmul.o_proj.h4096.dynM
-  program: sha256:58095e5e5b41ea26186fc203d251d5efa063641ba18cefa36e17ee388ca59394
+  program: 11
   target:
     origins:
     - matmul
@@ -2024,7 +1951,7 @@ configs:
     reference_us: 95.08
     reference_backend: cublas
 - name: matmul.o_proj.h4096.dynM
-  program: sha256:58095e5e5b41ea26186fc203d251d5efa063641ba18cefa36e17ee388ca59394
+  program: 11
   target:
     origins:
     - matmul
@@ -2039,7 +1966,7 @@ configs:
     reference_us: 95.08
     reference_backend: cublas
 - name: matmul.mlp_gate_up.h4096.dynM
-  program: sha256:5bc5601b5fec1ecfa762c9ec2404e2a7dbcef4f43d754bfbbe58b08a768c277e
+  program: 12
   target:
     origins:
     - matmul
@@ -2057,7 +1984,7 @@ configs:
     reference_us: 553.7
     reference_backend: cublas
 - name: matmul.mlp_gate_up.h4096.dynM
-  program: sha256:5bc5601b5fec1ecfa762c9ec2404e2a7dbcef4f43d754bfbbe58b08a768c277e
+  program: 12
   target:
     origins:
     - matmul
@@ -2072,7 +1999,7 @@ configs:
     reference_us: 553.7
     reference_backend: cublas
 - name: matmul.mlp_gate_up.h4096.dynM
-  program: sha256:5bc5601b5fec1ecfa762c9ec2404e2a7dbcef4f43d754bfbbe58b08a768c277e
+  program: 12
   target:
     origins:
     - matmul
@@ -2087,7 +2014,7 @@ configs:
     reference_us: 553.7
     reference_backend: cublas
 - name: matmul.mlp_down.h4096.dynM
-  program: sha256:3a7c1d296227365f96241738b95463dac13a1401c40c39744fd7c39ef6c98040
+  program: 13
   target:
     origins:
     - matmul
@@ -2105,7 +2032,7 @@ configs:
     reference_us: 295.03
     reference_backend: cublas
 - name: matmul.mlp_down.h4096.dynM
-  program: sha256:3a7c1d296227365f96241738b95463dac13a1401c40c39744fd7c39ef6c98040
+  program: 13
   target:
     origins:
     - matmul
@@ -2120,7 +2047,7 @@ configs:
     reference_us: 295.03
     reference_backend: cublas
 - name: softmax.k2048
-  program: sha256:cb110bf0d1c859518e26b75a1e6652a5d06d2b0b62e11c426256e92d9338cb3e
+  program: 14
   target:
     origins:
     - softmax
@@ -2135,7 +2062,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: reduce.k2048
-  program: sha256:673b4462d7e41a186c5803f4016c30158581052245188831ec6e61aaf185446a
+  program: 15
   target:
     origins:
     - sum_1
@@ -2151,7 +2078,7 @@ configs:
     reference_us: 5.4
     reference_backend: torch-eager
 - name: softmax.k8192
-  program: sha256:ca377de5f67b38fd565f052fabc57bf3d33fde5a14a55cb779f7171e1fe421d9
+  program: 16
   target:
     origins:
     - softmax
@@ -2166,7 +2093,7 @@ configs:
     reference_us: 14.29
     reference_backend: torch-eager
 - name: reduce.k8192
-  program: sha256:0604845f3199cac23529dc0175891e176465754ce7b8345be9c84e3cc011bb13
+  program: 17
   target:
     origins:
     - sum_1
@@ -2182,7 +2109,7 @@ configs:
     reference_us: 6.1
     reference_backend: torch-eager
 - name: rms_norm.k2048
-  program: sha256:a8311323973aa2e9c9372b7a5f81566f53d958154f95441787f9464c1e190cad
+  program: 18
   target:
     origins:
     - rms_norm
@@ -2197,7 +2124,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: rms_norm.k4096
-  program: sha256:5f049bf741858f5146b20af5d133bcb15ea25e4442efe97a4ed45cf717258aa8
+  program: 19
   target:
     origins:
     - rms_norm
@@ -2212,7 +2139,7 @@ configs:
     reference_us: 6.14
     reference_backend: torch-eager
 - name: rms_norm.k8192
-  program: sha256:071c376a8caa7bf257acb36461570343a4414eaad37923b362def93c7e189a01
+  program: 20
   target:
     origins:
     - rms_norm
@@ -2227,7 +2154,7 @@ configs:
     reference_us: 10.24
     reference_backend: torch-eager
 - name: pointwise.n4096
-  program: sha256:d630510d3c4d912aa43918db498d370b3d2f59277c2382104245f1c2cd34dcee
+  program: 21
   target:
     origins:
     - relu
@@ -2242,7 +2169,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: pointwise.n16384
-  program: sha256:008ac0d4cad1dd83883fa5c06c8bab4e6ea1366de60f32cfe1e6666b035627df
+  program: 22
   target:
     origins:
     - relu
@@ -2257,7 +2184,7 @@ configs:
     reference_us: 12.51
     reference_backend: torch-eager
 - name: softmax.k2048.dynM
-  program: sha256:28147f6e83f663eff1ec0cf867d79a75aded6c628949274701348fb671899a06
+  program: 23
   target:
     origins:
     - softmax
@@ -2272,7 +2199,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: reduce.k2048.dynM
-  program: sha256:c3183eda39b4f01440ec935c42f6a4da50e13cc1b5a1d7d76318e8d165db8abd
+  program: 24
   target:
     origins:
     - sum_1
@@ -2288,7 +2215,7 @@ configs:
     reference_us: 5.4
     reference_backend: torch-eager
 - name: softmax.k8192.dynM
-  program: sha256:71c353c19d9e55c21427cd19ccd1bcf8d58d8fa94951ebc464b753e27ffb1af4
+  program: 25
   target:
     origins:
     - softmax
@@ -2303,7 +2230,7 @@ configs:
     reference_us: 14.27
     reference_backend: torch-eager
 - name: reduce.k8192.dynM
-  program: sha256:84fdab2f0f0be5bc0d972ca7a083b9ca04326fff8e3d93c0c7d90c9dea556983
+  program: 26
   target:
     origins:
     - sum_1
@@ -2319,7 +2246,7 @@ configs:
     reference_us: 6.1
     reference_backend: torch-eager
 - name: rms_norm.k2048.dynM
-  program: sha256:294138fdb103638343277698193d468224dc1f19ff91847f629cb7f6939bf958
+  program: 27
   target:
     origins:
     - rms_norm
@@ -2334,7 +2261,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: rms_norm.k4096.dynM
-  program: sha256:e66034b352ebacde987a8d5ea7f0e902f10a0a70fdd03fd9617f05e5d964842a
+  program: 28
   target:
     origins:
     - rms_norm
@@ -2349,7 +2276,7 @@ configs:
     reference_us: 6.14
     reference_backend: torch-eager
 - name: rms_norm.k8192.dynM
-  program: sha256:5522c61cafd804313edd175f17b82d0a0fce7e949786283d8aaabe2fa89bf6f5
+  program: 29
   target:
     origins:
     - rms_norm
@@ -2364,7 +2291,7 @@ configs:
     reference_us: 10.25
     reference_backend: torch-eager
 - name: pointwise.n4096.dynM
-  program: sha256:925304b70aa45e0a7eafb772fa5879be5a463032f9772248027bf996ebe618c2
+  program: 30
   target:
     origins:
     - relu
@@ -2379,7 +2306,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: pointwise.n16384.dynM
-  program: sha256:61da690cb910aacab0c639e72291e743eb62d599a44e98a258d1cdcc9d1c4b3c
+  program: 31
   target:
     origins:
     - relu
@@ -2394,7 +2321,7 @@ configs:
     reference_us: 12.52
     reference_backend: torch-eager
 - name: attention.hd64
-  program: sha256:eaf4dc0273adcafe984f0052dcf92b1ae73e549e25e81dbce6266f8e9ecce031
+  program: 32
   target:
     origins:
     - scaled_dot_product_attention
@@ -2411,7 +2338,7 @@ configs:
     reference_us: 10.24
     reference_backend: torch-eager
 - name: attention.hd64
-  program: sha256:eaf4dc0273adcafe984f0052dcf92b1ae73e549e25e81dbce6266f8e9ecce031
+  program: 32
   target:
     origins:
     - scaled_dot_product_attention
@@ -2425,7 +2352,7 @@ configs:
     reference_us: 10.24
     reference_backend: torch-eager
 - name: attention.hd128
-  program: sha256:7a4e2c021d8f59674b941ccf7173e8fcb69972e23764bec4498ba8be80c26d46
+  program: 33
   target:
     origins:
     - scaled_dot_product_attention
@@ -2442,7 +2369,7 @@ configs:
     reference_us: 18.42
     reference_backend: torch-eager
 - name: attention.hd128
-  program: sha256:7a4e2c021d8f59674b941ccf7173e8fcb69972e23764bec4498ba8be80c26d46
+  program: 33
   target:
     origins:
     - scaled_dot_product_attention
@@ -2456,7 +2383,7 @@ configs:
     reference_us: 18.42
     reference_backend: torch-eager
 - name: attention.hd128
-  program: sha256:7a4e2c021d8f59674b941ccf7173e8fcb69972e23764bec4498ba8be80c26d46
+  program: 33
   target:
     origins:
     - scaled_dot_product_attention
@@ -2470,7 +2397,7 @@ configs:
     reference_us: 18.42
     reference_backend: torch-eager
 - name: attention.hd128
-  program: sha256:7a4e2c021d8f59674b941ccf7173e8fcb69972e23764bec4498ba8be80c26d46
+  program: 33
   target:
     origins:
     - scaled_dot_product_attention
@@ -2484,7 +2411,7 @@ configs:
     reference_us: 18.42
     reference_backend: torch-eager
 - name: attention.hd64.dynM
-  program: sha256:5b0d0423457aa37d43ab2bd55bea1a61b78619bd4991df096f29982259442cab
+  program: 34
   target:
     origins:
     - scaled_dot_product_attention
@@ -2500,7 +2427,7 @@ configs:
     reference_us: 10.23
     reference_backend: torch-eager
 - name: attention.hd64.dynM
-  program: sha256:5b0d0423457aa37d43ab2bd55bea1a61b78619bd4991df096f29982259442cab
+  program: 34
   target:
     origins:
     - scaled_dot_product_attention
@@ -2513,7 +2440,7 @@ configs:
     reference_us: 10.23
     reference_backend: torch-eager
 - name: attention.hd128.dynM
-  program: sha256:9bac5c1b433580a1d56d7369516ac4ba3bf349d2c323ce71c4ddafdf44ac98b2
+  program: 35
   target:
     origins:
     - scaled_dot_product_attention
@@ -2529,7 +2456,7 @@ configs:
     reference_us: 18.4
     reference_backend: torch-eager
 - name: attention.hd128.dynM
-  program: sha256:9bac5c1b433580a1d56d7369516ac4ba3bf349d2c323ce71c4ddafdf44ac98b2
+  program: 35
   target:
     origins:
     - scaled_dot_product_attention
@@ -2542,7 +2469,7 @@ configs:
     reference_us: 18.4
     reference_backend: torch-eager
 - name: attention.hd128.dynM
-  program: sha256:9bac5c1b433580a1d56d7369516ac4ba3bf349d2c323ce71c4ddafdf44ac98b2
+  program: 35
   target:
     origins:
     - scaled_dot_product_attention
@@ -2555,7 +2482,7 @@ configs:
     reference_us: 18.4
     reference_backend: torch-eager
 - name: attention.hd128.dynM
-  program: sha256:9bac5c1b433580a1d56d7369516ac4ba3bf349d2c323ce71c4ddafdf44ac98b2
+  program: 35
   target:
     origins:
     - scaled_dot_product_attention

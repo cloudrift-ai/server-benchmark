@@ -9,8 +9,6 @@ expressions and symbolic dimensions as tagged data rather than Python reprs.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 from emmy.compiler.dim import Dim
@@ -44,10 +42,6 @@ from emmy.compiler.ir.tensor.ir import (
     ScatterOp,
 )
 from emmy.compiler.tensor import Tensor
-
-IR_VERSION = 1
-PROGRAM_PREFIX = "sha256:"
-
 
 # Stable wire tag -> (runtime class, semantic dataclass fields).  Runtime-only
 # Op fields (source/knobs/populated IO) never appear here.
@@ -322,7 +316,6 @@ def graph_to_wire(graph: Graph) -> dict:
             }
         )
     return {
-        "ir_version": IR_VERSION,
         "inputs": list(graph.inputs),
         "outputs": list(graph.outputs),
         "nodes": nodes,
@@ -332,9 +325,7 @@ def graph_to_wire(graph: Graph) -> dict:
 def graph_from_wire(value: object) -> Graph:
     if not isinstance(value, dict):
         raise ValueError("Torch IR program must be a mapping")
-    _keys(value, {"ir_version", "inputs", "outputs", "nodes"}, "Torch IR program")
-    if value.get("ir_version") != IR_VERSION:
-        raise ValueError(f"unsupported Torch IR version {value.get('ir_version')!r}; expected {IR_VERSION}")
+    _keys(value, {"inputs", "outputs", "nodes"}, "Torch IR program")
     nodes = value.get("nodes")
     if not isinstance(nodes, list):
         raise ValueError("Torch IR program nodes must be a list")
@@ -367,38 +358,24 @@ def graph_from_wire(value: object) -> Graph:
     return graph
 
 
-def canonical_program_bytes(program: dict) -> bytes:
-    """Canonical semantic bytes used for content addressing."""
-    graph_from_wire(program)  # reject malformed/non-Torch payloads before hashing
-    return json.dumps(program, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-
-
-def program_id(program: dict) -> str:
-    return PROGRAM_PREFIX + hashlib.sha256(canonical_program_bytes(program)).hexdigest()
-
-
-def intern_program(programs: dict[str, dict], graph: Graph) -> str:
+def intern_program(programs: list[dict], graph: Graph) -> int:
     payload = graph_to_wire(graph)
-    key = program_id(payload)
-    current = programs.setdefault(key, payload)
-    if canonical_program_bytes(current) != canonical_program_bytes(payload):  # pragma: no cover - SHA collision guard
-        raise ValueError(f"Torch IR program digest collision for {key}")
-    return key
+    for index, current in enumerate(programs):
+        if current == payload:
+            return index
+    programs.append(payload)
+    return len(programs) - 1
 
 
-def validate_program_pool(programs: object) -> dict[str, dict]:
-    if not isinstance(programs, dict):
-        raise ValueError("golden programs must be a mapping")
-    out: dict[str, dict] = {}
-    for key, payload in programs.items():
-        if not isinstance(key, str) or not key.startswith(PROGRAM_PREFIX):
-            raise ValueError(f"golden program id must start with {PROGRAM_PREFIX!r}, got {key!r}")
+def validate_program_pool(programs: object) -> list[dict]:
+    if not isinstance(programs, list):
+        raise ValueError("golden programs must be a list")
+    out: list[dict] = []
+    for index, payload in enumerate(programs):
         if not isinstance(payload, dict):
-            raise ValueError(f"golden program {key} must be a mapping")
-        actual = program_id(payload)
-        if actual != key:
-            raise ValueError(f"golden program digest mismatch: key {key}, payload {actual}")
-        out[key] = payload
+            raise ValueError(f"golden program {index} must be a mapping")
+        graph_from_wire(payload)
+        out.append(payload)
     return out
 
 

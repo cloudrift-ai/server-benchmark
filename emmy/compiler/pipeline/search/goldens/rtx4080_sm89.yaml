@@ -1,407 +1,388 @@
-format_version: 2
 gpu_name: NVIDIA GeForce RTX 4080
 compute_cap:
 - 8
 - 9
 programs:
-  sha256:b04e839ac3f77acdf736c46762fba4ab13c8a94fc5075d365a4fd3e3211ed4a6:
-    ir_version: 1
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 512
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 512
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 512
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 512
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f32
-        shape:
-        - const: 512
-        - const: 512
-  sha256:eeb50041e63ff3b23a097725f346f3e41a82131388b8b98dd62c5429eacdfdd4:
-    ir_version: 1
+    - name: matmul
+      dtype: f32
+      shape:
+      - const: 512
+      - const: 512
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f32
+      shape:
+      - const: 1024
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f32
+      shape:
+      - const: 1024
+      - const: 1024
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f32
-        shape:
-        - const: 1024
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f32
-        shape:
-        - const: 1024
-        - const: 1024
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f32
-        shape:
-        - const: 1024
-        - const: 1024
-  sha256:71d3b67cb81e6946f69b03d4524098355b66cc9ba3156ca378b95a6d5c7e1cc5:
-    ir_version: 1
+    - name: matmul
+      dtype: f32
+      shape:
+      - const: 1024
+      - const: 1024
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f32
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f32
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f32
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f32
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f32
-        shape:
-        - const: 2048
-        - const: 2048
-  sha256:eaf8d923ffebb790fc0af0119fa1dd7e3bbc5b142bc368c85106f4fd2da6c1fe:
-    ir_version: 1
+    - name: matmul
+      dtype: f32
+      shape:
+      - const: 2048
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f32
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f32
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f32
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f32
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f32
-        shape:
-        - const: 4096
-        - const: 4096
-  sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54:
-    ir_version: 1
+    - name: matmul
+      dtype: f32
+      shape:
+      - const: 4096
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 512
-        - const: 512
-  sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 512
+      - const: 512
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1024
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1024
+      - const: 1024
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1024
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1024
-        - const: 1024
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 1024
-        - const: 1024
-  sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 1024
+      - const: 1024
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-  sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 4096
-  sha256:e8df708ccc7a8c2de8b301d2004b1d4edcb4e6fa9ff70831ce41849cb91adef6:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  - x2
+  outputs:
+  - scaled_dot_product_attention
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 16
+      - sym: seq_len
+        hint: 512
+      - const: 256
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 16
+      - sym: seq_len
+        hint: 512
+      - const: 256
+  - id: x2
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x2
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 16
+      - sym: seq_len
+        hint: 512
+      - const: 256
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs:
+      is_causal: true
+      sliding_window: null
+      scale: null
     inputs:
     - x0
     - x1
     - x2
     outputs:
-    - scaled_dot_product_attention
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 16
-        - sym: seq_len
-          hint: 512
-        - const: 256
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 16
-        - sym: seq_len
-          hint: 512
-        - const: 256
-    - id: x2
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x2
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 16
-        - sym: seq_len
-          hint: 512
-        - const: 256
-    - id: scaled_dot_product_attention
-      op: torch.sdpa
-      attrs:
-        is_causal: true
-        sliding_window: null
-        scale: null
-      inputs:
-      - x0
-      - x1
-      - x2
-      outputs:
-      - name: scaled_dot_product_attention
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 16
-        - sym: seq_len
-          hint: 512
-        - const: 256
+    - name: scaled_dot_product_attention
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 16
+      - sym: seq_len
+        hint: 512
+      - const: 256
 configs:
 - name: matmul.square.512
-  program: sha256:b04e839ac3f77acdf736c46762fba4ab13c8a94fc5075d365a4fd3e3211ed4a6
+  program: 0
   target:
     origins:
     - matmul
@@ -415,7 +396,7 @@ configs:
     reference_us: 18.0
     reference_backend: cublas
 - name: matmul.square.1024
-  program: sha256:eeb50041e63ff3b23a097725f346f3e41a82131388b8b98dd62c5429eacdfdd4
+  program: 1
   target:
     origins:
     - matmul
@@ -429,7 +410,7 @@ configs:
     reference_us: 77.0
     reference_backend: cublas
 - name: matmul.square.2048
-  program: sha256:71d3b67cb81e6946f69b03d4524098355b66cc9ba3156ca378b95a6d5c7e1cc5
+  program: 2
   target:
     origins:
     - matmul
@@ -443,7 +424,7 @@ configs:
     reference_us: 499.0
     reference_backend: cublas
 - name: matmul.square.4096
-  program: sha256:eaf8d923ffebb790fc0af0119fa1dd7e3bbc5b142bc368c85106f4fd2da6c1fe
+  program: 3
   target:
     origins:
     - matmul
@@ -457,7 +438,7 @@ configs:
     reference_us: 3922.0
     reference_backend: cublas
 - name: matmul.square.512.fp16
-  program: sha256:6ac00d0fb5dc8c939dedf0abaa19739433521d210d1a1601f110b01fe28b2b54
+  program: 4
   target:
     origins:
     - matmul
@@ -471,7 +452,7 @@ configs:
     reference_us: 6.0
     reference_backend: cublas
 - name: matmul.square.1024.fp16
-  program: sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe
+  program: 5
   target:
     origins:
     - matmul
@@ -485,7 +466,7 @@ configs:
     reference_us: 27.0
     reference_backend: cublas
 - name: matmul.square.1024.fp16
-  program: sha256:5ed03d66050ba3781405b89a990d740faae11aa2f3a28e555f14e031cecc5bfe
+  program: 5
   target:
     origins:
     - matmul
@@ -499,7 +480,7 @@ configs:
     reference_us: 27.0
     reference_backend: cublas
 - name: matmul.square.2048.fp16
-  program: sha256:4312f9e38a8ecb26363e2cce777ec37adc6e905150e4665f9c86b3b202b2d5e5
+  program: 6
   target:
     origins:
     - matmul
@@ -513,7 +494,7 @@ configs:
     reference_us: 197.0
     reference_backend: cublas
 - name: matmul.square.4096.fp16
-  program: sha256:4d2a6962c24a59a8520af0827af0b0870f68805b230cd46f046964a0729a96c8
+  program: 7
   target:
     origins:
     - matmul
@@ -527,7 +508,7 @@ configs:
     reference_us: 1350.0
     reference_backend: cublas
 - name: attention.hd256.dynM
-  program: sha256:e8df708ccc7a8c2de8b301d2004b1d4edcb4e6fa9ff70831ce41849cb91adef6
+  program: 8
   target:
     origins:
     - scaled_dot_product_attention

@@ -60,14 +60,14 @@ def _document(*entries):
     graph.add_node(InputOp(), [], Tensor("w", (64, 32), "f16"), node_id="w")
     graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (16, 32), "f16"), node_id="matmul")
     graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
-    programs = {}
-    program_id = intern_program(programs, graph)
+    programs = []
+    program_index = intern_program(programs, graph)
     rows = []
     for entry in entries:
         row = dict(entry)
-        row["program"] = program_id
+        row["program"] = program_index
         rows.append(row)
-    return {"format_version": 2, "compute_cap": [8, 9], "programs": programs, "configs": rows}
+    return {"compute_cap": [8, 9], "programs": programs, "configs": rows}
 
 
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
@@ -92,7 +92,7 @@ def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
 
     assert targets[0].entry_indexes == [0, 1]
     assert targets[0].proposals == [(1, {})]
-    assert loaded_document["format_version"] == 2
+    assert set(loaded_document) == {"compute_cap", "programs", "configs"}
 
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():

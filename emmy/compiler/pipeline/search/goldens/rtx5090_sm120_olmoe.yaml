@@ -1,572 +1,545 @@
-format_version: 2
 gpu_name: NVIDIA GeForce RTX 5090
 compute_cap:
 - 12
 - 0
 model: allenai/OLMoE-1B-7B-0125-Instruct
 programs:
-  sha256:ffb14d26aea789378cb71a99489d9c8f36a6c008472a09cf84a6b9d61bd16a85:
-    ir_version: 1
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 2048
-  sha256:cbd93b4878fe184ac406253eab921e5056e85da99a2594153ddd1df447b67cc9:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 1024
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 1024
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 2048
-  sha256:361760240dc7773bf700b2f37f21ff311e256c0e392ecaef27cd1dc1cef6b72c:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 16
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 4096
+      - const: 2048
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 16
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 4096
-        - const: 2048
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 16
-        - const: 4096
-  sha256:7ae8701d5872ce8e713fceadcf674c82033dbe2da860372cdc06b8a70e8db20b:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 16
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 16
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 16
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 16
-        - const: 2048
-  sha256:9853782d002cc0b6b2464c8e94d62ecb81a1034c063285ef66676854a5b65be2:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 16
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 16
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 1024
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 16
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 1024
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 16
-        - const: 2048
-  sha256:bb6fb5657ba5f84c2f1cfb5d5fde7168864e8ad163443bca1ae4cd7d867ec6e4:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 16
+      - const: 2048
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 2048
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 2048
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 16
+      - const: 2048
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
     inputs:
     - x
+    - p_weight
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 2048
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 2048
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 16
-        - const: 2048
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - const: 16
-        - const: 2048
-  sha256:3f7e4374eb1322ec1ac3d51b1897b8d9eb98157a8c5a3fee444bb1d5c67dc902:
-    ir_version: 1
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - const: 16
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 4096
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 4096
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 4096
-  sha256:6dcc42cc03ac6b642b113af1001964e6ad892dda1b2d3b682fa2cdb03b0393b9:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 4096
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - matmul
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: matmul
-      op: torch.matmul
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: matmul
-        dtype: f16
-        shape:
-        - const: 1
-        - const: 2048
-  sha256:82b95918ddeda9062a15710420120a3f595a8a387babc4b831ffde2d8a0546fd:
-    ir_version: 1
+    - name: matmul
+      dtype: f16
+      shape:
+      - const: 1
+      - const: 2048
+- inputs:
+  - x
+  outputs:
+  - rms_norm
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 2048
+      source_dtype: float32
+      source_graph: null
+    inputs: []
+    outputs:
+    - name: p_weight
+      dtype: f32
+      shape:
+      - const: 2048
+  - id: x
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x
+      dtype: f32
+      shape:
+      - const: 1
+      - const: 2048
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs:
+      eps: 1.0e-06
     inputs:
     - x
+    - p_weight
     outputs:
-    - rms_norm
-    nodes:
-    - id: p_weight
-      op: constant
-      attrs:
-        name: p_weight
-        value: null
-        context_value: null
-        load_ops:
-          __tuple__: []
-        source_path: weight
-        source_parts:
-          __tuple__: []
-        source_shape:
-          __tuple__:
-          - 2048
-        source_dtype: float32
-        source_graph: null
-      inputs: []
-      outputs:
-      - name: p_weight
-        dtype: f32
-        shape:
-        - const: 2048
-    - id: x
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x
-        dtype: f32
-        shape:
-        - const: 1
-        - const: 2048
-    - id: rms_norm
-      op: torch.rms_norm
-      attrs:
-        eps: 1.0e-06
-      inputs:
-      - x
-      - p_weight
-      outputs:
-      - name: rms_norm
-        dtype: f32
-        shape:
-        - const: 1
-        - const: 2048
-  sha256:36ccd6c74eebcf5d10af6454d9b89033ca01e95c427b828b94d7f98df67d78b0:
-    ir_version: 1
+    - name: rms_norm
+      dtype: f32
+      shape:
+      - const: 1
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 256
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 256
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 256
-        - const: 2048
-  sha256:1ba0290f7f27975effb26a5ff58f259fdd187e8ed34c920052a6f4824a0d26fd:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 256
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - const: 256
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 1024
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - const: 256
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 1024
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - const: 256
-        - const: 2048
-  sha256:9de2cc1656b1544a46e20867cc5f8ac3d10ed931cd86c808e853f7411c3f80cc:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - const: 256
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 2048
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 2048
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
-  sha256:8620020a96ca919047faa85f8ce5f3e4d79b73b1c53e6a897d83d3689e2ccd51:
-    ir_version: 1
+    - name: linear
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - linear
+  nodes:
+  - id: x0
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x0
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 1024
+  - id: x1
+    op: input
+    attrs: {}
+    inputs: []
+    outputs:
+    - name: x1
+      dtype: f16
+      shape:
+      - const: 2048
+      - const: 1024
+  - id: linear
+    op: torch.linear
+    attrs:
+      has_bias: false
     inputs:
     - x0
     - x1
     outputs:
-    - linear
-    nodes:
-    - id: x0
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x0
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 1024
-    - id: x1
-      op: input
-      attrs: {}
-      inputs: []
-      outputs:
-      - name: x1
-        dtype: f16
-        shape:
-        - const: 2048
-        - const: 1024
-    - id: linear
-      op: torch.linear
-      attrs:
-        has_bias: false
-      inputs:
-      - x0
-      - x1
-      outputs:
-      - name: linear
-        dtype: f16
-        shape:
-        - sym: seq_len
-          hint: 512
-        - const: 2048
+    - name: linear
+      dtype: f16
+      shape:
+      - sym: seq_len
+        hint: 512
+      - const: 2048
 configs:
 - name: olmoe_1b7b.expert_gate_up.m1
-  program: sha256:ffb14d26aea789378cb71a99489d9c8f36a6c008472a09cf84a6b9d61bd16a85
+  program: 0
   target:
     origins:
     - linear
@@ -582,7 +555,7 @@ configs:
     reference_us: 8.2
     reference_backend: cublas
 - name: olmoe_1b7b.expert_down.m1
-  program: sha256:cbd93b4878fe184ac406253eab921e5056e85da99a2594153ddd1df447b67cc9
+  program: 1
   target:
     origins:
     - linear
@@ -598,7 +571,7 @@ configs:
     reference_us: 6.1
     reference_backend: cublas
 - name: olmoe_1b7b.qk_cat.m16
-  program: sha256:361760240dc7773bf700b2f37f21ff311e256c0e392ecaef27cd1dc1cef6b72c
+  program: 2
   target:
     origins:
     - linear
@@ -614,7 +587,7 @@ configs:
     reference_us: 10.2
     reference_backend: cublas
 - name: olmoe_1b7b.o_proj.m16
-  program: sha256:7ae8701d5872ce8e713fceadcf674c82033dbe2da860372cdc06b8a70e8db20b
+  program: 3
   target:
     origins:
     - linear
@@ -630,7 +603,7 @@ configs:
     reference_us: 8.2
     reference_backend: cublas
 - name: olmoe_1b7b.expert_down.m16
-  program: sha256:9853782d002cc0b6b2464c8e94d62ecb81a1034c063285ef66676854a5b65be2
+  program: 4
   target:
     origins:
     - linear
@@ -646,7 +619,7 @@ configs:
     reference_us: 6.1
     reference_backend: cublas
 - name: olmoe_1b7b.rms_norm.k2048.m16
-  program: sha256:bb6fb5657ba5f84c2f1cfb5d5fde7168864e8ad163443bca1ae4cd7d867ec6e4
+  program: 5
   target:
     origins:
     - rms_norm
@@ -662,7 +635,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: olmoe_1b7b.qk_cat.m1.t
-  program: sha256:3f7e4374eb1322ec1ac3d51b1897b8d9eb98157a8c5a3fee444bb1d5c67dc902
+  program: 6
   target:
     origins:
     - matmul
@@ -678,7 +651,7 @@ configs:
     reference_us: 10.8
     reference_backend: cublas
 - name: olmoe_1b7b.o_proj.m1.t
-  program: sha256:6dcc42cc03ac6b642b113af1001964e6ad892dda1b2d3b682fa2cdb03b0393b9
+  program: 7
   target:
     origins:
     - matmul
@@ -694,7 +667,7 @@ configs:
     reference_us: 10.3
     reference_backend: cublas
 - name: olmoe_1b7b.rms_norm.k2048.m1
-  program: sha256:82b95918ddeda9062a15710420120a3f595a8a387babc4b831ffde2d8a0546fd
+  program: 8
   target:
     origins:
     - rms_norm
@@ -710,7 +683,7 @@ configs:
     reference_us: 4.1
     reference_backend: torch-eager
 - name: olmoe_1b7b.expert_gate_up.m256
-  program: sha256:36ccd6c74eebcf5d10af6454d9b89033ca01e95c427b828b94d7f98df67d78b0
+  program: 9
   target:
     origins:
     - linear
@@ -726,7 +699,7 @@ configs:
     reference_us: 16.8
     reference_backend: cublas
 - name: olmoe_1b7b.expert_down.m256
-  program: sha256:1ba0290f7f27975effb26a5ff58f259fdd187e8ed34c920052a6f4824a0d26fd
+  program: 10
   target:
     origins:
     - linear
@@ -742,7 +715,7 @@ configs:
     reference_us: 10.3
     reference_backend: cublas
 - name: olmoe_1b7b.expert_gate_up.dynM
-  program: sha256:9de2cc1656b1544a46e20867cc5f8ac3d10ed931cd86c808e853f7411c3f80cc
+  program: 11
   target:
     origins:
     - linear
@@ -758,7 +731,7 @@ configs:
     reference_us: 30.6
     reference_backend: cublas
 - name: olmoe_1b7b.expert_down.dynM
-  program: sha256:8620020a96ca919047faa85f8ce5f3e4d79b73b1c53e6a897d83d3689e2ccd51
+  program: 12
   target:
     origins:
     - linear

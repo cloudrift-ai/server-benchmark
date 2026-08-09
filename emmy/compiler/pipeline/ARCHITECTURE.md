@@ -1090,12 +1090,18 @@ A golden record is a reviewed, per-GPU measurement of a frontend program target.
 are, how a golden's layout has to match the fork it is meant to decide, the two audits that catch a golden that no
 longer deploys, and the checks that keep the A/B honest.
 
-`golden_v2.py` holds one generic `GoldenRecord`. Each record references a content-addressed stable frontend Torch IR
-program and selects its target only by frontend provenance origins. Current lowering derives the `S_*` histogram,
+`golden_v2.py` holds one generic `GoldenRecord`. Each record references a stable frontend Torch IR program by its
+document-local list index and selects its target only by frontend provenance origins. Current lowering derives the `S_*` histogram,
 `ShapeKey`, dtype classification, dynamic status, and operation kind lazily. Trace inventories retain the complete
 frontend program so these selectors re-lower in their original fusion context; standalone tuning slices are derived
 in memory from the selected origins. Those indexes and slices are not serialized and are
 allowed to evolve with the compiler. There are no kernel-kind classes or snippet generators.
+
+**Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
+The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
+every golden under `search/goldens/` in the same change. The loader does not carry migrations or legacy decoders for
+working files outside the repository; keeping the checked-in corpus loadable is the compatibility gate. Programs are
+a plain list and configs refer to them by integer index; no program digest or persistent identifier is stored.
 
 **One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** A working file
 may contain an inventory entry (no knobs or timings), a proposed candidate (knobs but no timings), or a verified

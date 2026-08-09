@@ -1091,23 +1091,27 @@ are, how a golden's layout has to match the fork it is meant to decide, the two 
 longer deploys, and the checks that keep the A/B honest.
 
 `golden.py` holds one generic `GoldenRecord`. Each record references a stable frontend Torch IR program by its
-document-local list index and selects its target only by frontend provenance origins. Current lowering derives the `S_*` histogram,
-`ShapeKey`, dtype classification, dynamic status, and operation kind lazily. Trace inventories retain the complete
-frontend program so these selectors re-lower in their original fusion context; standalone tuning slices are derived
-in memory from the selected origins. Those indexes and slices are not serialized and are
-allowed to evolve with the compiler. There are no kernel-kind classes or snippet generators.
+document-local list index. The preferred target selector is a non-empty, unique set of frontend provenance origins.
+When lowering produces a kernel without such a selector, the record points into the document's optional `loops` pool,
+which stores that standalone post-fusion Loop IR slice. Current lowering derives the `S_*` histogram, `ShapeKey`, dtype
+classification, dynamic status, and operation kind lazily; none is serialized. Trace inventories retain the complete
+frontend program so provenance selectors re-lower in their original fusion context, while Loop IR fallbacks load
+directly. There are no kernel-kind classes or snippet generators.
 
 **Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
 every golden under `search/goldens/` in the same change. The loader does not carry migrations or legacy decoders for
 working files outside the repository; keeping the checked-in corpus loadable is the compatibility gate. Programs are
-a plain list and configs refer to them by integer index; no program digest or persistent identifier is stored.
+a plain list and configs refer to them by integer index; no program digest or persistent identifier is stored. Loop IR
+fallbacks are implementation-level rather than a compatibility promise and follow the same regenerate-the-corpus
+invariant. Frontend graph nodes omit empty `attrs` / `inputs`, store tensors as `[name, dtype, shape]`, and encode static
+dimensions as integers to keep the persistence surface small.
 
 **One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** A working file
 may contain an inventory entry (no knobs or timings), a proposed candidate (knobs but no timings), or a verified
 candidate (knobs plus paired positive Emmy/reference measurements). `load_golden_file` and `dump_golden_file` validate
 this format without mutating the parsed entries; dumping refuses to replace an existing file unless its caller opts
-in explicitly. A traced inventory embeds stable frontend Torch IR and selects targets by origin IDs. Repository
+in explicitly. A traced inventory embeds stable frontend Torch IR and selects targets by origin IDs or a Loop IR fallback. Repository
 promotion is stricter: every entry must carry an explicit knobs mapping
 (possibly empty for a verified forkless anchor) plus both positive finite timings. Missing, one-sided, zero, NaN,
 and infinite measurements are rejected before they can become trusted deploy evidence. A working entry may also

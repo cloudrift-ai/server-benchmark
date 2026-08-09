@@ -6,13 +6,15 @@ import json
 import pytest
 
 from emmy.commands.trace import handle_trace, register_trace_command, trace_inline_code
+from emmy.compiler import provenance
 from emmy.compiler.backend import torch_ref
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
-from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
+from emmy.compiler.pipeline.search.working_golden import load_working_targets, write_trace_inventory
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -115,6 +117,63 @@ def test_trace_serializes_target_without_a_torch_reference_mapping(tmp_path) -> 
     (record,) = load_golden_records(load_golden_file(path))
     assert record.origin_ops == ("tensor.gather",)
     assert record.program.nodes["gather"].op == GatherOp(axis=1)
+
+
+def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch, tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x0", (16,)), node_id="x0")
+    graph.add_node(InputOp(), [], Tensor("x1", (16,)), node_id="x1")
+    graph.add_node(ElementwiseOp("relu"), ["x0"], Tensor("y0", (16,)), node_id="y0")
+    graph.add_node(ElementwiseOp("relu"), ["x1"], Tensor("y1", (16,)), node_id="y1")
+    graph.inputs, graph.outputs = ["x0", "x1"], ["y0", "y1"]
+    monkeypatch.setattr(LoopOp, "cache_key", lambda _self: None)
+
+    path = tmp_path / "working.yaml"
+    result = write_trace_inventory(graph, path)
+    records = load_golden_records(load_golden_file(path))
+
+    assert result.target_count == 2
+    assert len(records) == 2
+    assert {record.origins for record in records} == {("y0",), ("y1",)}
+
+
+def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monkeypatch, tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    monkeypatch.setattr(provenance, "seed", lambda _graph: None)
+
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path)
+    document = load_golden_file(path)
+    (record,) = load_golden_records(document)
+
+    assert set(document) == {"compute_cap", "programs", "loops", "configs"}
+    assert document["configs"][0]["target"] == {"loop": 0}
+    assert record.origins == ()
+    assert isinstance(record.target_program.nodes["y"].op, LoopOp)
+    assert record.structural_features["S_pw_relu"] == 1.0
+    _document, targets = load_working_targets(path)
+    assert len(targets) == 1
+    assert isinstance(targets[0].program.nodes["y"].op, LoopOp)
+
+
+def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x0", (512, 512), "f16"), node_id="x0")
+    graph.add_node(InputOp(), [], Tensor("x1", (512, 512), "f16"), node_id="x1")
+    graph.add_node(LinearOp(), ["x0", "x1"], Tensor("linear", (512, 512), "f16"), node_id="linear")
+    graph.inputs, graph.outputs = ["x0", "x1"], ["linear"]
+
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path)
+    text = path.read_text()
+
+    assert "inputs: [x0, x1]" in text
+    assert "outputs: [[x0, f16, [512, 512]]]" in text
+    assert "attrs: {has_bias: false}" in text
+    assert "target:\n    origins:\n" in text
 
 
 def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:

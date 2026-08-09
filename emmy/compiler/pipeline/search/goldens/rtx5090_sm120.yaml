@@ -3,726 +3,266 @@ compute_cap:
 - 12
 - 0
 programs:
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x0, f32, [512, 512]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x1, f32, [512, 512]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x0, f16, [512, 512]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x1, f16, [512, 512]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 1024
+    outputs: [[x0, f16, [1024, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 1024
+    outputs: [[x1, f16, [1024, 1024]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 2048
+    outputs: [[x0, f16, [2048, 2048]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 2048
+    outputs: [[x1, f16, [2048, 2048]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x0, f16, [4096, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x1, f16, [4096, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 512
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 512]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x1, f16, [512, 512]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 4096
+    outputs: [[x0, f16, [512, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 12288
+    outputs: [[x1, f16, [4096, 12288]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 12288
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 4096
+    outputs: [[x0, f16, [512, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x1, f16, [4096, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 4096
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 4096
+    outputs: [[x0, f16, [512, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 28672
+    outputs: [[x1, f16, [4096, 28672]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 28672
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 14336
+    outputs: [[x0, f16, [512, 14336]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 14336
-      - const: 4096
+    outputs: [[x1, f16, [14336, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 4096
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 12288
+    outputs: [[x1, f16, [4096, 12288]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 12288
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x1, f16, [4096, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 28672
+    outputs: [[x1, f16, [4096, 28672]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 28672
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 14336
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 14336]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 14336
-      - const: 4096
+    outputs: [[x1, f16, [14336, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
-- inputs:
-  - x
-  outputs:
-  - softmax
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [softmax]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 2048
+    outputs: [[x, f32, [512, 2048]]]
   - id: softmax
     op: torch.softmax
-    attrs:
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: softmax
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 2048
-- inputs:
-  - x
-  outputs:
-  - sum_1
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [sum_1]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 2048
+    outputs: [[x, f32, [512, 2048]]]
   - id: sum_1_keepdim
     op: tensor.reduce
-    attrs:
-      op:
-        __elementwise__: sum
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: sum_1_keepdim
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 1
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
   - id: sum_1
     op: tensor.index_map
     attrs:
-      out_shape:
-        __tuple__:
-        - __dim__:
-            const: 512
+      out_shape: {__tuple__: [{__dim__: 512}]}
       sources:
         __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - var: out_coord_0
-            - literal:
-                value: 0
-                dtype: int
-            select: null
-    inputs:
-    - sum_1_keepdim
-    outputs:
-    - name: sum_1
-      dtype: f32
-      shape:
-      - const: 512
-- inputs:
-  - x
-  outputs:
-  - softmax
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [softmax]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 8192
+    outputs: [[x, f32, [512, 8192]]]
   - id: softmax
     op: torch.softmax
-    attrs:
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: softmax
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 8192
-- inputs:
-  - x
-  outputs:
-  - sum_1
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [sum_1]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 8192
+    outputs: [[x, f32, [512, 8192]]]
   - id: sum_1_keepdim
     op: tensor.reduce
-    attrs:
-      op:
-        __elementwise__: sum
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: sum_1_keepdim
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 1
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
   - id: sum_1
     op: tensor.index_map
     attrs:
-      out_shape:
-        __tuple__:
-        - __dim__:
-            const: 512
+      out_shape: {__tuple__: [{__dim__: 512}]}
       sources:
         __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - var: out_coord_0
-            - literal:
-                value: 0
-                dtype: int
-            select: null
-    inputs:
-    - sum_1_keepdim
-    outputs:
-    - name: sum_1
-      dtype: f32
-      shape:
-      - const: 512
-- inputs:
-  - x
-  outputs:
-  - rms_norm
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [rms_norm]
   nodes:
   - id: p_weight
     op: constant
@@ -730,49 +270,23 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 2048
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
       source_dtype: float32
       source_graph: null
-    inputs: []
-    outputs:
-    - name: p_weight
-      dtype: f32
-      shape:
-      - const: 2048
+    outputs: [[p_weight, f32, [2048]]]
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 2048
+    outputs: [[x, f32, [512, 2048]]]
   - id: rms_norm
     op: torch.rms_norm
-    attrs:
-      eps: 1.0e-06
-    inputs:
-    - x
-    - p_weight
-    outputs:
-    - name: rms_norm
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 2048
-- inputs:
-  - x
-  outputs:
-  - rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
   nodes:
   - id: p_weight
     op: constant
@@ -780,49 +294,23 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 4096
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
       source_dtype: float32
       source_graph: null
-    inputs: []
-    outputs:
-    - name: p_weight
-      dtype: f32
-      shape:
-      - const: 4096
+    outputs: [[p_weight, f32, [4096]]]
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 4096
+    outputs: [[x, f32, [512, 4096]]]
   - id: rms_norm
     op: torch.rms_norm
-    attrs:
-      eps: 1.0e-06
-    inputs:
-    - x
-    - p_weight
-    outputs:
-    - name: rms_norm
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 4096
-- inputs:
-  - x
-  outputs:
-  - rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
   nodes:
   - id: p_weight
     op: constant
@@ -830,277 +318,107 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 8192
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [8192]}
       source_dtype: float32
       source_graph: null
-    inputs: []
-    outputs:
-    - name: p_weight
-      dtype: f32
-      shape:
-      - const: 8192
+    outputs: [[p_weight, f32, [8192]]]
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 8192
+    outputs: [[x, f32, [512, 8192]]]
   - id: rms_norm
     op: torch.rms_norm
-    attrs:
-      eps: 1.0e-06
-    inputs:
-    - x
-    - p_weight
-    outputs:
-    - name: rms_norm
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 8192
-- inputs:
-  - x
-  outputs:
-  - relu
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [relu]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 4096
+    outputs: [[x, f32, [512, 4096]]]
   - id: relu
     op: tensor.elementwise
-    attrs:
-      op:
-        __elementwise__: relu
-    inputs:
-    - x
-    outputs:
-    - name: relu
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 4096
-- inputs:
-  - x
-  outputs:
-  - relu
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [relu]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 16384
+    outputs: [[x, f32, [512, 16384]]]
   - id: relu
     op: tensor.elementwise
-    attrs:
-      op:
-        __elementwise__: relu
-    inputs:
-    - x
-    outputs:
-    - name: relu
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 16384
-- inputs:
-  - x
-  outputs:
-  - softmax
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 16384]]]
+- inputs: [x]
+  outputs: [softmax]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 2048
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
   - id: softmax
     op: torch.softmax
-    attrs:
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: softmax
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 2048
-- inputs:
-  - x
-  outputs:
-  - sum_1
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [sum_1]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 2048
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
   - id: sum_1_keepdim
     op: tensor.reduce
-    attrs:
-      op:
-        __elementwise__: sum
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: sum_1_keepdim
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 1
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
   - id: sum_1
     op: tensor.index_map
     attrs:
-      out_shape:
-        __tuple__:
-        - __dim__:
-            sym: seq_len
-            hint: 512
+      out_shape: {__tuple__: [{__dim__: {sym: seq_len, hint: 512}}]}
       sources:
         __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - var: out_coord_0
-            - literal:
-                value: 0
-                dtype: int
-            select: null
-    inputs:
-    - sum_1_keepdim
-    outputs:
-    - name: sum_1
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-- inputs:
-  - x
-  outputs:
-  - softmax
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [softmax]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
   - id: softmax
     op: torch.softmax
-    attrs:
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: softmax
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
-- inputs:
-  - x
-  outputs:
-  - sum_1
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [sum_1]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
   - id: sum_1_keepdim
     op: tensor.reduce
-    attrs:
-      op:
-        __elementwise__: sum
-      axis: -1
-    inputs:
-    - x
-    outputs:
-    - name: sum_1_keepdim
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 1
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
   - id: sum_1
     op: tensor.index_map
     attrs:
-      out_shape:
-        __tuple__:
-        - __dim__:
-            sym: seq_len
-            hint: 512
+      out_shape: {__tuple__: [{__dim__: {sym: seq_len, hint: 512}}]}
       sources:
         __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - var: out_coord_0
-            - literal:
-                value: 0
-                dtype: int
-            select: null
-    inputs:
-    - sum_1_keepdim
-    outputs:
-    - name: sum_1
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-- inputs:
-  - x
-  outputs:
-  - rms_norm
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [rms_norm]
   nodes:
   - id: p_weight
     op: constant
@@ -1108,51 +426,23 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 2048
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
       source_dtype: float32
       source_graph: null
-    inputs: []
-    outputs:
-    - name: p_weight
-      dtype: f32
-      shape:
-      - const: 2048
+    outputs: [[p_weight, f32, [2048]]]
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 2048
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
   - id: rms_norm
     op: torch.rms_norm
-    attrs:
-      eps: 1.0e-06
-    inputs:
-    - x
-    - p_weight
-    outputs:
-    - name: rms_norm
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 2048
-- inputs:
-  - x
-  outputs:
-  - rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
   nodes:
   - id: p_weight
     op: constant
@@ -1160,51 +450,23 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 4096
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
       source_dtype: float32
       source_graph: null
-    inputs: []
-    outputs:
-    - name: p_weight
-      dtype: f32
-      shape:
-      - const: 4096
+    outputs: [[p_weight, f32, [4096]]]
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
   - id: rms_norm
     op: torch.rms_norm
-    attrs:
-      eps: 1.0e-06
-    inputs:
-    - x
-    - p_weight
-    outputs:
-    - name: rms_norm
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
-- inputs:
-  - x
-  outputs:
-  - rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
   nodes:
   - id: p_weight
     op: constant
@@ -1212,359 +474,111 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 8192
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [8192]}
       source_dtype: float32
       source_graph: null
-    inputs: []
-    outputs:
-    - name: p_weight
-      dtype: f32
-      shape:
-      - const: 8192
+    outputs: [[p_weight, f32, [8192]]]
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
   - id: rms_norm
     op: torch.rms_norm
-    attrs:
-      eps: 1.0e-06
-    inputs:
-    - x
-    - p_weight
-    outputs:
-    - name: rms_norm
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
-- inputs:
-  - x
-  outputs:
-  - relu
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [relu]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
   - id: relu
     op: tensor.elementwise
-    attrs:
-      op:
-        __elementwise__: relu
-    inputs:
-    - x
-    outputs:
-    - name: relu
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 4096
-- inputs:
-  - x
-  outputs:
-  - relu
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
   nodes:
   - id: x
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 16384
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 16384]]]
   - id: relu
     op: tensor.elementwise
-    attrs:
-      op:
-        __elementwise__: relu
-    inputs:
-    - x
-    outputs:
-    - name: relu
-      dtype: f32
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 16384
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 16384]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 64
+    outputs: [[x0, f16, [1, 8, 512, 64]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 64
+    outputs: [[x1, f16, [1, 8, 512, 64]]]
   - id: x2
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x2
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 64
+    outputs: [[x2, f16, [1, 8, 512, 64]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: false
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - name: scaled_dot_product_attention
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 64
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 128
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 128
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
   - id: x2
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x2
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 128
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: false
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - name: scaled_dot_product_attention
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - const: 512
-      - const: 128
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 64
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 64
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
   - id: x2
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x2
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 64
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: false
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - name: scaled_dot_product_attention
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 64
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 128
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 128
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
   - id: x2
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x2
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 128
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: false
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - name: scaled_dot_product_attention
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 8
-      - sym: seq_len
-        hint: 512
-      - const: 128
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
 configs:
 - name: matmul.square.512
   program: 0

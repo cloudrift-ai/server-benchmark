@@ -117,11 +117,14 @@ and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. 
 handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
-The YAML embeds stable frontend Torch IR programs and identifies targets only by frontend provenance origins. Flash
-score producers absorbed into their consumer are not emitted as separate targets. Trace records neither knobs nor
-timings, refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
+The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
+structurally identical occurrences are not collapsed and a missing cache key never drops a target. A target uses
+frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
+Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
+stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
+refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
 
-`emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance target are grouped as candidate knob
+`emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance or Loop IR target are grouped as candidate knob
 sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
 remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize

@@ -192,10 +192,12 @@ def resolve_golden_arg(args) -> None:
     if len(distinct) > 1:
         logger.error("golden %r is ambiguous — matches %d shapes: %s\nNarrow it to one.", name, len(distinct), ", ".join(distinct))
         sys.exit(2)
-    targets: list[tuple[dict, tuple[str, ...]]] = []
+    targets: list[tuple[dict, tuple[str, ...], dict | None]] = []
     for match in matches:
-        if not any(match.program_wire == program and match.origins == origins for program, origins in targets):
-            targets.append((match.program_wire, match.origins))
+        if not any(
+            match.program_wire == program and match.origins == origins and match.loop_wire == loop for program, origins, loop in targets
+        ):
+            targets.append((match.program_wire, match.origins, match.loop_wire))
     if len(targets) != 1:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)

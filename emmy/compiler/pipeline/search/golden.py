@@ -18,11 +18,81 @@ from pathlib import Path
 
 import yaml
 
+from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
-_PROGRAM_GRAPH_CACHE: dict[int, object] = {}
+_PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+
+
+class _FlowSequence(list):
+    """A YAML sequence rendered inline without changing the loaded schema."""
+
+
+class _FlowMapping(dict):
+    """A YAML mapping rendered inline without changing the loaded schema."""
+
+
+class _GoldenDumper(yaml.SafeDumper):
+    pass
+
+
+_GoldenDumper.add_representer(
+    _FlowSequence,
+    lambda dumper, value: dumper.represent_sequence("tag:yaml.org,2002:seq", value, flow_style=True),
+)
+_GoldenDumper.add_representer(
+    _FlowMapping,
+    lambda dumper, value: dumper.represent_mapping("tag:yaml.org,2002:map", value, flow_style=True),
+)
+
+
+def _flow(value):
+    if isinstance(value, list):
+        return _FlowSequence(_flow(item) for item in value)
+    if isinstance(value, Mapping):
+        return _FlowMapping((key, _flow(item)) for key, item in value.items())
+    return value
+
+
+def _short_flow(value: object) -> bool:
+    if isinstance(value, Mapping):
+        if "__program__" in value:
+            return False
+        return len(repr(value)) <= 120 and all(_short_flow(item) for item in value.values())
+    if isinstance(value, list):
+        return len(repr(value)) <= 120 and all(_short_flow(item) for item in value)
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _style_wire_value(value):
+    if isinstance(value, Mapping):
+        if set(value) == {"__program__"}:
+            return {"__program__": _style_program(value["__program__"])}
+        styled = {key: _style_wire_value(item) for key, item in value.items()}
+        return _flow(styled) if _short_flow(value) else styled
+    if isinstance(value, list):
+        return [_style_wire_value(item) for item in value]
+    return value
+
+
+def _style_program(program: Mapping) -> dict:
+    styled_nodes = []
+    for source in program["nodes"]:
+        node = dict(source)
+        if "attrs" in node:
+            node["attrs"] = _style_wire_value(node["attrs"])
+        if "inputs" in node:
+            node["inputs"] = _flow(node["inputs"])
+        node["outputs"] = _flow(node["outputs"])
+        styled_nodes.append(node)
+    return {
+        "inputs": _flow(program["inputs"]),
+        "outputs": _flow(program["outputs"]),
+        "nodes": styled_nodes,
+    }
 
 
 class GoldenEntryState(StrEnum):
@@ -87,23 +157,41 @@ class GoldenRecord:
     knobs: dict
     measurements: dict | None
     ranking: dict | None
+    loop_index: int | None = None
+    loop_wire: dict | None = None
 
     @cached_property
     def program(self):
         """Decode the stable Torch IR payload once per embedded program."""
         key = id(self.program_wire)
-        graph = _PROGRAM_GRAPH_CACHE.get(key)
-        if graph is None:
+        cached = _PROGRAM_GRAPH_CACHE.get(key)
+        if cached is None or cached[0] is not self.program_wire:
             graph = graph_from_wire(self.program_wire)
-            _PROGRAM_GRAPH_CACHE[key] = graph
-        return graph
+            _PROGRAM_GRAPH_CACHE[key] = (self.program_wire, graph)
+            return graph
+        return cached[1]
 
     @cached_property
     def target_program(self):
         """Derive the disposable standalone program selected by this record."""
+        if self.loop_wire is not None:
+            key = id(self.loop_wire)
+            cached = _LOOP_GRAPH_CACHE.get(key)
+            if cached is None or cached[0] is not self.loop_wire:
+                graph = loop_graph_from_wire(self.loop_wire)
+                _LOOP_GRAPH_CACHE[key] = (self.loop_wire, graph)
+            else:
+                graph = cached[1]
+            return graph.copy()
+
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
 
         return CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
+
+    @property
+    def target_key(self) -> tuple:
+        """Document-local identity shared by candidate rows for one target."""
+        return ("loop", self.loop_index) if self.loop_index is not None else ("origins", *self.origins)
 
     @cached_property
     def shape_key(self) -> ShapeKey:
@@ -117,16 +205,25 @@ class GoldenRecord:
 
     @cached_property
     def origin_ops(self) -> tuple[str, ...]:
+        if not self.origins:
+            return ()
         by_id = {node["id"]: node["op"] for node in self.program_wire["nodes"]}
         return tuple(by_id[origin] for origin in self.origins)
 
     @cached_property
     def dtype(self) -> str:
         """Public dtype spelling derived from the selected frontend operation."""
+        if self.loop_wire is not None:
+            graph = self.target_program
+            tensor = graph.buffer(graph.outputs[0])
+            if tensor is None:
+                raise ValueError(f"{self.name}: Loop IR target has no output tensor")
+            output_dtype = tensor.dtype.name
+            return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
         by_id = {node["id"]: node for node in self.program_wire["nodes"]}
         order = {node["id"]: index for index, node in enumerate(self.program_wire["nodes"])}
         terminal = max(self.origins, key=order.__getitem__)
-        output_dtype = by_id[terminal]["outputs"][0]["dtype"]
+        output_dtype = by_id[terminal]["outputs"][0][1]
         return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
 
     @property
@@ -185,18 +282,26 @@ def _positive_number(value, where: str) -> None:
         raise ValueError(f"{where} must be a positive number")
 
 
-def _validate_target(target: object, *, index: int, program_wire: dict) -> None:
+def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
     where = f"configs[{index}].target"
     if not isinstance(target, Mapping):
         raise ValueError(f"{where} must be a mapping")
-    _require_keys(target, {"origins"}, where)
-    origins = target.get("origins")
-    if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
-        raise ValueError(f"{where}.origins must be a non-empty list of node ids")
-    node_ids = {node["id"] for node in program_wire["nodes"]}
-    missing_origins = set(origins) - node_ids
-    if missing_origins:
-        raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
+    _require_keys(target, {"origins", "loop"}, where)
+    if set(target) == {"origins"}:
+        origins = target["origins"]
+        if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
+            raise ValueError(f"{where}.origins must be a non-empty list of node ids")
+        node_ids = {node["id"] for node in program_wire["nodes"]}
+        missing_origins = set(origins) - node_ids
+        if missing_origins:
+            raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
+        return
+    if set(target) == {"loop"}:
+        loop_ref = target["loop"]
+        if isinstance(loop_ref, bool) or not isinstance(loop_ref, int) or not 0 <= loop_ref < len(loops):
+            raise ValueError(f"{where}.loop does not resolve in this document: {loop_ref!r}")
+        return
+    raise ValueError(f"{where} must contain exactly one of origins or loop")
 
 
 def validate_golden_file(
@@ -206,7 +311,7 @@ def validate_golden_file(
 ) -> None:
     if not isinstance(document, Mapping):
         raise ValueError("golden document must be a mapping")
-    _require_keys(document, {"gpu_name", "compute_cap", "model", "programs", "configs"}, "golden document")
+    _require_keys(document, {"gpu_name", "compute_cap", "model", "programs", "loops", "configs"}, "golden document")
     gpu_name = document.get("gpu_name")
     if gpu_name is not None and (not isinstance(gpu_name, str) or not gpu_name):
         raise ValueError("gpu_name must be a non-empty string")
@@ -221,6 +326,10 @@ def validate_golden_file(
         programs = validate_program_pool(document.get("programs"))
     except ValueError as exc:
         raise ValueError(f"programs: {exc}") from exc
+    try:
+        loops = validate_loop_program_pool(document.get("loops"))
+    except ValueError as exc:
+        raise ValueError(f"loops: {exc}") from exc
     configs = document.get("configs")
     if not isinstance(configs, list) or not configs:
         raise ValueError("configs must be a non-empty list")
@@ -241,7 +350,7 @@ def validate_golden_file(
             graph_from_wire(programs[program_ref])
         except ValueError as exc:
             raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
-        _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref])
+        _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
         if "knobs" in entry and not isinstance(entry["knobs"], Mapping):
             raise ValueError(f"{where}.knobs must be a mapping")
         if "knobs" in entry:
@@ -283,6 +392,7 @@ def load_golden_file(
 
 def golden_record_from_entry(document: Mapping, entry: Mapping) -> GoldenRecord:
     target = entry["target"]
+    loop_index = target.get("loop")
     return GoldenRecord(
         name=entry["name"],
         gpu_name=document.get("gpu_name") or "",
@@ -290,7 +400,9 @@ def golden_record_from_entry(document: Mapping, entry: Mapping) -> GoldenRecord:
         model=entry.get("model", document.get("model")),
         program_index=entry["program"],
         program_wire=document["programs"][entry["program"]],
-        origins=tuple(target["origins"]),
+        origins=tuple(target.get("origins", ())),
+        loop_index=loop_index,
+        loop_wire=document.get("loops", [])[loop_index] if loop_index is not None else None,
         knobs=dict(entry.get("knobs") or {}),
         measurements=dict(entry["measurements"]) if entry.get("measurements") is not None else None,
         ranking=dict(entry["ranking"]) if entry.get("ranking") is not None else None,
@@ -310,16 +422,41 @@ _PROGRAM_TARGET_CACHE: dict[
 
 def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
     """Lower one persisted frontend target and recover its unique ``S_*`` row."""
-    key = (id(record.program_wire), record.origins, record.compute_cap)
+    payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
+    key = (payload_id, record.target_key, record.compute_cap)
     cached = _STRUCTURAL_CACHE.get(key)
     if cached is not None:
         return cached
 
-    from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
+
+    if record.loop_wire is not None:
+        ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+        lowered = Pipeline.build(LOOP_PASSES).run(record.target_program, ctx=ctx)
+        output_nodes = {
+            node.id for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)
+        }
+        signatures = {
+            tuple(
+                sorted(
+                    (name, float(value))
+                    for name, value in (getattr(lowered.nodes[node_id].op, "knobs", {}) or {}).items()
+                    if name.startswith(STRUCT_PREFIX)
+                )
+            )
+            for node_id in output_nodes
+        }
+        signatures.discard(())
+        if len(signatures) != 1:
+            raise ValueError(f"{record.name}: Loop IR target resolves to {len(signatures)} structural targets")
+        result = next(iter(signatures))
+        _STRUCTURAL_CACHE[key] = result
+        return result
+
+    from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
 
     wanted = set(record.origins)
@@ -374,7 +511,11 @@ def dump_golden_file(
     if destination.exists() and not overwrite:
         raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = yaml.safe_dump(dict(document), sort_keys=False, width=140)
+    styled = dict(document)
+    styled["programs"] = [_style_program(program) for program in document["programs"]]
+    if "loops" in document:
+        styled["loops"] = [_style_program(program) for program in document["loops"]]
+    payload = yaml.dump(styled, Dumper=_GoldenDumper, sort_keys=False, width=140)
     temporary = None
     mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
     try:

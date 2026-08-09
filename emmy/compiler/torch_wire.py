@@ -160,10 +160,10 @@ def expr_from_wire(value: object):
     raise ValueError(f"Torch IR expression has unknown tag {tag!r}")
 
 
-def dim_to_wire(dim: Dim) -> dict:
+def dim_to_wire(dim: Dim) -> int | dict:
     payload = expr_to_wire(dim.expr)
     if isinstance(dim.expr, Literal) and dim.expr.dtype == "int":
-        return {"const": int(dim.expr.value)}
+        return int(dim.expr.value)
     if isinstance(dim.expr, Var):
         out: dict[str, object] = {"sym": dim.expr.name}
         if dim.hint is not None:
@@ -176,11 +176,10 @@ def dim_to_wire(dim: Dim) -> dict:
 
 
 def dim_from_wire(value: object) -> Dim:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return Dim(value)
     if not isinstance(value, dict):
-        raise ValueError("Torch IR dimension must be a mapping")
-    if "const" in value:
-        _keys(value, {"const"}, "Torch IR static dimension")
-        return Dim(int(value["const"]))
+        raise ValueError("Torch IR dimension must be an integer or a mapping")
     if "sym" in value:
         _keys(value, {"sym", "hint"}, "Torch IR symbolic dimension")
         return Dim(str(value["sym"]), hint=int(value["hint"]) if value.get("hint") is not None else None)
@@ -282,22 +281,24 @@ def op_from_wire(value: object) -> Op:
         raise ValueError(f"Torch IR operation {tag!r} is invalid: {exc}") from exc
 
 
-def _tensor_to_wire(tensor: Tensor) -> dict:
-    return {
-        "name": tensor.name,
-        "dtype": tensor.dtype.name,
-        "shape": [dim_to_wire(dim) for dim in tensor.shape],
-    }
+def tensor_to_wire(tensor: Tensor) -> list:
+    return [tensor.name, tensor.dtype.name, [dim_to_wire(dim) for dim in tensor.shape]]
 
 
-def _tensor_from_wire(value: object) -> Tensor:
-    if not isinstance(value, dict):
-        raise ValueError("Torch IR tensor must be a mapping")
-    _keys(value, {"name", "dtype", "shape"}, "Torch IR tensor")
+def tensor_from_wire(value: object) -> Tensor:
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError("Torch IR tensor must be [name, dtype, shape]")
+    name, dtype, shape = value
+    if not isinstance(name, str) or not name:
+        raise ValueError("Torch IR tensor name must be a non-empty string")
+    if not isinstance(dtype, str) or not dtype:
+        raise ValueError("Torch IR tensor dtype must be a non-empty string")
+    if not isinstance(shape, list):
+        raise ValueError("Torch IR tensor shape must be a list")
     return Tensor(
-        name=str(value["name"]),
-        dtype=str(value["dtype"]),
-        shape=tuple(dim_from_wire(dim) for dim in value.get("shape", [])),
+        name=name,
+        dtype=dtype,
+        shape=tuple(dim_from_wire(dim) for dim in shape),
     )
 
 
@@ -306,15 +307,13 @@ def graph_to_wire(graph: Graph) -> dict:
     for node_id in graph.topological_order():
         node = graph.nodes[node_id]
         encoded = op_to_wire(node.op)
-        nodes.append(
-            {
-                "id": node_id,
-                "op": encoded["op"],
-                "attrs": encoded["attrs"],
-                "inputs": list(node.inputs),
-                "outputs": [_tensor_to_wire(tensor) for tensor in node.outputs],
-            }
-        )
+        item = {"id": node_id, "op": encoded["op"]}
+        if encoded["attrs"]:
+            item["attrs"] = encoded["attrs"]
+        if node.inputs:
+            item["inputs"] = list(node.inputs)
+        item["outputs"] = [tensor_to_wire(tensor) for tensor in node.outputs]
+        nodes.append(item)
     return {
         "inputs": list(graph.inputs),
         "outputs": list(graph.outputs),
@@ -337,14 +336,14 @@ def graph_from_wire(value: object) -> Graph:
         node_id = item.get("id")
         if not isinstance(node_id, str) or not node_id:
             raise ValueError(f"Torch IR node {index} requires a non-empty id")
-        inputs = item.get("inputs")
+        inputs = item.get("inputs", [])
         outputs = item.get("outputs")
         if not isinstance(inputs, list) or not all(isinstance(name, str) for name in inputs):
             raise ValueError(f"Torch IR node {node_id!r} inputs must be string names")
         if not isinstance(outputs, list) or not outputs:
             raise ValueError(f"Torch IR node {node_id!r} outputs must be a non-empty list")
         op = op_from_wire({"op": item.get("op"), "attrs": item.get("attrs", {})})
-        tensors = tuple(_tensor_from_wire(output) for output in outputs)
+        tensors = tuple(tensor_from_wire(output) for output in outputs)
         try:
             graph.add_node(op, list(inputs), outputs=tensors, node_id=node_id)
         except ValueError as exc:

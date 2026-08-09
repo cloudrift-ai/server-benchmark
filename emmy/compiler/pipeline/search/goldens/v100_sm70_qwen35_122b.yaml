@@ -3,1744 +3,622 @@ compute_cap:
 - 7
 - 0
 programs:
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 16384
-      - const: 3072
+    outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 16384
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 16384]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 16384
-      - const: 3072
+    outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 16384
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 16384]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 16384
-      - const: 3072
+    outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 16384
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 16384]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 16384
-      - const: 3072
+    outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 16384
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 16384]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 512]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 512]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 512]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 8192
+    outputs: [[x0, f16, [32, 8192]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 8192
+    outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 8192
+    outputs: [[x0, f16, [128, 8192]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 8192
+    outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 8192
+    outputs: [[x0, f16, [512, 8192]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 8192
+    outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 8192]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 8192
+    outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 12288
-      - const: 3072
+    outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 12288
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 12288]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 12288
-      - const: 3072
+    outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 12288
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 12288]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 12288
-      - const: 3072
+    outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 12288
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 12288]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 12288
-      - const: 3072
+    outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 12288
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 12288]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 8192
-      - const: 3072
+    outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 8192
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 8192]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 8192
-      - const: 3072
+    outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 8192
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 8192]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 8192
-      - const: 3072
+    outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 8192
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 8192]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 8192
-      - const: 3072
+    outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 8192
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 64
-      - const: 3072
+    outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 64
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 64]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 64
-      - const: 3072
+    outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 64
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 64]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 64
-      - const: 3072
+    outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 64
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 64]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 64
-      - const: 3072
+    outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 64
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 64]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 256
-      - const: 3072
+    outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 256
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 256]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 256
-      - const: 3072
+    outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 256
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 256]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 256
-      - const: 3072
+    outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 256
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 256]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 256
-      - const: 3072
+    outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 256
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 256]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 3072
+    outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 3072
+    outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 3072
+    outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 3072
+    outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 1024
+    outputs: [[x0, f16, [32, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 1024
+    outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 1024
+    outputs: [[x0, f16, [128, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 1024
+    outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 1024
+    outputs: [[x0, f16, [512, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 1024
+    outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 1024
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 3072
-      - const: 1024
+    outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 3072]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 3072
+    outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 1024]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 3072
+    outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 1024]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 3072
+    outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 1024]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 3072
+    outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 1024]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 3072
+    outputs: [[x0, f16, [32, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 248320
-      - const: 3072
+    outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 32
-      - const: 248320
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [32, 248320]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 3072
+    outputs: [[x0, f16, [128, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 248320
-      - const: 3072
+    outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 128
-      - const: 248320
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [128, 248320]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 3072
+    outputs: [[x0, f16, [512, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 248320
-      - const: 3072
+    outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 248320
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 248320]]]
+- inputs: [x0, x1]
+  outputs: [linear]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 3072
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 3072]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 248320
-      - const: 3072
+    outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: linear
-      dtype: f16
-      shape:
-      - sym: seq_len
-        hint: 512
-      - const: 248320
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 248320]]]
 configs:
 - name: qwen35_122b.attn_q.m32.lin
   program: 0

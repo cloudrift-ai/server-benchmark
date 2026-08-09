@@ -144,9 +144,11 @@ shared with CausalLM traces.
 - CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile`, `run`, and `tune`, so
   adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
 - Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
-  `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, groups
-  fold-aware tuning targets, and embeds the complete stable Torch IR program once in the golden YAML. Each target is
-  selected by frontend origins; its smaller tuning reproducer is derived in memory when the working file is loaded.
+  `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, enumerates
+  every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden YAML. Each
+  target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
+  post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
+  file is loaded.
   `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,

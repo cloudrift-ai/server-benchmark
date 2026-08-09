@@ -3,383 +3,135 @@ compute_cap:
 - 8
 - 9
 programs:
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x0, f32, [512, 512]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x1, f32, [512, 512]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f32
-      shape:
-      - const: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f32
-      shape:
-      - const: 1024
-      - const: 1024
+    outputs: [[x0, f32, [1024, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f32
-      shape:
-      - const: 1024
-      - const: 1024
+    outputs: [[x1, f32, [1024, 1024]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f32
-      shape:
-      - const: 1024
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f32
-      shape:
-      - const: 2048
-      - const: 2048
+    outputs: [[x0, f32, [2048, 2048]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f32
-      shape:
-      - const: 2048
-      - const: 2048
+    outputs: [[x1, f32, [2048, 2048]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f32
-      shape:
-      - const: 2048
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f32
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x0, f32, [4096, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f32
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x1, f32, [4096, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f32
-      shape:
-      - const: 4096
-      - const: 4096
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x0, f16, [512, 512]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
+    outputs: [[x1, f16, [512, 512]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 512
-      - const: 512
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 1024
+    outputs: [[x0, f16, [1024, 1024]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 1024
+    outputs: [[x1, f16, [1024, 1024]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 1024
-      - const: 1024
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 2048
+    outputs: [[x0, f16, [2048, 2048]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 2048
+    outputs: [[x1, f16, [2048, 2048]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 2048
-      - const: 2048
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x0, f16, [4096, 4096]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
+    outputs: [[x1, f16, [4096, 4096]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - name: matmul
-      dtype: f16
-      shape:
-      - const: 4096
-      - const: 4096
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: x0
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x0
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 16
-      - sym: seq_len
-        hint: 512
-      - const: 256
+    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
   - id: x1
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x1
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 16
-      - sym: seq_len
-        hint: 512
-      - const: 256
+    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
   - id: x2
     op: input
-    attrs: {}
-    inputs: []
-    outputs:
-    - name: x2
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 16
-      - sym: seq_len
-        hint: 512
-      - const: 256
+    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: true
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - name: scaled_dot_product_attention
-      dtype: f16
-      shape:
-      - const: 1
-      - const: 16
-      - sym: seq_len
-        hint: 512
-      - const: 256
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
 configs:
 - name: matmul.square.512
   program: 0

@@ -8,6 +8,7 @@ persistence. CLI commands only validate argument combinations and report errors.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,8 +62,10 @@ def write_trace_inventory(
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
     destination = preflight_trace_inventory(path)
@@ -81,18 +84,12 @@ def write_trace_inventory(
         for producer_id in fused_producer_ids(fused, node):
             absorbed[producer_id] = node_id
 
-    representatives: dict[str, tuple[str, object]] = {}
+    targets: list[tuple[str, object]] = []
     for node_id in fused.topological_order():
         node = fused.nodes[node_id]
         if not isinstance(node.op, LoopOp) or node_id in absorbed:
             continue
-        key = node.op.cache_key()
-        if key is None:
-            continue
-        current = representatives.get(key)
-        label = node.op.name or node_id
-        if current is None or (label, node_id) < ((current[1].op.name or current[0]), current[0]):
-            representatives[key] = (node_id, node)
+        targets.append((node_id, node))
 
     programs: list[dict] = []
     # Persist the pristine program once.  Per-target frontend slices are useful
@@ -100,18 +97,29 @@ def write_trace_inventory(
     # lowered (especially sibling linears and computed-A cones).  Provenance
     # selectors must therefore resolve against the original trace context.
     program_ref = intern_program(programs, input_graph)
+    loops: list[dict] = []
     entries: list[dict] = []
-    for key, (node_id, node) in sorted(representatives.items(), key=lambda item: ((item[1][1].op.name or item[1][0]), item[0])):
+    inventory = []
+    for node_id, node in targets:
         folded = [fused.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
-        name = f"{node.op.name or node_id}.{key[:12]}"
         target_prov = provenance.union(*(provenance.get(item) for item in (node, *folded)))
-        origins = sorted(origin for origin in target_prov if origin in input_graph.nodes)
-        if not origins:
-            raise ValueError(f"post-fusion kernel {node.op.name or node_id!r} has empty frontend provenance")
+        origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
+        inventory.append((node_id, node, folded, origins))
+    origin_counts = Counter(origins for _node_id, _node, _folded, origins in inventory if origins)
+
+    for node_id, node, folded, origins in inventory:
+        key = node.op.cache_key()
+        suffix = key[:12] if key is not None else node_id
+        name = f"{node.op.name or node_id}.{suffix}"
+        if origins and origin_counts[origins] == 1:
+            target = {"origins": list(origins)}
+        else:
+            loop_graph = single_node_graph(fused, node_id, absorb=frozenset(item.id for item in folded))
+            target = {"loop": intern_loop_program(loops, loop_graph)}
         entry = {
             "name": name,
             "program": program_ref,
-            "target": {"origins": origins},
+            "target": target,
         }
         entries.append(entry)
 
@@ -120,6 +128,8 @@ def write_trace_inventory(
         "programs": programs,
         "configs": entries,
     }
+    if loops:
+        document["loops"] = loops
     if ctx.gpu_name:
         document["gpu_name"] = ctx.gpu_name
     if model:
@@ -136,12 +146,12 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
         raise ValueError(f"working golden cannot point inside the canonical repository goldens: {source}")
     document = load_golden_file(source)
 
-    by_source: dict[tuple[str, tuple[str, ...]], WorkingGoldenTarget] = {}
+    by_source: dict[tuple[int, tuple], WorkingGoldenTarget] = {}
     for index, entry in enumerate(document["configs"]):
         if kernel and kernel not in entry["name"]:
             continue
         record = golden_record_from_entry(document, entry)
-        key = (record.program_index, record.origins)
+        key = (record.program_index, record.target_key)
         target = by_source.get(key)
         if target is None:
             target = WorkingGoldenTarget(label=entry["name"], code=None, input=None, dynamic=None, program=record.target_program)

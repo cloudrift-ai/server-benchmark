@@ -40,7 +40,8 @@ The suite runs in four layers, distinguished by what they touch rather than by w
 - **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. The bulk of the suite.
 - **CLI dry-run** — the full argument-parsing → config-loading → orchestration path invoked as a subprocess with
   `--dry-run`, stopping just before any real side effect (SSH, Docker, file writes). Covers `deploy ssh/local/cloud`,
-  `bench`, `teardown`, and `vm create/delete`. These use real recipes from `recipes/` so config drift fails a test.
+  `bench`, `teardown`, and `vm create/delete/audit`. These use real recipes from `recipes/` so config drift fails a
+  test.
 - **GPU** — guarded by `requires_cuda` / `requires_sm90` / `importorskip` so they skip cleanly off-GPU, and routed
   onto a serial worker chain by the root conftest (see **Running**).
 - **End-to-end** — a traced model or snippet through the whole compiler, compared against PyTorch eager or numpy.

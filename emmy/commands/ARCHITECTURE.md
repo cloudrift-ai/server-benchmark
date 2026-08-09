@@ -9,12 +9,14 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
+commands/agent ─► agent (tracked skill runner and tool schemas)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
 - `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
+- `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
 - `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
   INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
@@ -279,7 +281,9 @@ emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25
 
 ### `emmy deploy cloud`
 
-Provisions a cloud VM and deploys via SSH. Requires `--gpu` and `--gpu-count` to select the matching matrix entry from the recipe (no auto-detection — there is no host yet). When a GPU is offered by more than one provider, the first provider in `hardware.py`'s `GPU_INSTANCE_TYPES` table is chosen by default; pass `--provider {gcp,cloudrift}` to override.
+Provisions a cloud VM and deploys via SSH. Requires `--gpu` and `--gpu-count` to select the matching matrix entry from
+the recipe (no auto-detection — there is no host yet). When several providers offer a GPU, their hardware-table order
+sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the search to one provider.
 
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
@@ -363,7 +367,7 @@ Cleans up VMs left running by `bench --no-teardown`. Reads `instances.json` from
 emmy teardown <run_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
-### `emmy vm create / delete`
+### `emmy vm create / delete / audit`
 
 Manages cloud GPU VM lifecycles directly. Instances are ephemeral — `delete` removes them entirely. Run `emmy vm create {gpu,gcp,cloudrift} --help` for full flag lists.
 
@@ -384,6 +388,18 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
 ```
+
+Automated jobs can require an exact physical GPU count and persist an interrupt-safe ownership lease:
+
+```bash
+emmy vm create gpu --gpu "NVIDIA H200 141GB" --gpu-count 1 --exact-gpu-count \
+  --lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1 --json
+emmy vm delete lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1
+emmy vm audit lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1
+```
+
+The lease records the provider deletion handle before readiness polling, then adds SSH connection details. Delete and
+audit accept only the exact recorded owner and never enumerate unrelated provider resources.
 
 CloudRift attach to a specific network with `--network <name>` (on `vm create cloudrift`, `vm create gpu`, `deploy cloud`, and `bench`). The name must exist in the target datacenter; omit to let CloudRift pick a public network.
 
@@ -421,11 +437,29 @@ emmy vm create gpu --gpu "NVIDIA B200" --gpu-count 8 --provider gcp --provisioni
 
 #### Allocation strategy (shared by `deploy cloud`, `bench`, `vm create gpu`)
 
-All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud.py`. It enumerates *candidates* from `hardware.GPU_INSTANCE_TYPES` (preference-ordered) and, for GCP, fans out across the zones listed in `GPU_GCP_ZONES`. For each candidate it makes up to `SAME_CANDIDATE_RETRIES` attempts on transient failures, then advances. Providers signal "no capacity, try next" by raising `CapacityExhausted`; non-retryable errors raise `TerminalProvisionError` and abort. Fallback never silently crosses provider boundaries — `--provider` (or the first hardware-table entry) bounds the search.
+All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud.py`. It enumerates preference-ordered
+candidates from `hardware.GPU_INSTANCE_TYPES` and fans GCP entries across `GPU_GCP_ZONES`. Each candidate gets up to
+`SAME_CANDIDATE_RETRIES` transient attempts. `CapacityExhausted` advances; `TerminalProvisionError` aborts. Without a
+filter, fallback can cross providers in hardware-table order; `--provider` restricts the complete search.
 
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
+
+### `emmy agent`
+
+Runs a tracked repository skill non-interactively through an OpenAI-compatible Chat Completions endpoint. The API key
+must arrive through a one-use mode-`0600` file or inherited file descriptor and is removed from every tool subprocess.
+
+```bash
+emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
+emmy agent tools --output /tmp/emmy-agent-tools.json
+```
+
+Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
+from the same definitions the runner sends to the model. See `emmy/agent/ARCHITECTURE.md` for the security and
+workflow-ownership boundary.
 
 ### `emmy fit`
 

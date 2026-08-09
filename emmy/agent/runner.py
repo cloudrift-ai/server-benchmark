@@ -1,17 +1,15 @@
-#!/usr/bin/env python3
-"""Run a tracked repository skill through CloudRift's Chat Completions API."""
+"""Run a tracked repository skill through an OpenAI-compatible endpoint."""
 
 from __future__ import annotations
 
-import argparse
+import asyncio
 import html.parser
 import ipaddress
 import json
 import os
 import socket
 import stat
-import subprocess
-import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -134,6 +132,28 @@ TOOLS = [
 ]
 
 
+@dataclass(frozen=True)
+class AgentRun:
+    """One non-interactive skill execution."""
+
+    skill: Path
+    prompt: Path
+    model: str
+    output: Path
+    workspace: Path = field(default_factory=Path.cwd)
+    endpoint: str = DEFAULT_ENDPOINT
+    allow_write: tuple[Path, ...] = ()
+    max_turns: int = 160
+    request_timeout: float = 600
+    api_key_file: Path | None = None
+    api_key_fd: int | None = None
+
+
+def tool_definitions() -> list[dict]:
+    """Return a detached JSON-compatible copy of the tools exposed to the model."""
+    return json.loads(json.dumps(TOOLS))
+
+
 class _SearchParser(html.parser.HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -206,12 +226,14 @@ def _duckduckgo_target(raw_url: str) -> str:
     return unquote(target) if target else absolute
 
 
-def _validate_public_url(raw_url: str) -> str:
+async def _validate_public_url(raw_url: str) -> str:
     parsed = urlparse(raw_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("URL must be public HTTP(S) without embedded credentials")
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+        loop = asyncio.get_running_loop()
+        resolved = await loop.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+        addresses = {item[4][0] for item in resolved}
     except socket.gaierror as exc:
         raise ValueError(f"Could not resolve URL host: {parsed.hostname}") from exc
     for address in addresses:
@@ -221,13 +243,13 @@ def _validate_public_url(raw_url: str) -> str:
     return raw_url
 
 
-def _bounded_get(raw_url: str, *, params: dict | None = None) -> tuple[str, str]:
+async def _bounded_get(raw_url: str, *, params: dict | None = None) -> tuple[str, str]:
     headers = {"User-Agent": "emmy-model-discovery/1.0"}
     current = raw_url
-    with httpx.Client(timeout=httpx.Timeout(20, connect=10), follow_redirects=False, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10), follow_redirects=False, headers=headers) as client:
         for _ in range(4):
-            _validate_public_url(current)
-            with client.stream("GET", current, params=params) as response:
+            await _validate_public_url(current)
+            async with client.stream("GET", current, params=params) as response:
                 params = None
                 if response.is_redirect:
                     location = response.headers.get("location")
@@ -240,7 +262,7 @@ def _bounded_get(raw_url: str, *, params: dict | None = None) -> tuple[str, str]
                 if not any(kind in content_type for kind in ("text/", "json", "xml")):
                     raise ValueError(f"URL returned unsupported content type: {content_type or 'unknown'}")
                 chunks = bytearray()
-                for chunk in response.iter_bytes():
+                async for chunk in response.aiter_bytes():
                     chunks.extend(chunk)
                     if len(chunks) > MAX_FETCH_BYTES:
                         raise ValueError(f"URL response exceeded {MAX_FETCH_BYTES} bytes")
@@ -248,21 +270,21 @@ def _bounded_get(raw_url: str, *, params: dict | None = None) -> tuple[str, str]
     raise ValueError("URL exceeded the redirect limit")
 
 
-def _search_web(query: str, results: int = 5) -> str:
+async def _search_web(query: str, results: int = 5) -> str:
     query = query.strip()
     if not query or len(query) > 256:
         raise ValueError("Search query must contain 1-256 characters")
     results = max(1, min(int(results), 8))
-    body, _ = _bounded_get("https://html.duckduckgo.com/html/", params={"q": query})
+    body, _ = await _bounded_get("https://html.duckduckgo.com/html/", params={"q": query})
     parser = _SearchParser()
     parser.feed(body)
     parser.close()
     return _trim(json.dumps(parser.results[:results], ensure_ascii=False))
 
 
-def _fetch_url(raw_url: str, max_chars: int = 8000) -> str:
+async def _fetch_url(raw_url: str, max_chars: int = 8000) -> str:
     max_chars = max(500, min(int(max_chars), 12000))
-    body, final_url = _bounded_get(raw_url)
+    body, final_url = await _bounded_get(raw_url)
     parser = _TextParser()
     parser.feed(body)
     parser.close()
@@ -308,7 +330,7 @@ def _tool_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key not in SECRET_ENV_NAMES}
 
 
-def _take_api_key(args: argparse.Namespace) -> str:
+def _take_api_key(args: AgentRun) -> str:
     if args.api_key_file is not None:
         path = args.api_key_file.resolve()
         try:
@@ -318,6 +340,8 @@ def _take_api_key(args: argparse.Namespace) -> str:
         finally:
             path.unlink(missing_ok=True)
         return value
+    if args.api_key_fd is None:
+        raise RuntimeError("An API key file or descriptor is required")
     with os.fdopen(args.api_key_fd, "r") as source:
         return source.read().strip()
 
@@ -334,33 +358,38 @@ def _resolve_path(workspace: Path, raw_path: str, allowed_writes: set[Path], *, 
     raise ValueError(f"Path is outside the repository: {raw_path}")
 
 
-def _run_tool(
+async def _run_tool(
     name: str,
     arguments: dict,
     workspace: Path,
     allowed_writes: set[Path],
 ) -> str:
     if name == "web_search":
-        return _search_web(arguments["query"], arguments.get("results", 5))
+        return await _search_web(arguments["query"], arguments.get("results", 5))
     if name == "fetch_url":
-        return _fetch_url(arguments["url"], arguments.get("max_chars", 8000))
+        return await _fetch_url(arguments["url"], arguments.get("max_chars", 8000))
     if name == "shell":
         timeout = min(int(arguments.get("timeout_seconds", 600)), 2700)
+        process = await asyncio.create_subprocess_exec(
+            "/bin/bash",
+            "-lc",
+            arguments["command"],
+            cwd=workspace,
+            env=_tool_environment(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         try:
-            result = subprocess.run(
-                arguments["command"],
-                cwd=workspace,
-                env=_tool_environment(),
-                shell=True,
-                executable="/bin/bash",
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return _trim(
+                f"exit_code={process.returncode}\nstdout:\n{stdout.decode(errors='replace')}\nstderr:\n{stderr.decode(errors='replace')}"
             )
-            return _trim(f"exit_code={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
-        except subprocess.TimeoutExpired as exc:
-            return _trim(f"timeout after {timeout}s\nstdout:\n{exc.stdout or ''}\nstderr:\n{exc.stderr or ''}")
+        except TimeoutError:
+            process.kill()
+            stdout, stderr = await process.communicate()
+            return _trim(
+                f"timeout after {timeout}s\nstdout:\n{stdout.decode(errors='replace')}\nstderr:\n{stderr.decode(errors='replace')}"
+            )
 
     path = _resolve_path(workspace, arguments["path"], allowed_writes, writing=name != "read_file")
     if name == "read_file":
@@ -381,8 +410,8 @@ def _run_tool(
     raise ValueError(f"Unknown tool: {name}")
 
 
-def _completion(client: httpx.Client, endpoint: str, api_key: str, payload: dict) -> dict:
-    response = client.post(
+async def _completion(client: httpx.AsyncClient, endpoint: str, api_key: str, payload: dict) -> dict:
+    response = await client.post(
         f"{endpoint.rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
         json=payload,
@@ -392,25 +421,24 @@ def _completion(client: httpx.Client, endpoint: str, api_key: str, payload: dict
     try:
         return data["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("CloudRift returned an invalid Chat Completions response") from exc
+        raise RuntimeError("The inference endpoint returned an invalid Chat Completions response") from exc
 
 
-def run(args: argparse.Namespace) -> int:
+async def run(args: AgentRun) -> str:
     api_key = _take_api_key(args)
     if not api_key:
-        raise RuntimeError("CloudRift API key file or descriptor was empty")
+        raise RuntimeError("The API key file or descriptor was empty")
 
     workspace = args.workspace.resolve()
     skill = args.skill.resolve()
     if workspace not in skill.parents:
         raise RuntimeError("Skill must be tracked inside the repository")
     allowed_writes = {path.resolve() for path in args.allow_write}
-    system = f"""You are an autonomous repository agent running non-interactively in GitHub Actions.
+    system = f"""You are an autonomous repository agent running non-interactively.
 
 Follow the tracked skill below exactly. Inspect linked repository documentation and skills before acting. Work until
-the requested outcome is complete or a real gate fails. Never rent or delete a VM, commit, push, open a pull request,
-or print credentials; the workflow owns those operations. Use the supplied SSH target only. Keep changes scoped to
-the request, clean exploratory output, and leave the worktree ready for automated validation and submission.
+the requested outcome is complete or a real gate fails. Perform only actions authorized by the request, never print
+credentials, keep changes scoped, and clean exploratory output before finishing.
 
 <tracked-skill path={skill.relative_to(workspace)}>
 {skill.read_text()}
@@ -423,60 +451,30 @@ the request, clean exploratory output, and leave the worktree ready for automate
     payload = {
         "model": args.model,
         "messages": messages,
-        "tools": TOOLS,
+        "tools": tool_definitions(),
         "tool_choice": "auto",
         "temperature": 0.1,
         "max_tokens": 8192,
     }
 
-    with httpx.Client(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:
         for _ in range(args.max_turns):
             messages = _compact_messages(messages)
             payload["messages"] = messages
-            message = _completion(client, args.endpoint, api_key, payload)
+            message = await _completion(client, args.endpoint, api_key, payload)
             tool_calls = message.get("tool_calls") or []
             messages.append(message)
             if not tool_calls:
                 final = message.get("content") or ""
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(final.rstrip() + "\n")
-                print(final)
-                return 0
+                return final
             for tool_call in tool_calls:
                 try:
                     function = tool_call["function"]
                     arguments = json.loads(function.get("arguments") or "{}")
-                    result = _run_tool(function["name"], arguments, workspace, allowed_writes)
+                    result = await _run_tool(function["name"], arguments, workspace, allowed_writes)
                 except Exception as exc:
                     result = f"tool_error: {exc}"
                 messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": result})
     raise RuntimeError(f"Agent exceeded {args.max_turns} model turns")
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skill", type=Path, required=True)
-    parser.add_argument("--prompt", type=Path, required=True)
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--allow-write", type=Path, action="append", default=[])
-    parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--endpoint", default=os.environ.get("CLOUDRIFT_INFERENCE_URL", DEFAULT_ENDPOINT))
-    parser.add_argument("--max-turns", type=int, default=160)
-    parser.add_argument("--request-timeout", type=float, default=600)
-    api_key = parser.add_mutually_exclusive_group(required=True)
-    api_key.add_argument("--api-key-file", type=Path)
-    api_key.add_argument("--api-key-fd", type=int)
-    return parser
-
-
-def main() -> int:
-    try:
-        return run(_parser().parse_args())
-    except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

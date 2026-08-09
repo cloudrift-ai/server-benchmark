@@ -61,10 +61,10 @@ without an existing recipe for one exact GPU name and count. Discovery is read-o
 agent did not modify the checkout, then `.github/scripts/discovery_selection.py` validates the model ID, target,
 rationale, and absence of an existing recipe.
 
-The repo-owned agent runtime in `.github/scripts/cloudrift_agent.py` calls a configurable OpenAI-compatible CloudRift
-endpoint. It provides bounded public-web search and fetch tools while rejecting private, link-local, and metadata
-addresses. Search results, redirects, response sizes, extracted text, command output, and the final transcript are
-bounded. Discovery never provisions hardware.
+The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
+public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,
+redirects, response sizes, extracted text, command output, and the final transcript are bounded. Discovery never
+provisions hardware. The reusable runner contract is documented in `emmy/agent/ARCHITECTURE.md`.
 
 ### Direct onboarding
 
@@ -101,11 +101,11 @@ shell, and unlink the file before the first agent tool call. Agent tool subproce
 GitHub credentials. Onboarding retains only the explicitly required Hugging Face and Docker Hub credentials. The
 self-hosted runner must not carry unrelated ambient cloud credentials.
 
-`.github/scripts/onboarding_vm.py` writes a run-owned lease as soon as CloudRift returns an instance ID or before GCP
-starts the named instance. The lease binds the provider handle, exact request, repository, run attempt, and SSH target.
-Cleanup accepts only that lease, retries deletion, and audits only the recorded handle; it never enumerates or deletes
-unrelated VMs. Cleanup runs from both the agent shell trap and an `if: always()` workflow step, and the job fails if its
-owned VM is still active.
+`emmy vm create gpu --lease` writes a run-owned lease as soon as CloudRift returns an instance ID or GCP creates the
+named instance. The lease binds the provider handle, exact request, workflow owner, and SSH target. Cleanup through
+`emmy vm delete lease` accepts only that lease, retries deletion, and audits only the recorded handle; it never
+enumerates or deletes unrelated VMs. Cleanup runs from both the agent shell trap and an `if: always()` workflow step,
+then `emmy vm audit lease` fails the job if its owned VM is still active.
 
 GitHub App credentials are used for long-lived branch writes and PR operations. Private keys and temporary provider
 configuration live only under run-specific `/tmp/emmy-*` paths and are removed by unconditional cleanup steps.

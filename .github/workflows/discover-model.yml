@@ -104,7 +104,7 @@ jobs:
           printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
           chmod 600 "$AGENT_KEY_FILE"
           unset CLOUDRIFT_API_KEY
-          exec env -u CLOUDRIFT_API_KEY ./venv/bin/python .github/scripts/cloudrift_agent.py \
+          exec env -u CLOUDRIFT_API_KEY ./venv/bin/emmy agent run \
             --api-key-file "$AGENT_KEY_FILE" \
             --skill .claude/skills/discover-models/SKILL.md \
             --prompt "$AGENT_PROMPT" \

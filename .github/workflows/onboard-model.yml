@@ -203,13 +203,25 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/python .github/scripts/onboarding_vm.py provision \
+          ./venv/bin/emmy vm create gpu \
             --gpu "$TARGET_GPU" \
             --gpu-count "$TARGET_GPU_COUNT" \
+            --exact-gpu-count \
             --ssh-key "$SSH_KEY" \
-            --repository "$GITHUB_REPOSITORY" \
-            --run-id "$RUN_OWNER" \
-            --lease "$VM_LEASE"
+            --name "onboard-$RUN_OWNER" \
+            --lease "$VM_LEASE" \
+            --owner "$GITHUB_REPOSITORY/$RUN_OWNER" \
+            --json
+          {
+            echo "provider=$(jq -r .vm.provider "$VM_LEASE")"
+            echo "instance_id=$(jq -r .vm.instance_id "$VM_LEASE")"
+            echo "zone=$(jq -r '.vm.zone // ""' "$VM_LEASE")"
+            echo "ssh_host=$(jq -r .vm.ssh_host "$VM_LEASE")"
+            echo "ssh_port=$(jq -r .vm.ssh_port "$VM_LEASE")"
+            echo "ssh_user=$(jq -r .vm.ssh_user "$VM_LEASE")"
+            echo "ssh_target=$(jq -r .vm.ssh_target "$VM_LEASE")"
+            echo "lease=$VM_LEASE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Remove provider credentials before agent execution
         if: steps.vm.outcome == 'success'
@@ -332,10 +344,8 @@ jobs:
             gcloud auth activate-service-account --key-file="$GCP_KEY_FILE"
             gcloud config set project "$(jq -r .project_id "$GCP_KEY_FILE")"
           fi
-          ./venv/bin/python .github/scripts/onboarding_vm.py delete \
-            --repository "$GITHUB_REPOSITORY" --run-id "$RUN_OWNER" --lease "$VM_LEASE"
-          ./venv/bin/python .github/scripts/onboarding_vm.py audit \
-            --repository "$GITHUB_REPOSITORY" --run-id "$RUN_OWNER" --lease "$VM_LEASE"
+          ./venv/bin/emmy vm delete lease "$VM_LEASE" --owner "$GITHUB_REPOSITORY/$RUN_OWNER"
+          ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$GITHUB_REPOSITORY/$RUN_OWNER"
 
       - name: Validate and stage onboarding artifacts
         env:

@@ -11,6 +11,8 @@ def register_vm_command(subparsers):
     )
     from emmy.commands.vm.gcp import register_create_target, register_delete_target
     from emmy.commands.vm.gpu import register_create_target as register_gpu_create
+    from emmy.commands.vm.lease import register_audit_target as register_lease_audit
+    from emmy.commands.vm.lease import register_delete_target as register_lease_delete
 
     vm_parser = subparsers.add_parser("vm", help="Manage cloud VM instances")
 
@@ -29,3 +31,8 @@ def register_vm_command(subparsers):
     delete_subparsers = delete_parser.add_subparsers(dest="provider", required=True)
     register_delete_target(delete_subparsers)
     register_cloudrift_delete(delete_subparsers)
+    register_lease_delete(delete_subparsers)
+
+    audit_parser = action_subparsers.add_parser("audit", help="Audit cloud VM lifecycle state")
+    audit_subparsers = audit_parser.add_subparsers(dest="target", required=True)
+    register_lease_audit(audit_subparsers)

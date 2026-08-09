@@ -274,6 +274,8 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 
 ## Project Structure
 
+- [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
+  (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
   - [emmy.py](emmy/emmy.py) — CLI entrypoint
   - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration

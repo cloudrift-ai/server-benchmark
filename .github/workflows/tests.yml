@@ -49,6 +49,3 @@ jobs:
 
       - name: Run tests
         run: make test
-
-      - name: Test GitHub workflow helpers
-        run: ./venv/bin/pytest -q .github/scripts/test_*.py

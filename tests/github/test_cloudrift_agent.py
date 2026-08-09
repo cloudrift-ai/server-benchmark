@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-MODULE_PATH = Path(__file__).with_name("cloudrift_agent.py")
+MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "cloudrift_agent.py"
 SPEC = importlib.util.spec_from_file_location("cloudrift_agent", MODULE_PATH)
 cloudrift_agent = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

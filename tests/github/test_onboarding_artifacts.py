@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-MODULE_PATH = Path(__file__).with_name("onboarding_artifacts.py")
+MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "onboarding_artifacts.py"
 SPEC = importlib.util.spec_from_file_location("onboarding_artifacts", MODULE_PATH)
 onboarding_artifacts = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

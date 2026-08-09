@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-MODULE_PATH = Path(__file__).with_name("discovery_selection.py")
+MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "discovery_selection.py"
 SPEC = importlib.util.spec_from_file_location("discovery_selection", MODULE_PATH)
 discovery_selection = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

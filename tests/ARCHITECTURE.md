@@ -20,8 +20,8 @@ because `emmy/compiler/pipeline/search/` has them, so a test for `policy/greedy.
 deploy-pick order invariance, or a process-wide cache over two subsystems — sit at the level that owns all of
 them, not inside one arbitrary child.
 
-Four directories break the mirror deliberately, because their organizing axis is the *kind* of test, not the
-source module:
+Five directories break the `emmy/` mirror deliberately, because their organizing axis is the *kind* of test or their
+source lives outside the package:
 
 | Directory | Axis |
 |---|---|
@@ -29,6 +29,7 @@ source module:
 | `compiler/cli/` | `emmy <command>` as a subprocess, via the `run_cli` fixture |
 | `compiler/fixtures/` | checked-in traces and model configs, not tests |
 | `perf/` | GPU perf comparison vs PyTorch, gated by the `perf` marker (see `tests/perf/ARCHITECTURE.md`) |
+| `github/` | unit tests for repository automation helpers under `.github/scripts/` |
 
 `compiler/passes/` and `compiler/perf/` carry their own `ARCHITECTURE.md`; read those before adding to them.
 

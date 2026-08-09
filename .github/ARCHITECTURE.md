@@ -9,7 +9,7 @@ tracked skills and CloudRift inference endpoint.
 
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
-| **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff, the test suite, and GitHub helper tests. |
+| **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff and the complete test suite. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
 | **Run Experiment** | Authorized `/run-experiment` PR comment | GitHub-hosted | Runs selected cloud experiments and commits results to the PR branch. |
 | **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
@@ -18,9 +18,9 @@ tracked skills and CloudRift inference endpoint.
 ## Pull-request checks
 
 **Tests** installs the CI dependency set on Python 3.13. Its lint job runs Ruff check and format verification; its test
-job runs `make test` plus the tests for helpers under `.github/scripts/`. Hugging Face downloads used by tests are
-cached because anonymous shared-runner traffic is rate-limited. This workflow has no write permission and does not
-use deployment credentials.
+job runs `make test`, including `tests/github/` coverage for helpers under `.github/scripts/`. Hugging Face downloads
+used by tests are cached because anonymous shared-runner traffic is rate-limited. This workflow has no write
+permission and does not use deployment credentials.
 
 ## Package publication
 

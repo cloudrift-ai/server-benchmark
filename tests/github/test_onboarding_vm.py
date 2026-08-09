@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-MODULE_PATH = Path(__file__).with_name("onboarding_vm.py")
+MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "onboarding_vm.py"
 SPEC = importlib.util.spec_from_file_location("onboarding_vm", MODULE_PATH)
 onboarding_vm = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

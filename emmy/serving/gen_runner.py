@@ -320,6 +320,7 @@ def _compile_split(
     aux_examples=None,
     weight_inputs=(),
     ckpt=None,
+    plan_cache=None,
 ):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
@@ -357,7 +358,10 @@ def _compile_split(
     (:func:`_retarget_constants`), ``spell_trellis_constants`` then fires on a serving wrapper
     for the first time (the compressed lane forced, not env-gated), and the constant feed comes
     from the shards rather than the live module (:func:`_plan_sources`). This is what puts an
-    EXL3 trunk on the card at its CODED size; without it a trunk linear binds decoded values."""
+    EXL3 trunk on the card at its CODED size; without it a trunk linear binds decoded values.
+    ``plan_cache`` is a session-scoped, binding-neutral plan-template cache. It runs only on the
+    cold path (an explicit pack ``plan`` still wins), after every loader spelling and ABI hint has
+    reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -384,7 +388,11 @@ def _compile_split(
             spell_trellis_inputs(graph, trellis_specs)
         if indirect_inputs:
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
-        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+
+        def compile_plan(g):
+            return plan_from_graph(CudaBackend(tune_db="auto").compile(g))
+
+        plan = plan_cache.resolve(graph, compile_plan) if plan_cache is not None else compile_plan(graph)
 
     if aux_examples:
         # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
@@ -658,10 +666,13 @@ class EmmyGenRunner:
             # EXL3 keeps the TRUNK coded too — the whole point of a 2-bit checkpoint is that the
             # decoded trunk (GLM-4.5-Air: ~14 GiB) does not fit beside the experts. fp8 trunks
             # stay on the decoded lane, where the values are what the fp8 expert path expects.
-            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary
+            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_format, checkpoint_quant_summary
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            coded_trunk = False
+            # EXL3's generic reconstruction algebra is dissolved before lowering, so its
+            # checkpoint sources can stay coded on the card. FP8 keeps the existing
+            # value-trunk lane; only its routed experts are input-spelled today.
+            coded_trunk = checkpoint_quant_format(qdir) == "exl3"
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -669,7 +680,7 @@ class EmmyGenRunner:
                 "[gen_runner] loading %s (%s, quantized checkpoint: dense trunk %s, experts compressed) — resolved %s, %s, key %s...",
                 model_id,
                 dtype_str,
-                "as values",
+                "coded" if coded_trunk else "as values",
                 qdir,
                 checkpoint_quant_summary(qdir),
                 checkpoint_quant_digest(qdir),
@@ -764,6 +775,7 @@ class EmmyGenRunner:
 
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
+        from emmy.compiler.backend.plan_cache import PlanTemplateCache
         from emmy.compiler.loader.quant import checkpoint_quant_digest
 
         cfg_dict = model.config.to_dict()
@@ -809,9 +821,13 @@ class EmmyGenRunner:
             return loaded.get(name) if loaded is not None else None
 
         plans: dict = {}
+        # One cold-boot compile session for every split. Plans remain per program (and retain
+        # each layer's actual checkpoint provenance); only binding-neutral compiled structure
+        # is shared. A pack hit supplies ``plan=`` and bypasses this cache entirely.
+        plan_cache = PlanTemplateCache()
 
         def build(name, *args, **kw):
-            prog, built_plan = _compile_split(*args, plan=stored(name), **kw)
+            prog, built_plan = _compile_split(*args, plan=stored(name), plan_cache=plan_cache, **kw)
             plans[name] = built_plan
             return prog
 
@@ -959,7 +975,14 @@ class EmmyGenRunner:
                     try:
                         slot_example = [torch.zeros(1, hidden, dtype=dtype), *example_w]
                         slot0, ind_plan = _compile_split(
-                            expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names, **expert_kw
+                            expert_w,
+                            slot_example,
+                            None,
+                            np_dtype,
+                            plan=stored_ind,
+                            plan_cache=plan_cache,
+                            indirect_inputs=ind_names,
+                            **expert_kw,
                         )
                         if not _indirect_covered(ind_plan, ind_names):
                             raise RuntimeError(
@@ -1258,6 +1281,13 @@ class EmmyGenRunner:
         use_decode = decode_ok and len(pre_decode) == len(layers)
         use_m1 = m1_ok and len(pre_m1) == len(layers) and len(post_m1) == len(layers)
         use_prefill = prefill_ok and len(pre_prefill) == len(layers)
+        if plan_cache.hits or plan_cache.misses:
+            logger.info(
+                "[gen_runner] structural plan cache: %d hit(s), %d miss(es), %d template(s)",
+                plan_cache.hits,
+                plan_cache.misses,
+                len(plan_cache),
+            )
         if pack_at is not None and loaded is None:
             # Best-effort save after a full compile: only the program sets that survived
             # (a mid-run twin failure leaves partial lists — those must not be recorded).

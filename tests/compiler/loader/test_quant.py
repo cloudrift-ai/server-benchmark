@@ -641,6 +641,23 @@ def test_checkpoint_quant_digest_separates_rungs_a_config_hash_cannot(tmp_path):
     assert checkpoint_quant_summary(plain) == "unquantized"
 
 
+def test_checkpoint_quant_format_names_only_owned_formats(tmp_path):
+    from emmy.compiler.loader.quant import checkpoint_quant_format
+
+    exl3 = _rung(tmp_path / "exl3", 1.98)
+    fp8 = tmp_path / "fp8"
+    plain = tmp_path / "plain-format"
+    fp8.mkdir()
+    plain.mkdir()
+    (fp8 / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "fp8"}}))
+    (plain / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "gptq"}}))
+
+    assert checkpoint_quant_format(exl3) == "exl3"
+    assert checkpoint_quant_format(fp8) == "fp8"
+    assert checkpoint_quant_format(plain) is None
+    assert checkpoint_quant_format(tmp_path / "absent") is None
+
+
 # ===================================================================
 # emmy compile / run wiring: whole-model trace of a quantized checkpoint
 # (the ``_trace_model`` seam both commands share via ``load_or_trace``)

@@ -133,6 +133,22 @@ def _exl3_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
+def checkpoint_quant_format(model_dir) -> str | None:
+    """The quantized checkpoint format Emmy owns, or ``None``.
+
+    Keep format detection in the loader band: serving callers need to choose whether
+    the dense trunk may remain coded, but must not parse checkpoint metadata or infer
+    that policy from a human-readable summary.  ``"exl3"`` names the trellis-coded
+    sibling format; ``"fp8"`` covers both supported FP8 declarations.
+    """
+    model_dir = Path(model_dir)
+    if _exl3_quant_config(model_dir) is not None:
+        return "exl3"
+    if _fp8_quant_config(model_dir) is not None:
+        return "fp8"
+    return None
+
+
 def checkpoint_quant_digest(model_dir) -> str | None:
     """A short hash of the checkpoint's quantization declaration, or ``None`` when it declares
     none. Identifies the CODE RATES a cache key would otherwise miss.

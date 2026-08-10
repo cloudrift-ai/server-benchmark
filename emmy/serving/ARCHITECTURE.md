@@ -465,6 +465,12 @@ Recorded follow-ups, in impact order:
   compression scheme, so two rungs of one coded conversion — same architecture, different per-tensor rates and
   therefore different coded extents — hash identically on `config_sha` alone and would share one pack, each warm
   overwriting the other's plans.
+  On a generative pack **miss**, one session-scoped `PlanTemplateCache` also collapses repeated layer profiles within
+  that same boot. Its exact graph key retains names, node order, shapes/dtypes, scalar fields, aliases and every hint,
+  but replaces checkpoint `source_path` / ordered `source_parts` addresses with binding slots. A hit instantiates a
+  fresh plan with the current layer's real paths before source loading, program construction, or pack serialization;
+  mutable buffers, constants, descriptors and CUDA graphs remain per-program. The cache is intentionally in-memory
+  only: the pack remains the sole cross-boot artifact and validity contract.
 - **`--revision` reaches the runner, as a tagged id.** vLLM keeps the repo id and the revision in two fields and only
   the id ever reached emmy, so the runner re-resolved the checkpoint off the repo's DEFAULT branch while vLLM's config
   came from the pinned one. Both shims now compose `<repo>@<revision>` (`pinned_model_id`) and hand the runners that

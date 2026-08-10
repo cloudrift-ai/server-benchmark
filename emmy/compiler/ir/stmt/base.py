@@ -673,7 +673,13 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         bases: dict[str, frozenset[str]] = {}  # inlined temp → the base names its folded expression reads
         stmts = list(body)
         for di, s in enumerate(stmts):
-            if not (isinstance(s, Assign) and total.get(s.name, 0) == 1 and local.get(s.name, 0) == 1 and s.name not in inline):
+            if not (
+                isinstance(s, Assign)
+                and s.op.name != "bitcast"
+                and total.get(s.name, 0) == 1
+                and local.get(s.name, 0) == 1
+                and s.name not in inline
+            ):
                 continue
             # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
             # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp

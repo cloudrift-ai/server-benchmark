@@ -1,0 +1,31 @@
+# Laguna S 2.1 EXL3 — Emmy non-eager RTX 5090 smoke
+
+Result: **PASS** for the deliberately constrained custom Emmy/vLLM integration.
+
+- Checkpoint: local verified Laguna-S-2.1 EXL3, configured body target 1.98 bpw
+- GPU: NVIDIA GeForce RTX 5090, 32,607 MiB reported total memory
+- Runtime: vLLM 0.23.0 with `EmmyGenModel`
+- Execution: non-eager `FULL_DECODE_ONLY`, CUDA graph capture size `[1]`
+- Attention/KV: FlashAttention 2, FP16 KV cache
+- Scheduler: max model length 128, max batched tokens 1, max sequences 1
+- Emmy lane: host embedding, capacity 1, decode bucket 1, prefill bucket 0, M=1 tier
+- Model load: 27.08 GiB and 191.534911 seconds
+- CUDA graph estimate: 0.05 GiB; the actual one-shape capture completed
+- GPU KV cache: 3,957 shared tokens
+- Post-generation device sample: 31,801 MiB used, 275 MiB free
+
+Two independent captured-graph requests for `The capital of France is` generated the
+same two tokens (`Question`, `fort`) and exactly the same token log probabilities
+(`-2.1693501472473145`, `-2.2998788356781006`). They also match the earlier eager
+control exactly. A separate 10-token prompt plus four decode tokens completed as well.
+
+This is functional evidence, not a performance benchmark or a claim of standard vLLM
+compatibility. One-token chunking and a single scheduled request make the custom lane
+extremely constrained; native ExLlamaV3 is the recommended RTX 5090 runtime.
+
+Evidence in this directory:
+
+- `capture.stdout.log` / `capture.stderr.log`
+- `capture-greedy-repeat-1.json`
+- `capture-greedy-repeat-2.json`
+- `capture-prefill-and-decode.json`

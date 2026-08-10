@@ -1,0 +1,108 @@
+# Direct native ExLlamaV3 performance validation for the verified local Laguna S 2.1 EXL3
+# checkpoint. No server, external serving/client layer, or runtime patch is involved.
+# Generator.enqueue(list[Job]) places every request in a wave on the native scheduler before
+# the first iterate(); native_bench.py fails unless the installed scheduler/job sources are
+# byte-identical to the exact v1.4.1 checkout and its batching/timing semantics are present.
+#
+# This records the pre-publication local run. 96ab... is only the basename used for the local
+# snapshot directory; it is deliberately not presented as an HF commit. The three manifest
+# hashes below are the immutable identity of the tested artifact until a Hub revision exists.
+command:
+  stage:
+    - experiments/Laguna-S-2.1-EXL3/serving_exllamav3_rtx5090/native_bench.py
+  run: |
+    set -Eeuo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    LOCAL_SNAPSHOT_ID=96ab72f4afbcb028fc880d3215812ffb494ebd7a
+    CACHE_MODE=q2
+    CACHE_TOKENS=6144
+    CONFIG_SHA256=dedf94f07f5a92935e43d7ce6b7710314ae26b37f476e41e447dc49ff340de7a
+    INDEX_SHA256=dfc19be2e337430fc0e0c012e71a2b178d281e5d0c5d54e5ec11a235e69eef5c
+    QUANT_SHA256=3d0a4769f3ead9f2cf82e0e60dd28af72e2e7ce652177392ddd7a5adb529e1f2
+    EXL_COMMIT=4f8ad0121f483ba66a5336244a4c3b6d7210385e
+    EXL_VERSION=1.4.1+cu128.torch2.10.0
+    TORCH_VERSION=2.10.0+cu128
+    SRC=$task_dir/exllamav3-v1.4.1
+    VENV=$task_dir/venv-exllamav3-v1.4.1
+    RUNNER=$repo_dir/experiments/Laguna-S-2.1-EXL3/serving_exllamav3_rtx5090/native_bench.py
+    # This is the exact shared-filesystem path used by the recorded --local run. A different
+    # local host can override it in the workload environment without changing artifact identity.
+    DEFAULT_SNAPSHOT=/home/dikobraz/Projects/emmy/_release/laguna-s-2.1-exl3/native-5090-task/snapshots/$$LOCAL_SNAPSHOT_ID
+    SNAP=$${LAGUNA_EXL3_LOCAL_SNAPSHOT:-$$DEFAULT_SNAPSHOT}
+
+    [ -d "$$SNAP" ] || { echo "FATAL: set LAGUNA_EXL3_LOCAL_SNAPSHOT to the verified local snapshot" >&2; exit 2; }
+    [ "$$(basename "$$SNAP")" = "$$LOCAL_SNAPSHOT_ID" ] || {
+      echo "FATAL: local snapshot basename must be $$LOCAL_SNAPSHOT_ID" >&2
+      exit 2
+    }
+    (( CACHE_TOKENS >= 6144 && CACHE_TOKENS % 256 == 0 )) || {
+      echo "FATAL: cache capacity must be a 256-token multiple >=6144 for c=8 512/128" >&2
+      exit 2
+    }
+    command -v python3.12 >/dev/null
+    command -v git >/dev/null
+    command -v nvidia-smi >/dev/null
+    command -v sha256sum >/dev/null
+    (
+      cd "$$SNAP"
+      printf '%s  %s\n' \
+        "$$CONFIG_SHA256" config.json \
+        "$$INDEX_SHA256" model.safetensors.index.json \
+        "$$QUANT_SHA256" quantization_config.json | sha256sum -c -
+    )
+
+    if [ ! -d "$$SRC/.git" ]; then
+      [ ! -e "$$SRC" ] || { echo "FATAL: non-Git ExLlamaV3 source destination exists: $$SRC" >&2; exit 2; }
+      git init -q "$$SRC"
+      git -C "$$SRC" remote add origin https://github.com/turboderp-org/exllamav3.git
+    fi
+    [ "$$(git -C "$$SRC" remote get-url origin)" = https://github.com/turboderp-org/exllamav3.git ]
+    git -C "$$SRC" fetch --depth=1 origin "$$EXL_COMMIT"
+    git -C "$$SRC" checkout -q --detach "$$EXL_COMMIT"
+    git -C "$$SRC" reset -q --hard "$$EXL_COMMIT"
+    git -C "$$SRC" clean -ffdqx
+    [ "$$(git -C "$$SRC" rev-parse HEAD)" = "$$EXL_COMMIT" ]
+    [ -z "$$(git -C "$$SRC" status --porcelain)" ]
+
+    [ -x "$$VENV/bin/python" ] || python3.12 -m venv "$$VENV"
+    "$$VENV/bin/pip" install --disable-pip-version-check --upgrade \
+      pip==25.1.1 setuptools==80.9.0 wheel==0.45.1 > $task_dir/install.log 2>&1
+    "$$VENV/bin/pip" install --disable-pip-version-check \
+      --index-url https://download.pytorch.org/whl/cu128 torch==2.10.0 >> $task_dir/install.log 2>&1
+    "$$VENV/bin/pip" install --disable-pip-version-check \
+      https://github.com/turboderp-org/exllamav3/releases/download/v1.4.1/exllamav3-1.4.1+cu128.torch2.10.0-cp312-cp312-linux_x86_64.whl \
+      huggingface_hub==1.23.0 >> $task_dir/install.log 2>&1
+    "$$VENV/bin/python" -c "import importlib.metadata as m; assert m.version('torch') == '$$TORCH_VERSION'; assert m.version('exllamav3') == '$$EXL_VERSION'"
+    "$$VENV/bin/pip" freeze --all | sort > $task_dir/pip-freeze.txt
+
+    # CPU/source-only semantic gate. This produces no model load and no benchmark result.
+    "$$VENV/bin/python" "$$RUNNER" \
+      --revision "$$LOCAL_SNAPSHOT_ID" \
+      --exllama-source "$$SRC" \
+      --validate-api-only \
+      --output $task_dir/native-api-validation.json \
+      --versions-output $task_dir/native-api-versions.json \
+      > $task_dir/native-api-validation.log 2>&1
+
+    printf '%s\n' "$$SNAP" > $task_dir/checkpoint-snapshot.txt
+
+    "$$VENV/bin/python" "$$RUNNER" \
+      --model-dir "$$SNAP" \
+      --revision "$$LOCAL_SNAPSHOT_ID" \
+      --exllama-source "$$SRC" \
+      --cache-mode "$$CACHE_MODE" \
+      --cache-tokens "$$CACHE_TOKENS" \
+      --output $task_dir/native-results.json \
+      --versions-output $task_dir/native-versions.json \
+      2>&1 | tee $task_dir/native-benchmark.log
+    grep -q '^NATIVE_EXLLAMAV3_BENCHMARK_PASS ' $task_dir/native-benchmark.log
+    "$$VENV/bin/python" -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"] == "PASS" and [c["concurrency"] for c in r["cells"]] == [1,4,8]' $task_dir/native-results.json
+  result_files:
+    - "*.json"
+    - "*.log"
+    - "*.txt"
+  timeout: 21600
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

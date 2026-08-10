@@ -1,0 +1,61 @@
+{
+  "cache_mode": "q2",
+  "cache_tokens": 6144,
+  "checkpoint": {
+    "actual_bits": 1.98,
+    "config_sha256": "dedf94f07f5a92935e43d7ce6b7710314ae26b37f476e41e447dc49ff340de7a",
+    "correction_biases": 47,
+    "index_sha256": "dfc19be2e337430fc0e0c012e71a2b178d281e5d0c5d54e5ec11a235e69eef5c",
+    "indexed_tensors": 146068,
+    "model_id": "cloudriftai/Laguna-S-2.1-exl3",
+    "revision": "96ab72f4afbcb028fc880d3215812ffb494ebd7a",
+    "shard_bytes": 30191374574,
+    "shards": 4,
+    "sidecar_sha256": "3d0a4769f3ead9f2cf82e0e60dd28af72e2e7ce652177392ddd7a5adb529e1f2",
+    "snapshot": "/home/dikobraz/Projects/emmy/_release/laguna-s-2.1-exl3/native-5090-task/snapshots/96ab72f4afbcb028fc880d3215812ffb494ebd7a"
+  },
+  "checkpoint_revision": "96ab72f4afbcb028fc880d3215812ffb494ebd7a",
+  "created_at_utc": "2026-08-10T05:38:57Z",
+  "cuda_capability": [
+    12,
+    0
+  ],
+  "exllamav3_commit": "4f8ad0121f483ba66a5336244a4c3b6d7210385e",
+  "gpu": {
+    "driver": "580.173.02",
+    "memory_total_mib": 32607,
+    "memory_used_preflight_mib": 188,
+    "name": "NVIDIA GeForce RTX 5090",
+    "uuid": "GPU-bb78f2c5-11d6-02d6-f124-08b719623110"
+  },
+  "hostname": "kenshin",
+  "load_metrics": {
+    "available": false,
+    "error": "AttributeError: 'SafetensorsCollection' object has no attribute 'get_metrics'"
+  },
+  "load_peak_torch_allocated_bytes": 30873049600,
+  "load_peak_torch_reserved_bytes": 30895243264,
+  "load_seconds": 10.630178247985896,
+  "native_concurrency": {
+    "max_batch_size": 8,
+    "method": "Generator.enqueue(list[Job]) before first Generator.iterate()",
+    "source_sha256": {
+      "exllamav3/generator/generator.py": "451cebd35103413c26fefd9f19a4f4b255b56c85623edf492675cb17f1481ce7",
+      "exllamav3/generator/job.py": "9d77b9c22ef3c11a188c4b393903adeff94b1d655fd40b815730bddf2bad687a"
+    },
+    "validated": true
+  },
+  "packages": {
+    "exllamav3": "1.4.1+cu128.torch2.10.0",
+    "flash-linear-attention": "0.5.2",
+    "huggingface_hub": "1.23.0",
+    "numpy": "2.5.2",
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.10.0+cu128"
+  },
+  "platform": "Linux-7.0.0-28-generic-x86_64-with-glibc2.39",
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "status": "MODEL_LOADED",
+  "torch_cuda": "12.8"
+}

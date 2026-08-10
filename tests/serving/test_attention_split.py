@@ -42,7 +42,7 @@ def _split_path_output(pre, post, attn, hidden2d, cos, sin, mask, apply_rotary):
     return post(attn_out, hidden2d)
 
 
-@pytest.mark.parametrize("arch", ["qwen3", "llama", "gemma3"])
+@pytest.mark.parametrize("arch", ["qwen3", "llama", "gemma3", "laguna"])
 def test_split_matches_eager_block(arch):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
@@ -75,7 +75,7 @@ def test_split_matches_eager_block(arch):
         )
         model = transformers.LlamaForCausalLM(config)
         from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-    else:  # gemma3: 4-norm layer + per-head q/k norm (no v_norm). sliding_window_pattern=1 forces
+    elif arch == "gemma3":  # 4-norm layer + per-head q/k norm (no v_norm). sliding_window_pattern=1 forces
         # layer 0 to full_attention (global) so the plain-causal reference SDPA matches.
         config = transformers.Gemma3TextConfig(
             vocab_size=64,
@@ -91,6 +91,29 @@ def test_split_matches_eager_block(arch):
         )
         model = transformers.Gemma3ForCausalLM(config)
         from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
+    else:  # Laguna: per-head q/k norm plus a softplus per-head attention output gate.
+        pytest.importorskip("transformers.models.laguna")
+        config = transformers.LagunaConfig(
+            vocab_size=64,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            max_position_embeddings=64,
+            sliding_window=16,
+            num_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=32,
+            shared_expert_intermediate_size=32,
+            layer_types=["full_attention"],
+            mlp_layer_types=["dense"],
+            num_attention_heads_per_layer=[4],
+            gating="per-head",
+        )
+        model = transformers.LagunaForCausalLM(config)
+        from transformers.models.laguna.modeling_laguna import apply_rotary_pos_emb
 
     torch.manual_seed(0)
     model = model.eval()
@@ -101,8 +124,8 @@ def test_split_matches_eager_block(arch):
     t = 6
     hidden3d = torch.randn(1, t, config.hidden_size)
     position_ids = torch.arange(t).unsqueeze(0)
-    # Gemma's rotary is keyed per layer-type (local vs global); layer 0 here is global.
-    rotary_kwargs = {"layer_type": "full_attention"} if arch == "gemma3" else {}
+    # Gemma and Laguna rotary embeddings are keyed per layer-type; layer 0 here is global.
+    rotary_kwargs = {"layer_type": "full_attention"} if arch in ("gemma3", "laguna") else {}
     cos, sin = trunk.rotary_emb(hidden3d, position_ids, **rotary_kwargs)  # [1, T, D]
     mask = build_causal_mask(t, torch.float32)  # [1, 1, T, T] additive
 

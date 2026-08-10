@@ -270,6 +270,161 @@ def test_trace_flatten_is_reshape():
     assert tuple(reshapes[0].output.shape) == (1, 8, 64)
 
 
+def test_trace_new_zeros_constructs_declared_shape_and_matches_eager():
+    """``Tensor.new_zeros`` constructs a tensor; its source is not an elementwise operand."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class NewZeros(nn.Module):
+        def forward(self, x):
+            return x.new_zeros((x.shape[0], x.shape[1], 8, 16))
+
+    x = torch.randn(1, 3, 4, 32)
+    graph = trace_module(NewZeros(), (x,))
+    assert tuple(graph.nodes[graph.outputs[0]].output.shape) == (1, 3, 8, 16)
+    assert any(isinstance(node.op, ConstantOp) and node.op.value == 0.0 for node in graph.nodes.values())
+    assert isinstance(graph.nodes[graph.outputs[0]].op, IndexMapOp)
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, NewZeros()(x).numpy())
+
+
+def test_trace_new_full_constructs_declared_shape_and_matches_eager():
+    """``Tensor.new_full`` uses a static fill scalar, not receiver values."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class NewFull(nn.Module):
+        def forward(self, x):
+            return x.new_full((x.shape[0], x.shape[1], 8, 16), float("-inf"))
+
+    x = torch.randn(1, 3, 4, 32)
+    graph = trace_module(NewFull(), (x,))
+    fill_nodes = [node for node in graph.nodes.values() if isinstance(node.op, ConstantOp) and node.op.value == float("-inf")]
+    assert len(fill_nodes) == 1
+    assert tuple(graph.nodes[graph.outputs[0]].output.shape) == (1, 3, 8, 16)
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, NewFull()(x).numpy())
+
+
+def test_trace_copy_uses_broadcast_source_values_and_matches_eager():
+    """``copy_(dest, src)`` produces broadcast source values; destination values are discarded."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Copy(nn.Module):
+        def forward(self, template, source):
+            return template.new_zeros((1, 3, 8, 16)).copy_(source)
+
+    template = torch.randn(1, 3, 4, 32)
+    source = torch.randn(1, 1, 8, 16)
+    graph = trace_module(Copy(), (template, source))
+    output = graph.nodes[graph.outputs[0]]
+    assert isinstance(output.op, IndexMapOp)
+    assert tuple(output.output.shape) == (1, 3, 8, 16)
+
+    backend = NumpyBackend()
+    input_data = {name: value.numpy() for name, value in zip(graph.inputs, (template, source), strict=True)}
+    result, _ = backend.run(backend.compile(graph), input_data=input_data)
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, Copy()(template, source).numpy())
+
+
+def test_trace_rejects_copy_mutation_observed_through_original_base():
+    """A functional copy result cannot stand in for a later read through its mutated base."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class CopyThenReadBase(nn.Module):
+        def forward(self, template, source):
+            base = template.new_zeros((1, 3, 8, 16))
+            base[:, 1:].copy_(source)
+            return base + 1.0
+
+    template = torch.randn(1, 3, 4, 32)
+    source = torch.randn(1, 2, 8, 16)
+    with pytest.raises(NotImplementedError, match="observable alias mutation.*original destination"):
+        trace_module(CopyThenReadBase(), (template, source))
+
+
+def test_trace_exports_in_inference_grad_mode_without_higher_order_wrapper():
+    """A ``no_grad`` helper must export its tensor ops directly, not as a tuple-valued HOP."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class NoGradPair(nn.Module):
+        @torch.no_grad()
+        def trig(self, x):
+            return x.cos(), x.sin()
+
+        def forward(self, x):
+            return self.trig(x)
+
+    x = torch.randn(2, 3)
+    graph = trace_module(NoGradPair(), (x,))
+    assert len(graph.outputs) == 2
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    for got, expected in zip(result.outputs.values(), NoGradPair()(x), strict=True):
+        np.testing.assert_allclose(got, expected.numpy(), rtol=1e-6, atol=1e-6)
+
+
+def test_trace_masked_fill_lowers_to_ternary_where_and_matches_eager():
+    """Scalar masked fill preserves ``-inf`` exactly; arithmetic selection would create NaNs."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class MaskedFill(nn.Module):
+        def forward(self, x, mask):
+            return x.masked_fill(mask, float("-inf"))
+
+    x = torch.randn(1, 3, 4)
+    mask = torch.tensor([[[False, True, False, True]]])
+    graph = trace_module(MaskedFill(), (x, mask))
+    where_nodes = [node for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp) and node.op.name == "where"]
+    assert len(where_nodes) == 1 and where_nodes[0].op.arity == 3
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    input_data = {name: value.numpy() for name, value in zip(compiled.inputs, (x, mask), strict=True)}
+    result, _ = backend.run(compiled, input_data=input_data)
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, MaskedFill()(x, mask).numpy())
+
+
 def test_trace_transpose():
     """aten.transpose traces to TransposeOp."""
     import torch
@@ -731,6 +886,58 @@ def test_trace_rejects_unmapped_multi_output_op():
 
     with pytest.raises(NotImplementedError, match="topk"):
         trace_module(TopK(), (torch.randn(2, 8),))
+
+
+def test_trace_prunes_output_dead_local_mutation_before_unsupported_op_mapping():
+    """An unobserved local scatter branch is not part of the exported function value.
+
+    FX retains the mutating branch as impure, but Emmy must walk only output-live nodes. A live
+    topk remains covered by ``test_trace_rejects_unmapped_multi_output_op`` above.
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class DeadTopKScatter(nn.Module):
+        def forward(self, x):
+            _values, indices = torch.topk(x, x.shape[-1], dim=-1)
+            local = x.new_full((x.shape[0], x.shape[1] + 1), float("-inf"))
+            local.scatter_(-1, indices, 0.0)
+            local[..., : x.shape[-1]]  # noqa: B018 — deliberately dead descendant
+            return x * 2.0
+
+    module = DeadTopKScatter()
+    x = torch.randn(2, 8)
+    exported = torch.export.export(module, (x,))
+    assert any("aten.topk" in str(node.target) for node in exported.graph_module.graph.nodes)
+
+    graph = trace_module(module, (x,))
+    assert all("topk" not in node.id for node in graph.nodes.values())
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_allclose(next(iter(result.outputs.values())), (x * 2.0).numpy(), rtol=1e-6, atol=1e-6)
+
+
+def test_trace_keeps_a_mutation_through_a_view_of_the_output():
+    """A no-user write remains observable when its receiver aliases the returned tensor."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import _output_live_fx_nodes
+
+    class ReturnedAliasMutation(nn.Module):
+        def forward(self, x):
+            shifted = torch.roll(x, -1, 1)
+            shifted[:, -1].fill_(0)
+            return shifted
+
+    exported = torch.export.export(ReturnedAliasMutation(), (torch.arange(9).reshape(1, 9),))
+    nodes = list(exported.graph_module.graph.nodes)
+    live = _output_live_fx_nodes(nodes)
+    assert {node.name for node in live} == {"x", "roll", "select", "fill_", "output"}
 
 
 def test_trace_chunk_rejects_invalid_tuple_index():

@@ -110,6 +110,9 @@ requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic sh
 and Emmy always rebuild the same module and example inputs. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
 identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+For a single-layer trace, the loader derives a missing attention `layer_type` from
+`config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
+modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.
 
 The trace/tune handlers delegate working-golden inventory construction, target reconstruction, proposal measurement,
 and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by

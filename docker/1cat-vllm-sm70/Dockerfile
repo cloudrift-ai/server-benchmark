@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-# Pinned CloudRift 1Cat-vLLM source build for the Volta Qwen3.5 bring-up.
+# Pinned CloudRift 1Cat-vLLM source build for Volta model bring-up.
 #
 # Build from the repository root:
 #   docker build -f docker/1cat-vllm-sm70/Dockerfile \
@@ -40,10 +40,10 @@ ARG ONECAT_BASE_TAG=v1.2.2
 RUN git init /src \
     && git -C /src remote add origin "${ONECAT_REPO}" \
     && git -C /src fetch --depth 16 origin "${ONECAT_COMMIT}" \
-    && git -C /src fetch --depth 1 origin "refs/heads/${ONECAT_BASE_REF}:refs/tags/${ONECAT_BASE_TAG}" \
+    && git -C /src fetch --depth 16 origin "refs/heads/${ONECAT_BASE_REF}:refs/tags/${ONECAT_BASE_TAG}" \
     && git -C /src checkout --detach "${ONECAT_COMMIT}" \
     && test "$(git -C /src rev-parse HEAD)" = "${ONECAT_COMMIT}" \
-    && git -C /src merge-base --is-ancestor "${ONECAT_BASE_TAG}" HEAD
+    && git -C /src merge-base --is-ancestor "${ONECAT_COMMIT}" "${ONECAT_BASE_TAG}"
 
 RUN pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu128 \

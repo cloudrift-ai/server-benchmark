@@ -732,11 +732,13 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = ()) -> frozenset[str]:
+def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = (), *, body: Body | tuple = ()) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
-    block, so renaming one would emit a reference no enclosing loop defines."""
+    block, so renaming one would emit a reference no enclosing loop defines. ``body`` contributes
+    projection-local loop coordinates, notably an output sweep that remains bound inside every
+    replicated cell."""
     m, n, k_axis = tile.m, tile.n, c.axis
     prot = {k_axis.name}
     for s in (m, n):
@@ -745,6 +747,7 @@ def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = ()) -> frozenset[st
         prot.add(a.name)
     for a in (m.axis, n.axis, k_axis, *lead):
         prot |= set(a.extent_expr().free_vars())
+    prot.update(Body(body).axis_names)
     return frozenset(prot)
 
 
@@ -1184,7 +1187,7 @@ class _ScalarOps(_AtomOps):
         the (overhanging) write, dedup shared operand loads."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
-        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead))
+        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=self.epilogue))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 

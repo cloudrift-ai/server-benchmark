@@ -38,6 +38,7 @@ from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "../../../../emmy/compiler/pipeline/search/goldens")
 
@@ -126,7 +127,7 @@ def _attention() -> Graph:
     return graph
 
 
-def _tree(build, pick=None):
+def _tree(build, pick=None, *, target=(12, 0)):
     """The recognized tile tree for one kernel kind — resolve the tile passes, take the (single)
     ``TileOp``'s stored op. ``pick`` selects a fork leaf (default option-0; the schedule slices a
     row stamps never change the walker's structure)."""
@@ -139,7 +140,7 @@ def _tree(build, pick=None):
                     return leaf
         return leaves[0]
 
-    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(build(), decide)
+    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(target)).resolve(build(), decide)
     tiles = [n.op for n in rg.nodes.values() if isinstance(n.op, TileOp)]
     assert len(tiles) == 1, f"expected one kernel, got {len(tiles)}"
     return tiles[0].op
@@ -205,12 +206,19 @@ def test_every_stored_golden_spelling_is_canonical(trees):
     checked = 0
     for fname, cfg in _entries():
         kind = _tree_kind(cfg)
-        if kind not in trees:
+        if cfg.loop_wire is not None:
+            # A Loop IR target deliberately has no frontend operation discriminator. Its
+            # persisted algebra is the authoritative tree for path-key spelling.
+            with pinned_knobs(cfg.knobs):
+                root = _tree(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
+            kind = "loop"
+        elif kind in trees:
+            root = trees[kind]
+        else:
             # rope / embedding entries carry no tree-path families — nothing to resolve.
             path_keys = [k for k in cfg.knobs if family_of(k) in PATH_FAMILIES]
             assert not path_keys, f"{fname}:{cfg.name}: derived kind {kind!r} has path-family keys but no reference tree"
             continue
-        root = trees[kind]
         all_sites = sites(root)
         for key, value in cfg.knobs.items():
             if family_of(key) not in PATH_FAMILIES:

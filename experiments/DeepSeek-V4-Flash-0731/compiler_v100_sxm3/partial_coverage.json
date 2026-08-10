@@ -1,0 +1,46 @@
+{
+  "status": "partial",
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "scope": "architecture/static-shape FP16 representative constants",
+  "checkpoint_representation_qualified": false,
+  "canonical_compiler_golden_eligible": false,
+  "serving_eligibility_from_this_compiler_artifact": false,
+  "source_inventory_targets": 69,
+  "partial_targets": 68,
+  "o3_verified_targets": 62,
+  "o3_failed_targets": [
+    31
+  ],
+  "unfinished_targets": [
+    33,
+    49,
+    57,
+    63,
+    65
+  ],
+  "excluded_semantic_target": {
+    "index": 34,
+    "name": "k_softmax_mean_reduce_342131.4dea1e03816a",
+    "path": "layer 2 compressor new_kv/new_gate window merge",
+    "boundary": "observable copy_ through a destination view requires base reassembly",
+    "fail_closed_error": "aten.copy_ observable alias mutation is unsupported: later live node 'slice_15' reads original destination alias 'new_zeros'"
+  },
+  "decoder_architecture_inventory": {
+    "layers_0_1": "sliding HCA + hash MoE",
+    "layer_2": "CSA ratio 4 + hash MoE; blocked at live compressor copy_ mutation",
+    "odd_layers_3_41": "HCA ratio 128 + learned MoE",
+    "even_layers_4_42": "CSA ratio 4 + learned MoE",
+    "dspark_layers_43_45": "architecture-only DSpark remap"
+  },
+  "model_seams_in_inventory": [
+    "token embedding",
+    "initial HC broadcast",
+    "final HC collapse",
+    "final norm",
+    "lm head",
+    "DSpark combine",
+    "DSpark markov embedding",
+    "DSpark markov bias",
+    "DSpark confidence"
+  ]
+}

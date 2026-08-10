@@ -14,9 +14,8 @@ Use one golden YAML format throughout the workflow. Keep its two trust levels se
   proposals, verified entries copied from a canonical golden, and `ranking` feedback written by `emmy tune`.
 - A **canonical golden** is reviewed deploy evidence under
   `emmy/compiler/pipeline/search/goldens/`. New rows require a recognized kernel kind, an explicit knobs mapping
-  (empty for a forkless anchor), and paired positive deployable `emmy_us` / `cublas_us` measurements. The three
-  explicitly marked RTX 4080 compatibility seeds are the only provisional migration exception. Never write search
-  feedback into a canonical file.
+  (empty for a forkless anchor), and paired positive deployable `emmy_us` / `reference_us` measurements with a named
+  `reference_backend`. Never write search feedback into a canonical file.
 
 `emmy tune --golden-file` rejects canonical repository paths because it updates its input. Copy a canonical file to
 a fresh `_tune/<run>/working.yaml` first. Do not commit a trace-created working golden automatically; leave that
@@ -185,8 +184,8 @@ when the target set and measurement coverage are identical.
 
 ## 5. Optionally refine once
 
-Use failed pins, measured-knob mismatches, searched finalists, `emmy eval variants`, and same-family canonical winners to
-form at most one refined proposal round. Keep it outside the primary A/B result unless both arms receive an equal
+Use failed pins, measured-knob mismatches, searched finalists, `emmy eval variants`, and same-family canonical winners
+to form at most one refined proposal round. Keep it outside the primary A/B result unless both arms receive an equal
 additional budget and deadline. Record which first-round evidence motivated each new proposal.
 
 ## 6. Verify deployable winners and promote cautiously
@@ -211,10 +210,14 @@ physical GPU becomes the command's ordinal 0; never pass an invented `--device` 
 - a win that exceeds observed run-to-run noise.
 
 Treat statistically indistinguishable configurations as ties and retain multiple candidates when their realized
-knobs differ. Promote only specialized kernel entries with paired positive O3 `emmy_us` and live reference
-`cublas_us`. Never promote a `ranking` block, an O1 latency, an absolute/traversing reproducer path, a generic
-`kernel: traced` entry, or a timing copied from another run/GPU. Let the author or agent decide whether to update and
-commit the canonical golden.
+knobs differ. Promote only specialized kernel entries with paired positive O3 `emmy_us` / `reference_us` measurements
+and a live `reference_backend`. Never promote a `ranking` block, an O1 latency, an absolute/traversing reproducer path,
+a generic `kernel: traced` entry, or a timing copied from another run/GPU. Let the author or agent decide whether to
+update and commit the canonical golden.
+
+When the calling workflow has proved that its model inventory covers every required path, canonical promotion is a
+required output, including a correct measured greedy fallback for every search miss. Withhold the repository golden
+only when model tracing is incomplete; preserve that successful subset as a partial working golden instead.
 
 Validate any proposed canonical edit with the golden schema tests before presenting it.
 

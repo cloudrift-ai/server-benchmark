@@ -423,7 +423,13 @@ stage detection, the split-K atomic-distributivity gate), the materializer's pro
 (the conversion sites run `split_effects`, whose round-trip gate is the same 1o construction-time byte-identity
 pattern; a declining shape keeps the raw spelling). `030`'s split partials nodify their sliced annotated `Loop`
 into a `Fold` source and carry the workspace stores as boundary `Store`s; the register strip fans the root store
-out per copy. The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
+out per copy. A zero-axis root without an operand edge reassembles its boundary stores after emitting its own body,
+so an output sweep still encloses every projection statement that reads its coordinate. A scalar register tile's
+per-cell projection copy protects every axis bound inside that reassembled tail (`Body.axis_names`), so an
+output-sweep coordinate stays bound by its loop while only per-cell SSA values gain
+the cell suffix. If enumeration deliberately leaves a term unmapped because no schedule row is legal, materialization
+maps its free axes directly to the scalar grid before lowering; the valid guardrail term therefore remains executable.
+The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
 that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
 un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
 composed contraction tail), formed through the one `Fold.projection`-private `_loop_ir_fn` arm and dying with the

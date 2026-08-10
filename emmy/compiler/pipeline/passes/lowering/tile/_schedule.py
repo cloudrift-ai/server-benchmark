@@ -741,7 +741,9 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
     This is the CHOICE half of the dtype rule; a ``TILE`` pin bypasses the choice layer by design, so
     it re-asks the same question as a CHECK (``_legality.warp_operand_dtype``)."""
     inputs = term.tile.inputs
-    if not inputs or legal.fragment_epilogue(term.proj) is not None:
+    # Boundary stores are outside the algebraic term. Reconstitute them before asking whether
+    # the projection is a straight-line fragment epilogue, or a swept stack tail reaches RegStore.
+    if not inputs or legal.fragment_epilogue(Body(tuple(projection_tail(term.tile)))) is not None:
         return ()
     ab = _a_dtype(node, inputs)
     if ab is not None and ab.nbytes == 1:

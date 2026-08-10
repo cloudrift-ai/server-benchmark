@@ -44,6 +44,7 @@ def test_moe_split_matches_eager_block_tail():
     block = OlmoeDecoderLayer(cfg, layer_idx=0).eval()
     for p in block.parameters():
         torch.nn.init.normal_(p, std=0.2)
+    block.mlp.routed_scaling_factor = 2.5
 
     _, post_attn, expert = build_moe_split_wrapper(block)
     gate, experts = moe_block_parts(block.mlp)
@@ -56,7 +57,7 @@ def test_moe_split_matches_eager_block_tail():
         h, xn = post_attn(attn_out, residual)
         got = h + _combine(gate, experts, expert, xn)
         h_ref = residual + block.self_attn.o_proj(attn_out)
-        ref = h_ref + block.mlp(block.post_attention_layernorm(h_ref).unsqueeze(0)).squeeze(0)
+        ref = h_ref + block.mlp(block.post_attention_layernorm(h_ref).unsqueeze(0)).squeeze(0) * 2.5
     assert torch.allclose(ref, got, atol=1e-5)
 
 

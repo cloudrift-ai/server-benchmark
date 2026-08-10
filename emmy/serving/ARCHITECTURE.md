@@ -107,6 +107,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's √hidden embed-scale folded into the
   gather table) / `forward_layer_pre(L,…)→(q,k,v)` (un-rotated 2-D seam; carves q/k/**v**-norm, and Gemma-4's global
   `attention_k_eq_v` where V reuses K's projection) / `forward_layer_post(L, attn_out, residual)→hidden` / `final_norm`.
+  A Laguna post program recomputes the input normalization needed by its softplus `g_proj` and applies that gate to
+  the flattened attention output before `o_proj`; a per-head gate temporarily views the seam as
+  `[num_tokens, num_heads, head_dim]`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
@@ -182,6 +185,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture boot
   is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
   `--enforce-eager` then).
+  When the model declares `routed_scaling_factor`, the expert program applies it to each routed expert result;
+  an always-on dense shared expert remains unscaled and folds into `h` before the routed combine.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
   static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in

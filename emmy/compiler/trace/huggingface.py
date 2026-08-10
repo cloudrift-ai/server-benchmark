@@ -362,7 +362,6 @@ def build_attention_split_wrapper(block):
     Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``
     (in :func:`_build_pre_wrapper`): the carve has no seam for either and would silently drop
     them, corrupting outputs."""
-    import torch
     import torch.nn as nn
 
     pre = _build_pre_wrapper(block)  # carries the PLE / clip_qkv rejects — before any attribute reads

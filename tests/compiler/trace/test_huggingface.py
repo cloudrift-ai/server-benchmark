@@ -207,6 +207,7 @@ def test_static_layer_trace_selects_laguna_rope_tuple_from_config(monkeypatch):
     """Laguna's configured attention type selects one RoPE tuple, not the whole
     multi-RoPE mapping used by DeepSeek-style decoder blocks."""
     from types import SimpleNamespace
+
     import torch
     import torch.nn as nn
 

@@ -22,11 +22,10 @@ DEFAULT_IMAGE_URL_NVIDIA_PROPRIETARY = (
 )
 DEFAULT_IMAGE_URL_AMD = "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-rocm-64-20260220-025112.img"
 DEFAULT_CLOUDINIT_URL = "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
-# Pins the CloudRift v059 protocol generation: instances/rent resolves to v059,
-# instances/list to v058 (mask-aware response), instances/terminate to v055.
+# Pins the CloudRift protocol generation currently returned by the public API.
 # Pin to the date rather than "~upcoming" so a future server version can't silently
 # change request/response shapes (e.g. add another default-off field mask) under us.
-API_VERSION = "2026-05-26"
+API_VERSION = "2026-08-05"
 TERMINAL_INSTANCE_STATUSES = {"Deleted", "Failed", "Inactive", "Terminated"}
 
 

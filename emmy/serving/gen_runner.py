@@ -213,7 +213,7 @@ def _bind_plan_constants(plan, sources, cache):
             continue
         import cupy as cp
 
-        key = (w.source_path, w.source_parts, w.load_ops)
+        key = (w.source_path, w.source_parts, w.generated, w.load_ops)
         arr = cache.get(key)
         if arr is None:
             arr = cp.asarray(apply_weight_loads(src, w.load_ops))
@@ -260,7 +260,11 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
 
     from emmy.compiler.loader.safetensors import load_sources_by_path
 
-    unbindable = [nid for nid, w in plan.weights.items() if w.load_ops is None or (w.source_path is None and not w.source_parts)]
+    unbindable = [
+        nid
+        for nid, w in plan.weights.items()
+        if w.load_ops is None or (w.source_path is None and not w.source_parts and w.generated is None)
+    ]
     if unbindable:
         raise RuntimeError(
             f"checkpoint-sourced compile: {len(unbindable)} weight(s) carry no plan-reproducible source "

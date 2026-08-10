@@ -156,7 +156,9 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
         def forward(self, x, w_gate, w_up, w_down):
             return nn.functional.linear(nn.functional.silu(nn.functional.linear(x, w_gate)) * nn.functional.linear(x, w_up), w_down)
 
-    h, inter = 32, 16
+    # The deployed Laguna shape. Shape-only compilation allocates no checkpoint tensors and
+    # catches primitives which tiny padded examples can accidentally fold away.
+    h, inter = 3072, 1024
     graph = trace_split(
         Expert(),
         (
@@ -178,13 +180,25 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     assert {spelled.nodes[name].output.dtype.name for name in ("w_gate", "w_up", "w_down")} == {"i16"}
     assert all(type(node.op).__name__ not in {"TrellisDecodeOp", "HadamardOp"} for node in spelled.nodes.values())
 
+    from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.context import Context
+    from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
     lowered = Pipeline.build(CUDA_PASSES).run(spelled, ctx=Context(compute_capability=(12, 0)))
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda and all(op.kernel_source for op in cuda)
+    assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
+    plan = plan_from_graph(lowered)
+    assert plan.launches and plan.weights
+    assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
+    assert {f"{weight}_decoded_tile_step" for weight in ("w_gate", "w_up", "w_down")} <= set(plan.weights)
+    factors = [spec.generated for spec in plan.weights.values() if spec.generated is not None and spec.generated[1] == (128, 128)]
+    assert len(factors) == 3 and {factor[0] for factor in factors} == {"<f4"}
+    from emmy.serving.gen_runner import _bind_plan_constants
+
+    assert set(_bind_plan_constants(plan, {}, cache=None)) == set(plan.weights)
     active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
 

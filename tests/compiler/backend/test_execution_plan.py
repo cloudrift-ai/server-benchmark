@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.backend.plan import (
+    PLAN_FORMAT_GENERATED,
     PLAN_FORMAT_INDIRECT,
     PLAN_FORMAT_VERSION,
     WeightSpec,
@@ -100,7 +101,7 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = PLAN_FORMAT_INDIRECT + 1  # past every format the runtime speaks
+    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED) + 1  # past every format the runtime speaks
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
 
@@ -285,12 +286,38 @@ def test_unreproducible_bind_record_marks_the_weight_unbindable(caplog):
     import logging
 
     record = Graph()
-    record.add_node(op=InputOp(), inputs=[], output=Tensor("leaf", (4, 4)), node_id="leaf")
+    record.add_node(
+        op=ConstantOp(name="leaf", source_path="model.external", source_shape=(4, 4), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("leaf", (4, 4)),
+        node_id="leaf",
+    )
     record.outputs = ["leaf"]
     with caplog.at_level(logging.WARNING, logger="emmy.compiler.backend.plan"):
         plan = _one_weight_plan(ConstantOp(name="h", source_graph=record, source_shape=(4, 4)))
     assert plan.weights["w"].load_ops is None
+    assert plan.weights["w"].generated is None
     assert "bind record" in caplog.text
+
+
+def test_source_free_bind_record_is_generated_serialized_and_rebound():
+    from emmy.compiler.ir.tensor.ir import CastOp, RangeOp
+    from emmy.compiler.loader.binder import assemble_source
+
+    record = Graph()
+    axis = record.add_node(op=RangeOp(stop=16, dtype="i32"), inputs=[], output=Tensor("axis", (16,), "i32"))
+    values = record.add_node(op=CastOp(dtype="f32"), inputs=[axis], output=Tensor("values", (16,), "f32"))
+    record.add_node(op=ReshapeOp(shape=(4, 4)), inputs=[values], output=Tensor("generated", (4, 4)), node_id="generated")
+    record.outputs = ["generated"]
+
+    plan = _one_weight_plan(ConstantOp(name="generated", source_graph=record, source_shape=(4, 4), source_dtype="f32"))
+    spec = plan.weights["w"]
+    assert spec.generated is not None and spec.load_ops == ()
+    wire = json.loads(json.dumps(plan_to_dict(plan)))
+    assert wire["format"] == PLAN_FORMAT_GENERATED
+    restored = plan_from_dict(wire)
+    assert restored == plan
+    np.testing.assert_array_equal(assemble_source(restored.weights["w"], {}), np.arange(16, dtype=np.float32).reshape(4, 4))
 
 
 def test_plan_mimo_node_mints_per_buffer_specs_and_writes():

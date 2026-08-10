@@ -53,6 +53,9 @@ class RenderTarget(Protocol):
         target conversion intrinsic (e.g. ``__half2float(value)``).
         """
 
+    def bitcast(self, value: str, src_dt: str, dst_dt: str) -> str:
+        """Reinterpret one same-width scalar without numerical conversion."""
+
     def intrinsic(self, op_name: str, result_dt: str) -> str:
         """Per-dtype intrinsic spelling for an abstract op name.
 

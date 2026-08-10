@@ -182,7 +182,7 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
         # Body.map post-order: block bodies already recursed; only handle leaves.
         if isinstance(s, (Loop, StridedLoop, Cond)):
             return s
-        if isinstance(s, Assign) and s.op.name == "copy" and len(s.args) == 1:
+        if isinstance(s, Assign) and s.op.name == "copy" and len(s.args) == 1 and s.dtype is None:
             alias[s.name] = s.args[0]
             return None
         return s.rewrite(resolve)

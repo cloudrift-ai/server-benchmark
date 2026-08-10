@@ -249,21 +249,21 @@ slice runs zero steps). The close swaps the projection for RAW state stores when
 state component: O rides the normal fragment store into the f32 `__partial` workspace; the d-invariant row stats
 (m, l) are written once per query row (the `_t == 0` lanes) at their template's pinned last slot.
 
-**The fused edge — the mma tier's `sync` transport.** A cone-fed matmul (`f(x, …) @ w`) reaches the warp tier through
-its COMPUTED `a` edge: recognition stores the producer cone inline on that edge (`_atomize.make_cone`), the schedule's
-contraction site then offers the warp tier over a MANDATORY resolved `sync` `Stage` (there is no gmem-direct sibling —
-a copy transport cannot evaluate a cone), and the reduce tiers stay reachable through the COLLAPSE reading, which
-splices the edge back inline. `_staged` builds a `SyncTransport`
-whose A fill is the producer CONE evaluated per slab cell (compute-fill) — the same `fill`/`commit`/`wait` seam,
-feeding the unchanged `ldmatrix` drain. The compute fill assigns each thread a 16-byte run of CONTIGUOUS slab
-cells (the row/col derivation hoists out of the per-cell code; per-thread gmem reads and smem stores merge into
-wide accesses; the cone replicates per cell with a `__c<j>` SSA suffix). Every **B** fold channel is a plain
-weight copy riding a vectorized `cp.async` issued BEFORE the compute fill, so the hardware copies fly underneath
-it — a canonical B as the K-major `(bk × tile_n)` slab, a transposed B (the serving `F.linear` layout) as the
-N-major `(tile_n × bk)` slab in its own gmem orientation (`Operand.trans`; K stride-1 in gmem and smem, swizzle
-from `bk_elems`, drained by the plain no-`.trans` ldmatrix — the per-thread per-cell copy fill it replaced was the
-served fused edges' weight-stream deficit); when a two-slot ring also fits the smem budget the
-stage resolves at `depth=2` and the prefetched chunk's B copies stay in flight across the current chunk's drain. A
+**Inline operands — the mma tier's `sync` transport.** A matmul with a pure producer cone on either operand reaches
+the warp tier through a COMPUTED edge: recognition stores the producer tree inline on that edge
+(`_atomize.make_cone`), and the schedule offers a MANDATORY resolved `sync` `Stage` (there is no gmem-direct sibling —
+a copy transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
+ordinary scalar tensor algebra per shared-memory slab cell, feeding the unchanged `ldmatrix` drain. A is stored in
+canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Materialized peer operands use the
+same vectorized `cp.async` path as ordinary staged matmul, so a generic compact-storage B producer can be evaluated
+directly into Tensor Core fragments without first constructing its expanded dense matrix. This facility is defined
+entirely in generic tensor/loop IR; checkpoint formats are already dissolved before it is selected.
+
+The compute fill assigns each thread a contiguous run of slab cells (the row/col derivation hoists out of the
+per-cell code and the cone replicates with a `__c<j>` SSA suffix). A materialized canonical B uses the K-major
+`(bk × tile_n)` slab; a transposed B (the serving `F.linear` layout) uses the N-major `(tile_n × bk)` slab in its own
+gmem orientation (`Operand.trans`). When a two-slot ring also fits the smem budget, the stage resolves at `depth=2`
+and copied peer chunks can stay in flight across the current chunk's drain. A
 **reduce-bearing (MONOID) cone** — the fused norm→linear edge — is the schedule's fused term READING
 (`_atomize.bind_prologue_contraction`; real fork rows unioned with the map form's, not a pin rescue): the A cone is an
 inline node tree whose

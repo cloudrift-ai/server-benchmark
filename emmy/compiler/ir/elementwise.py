@@ -47,6 +47,9 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
     "where": np.where,
+    # Generic scalar same-width bit reinterpretation. The destination dtype lives on the
+    # enclosing Assign/Tensor; source renderers spell the bitcast from both SSA dtypes.
+    "bitcast": lambda x: x,
     # fp8 decode casts. The dtype-boundary cast out of an fp8 tensor cannot be
     # a plain ``copy``: the numpy carrier is uint8 BITS, so copying would move
     # the bit patterns, not the values — the decode IS the cast's semantics.

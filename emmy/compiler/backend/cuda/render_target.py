@@ -43,6 +43,7 @@ _INTEGER_NATIVE_OPS = frozenset(
         "bitwise_and",
         "bitwise_or",
         "bitwise_xor",
+        "bitwise_count",
     }
 )
 
@@ -173,7 +174,16 @@ class CudaRenderTarget:
             return f"__float2half2_rn({value})"
         return value
 
+    def bitcast(self, value: str, src_dt: str, dst_dt: str) -> str:
+        if src_dt == dst_dt:
+            return value
+        if dst_dt not in _TYPE_NAME:
+            raise ValueError(f"CUDA scalar bitcast does not support destination dtype {dst_dt!r}")
+        return f"emmy_bitcast<{_TYPE_NAME[dst_dt]}>({value})"
+
     def intrinsic(self, op_name: str, result_dt: str) -> str:
+        if op_name == "bitwise_count":
+            return "__popcll" if result_dt in ("i64", "u64") else "__popc"
         if result_dt == "f16":
             return _INTRINSIC_F16.get(op_name, op_name)
         if result_dt == "f16x2":

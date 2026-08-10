@@ -19,7 +19,10 @@ def rewrite(match: Match, inp_a: Node, inp_b: Node, inp_bias: Node | None, out: 
     frag = open_fragment(graph, exts)
 
     matmul_name = f"{out.name}_mm" if inp_bias else out.name
-    mm = matmul_decompose(frag, inp_a, inp_b, name=matmul_name)
+    # The declared result dtype is the accumulation/output contract.  It may be wider than
+    # either multiplicand (fp16 × fp16 → fp32 is the tensor-core serving path), so deriving it
+    # from A silently discards a real precision boundary.
+    mm = matmul_decompose(frag, inp_a, inp_b, name=matmul_name, dtype=out.dtype.name)
 
     if inp_bias:
         bias_bc = broadcast_to(frag, inp_bias, out.shape)

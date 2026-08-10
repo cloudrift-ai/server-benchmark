@@ -441,6 +441,16 @@ def _fold(graph):
     return Pipeline.build(["frontend/decomposition"], select=[_FOLD_RULE]).run(graph)
 
 
+def _bind_and_run_spelled(graph, checkpoint):
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    graph = _fold(graph)
+    feed = load_constants_from_safetensors(graph, str(checkpoint))
+    result, _ = NumpyBackend().run(graph, input_data=feed)
+    return result.outputs[graph.outputs[0]]
+
+
 def test_spell_trellis_builds_generic_cone(tmp_path):
     from emmy.compiler.ir.base import ConstantOp
     from emmy.compiler.ir.frontend.ir import MatmulOp
@@ -488,7 +498,7 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     """A runtime-coded dense contraction lowers entirely through generic integer IR."""
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph, Tensor
-    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.loader.quant import spell_trellis_inputs
@@ -504,12 +514,132 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda
+    assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    plan = plan_from_graph(lowered)
+    assert plan.launches and plan.weights
+    assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
+    assert "w_decoded_tile_step" in plan.weights
+    assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
+    from emmy.serving.gen_runner import _bind_plan_constants
+
+    assert set(_bind_plan_constants(plan, {}, cache=None)) == set(plan.weights)
     source = "\n".join(op.kernel_source for op in cuda)
+    assert "emmy_bitcast" in source and "#include <cuda_fp16.h>" in source
     for spelling in (" % ", " << ", " >> ", " & ", " | ", " ^ "):
         assert spelling in source
     assert "unsigned int" in source and "unsigned long long" in source
     active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
+
+
+def test_input_spelling_streams_computed_b_through_tensor_cores():
+    """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import flatten_leaves
+    from emmy.compiler.pipeline.pipeline import Run
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    spell_trellis_inputs(graph, {"w": (0, (8, 8, 32))})
+
+    def choose_sync_mma(fp):
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            row = dict(getattr(leaf, "knobs", {}) or {})
+            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+                return leaf
+        return leaves[0]
+
+    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
+    cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    streamed = [op for op in cuda if "emmy_bitcast" in op.kernel_source and "mma.sync.aligned" in op.kernel_source]
+    assert len(streamed) == 1
+    source = streamed[0].kernel_source
+    assert "cp.async" in source and "ldmatrix" in source
+    assert "__launch_bounds__(32)" in source
+    assert not any("const float* y_factor32" in op.kernel_source and "cp.async" in op.kernel_source for op in cuda)
+    active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
+    assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
+
+
+@requires_cuda
+def test_input_spelling_computed_b_mma_matches_decoded_linear():
+    """The streamed generic B cone agrees with the decoded-weight linear on CUDA."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import flatten_leaves
+    from emmy.compiler.pipeline.pipeline import Run
+
+    tensors, decoded = _exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    spell_trellis_inputs(graph, {"w": (0, tuple(tensors["layer.trellis"].shape))})
+
+    def choose_sync_mma(fp):
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            row = dict(getattr(leaf, "knobs", {}) or {})
+            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+                return leaf
+        return leaves[0]
+
+    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
+    sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert any("emmy_bitcast" in source and "mma.sync.aligned" in source for source in sources)
+    lowered.outputs = [nid for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)]
+
+    x = (rng.standard_normal((16, 128)) * 0.25).astype(np.float16)
+    feed = bind_constants(lowered, {})
+    assert "y_factor32" in feed and np.any(feed["y_factor32"])
+    decoded_constants = [name for name in feed if name.startswith("w_decoded_")]
+    assert len(decoded_constants) == 4 and all(np.any(feed[name]) for name in decoded_constants)
+    feed.update(
+        {
+            "x": x,
+            "w": tensors["layer.trellis"].numpy(),
+            "w_suh": tensors["layer.suh"].numpy(),
+            "w_svh": tensors["layer.svh"].numpy(),
+        }
+    )
+    backend = CudaBackend(debug=True)
+    run_outputs = backend.run(lowered, input_data=feed)[0].outputs
+    got = run_outputs["y"].astype(np.float32)
+    ref = x.astype(np.float32) @ decoded.astype(np.float32).T
+    err = got - ref
+    rel_rms = float(np.sqrt(np.mean(err**2)) / max(np.sqrt(np.mean(ref**2)), 1e-12))
+    max_ratio = float(np.max(np.abs(err)) / max(np.max(np.abs(ref)), 1e-12))
+    assert np.any(run_outputs["y_left_flat"])
+    assert np.any(run_outputs["y_core_reduce"])
+    assert rel_rms < 2e-2 and max_ratio < 2e-2, (
+        rel_rms,
+        max_ratio,
+        float(got.min()),
+        float(got.max()),
+        float(ref.min()),
+        float(ref.max()),
+        {name: (float(np.asarray(value).min()), float(np.asarray(value).max())) for name, value in run_outputs.items()},
+    )
 
 
 @pytest.mark.parametrize("cb", [1, 2])
@@ -579,67 +709,90 @@ def test_spell_trellis_shape_mismatch_left_alone(tmp_path):
     assert set(g.nodes) == {"p_w"}
 
 
-def test_fold_collapses_trellis_cone(tmp_path):
+def test_fold_preserves_storage_expanding_trellis_cone(tmp_path):
+    from emmy.compiler.ir.base import ConstantOp
+
     g, _ref = _spelled_exl3(tmp_path)
     folded = _fold(g)
-    assert set(folded.nodes) == {"p_w"}
-    assert folded.nodes["p_w"].op.source_graph is not None
+    paths = {op.source_path for _nid, op in folded.loadable_constants() if op.source_path is not None}
+    assert paths == {"layer.trellis", "layer.suh", "layer.svh"}
+    assert not isinstance(folded.nodes["p_w"].op, ConstantOp)
+    records = [op.source_graph for _nid, op in folded.loadable_constants() if op.source_graph is not None]
+    assert records
+    assert all(leaf.source_path is None and not leaf.source_parts for record in records for _leaf_id, leaf in record.loadable_constants())
+
+
+def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path):
+    """The serving trunk keeps compact source leaves all the way into its execution plan."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.quant import spell_trellis_constants
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources
+
+    tensors, _ref = _exl3_linear_tensors("layer", 128, 128, K=2, cb=2)
+    _write_exl3_checkpoint(tmp_path, tensors)
+    graph = _weight_graph((128, 128), dtype="f16")
+    graph.add_node(InputOp(), [], Tensor("x", (1, 128), "f16"), node_id="x")
+    graph.add_node(LinearOp(), ["x", "p_w"], Tensor("y", (1, 128), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    assert spell_trellis_constants(graph, str(tmp_path)) == 1
+
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
+    plan = plan_from_graph(lowered)
+    paths = {weight.source_path for weight in plan.weights.values() if weight.source_path is not None}
+    assert paths == {"layer.trellis", "layer.suh", "layer.svh"}
+    assert all(weight.load_ops is not None for weight in plan.weights.values())
+    assert any(weight.generated is not None for weight in plan.weights.values())
+    assert "p_w_tile_step" in plan.weights
+    assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
+
+    sources = _plan_sources(plan, torch.nn.Module(), np.float16, str(tmp_path), {})
+    bound = _bind_plan_constants(plan, sources, cache=None)
+    assert set(bound) == set(plan.weights)
+    by_path = {weight.source_path: bound[nid] for nid, weight in plan.weights.items() if weight.source_path is not None}
+    for path in paths:
+        np.testing.assert_array_equal(by_path[path], tensors[path].numpy())
 
 
 @pytest.mark.parametrize(("n", "k", "K", "cb"), [(256, 128, 2, 0), (192, 128, 3, 1), (128, 128, 6, 2)])
-def test_loader_binds_folded_trellis_weight_exact(tmp_path, n, k, K, cb):
-    """spell → fold → bind reproduces the direct decode exactly (the fp16 decode cast to the
+def test_loader_binds_spelled_trellis_weight_exact(tmp_path, n, k, K, cb):
+    """spell → bind → generic evaluation reproduces the direct decode exactly (the fp16 decode cast to the
     traced f32 — one widening, bit-preserving). ``n=192`` exercises the encode padding slice;
     ``K=6`` is the lm_head rung."""
-    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
     g, ref = _spelled_exl3(tmp_path, n=n, k=k, K=K, cb=cb)
-    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
-    assert out["p_w"].dtype == np.float32 and out["p_w"].shape == (n, k)
-    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32))
+    out = _bind_and_run_spelled(g, tmp_path)
+    assert out.dtype == np.float32 and out.shape == (n, k)
+    np.testing.assert_array_equal(out, ref.astype(np.float32))
 
 
 def test_loader_binds_f16_graph_dtype_bit_exact(tmp_path):
     """At a traced f16 dtype the bound weight is bit-identical to the direct decode."""
-    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
     g, ref = _spelled_exl3(tmp_path, dtype="f16")
-    out = load_constants_from_safetensors(_fold(g), str(tmp_path))
-    assert out["p_w"].dtype == np.float16
-    np.testing.assert_array_equal(out["p_w"].view(np.uint16), ref.view(np.uint16))
+    out = _bind_and_run_spelled(g, tmp_path)
+    assert out.dtype == np.float16
+    np.testing.assert_array_equal(out.view(np.uint16), ref.view(np.uint16))
 
 
-def test_loader_applies_trailing_load_ops_after_the_record(tmp_path):
-    """A layout chain folded onto the constant AFTER the record (what ``050``/``060`` append)
-    runs on the EVALUATED result."""
-    from dataclasses import replace
-
-    from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.frontend.ir import TransposeOp
-    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
-    g, ref = _spelled_exl3(tmp_path)
-    folded = _fold(g)
-    node = folded.nodes["p_w"]
-    node.op = replace(node.op, load_ops=(TransposeOp(axes=(1, 0)),))
-    node.outputs = (Tensor("p_w", (128, 256), "f32"),)
-    out = load_constants_from_safetensors(folded, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32).T)
-
-
-def test_trellis_source_graph_survives_json_roundtrip(tmp_path):
+def test_expanded_trellis_graph_survives_json_roundtrip(tmp_path):
     import json as _json
 
     from emmy.compiler.graph import Graph
-    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 
     g, ref = _spelled_exl3(tmp_path)
     folded = _fold(g)
     g2 = Graph.from_dict(_json.loads(_json.dumps(folded.to_dict())))
-    record = g2.nodes["p_w"].op.source_graph
-    assert record is not None and record.structural_key() == folded.nodes["p_w"].op.source_graph.structural_key()
-    out = load_constants_from_safetensors(g2, str(tmp_path))
-    np.testing.assert_array_equal(out["p_w"], ref.astype(np.float32))
+    assert set(g2.nodes) == set(folded.nodes)
+    assert any(op.source_graph is not None for _nid, op in g2.loadable_constants())
+    out = _bind_and_run_spelled(g2, tmp_path)
+    np.testing.assert_array_equal(out, ref.astype(np.float32))
 
 
 def test_load_dequantized_state_dict_exl3(tmp_path):
@@ -675,18 +828,17 @@ def test_quantized_checkpoint_dir_detects_exl3(tmp_path):
 
 @requires_glm_exl3
 def test_real_tensor_bind_time_decode_matches_direct():
-    """D.1 pin on the real checkpoint: spell → fold → bind of a real expert linear equals the
+    """D.1 pin on the real checkpoint: spell → bind of a real expert linear equals the
     direct Phase-1 decode bit-exactly (uint16 view of the fp16 values)."""
     from emmy.compiler.loader.quant import spell_trellis_constants
-    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 
     name = "model.layers.5.mlp.experts.0.down_proj"
     tr, suh, svh = (_load_real(name + s) for s in (".trellis", ".suh", ".svh"))
     ref = decode_exl3_linear(tr, suh, svh).T
     g = _weight_graph(ref.shape, dtype="f16", source_path=name + ".weight")
     assert spell_trellis_constants(g, str(_SNAPSHOT)) == 1
-    out = load_constants_from_safetensors(_fold(g), str(_SNAPSHOT))
-    np.testing.assert_array_equal(out["p_w"].view(np.uint16), ref.view(np.uint16))
+    out = _bind_and_run_spelled(g, _SNAPSHOT)
+    np.testing.assert_array_equal(out.view(np.uint16), ref.view(np.uint16))
 
 
 # ===================================================================
@@ -773,7 +925,7 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
 @requires_cuda
 def test_exl3_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny EXL3 model through the same seam ``emmy compile`` / ``emmy run`` use, compiled
-    on the CUDA backend: generic reconstruction cones fold at 032, and the output matches the
+    on the CUDA backend: generic reconstruction cones remain source-bindable, and the output matches the
     decoded eager reference."""
     from emmy.compiler.ir.tensor.ir import BitcastOp, RangeOp
 

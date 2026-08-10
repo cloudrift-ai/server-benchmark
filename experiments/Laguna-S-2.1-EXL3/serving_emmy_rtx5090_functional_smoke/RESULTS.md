@@ -23,9 +23,12 @@ This is functional evidence, not a performance benchmark or a claim of standard 
 compatibility. One-token chunking and a single scheduled request make the custom lane
 extremely constrained; native ExLlamaV3 is the recommended RTX 5090 runtime.
 
-Evidence in this directory:
+Original evidence hashes:
 
-- `capture.stdout.log` / `capture.stderr.log`
-- `capture-greedy-repeat-1.json`
-- `capture-greedy-repeat-2.json`
-- `capture-prefill-and-decode.json`
+- Capture stdout: `ae9c3e56ab17b9905c20ab7ff1ac5e3364e29c03f833edb193d016c98e30c49f`
+- Capture stderr: `8e3f8858cc54a040184958df346360e52705eac38dfb71f2db72cfb6bfd93a0f`
+- Greedy repeat 1: `cfe0bfbedfd25d12858417262ec46e01301f58f574e9aa3d02731077f9fda73c`
+- Greedy repeat 2: `acc5c4fe69a9be4d84712316753b286090bafa334afc39c28b107979b5a1e7ec`
+- Prefill/decode response: `d3be8d8c63b06e15315856134e1be833b9e0bda0fa075c946371c2f13290c899`
+
+Raw logs and response JSON are intentionally not stored in the repository.

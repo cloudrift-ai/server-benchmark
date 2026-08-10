@@ -4,16 +4,16 @@
 # the first iterate(); native_bench.py fails unless the installed scheduler/job sources are
 # byte-identical to the exact v1.4.1 checkout and its batching/timing semantics are present.
 #
-# This records the pre-publication local run. 96ab... is only the basename used for the local
-# snapshot directory; it is deliberately not presented as an HF commit. The three manifest
-# hashes below are the immutable identity of the tested artifact until a Hub revision exists.
+# The recorded run used a byte-identical local checkpoint. This recipe now resolves the
+# published immutable Hub revision and rechecks the same three checkpoint hashes before CUDA.
 command:
   stage:
     - experiments/Laguna-S-2.1-EXL3/serving_exllamav3_rtx5090/native_bench.py
   run: |
     set -Eeuo pipefail
     export PATH=/usr/local/cuda/bin:$$PATH
-    LOCAL_SNAPSHOT_ID=96ab72f4afbcb028fc880d3215812ffb494ebd7a
+    MODEL_ID=riftstack/Laguna-S-2.1-exl3
+    HF_REVISION=ce452c59b960bdb5ad8b7ebdc3a1142e663caf6a
     CACHE_MODE=q2
     CACHE_TOKENS=6144
     CONFIG_SHA256=dedf94f07f5a92935e43d7ce6b7710314ae26b37f476e41e447dc49ff340de7a
@@ -25,14 +25,16 @@ command:
     SRC=$task_dir/exllamav3-v1.4.1
     VENV=$task_dir/venv-exllamav3-v1.4.1
     RUNNER=$repo_dir/experiments/Laguna-S-2.1-EXL3/serving_exllamav3_rtx5090/native_bench.py
-    # This is the exact shared-filesystem path used by the recorded --local run. A different
-    # local host can override it in the workload environment without changing artifact identity.
-    DEFAULT_SNAPSHOT=/home/dikobraz/Projects/emmy/_release/laguna-s-2.1-exl3/native-5090-task/snapshots/$$LOCAL_SNAPSHOT_ID
+    DEFAULT_SNAPSHOT=$task_dir/snapshots/$$HF_REVISION
     SNAP=$${LAGUNA_EXL3_LOCAL_SNAPSHOT:-$$DEFAULT_SNAPSHOT}
 
-    [ -d "$$SNAP" ] || { echo "FATAL: set LAGUNA_EXL3_LOCAL_SNAPSHOT to the verified local snapshot" >&2; exit 2; }
-    [ "$$(basename "$$SNAP")" = "$$LOCAL_SNAPSHOT_ID" ] || {
-      echo "FATAL: local snapshot basename must be $$LOCAL_SNAPSHOT_ID" >&2
+    if [ ! -d "$$SNAP" ]; then
+      command -v hf >/dev/null
+      mkdir -p "$$(dirname "$$SNAP")"
+      hf download "$$MODEL_ID" --revision "$$HF_REVISION" --local-dir "$$SNAP"
+    fi
+    [ "$$(basename "$$SNAP")" = "$$HF_REVISION" ] || {
+      echo "FATAL: snapshot basename must be immutable revision $$HF_REVISION" >&2
       exit 2
     }
     (( CACHE_TOKENS >= 6144 && CACHE_TOKENS % 256 == 0 )) || {
@@ -77,7 +79,7 @@ command:
 
     # CPU/source-only semantic gate. This produces no model load and no benchmark result.
     "$$VENV/bin/python" "$$RUNNER" \
-      --revision "$$LOCAL_SNAPSHOT_ID" \
+      --revision "$$HF_REVISION" \
       --exllama-source "$$SRC" \
       --validate-api-only \
       --output $task_dir/native-api-validation.json \
@@ -88,7 +90,7 @@ command:
 
     "$$VENV/bin/python" "$$RUNNER" \
       --model-dir "$$SNAP" \
-      --revision "$$LOCAL_SNAPSHOT_ID" \
+      --revision "$$HF_REVISION" \
       --exllama-source "$$SRC" \
       --cache-mode "$$CACHE_MODE" \
       --cache-tokens "$$CACHE_TOKENS" \

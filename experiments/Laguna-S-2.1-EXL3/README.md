@@ -12,9 +12,9 @@ Checkpoint accuracy was evaluated separately on an A100; see
 
 | Field | Value |
 |---|---|
-| Intended Hub repository | `cloudriftai/Laguna-S-2.1-exl3` |
+| Intended Hub repository | `riftstack/Laguna-S-2.1-exl3` |
 | Intended bitrate branch | `1.98bpw` |
-| Hub commit | Not available when these local experiments ran |
+| Published Hub commit | `riftstack/Laguna-S-2.1-exl3@ce452c59b960bdb5ad8b7ebdc3a1142e663caf6a` |
 | Source | `poolside/Laguna-S-2.1@00af5a51782109b587a3b3bbf11875e566036fa7` |
 | Configured body allocation | 1.98 bpw |
 | Shards | 4, totaling 30,191,374,574 bytes |
@@ -27,9 +27,8 @@ Checkpoint accuracy was evaluated separately on an A100; see
 The local benchmark snapshot was placed in a directory named
 `96ab72f4afbcb028fc880d3215812ffb494ebd7a`. That value is a local directory identifier,
 not a Hugging Face commit and not a content digest. The three file hashes above identify the
-tested artifact until publication supplies an immutable Hub revision. The raw native manifests
-retain the historical fields `checkpoint_revision` and `checkpoint.revision`; in these files
-both fields contain this local identifier and make no Hub-revision claim.
+tested artifact and match the checkpoint now published at the immutable Hub revision listed
+above. Historical runner fields containing this local identifier make no Hub-revision claim.
 
 ## Evidence lanes
 
@@ -58,18 +57,13 @@ recorded-run throughput values, median request latency, and maximum sampled devi
 | 4 | 170.3335 | 931.036 ms | 16.313 ms | 29.813 GiB |
 | 8 | 212.6328 | 1,891.374 ms | 22.953 ms | 29.839 GiB |
 
-[`native-results.json`](serving_exllamav3_rtx5090/native-results.json) contains every recorded
-request, prompt/output hashes, queue/prefill/generation timing, and aggregate statistics.
-[`native-versions.json`](serving_exllamav3_rtx5090/native-versions.json) records the checkpoint
-manifest, runtime/package versions, native scheduler source hashes, GPU/driver, cache settings,
-model-load time, and load-memory metrics. Both files are byte-for-byte copies of the final local
-run; consequently, their embedded `snapshot` and `versions_manifest` paths record the original
-ignored evidence directory.
+The compact [`RESULTS.md`](serving_exllamav3_rtx5090/RESULTS.md) records the aggregate metrics,
+runtime identity, and hashes of the original result and version manifests. Per-request JSON and
+run logs are intentionally not stored in the repository.
 
-The recipe is intentionally local until an immutable Hub commit exists. It records the exact
-absolute snapshot path on the authoring host and accepts an equivalent path through
-`LAGUNA_EXL3_LOCAL_SNAPSHOT` when that variable is present in the workload shell. The basename
-and all three manifest hashes are checked before the GPU is touched:
+The recipe downloads the immutable Hub revision and accepts an equivalent preseeded snapshot
+through `LAGUNA_EXL3_LOCAL_SNAPSHOT`. All three manifest hashes are checked before the GPU is
+touched. The recorded run used the same bytes from the verified local checkpoint:
 
 ```bash
 emmy bench experiments/Laguna-S-2.1-EXL3/serving_exllamav3_rtx5090 --local
@@ -86,5 +80,5 @@ plus four decode tokens also completed.
 This lane used max model length 128, one max batched token, one sequence, host embedding,
 decode bucket 1, prefill bucket 0, and M=1 tier. Those restrictions make it a functional smoke,
 not a useful performance configuration. Native ExLlamaV3 remains the recommended RTX 5090
-runtime. Exact responses, server logs, limits, and memory observations are preserved under
-[`serving_emmy_rtx5090_functional_smoke`](serving_emmy_rtx5090_functional_smoke).
+runtime. The compact result summary records the exact responses, limits, memory observations,
+and source-artifact hashes; raw server logs and response JSON are intentionally not stored.

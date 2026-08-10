@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-MODEL_ID = "cloudriftai/Laguna-S-2.1-exl3"
+MODEL_ID = "riftstack/Laguna-S-2.1-exl3"
 EXLLAMA_COMMIT = "4f8ad0121f483ba66a5336244a4c3b6d7210385e"
 EXLLAMA_VERSION = "1.4.1+cu128.torch2.10.0"
 TORCH_VERSION = "2.10.0+cu128"

@@ -47,8 +47,6 @@ for this quantization.
 
 - Original A100 `qbench-results.json` SHA-256:
   `f47a041a204d1fb22de8188e586c29c35f69a4b9a9e3e7e44c0990dbb6f911fc`
-- Repository [qbench-results.json](qbench-results.json), normalized with a final newline, SHA-256:
-  `0428e491c79f50d912e22302cd11063472d3072ac0146c1257c6a5f301c4fc38`
 - Input/cache manifest SHA-256:
   `1b99b79e37ee204889e2fcbea70711dad72d850607a99d8da51aef4df67f5947`
 - Version manifest SHA-256:
@@ -62,3 +60,6 @@ for this quantization.
 
 The run exited zero, all four phases passed, stderr was empty, all 47 Laguna router correction
 biases were present, and the pinned ExLlamaV3 checkout remained clean.
+
+Raw qbench JSON and logs are intentionally not stored in the repository; this summary retains
+the release metrics and hashes of the original evidence.

@@ -180,7 +180,7 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     assert {spelled.nodes[name].output.dtype.name for name in ("w_gate", "w_up", "w_down")} == {"i16"}
     assert all(type(node.op).__name__ not in {"TrellisDecodeOp", "HadamardOp"} for node in spelled.nodes.values())
 
-    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.backend.plan import plan_from_dict, plan_from_graph, plan_to_dict
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.cuda import CudaOp
@@ -191,10 +191,12 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     assert cuda and all(op.kernel_source for op in cuda)
     assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
     plan = plan_from_graph(lowered)
+    assert plan_to_dict(plan_from_dict(plan_to_dict(plan))) == plan_to_dict(plan)
     assert plan.launches and plan.weights
     assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
-    assert not {f"{weight}_decoded_tile_step" for weight in ("w_gate", "w_up", "w_down")} & set(plan.weights)
-    assert {f"{weight}_decoded_shift_step" for weight in ("w_gate", "w_up", "w_down")} <= set(plan.weights)
+    for weight in ("w_gate", "w_up", "w_down"):
+        assert not {f"{weight}_decoded_{table}" for table in ("bit_start", "word_idx", "next_word")} & set(plan.weights)
+        assert {f"{weight}_decoded_shift_step", f"{weight}_decoded_tile_step"} <= set(plan.weights)
     factors = [spec.generated for spec in plan.weights.values() if spec.generated is not None and spec.generated[1] == (128, 128)]
     assert len(factors) == 3 and {factor[0] for factor in factors} == {"<f4"}
     from emmy.serving.gen_runner import _bind_plan_constants

@@ -461,18 +461,18 @@ def test_spell_trellis_builds_generic_cone(tmp_path):
     assert set(consts) == {"layer.trellis", "layer.suh", "layer.svh"}
     assert consts["layer.trellis"].output.dtype.name == "i16" and consts["layer.trellis"].op.source_dtype == "i16"
     assert consts["layer.suh"].output.dtype.name == "f16"
-    # Hadamard and the one per-step shift remain generic source-free range
-    # algebra. The three deterministic gather indices are address expressions,
+    # Hadamard, the one per-step shift, and tile permutation remain generic
+    # source-free range algebra. Packed-word indices are address expressions,
     # not materialized tensors.
     assert any(isinstance(nn.op, RangeOp) for nn in g.nodes.values())
     assert any(isinstance(nn.op, BitcastOp) for nn in g.nodes.values())
-    assert not any(isinstance(nn.op, GatherOp) for nn in g.nodes.values())
+    assert sum(isinstance(nn.op, GatherOp) for nn in g.nodes.values()) == 1
     direct_maps = {
         nn.output.name: nn.op
         for nn in g.nodes.values()
-        if isinstance(nn.op, IndexMapOp) and nn.output.name.endswith(("window_lo", "window_hi", "tiles_row_major"))
+        if isinstance(nn.op, IndexMapOp) and nn.output.name.endswith(("window_lo", "window_hi"))
     }
-    assert len(direct_maps) == 3
+    assert len(direct_maps) == 2
     assert all(any(op in src.coord_map[-1].pretty() for op in ("%", "//")) for src in direct_maps.values() for src in src.sources)
     assert sum(isinstance(nn.op, MatmulOp) for nn in g.nodes.values()) == 2
     # Interface invariance: the cone's output is exactly what the trace promised.
@@ -530,14 +530,14 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     plan = plan_from_graph(lowered)
     assert plan.launches and plan.weights
     assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
-    for table in ("bit_start", "word_idx", "next_word", "tile_step"):
+    for table in ("bit_start", "word_idx", "next_word"):
         assert f"w_decoded_{table}" not in plan.weights
-    shift_tables = {
+    index_tables = {
         name: spec
         for name, spec in plan.weights.items()
         if name.startswith("w_decoded_") and spec.generated is not None and spec.generated[1] == (256,)
     }
-    assert set(shift_tables) == {"w_decoded_shift_step"}
+    assert set(index_tables) == {"w_decoded_shift_step", "w_decoded_tile_step"}
     assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
     from emmy.serving.gen_runner import _bind_plan_constants
 
@@ -630,7 +630,7 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     feed = bind_constants(lowered, {})
     assert "y_factor32" in feed and np.any(feed["y_factor32"])
     decoded_constants = [name for name in feed if name.startswith("w_decoded_")]
-    assert set(decoded_constants) == {"w_decoded_shift_step"}
+    assert set(decoded_constants) == {"w_decoded_shift_step", "w_decoded_tile_step"}
     assert all(np.any(feed[name]) for name in decoded_constants)
     feed.update(
         {
@@ -769,9 +769,9 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     assert paths == {"layer.trellis", "layer.suh", "layer.svh"}
     assert all(weight.load_ops is not None for weight in plan.weights.values())
     assert any(weight.generated is not None for weight in plan.weights.values())
-    for table in ("bit_start", "word_idx", "next_word", "tile_step"):
+    for table in ("bit_start", "word_idx", "next_word"):
         assert f"p_w_{table}" not in plan.weights
-    assert "p_w_shift_step" in plan.weights
+    assert {"p_w_shift_step", "p_w_tile_step"} <= set(plan.weights)
     assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
 
     sources = _plan_sources(plan, torch.nn.Module(), np.float16, str(tmp_path), {})

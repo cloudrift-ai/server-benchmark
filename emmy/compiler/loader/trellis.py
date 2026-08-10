@@ -18,6 +18,7 @@ from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
     ElementwiseOp,
+    GatherOp,
     IndexMapOp,
     IndexSource,
     RangeOp,
@@ -186,15 +187,32 @@ def _codebook(b: _Builder, windows: str, cb: int, shape: tuple[int, ...]) -> str
 
 def _tile_order(b: _Builder, values: str, kt: int, nt: int) -> str:
     """MMA-fragment step order → row-major tiled matrix, derived from coordinates."""
-    pos = placeholder(2)
-    row, col = BinaryExpr("//", pos, Literal(16, "int")), pos % 16
-    lane = (col % 8) * 4 + BinaryExpr("//", row % 8, Literal(2, "int"))
-    j0 = BinaryExpr("&", row, Literal(1, "int"))
-    j1 = BinaryExpr("&", BinaryExpr(">>", row, Literal(3, "int")), Literal(1, "int")) * 2
-    j2 = BinaryExpr("//", col, Literal(8, "int")) * 4
-    step = lane * 8 + j0 + j1 + j2
-    shape = (kt, nt, 256)
-    ordered = b.indexed(values, shape, (placeholder(0), placeholder(1), step), "tiles_row_major")
+    pos = b.range(256, "tile_pos")
+
+    def i(suffix: str, value: int) -> str:
+        return b.scalar(f"i32_{value}_{suffix}", value, "i32")
+
+    row = b.binary("floor_divide", pos, i("row", 16), (256,), "i32", "tile_row")
+    col = b.binary("remainder", pos, i("col", 16), (256,), "i32", "tile_col")
+    row8 = b.binary("remainder", row, i("row8", 8), (256,), "i32", "tile_row8")
+    lane_lo = b.binary("floor_divide", row8, i("lane2", 2), (256,), "i32", "tile_lane_lo")
+    col8 = b.binary("remainder", col, i("col8", 8), (256,), "i32", "tile_col8")
+    lane_hi = b.binary("multiply", col8, i("lane4", 4), (256,), "i32", "tile_lane_hi")
+    lane = b.binary("add", lane_hi, lane_lo, (256,), "i32", "tile_lane")
+    j0 = b.binary("bitwise_and", row, i("j0", 1), (256,), "i32", "tile_j0")
+    row3 = b.binary("right_shift", row, i("row3", 3), (256,), "i32", "tile_row3")
+    j1bit = b.binary("bitwise_and", row3, i("j1bit", 1), (256,), "i32", "tile_j1bit")
+    j1 = b.binary("multiply", j1bit, i("j1", 2), (256,), "i32", "tile_j1")
+    j2bit = b.binary("floor_divide", col, i("j2bit", 8), (256,), "i32", "tile_j2bit")
+    j2 = b.binary("multiply", j2bit, i("j2", 4), (256,), "i32", "tile_j2")
+    j = b.binary("add", b.binary("add", j0, j1, (256,), "i32", "tile_j01"), j2, (256,), "i32", "tile_j")
+    lane8 = b.binary("multiply", lane, i("lane8", 8), (256,), "i32", "tile_lane8")
+    step = b.binary("add", lane8, j, (256,), "i32", "tile_step")
+    ordered = b.graph.add_node(
+        op=GatherOp(axis=-1),
+        inputs=[values, step],
+        output=Tensor(f"{b.prefix}_tiles_row_major", (kt, nt, 256), "f16"),
+    )
     tiles = b.reshape(ordered, (kt, nt, 16, 16), "tiles")
     tiled = b.graph.add_node(
         op=TransposeOp(axes=(0, 2, 1, 3)),

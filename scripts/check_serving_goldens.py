@@ -21,6 +21,9 @@ With ``--strict-major-gaps`` the gate also captures the release checkpoint's ser
 weight-free and fails on drift, compile failure, or any uncovered warp-contraction fork.
 ``--release-config`` adds every decode/prefill width named by the pinned config and its warm
 shape matrix to that audit.
+``--static-only-release`` instead audits only M=1, but is accepted only when that release
+config proves runner capacity 1, decode bucket 1, disabled prefill, scheduler maximum 1, and
+no wider warm override. The default standard-width and symbolic audit remains unchanged.
 ``--checkpoint PATH`` traces an exact local/preseeded artifact while golden selection and
 reporting remain bound to ``--model`` plus ``--revision``; omit it for normal Hub capture.
 
@@ -252,6 +255,7 @@ def audit_release_twins(
     widths: tuple[int, ...],
     *,
     provenance: str | None = None,
+    static_only: bool = False,
 ) -> bool:
     """Return whether a release model has no drift, compile failure, or major gap."""
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize
@@ -259,8 +263,18 @@ def audit_release_twins(
 
     release = provenance or capture_model
     source = f" from local checkpoint {capture_model!r}" if provenance and provenance != capture_model else ""
-    print(f"STRICT: tracing serving twins for {release!r}{source} (weight-free; extra widths {list(widths) or 'none'}).")
-    graphs = capture_twin_graphs(capture_model, extra_widths=widths)
+    scope = "static-only M=1" if static_only else f"standard plus extra widths {list(widths) or 'none'}"
+    print(f"STRICT: tracing serving twins for {release!r}{source} (weight-free; {scope}).")
+    if static_only:
+        graphs = capture_twin_graphs(
+            capture_model,
+            decode_bucket=1,
+            prefill_bucket=0,
+            extra_widths=(),
+            static_only=True,
+        )
+    else:
+        graphs = capture_twin_graphs(capture_model, extra_widths=widths)
     passed = True
     for cap in caps:
         results = audit_card(graphs, gpu_name, cap)
@@ -315,6 +329,14 @@ def main() -> int:
             "still use --model/--revision; default capture source is that Hub snapshot."
         ),
     )
+    ap.add_argument(
+        "--static-only-release",
+        action="store_true",
+        help=(
+            "Audit only the static M=1 twins. Requires --strict-major-gaps and --release-config; "
+            "the config must prove the exact static-only runner and scheduler envelope."
+        ),
+    )
     args = ap.parse_args()
     if args.release_config and not args.strict_major_gaps:
         ap.error("--release-config requires --strict-major-gaps")
@@ -322,6 +344,12 @@ def main() -> int:
         ap.error("--serving-width requires --strict-major-gaps")
     if args.checkpoint and not args.strict_major_gaps:
         ap.error("--checkpoint requires --strict-major-gaps")
+    if args.static_only_release and not args.strict_major_gaps:
+        ap.error("--static-only-release requires --strict-major-gaps")
+    if args.static_only_release and not args.release_config:
+        ap.error("--static-only-release requires --release-config")
+    if args.static_only_release and args.serving_width:
+        ap.error("--static-only-release cannot include additional --serving-width values")
     if args.serving_width and any(width <= 0 for width in args.serving_width):
         ap.error(f"--serving-width values must be positive, got {args.serving_width}")
 
@@ -390,7 +418,15 @@ def main() -> int:
         print(f"  NOTE: {len(wrong_rev)} further golden(s) for this repo were NOT counted — recorded against {_revisions(wrong_rev)}.")
     if args.strict_major_gaps:
         widths = set(args.serving_width or ())
-        if args.release_config:
+        if args.static_only_release:
+            from emmy.serving.twins import validate_static_only_release_config
+
+            try:
+                validate_static_only_release_config(args.release_config)
+            except (OSError, ValueError) as exc:
+                print(f"ERROR: static-only release scope is unsafe: {exc}")
+                return 2
+        elif args.release_config:
             try:
                 widths.update(release_widths(args.release_config))
             except (OSError, ValueError) as exc:
@@ -398,7 +434,14 @@ def main() -> int:
                 return 2
         capture_source, model_ref = release_capture_source(repo, revision, args.checkpoint)
         caps = sorted({tuple(g.compute_cap) for g in matched})
-        if not audit_release_twins(capture_source, card, caps, tuple(sorted(widths)), provenance=model_ref):
+        if not audit_release_twins(
+            capture_source,
+            card,
+            caps,
+            tuple(sorted(widths)),
+            provenance=model_ref,
+            static_only=args.static_only_release,
+        ):
             return 1
     return 0
 

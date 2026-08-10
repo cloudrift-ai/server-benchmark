@@ -147,6 +147,7 @@ serve-config: serve-config-guard
 	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
 	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
 	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
+	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
 	@echo "golden src = $(if $(CHECKPOINT),$(CHECKPOINT),Hub model/revision)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
 
@@ -176,6 +177,7 @@ serve-goldens: serve-config-guard
 	./venv/bin/python scripts/check_serving_goldens.py --model "$(SERVE_MODEL)" --gpu "$(SERVE_GPU_NAME)" \
 		$(if $(SERVE_REVISION),--revision "$(SERVE_REVISION)") \
 		$(if $(CHECKPOINT),--checkpoint "$(CHECKPOINT)") \
+		$(if $(filter 1,$(SERVE_STATIC_ONLY)),--static-only-release) \
 		--strict-major-gaps --release-config "$(SERVE_CONFIG)"
 
 serve-warm: serve-config-guard

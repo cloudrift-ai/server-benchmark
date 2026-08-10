@@ -32,7 +32,9 @@ changes the model's forward changes these twins — exactly as it would change s
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
@@ -47,6 +49,93 @@ DECODE_BUCKET = 32
 PREFILL_BUCKET = 256
 
 
+def validate_static_only_release_config(path: str | Path) -> None:
+    """Prove that a pinned release can reach only the static M=1 runner tier.
+
+    This mirrors the runtime's strict capacity proof, with the scheduler bound included:
+    the runner capacity, decode bucket, and scheduler maximum are all one, while the
+    prefill bucket is disabled.  Extra warm shapes are part of the release contract too;
+    each must resolve to the same envelope rather than silently warming a symbolic tier.
+    """
+    source = Path(path)
+    values: dict[str, str] = {}
+    for raw in source.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value.strip().strip('"')
+
+    required = {
+        "SERVE_STATIC_ONLY": "1",
+        "SERVE_MAX_NUM_BATCHED_TOKENS": "1",
+        "SERVE_DECODE_BUCKET": "1",
+        "SERVE_PREFILL_CAPACITY": "1",
+        "SERVE_PREFILL_BUCKET": "0",
+        "SERVE_M1_TIER": "1",
+    }
+    for field, expected in required.items():
+        actual = values.get(field)
+        if actual != expected:
+            shown = "missing" if actual is None else repr(actual)
+            raise ValueError(f"{source}: static-only release requires {field}={expected}, got {shown}")
+
+    capture_sizes = values.get("SERVE_CAPTURE_SIZES")
+    try:
+        parsed_capture_sizes = json.loads(capture_sizes) if capture_sizes is not None else None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source}: SERVE_CAPTURE_SIZES must be the JSON list [1], got {capture_sizes!r}") from exc
+    if parsed_capture_sizes != [1]:
+        shown = "missing" if capture_sizes is None else repr(capture_sizes)
+        raise ValueError(f"{source}: static-only release requires SERVE_CAPTURE_SIZES=[1], got {shown}")
+
+    for spec in values.get("SERVE_WARM_SHAPES", "").split():
+        fields = spec.split(":")
+        if len(fields) not in {3, 4}:
+            raise ValueError(f"{source}: invalid SERVE_WARM_SHAPES entry {spec!r}")
+        if len(fields) == 4 and fields[3]:
+            raise ValueError(f"{source}: static-only release cannot warm alternate lane {fields[3]!r} in {spec!r}")
+        decode = fields[0] or required["SERVE_DECODE_BUCKET"]
+        prefill = fields[1] or required["SERVE_PREFILL_BUCKET"]
+        max_tokens = fields[2] or required["SERVE_MAX_NUM_BATCHED_TOKENS"]
+        if (decode, prefill, max_tokens) != ("1", "0", "1"):
+            raise ValueError(
+                f"{source}: static-only release warm shape {spec!r} resolves to "
+                f"decode/prefill/max_tokens={decode}/{prefill}/{max_tokens}, expected 1/0/1"
+            )
+
+
+def _serving_twin_buckets(
+    decode_bucket: int,
+    prefill_bucket: int,
+    extra_widths: tuple[int, ...],
+    *,
+    symbolic: bool,
+    static_only: bool,
+) -> list[tuple[str, int | None]]:
+    """Return reachable serving widths, preserving the standard audit ladder by default."""
+    if static_only:
+        if decode_bucket != 1 or prefill_bucket != 0 or extra_widths:
+            raise ValueError("static-only serving capture requires decode_bucket=1, prefill_bucket=0, and no extra widths")
+        return [("1", 1)]
+
+    widths = [
+        1,
+        8,
+        decode_bucket,
+        64,
+        192,
+        prefill_bucket,
+        2048,
+        4096,
+        *extra_widths,
+    ]
+    buckets: list[tuple[str, int | None]] = [(str(m), m) for m in sorted({w for w in widths if w})]
+    if symbolic:
+        buckets.append(("-sym", None))
+    return buckets
+
+
 def capture_twin_graphs(
     model: str,
     *,
@@ -55,6 +144,7 @@ def capture_twin_graphs(
     extra_widths: tuple[int, ...] = (),
     symbolic: bool = True,
     dtype: str = "float16",
+    static_only: bool = False,
 ) -> dict[str, Graph]:
     """Trace every serving twin of ``model`` from its config alone (no weights).
 
@@ -66,7 +156,8 @@ def capture_twin_graphs(
     ``scripts/capture_gen_twins.py`` writes. ``extra_widths`` adds release-specific decode or
     prefill buckets without dropping the standard audit widths. On an EXL3 checkpoint each
     twin holding coded weights is replaced by its spelled forms, one per rate profile
-    (``…@b4``)."""
+    (``…@b4``). ``static_only`` is the deliberate exception: it accepts only the proven
+    decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
@@ -114,20 +205,13 @@ def capture_twin_graphs(
     # because these widths were missing here — MATCH 74/0/0 while serving cold-resolved.
     if any(width <= 0 for width in extra_widths):
         raise ValueError(f"serving twin widths must be positive, got {extra_widths}")
-    widths = [
-        1,
-        8,
+    buckets = _serving_twin_buckets(
         decode_bucket,
-        64,
-        192,
         prefill_bucket,
-        2048,
-        4096,
-        *extra_widths,
-    ]  # 1 = the EMMY_GEN_M1_TIER gemv twins
-    buckets: list[tuple[str, int | None]] = [(str(m), m) for m in sorted({w for w in widths if w})]
-    if symbolic:
-        buckets.append(("-sym", None))
+        extra_widths,
+        symbolic=symbolic,
+        static_only=static_only,
+    )
 
     signatures = _layer_signatures(trunk, text)
     layers = _profile_layers(trunk, text)

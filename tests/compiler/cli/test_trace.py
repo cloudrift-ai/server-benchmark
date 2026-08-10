@@ -94,10 +94,56 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         "decode_bucket": 64,
         "prefill_bucket": 512,
         "extra_widths": (1024,),
+        "static_only": False,
     }
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None and not record.origins for record in records)
+
+
+def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatch, tmp_path) -> None:
+    import emmy.serving.twins as twins
+
+    graphs = {"pre1@b2": trace_inline_code("torch.relu(torch.randn(8))")["graph"]}
+    captured = {}
+
+    def fake_capture(model, **kwargs):
+        captured.update(model=model, **kwargs)
+        return graphs
+
+    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    output = tmp_path / "static.yaml"
+    handle_trace(
+        _parser().parse_args(
+            [
+                "trace",
+                "org/model",
+                "--serving-twins",
+                "--static-only-release",
+                "--decode-bucket",
+                "1",
+                "--prefill-bucket",
+                "0",
+                "-o",
+                str(output),
+            ]
+        )
+    )
+
+    assert captured == {
+        "model": "org/model",
+        "decode_bucket": 1,
+        "prefill_bucket": 0,
+        "extra_widths": (),
+        "static_only": True,
+    }
+
+
+def test_trace_static_only_release_rejects_non_m1_scope() -> None:
+    args = _parser().parse_args(["trace", "org/model", "--serving-twins", "--static-only-release"])
+    with pytest.raises(SystemExit) as exc:
+        handle_trace(args)
+    assert exc.value.code == 2
 
 
 def test_trace_command_writes_only_golden_yaml(monkeypatch, tmp_path) -> None:

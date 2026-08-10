@@ -131,6 +131,9 @@ refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
 variant. It calls the same config/allocation-metadata-only `serving.twins.capture_twin_graphs` path as the in-model
 audit, combines every distinct pre/post/expert and coded rate-profile kernel into one document, and forces exact Loop
 IR targets. `--decode-bucket`, `--prefill-bucket`, and repeatable `--serving-width` add the deployed shape matrix.
+`--static-only-release` deliberately replaces that standard matrix with only M=1 and no symbolic graph, but requires
+the exact `--decode-bucket 1 --prefill-bucket 0` spelling and rejects extra widths. Release audits accept the same
+scope only after their pinned env proves the runtime and scheduler cannot reach anything wider.
 The explicit provenance lets a local pre-upload checkpoint produce rows that can later be promoted under the exact
 HF snapshot identity; the resulting file is consumed directly by `tune --golden-file` and verified by explicit
 `run --golden-file --golden NAME` calls.

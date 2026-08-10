@@ -1,0 +1,164 @@
+[
+  {
+    "label": "BF16",
+    "group": "reference",
+    "ppl": 48.15994585587911,
+    "release_metrics_version": "5-laguna-bidir-v1",
+    "ppl_token_count": 20470,
+    "ppl_total_count": 20470,
+    "ppl_nonfinite_count": 0,
+    "bpw_layer": 16.0,
+    "bpw_head": 16.0,
+    "vram_gb": 218.40142822265625
+  },
+  {
+    "label": "Noise floor",
+    "group": "noise_floor",
+    "ppl": 48.576242309986604,
+    "kld": 0.18223707377910614,
+    "kld_median": 0.06257376819849014,
+    "kld_p10": 0.003156262682750821,
+    "kld_p25": 0.017238464206457138,
+    "kld_p75": 0.17569848895072937,
+    "kld_p90": 0.42610934376716614,
+    "kld_buckets": [
+      {
+        "conf_range": [
+          0.0,
+          0.25
+        ],
+        "share": 0.08588866889476776,
+        "mean": 0.37467944622039795,
+        "median": 0.20963644981384277
+      },
+      {
+        "conf_range": [
+          0.25,
+          0.5
+        ],
+        "share": 0.2962890565395355,
+        "mean": 0.23855222761631012,
+        "median": 0.11911183595657349
+      },
+      {
+        "conf_range": [
+          0.5,
+          0.75
+        ],
+        "share": 0.248779296875,
+        "mean": 0.1975904107093811,
+        "median": 0.07626103609800339
+      },
+      {
+        "conf_range": [
+          0.75,
+          0.95
+        ],
+        "share": 0.20180663466453552,
+        "mean": 0.12007270753383636,
+        "median": 0.03393155336380005
+      },
+      {
+        "conf_range": [
+          0.95,
+          1.0
+        ],
+        "share": 0.167236328125,
+        "mean": 0.035805948078632355,
+        "median": 0.002588248811662197
+      }
+    ],
+    "release_metrics_version": "5-laguna-bidir-v1",
+    "ppl_token_count": 20470,
+    "ppl_total_count": 20470,
+    "ppl_nonfinite_count": 0,
+    "kld_token_count": 20480,
+    "kld_total_count": 20480,
+    "kld_nonfinite_count": 0,
+    "reverse_kld_token_count": 20480,
+    "reverse_kld_total_count": 20480,
+    "reverse_kld_nonfinite_count": 0,
+    "reverse_kld": 0.18393874168395996,
+    "top1_agreement_count": 16817,
+    "top1_total_count": 20480,
+    "top1_agreement": 0.821142578125,
+    "bpw_layer": 16.0,
+    "bpw_head": 16.0,
+    "vram_gb": 218.40142822265625
+  },
+  {
+    "label": "EXL3 1.98 bpw",
+    "group": "EXL3",
+    "ppl": 67.08948675060374,
+    "kld": 0.5950700044631958,
+    "kld_median": 0.318787157535553,
+    "kld_p10": 0.015763044357299805,
+    "kld_p25": 0.09226372838020325,
+    "kld_p75": 0.7371599674224854,
+    "kld_p90": 1.4466252326965332,
+    "kld_buckets": [
+      {
+        "conf_range": [
+          0.0,
+          0.25
+        ],
+        "share": 0.08588866889476776,
+        "mean": 1.0995575189590454,
+        "median": 0.8736008405685425
+      },
+      {
+        "conf_range": [
+          0.25,
+          0.5
+        ],
+        "share": 0.2962890565395355,
+        "mean": 0.8018081784248352,
+        "median": 0.5481599569320679
+      },
+      {
+        "conf_range": [
+          0.5,
+          0.75
+        ],
+        "share": 0.248779296875,
+        "mean": 0.6338852047920227,
+        "median": 0.3652968108654022
+      },
+      {
+        "conf_range": [
+          0.75,
+          0.95
+        ],
+        "share": 0.20180663466453552,
+        "mean": 0.4245643615722656,
+        "median": 0.148345947265625
+      },
+      {
+        "conf_range": [
+          0.95,
+          1.0
+        ],
+        "share": 0.167236328125,
+        "mean": 0.1177143082022667,
+        "median": 0.012120172381401062
+      }
+    ],
+    "release_metrics_version": "5-laguna-bidir-v1",
+    "ppl_token_count": 20470,
+    "ppl_total_count": 20470,
+    "ppl_nonfinite_count": 0,
+    "kld_token_count": 20480,
+    "kld_total_count": 20480,
+    "kld_nonfinite_count": 0,
+    "reverse_kld_token_count": 20480,
+    "reverse_kld_total_count": 20480,
+    "reverse_kld_nonfinite_count": 0,
+    "reverse_kld": 0.5823022127151489,
+    "top1_agreement_count": 14087,
+    "top1_total_count": 20480,
+    "top1_agreement": 0.687841796875,
+    "bpw_layer": 2.0061055771052607,
+    "bpw_head": 6.00536787591013,
+    "vram_gb": 27.52704841271043
+  }
+]

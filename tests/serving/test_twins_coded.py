@@ -193,7 +193,8 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     plan = plan_from_graph(lowered)
     assert plan.launches and plan.weights
     assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
-    assert {f"{weight}_decoded_tile_step" for weight in ("w_gate", "w_up", "w_down")} <= set(plan.weights)
+    assert not {f"{weight}_decoded_tile_step" for weight in ("w_gate", "w_up", "w_down")} & set(plan.weights)
+    assert {f"{weight}_decoded_shift_step" for weight in ("w_gate", "w_up", "w_down")} <= set(plan.weights)
     factors = [spec.generated for spec in plan.weights.values() if spec.generated is not None and spec.generated[1] == (128, 128)]
     assert len(factors) == 3 and {factor[0] for factor in factors} == {"<f4"}
     from emmy.serving.gen_runner import _bind_plan_constants

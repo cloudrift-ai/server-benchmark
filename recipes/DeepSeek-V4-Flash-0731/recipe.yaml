@@ -1,5 +1,5 @@
-# Qualified on 16x V100 SXM3 32GB with the exact public checkpoint revision and a native-SM70
-# 1Cat image. The tag was validated locally; Docker Hub publication is pending namespace access.
+# Qualified on 16x V100 SXM3 32GB with a zero-JIT request cache and CUDA graphs. The tag was validated locally;
+# image publication requires approval and cloudriftai namespace access.
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
   task: generate
@@ -10,9 +10,9 @@ engine:
     pipeline_parallel_size: 2
     gpu_memory_utilization: 0.80
     context_length: 4096
-    max_concurrent_requests: 1
+    max_concurrent_requests: 8
     vllm:
-      image: "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608"
+      image: "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree"
       extra_args: >-
         --revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062
         --dtype half
@@ -20,14 +20,12 @@ engine:
         --kv-cache-dtype fp8
         --block-size 256
         --max-num-batched-tokens 4096
-        --enforce-eager
         --tokenizer-mode deepseek_v4
         --reasoning-parser deepseek_v4
         --tool-call-parser deepseek_v4
         --enable-auto-tool-choice
       extra_env:
         VLLM_SM70_FLASH_ATTN_V100: "1"
-        VLLM_SM70_FLASH_V100_0DOT3_COMPILE_GRAPH: "1"
         VLLM_SM70_FP8_TURBOMIND: "1"
         VLLM_SM70_MXFP4_TURBOMIND: "1"
         VLLM_SM70_QUANT_BACKEND: "turbomind"

@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "status": "serving_qualified_image_publication_blocked",
+  "schema_version": 2,
+  "status": "serving_qualified_image_publication_pending_approval",
   "measured_at": "2026-08-10",
   "host": "riftuser@185.165.50.61",
   "hardware": {
@@ -15,137 +15,248 @@
   },
   "image": {
     "source_revision": "d76126608155c334df7c2fb9b75096f879624859",
-    "local_tag": "onecat-dsv4-0731:d76126608",
-    "publication_tag": "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608",
-    "id": "sha256:d08f373fe9558def8b6ab6589b4d80e5b021caa3e1e40687192305a49c5b11c6",
-    "local_manifest_digest": "sha256:d08f373fe9558def8b6ab6589b4d80e5b021caa3e1e40687192305a49c5b11c6",
-    "size_bytes": 10968934035,
-    "entrypoint": [
-      "vllm",
-      "serve"
-    ],
-    "docker_hub_push": {
-      "attempted": true,
-      "succeeded": false,
-      "error": "insufficient_scope: authorization failed"
+    "source_id": "sha256:d08f373fe9558def8b6ab6589b4d80e5b021caa3e1e40687192305a49c5b11c6",
+    "local_tag": "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree",
+    "publication_tag": "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree",
+    "id": "sha256:970b8c418271d443337acadb5bc7f7b3a7d470d4bb033c79c0cd8e666a4b8a78",
+    "size_bytes": 10974534120,
+    "publication": {
+      "attempted": false,
+      "approval_required": true,
+      "credential_caveat": "An earlier source-image push failed with insufficient_scope for cloudriftai."
     }
   },
   "configuration": {
     "tensor_parallel_size": 8,
     "pipeline_parallel_size": 2,
+    "pipeline_layer_split": [
+      22,
+      21
+    ],
     "dtype": "half",
     "kv_cache_dtype": "fp8",
     "block_size": 256,
     "context_length": 4096,
-    "max_concurrent_requests": 1,
+    "max_concurrent_requests": 8,
     "max_num_batched_tokens": 4096,
     "gpu_memory_utilization": 0.8,
-    "enforce_eager": true
+    "enforce_eager": false,
+    "cuda_graph_mode": "FULL_AND_PIECEWISE",
+    "cuda_graph_capture_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "sm70_attention_context_bucket": 2048
   },
-  "startup": {
-    "health_http_status": 200,
-    "checkpoint_load_seconds": 19.83,
-    "engine_profile_kv_cache_warmup_seconds": 84.05,
-    "pipeline_layer_split": [
-      22,
-      21
+  "request_time_kernels": {
+    "requested_count": 16,
+    "requested": [
+      "_compressed_slot_mapping_kernel",
+      "_build_prefill_chunk_metadata_kernel",
+      "_build_c128a_topk_metadata_kernel",
+      "_compute_prefill_metadata_kernel",
+      "_sm70_qnorm_rope_kernel",
+      "quantize_and_insert_k_kernel",
+      "_dequantize_and_gather_k_kernel",
+      "_combine_topk_swa_indices_kernel",
+      "_sm70_sparse_gathered_kernel",
+      "_save_partial_states_kernel",
+      "_fused_kv_compress_norm_rope_insert_indexer_attn",
+      "_fill_short_context_topk_indices",
+      "_fused_kv_compress_norm_rope_insert_sparse_attn",
+      "_compute_swa_indices_and_lens_kernel",
+      "_sm70_sparse_paged_fp8_kernel",
+      "_compute_global_topk_indices_and_lens_kernel"
+    ],
+    "additional_observed": [
+      "_weighted_query_kernel",
+      "_dequant_contiguous_index_k_kernel",
+      "_dequant_paged_index_k_kernel"
+    ],
+    "observed_count": 19,
+    "cuda_graph_generated": [
+      "triton_poi_fused_add_bitwise_and_bitwise_not_bitwise_or_ge_lt_mul_sub_0",
+      "_sm70_sparse_paged_fp8_kernel specialization"
     ]
   },
-  "routes": [
-    "SM70 FP16 Triton sparse MLA with packed FP8 KV",
-    "fp8_ds_mla KV cache",
-    "FP8 Lightning Indexer cache",
-    "SM70 FP8 TurboMind W8A16 dense",
-    "SM70 FP8 TurboMind grouped BMM",
-    "SM70 FP8 dense gated-SiLU single-layout",
-    "SM70 TurboMind MXFP4 MoE"
-  ],
-  "accuracy": [
-    {
-      "probe": "capital_of_france",
-      "expected": "Paris",
-      "actual": "Paris",
-      "finish_reason": "stop",
-      "passed": true
+  "baked_caches": {
+    "triton": {
+      "file_count": 796,
+      "manifest_sha256": "9b2d72f0a91dad55a0f924e2fae59446e4daef8e319c6b0bdf4856e1f446e992"
     },
-    {
-      "probe": "small_arithmetic",
-      "expected": "4",
-      "actual": "4",
-      "finish_reason": "stop",
-      "passed": true
+    "tilelang": {
+      "file_count": 64,
+      "manifest_sha256": "bf45091a4e4398fb6d4df9fc3bc24ee2dcbda3c0edf44b2d1f5acc0d78693805"
     },
-    {
-      "probe": "terse_17_times_19",
-      "expected": "323",
-      "actual": "323",
-      "finish_reason": "stop",
-      "passed": true
-    },
-    {
-      "probe": "exact_ok",
-      "expected": "OK",
-      "actual": "OK",
-      "finish_reason": "stop",
-      "passed": true
-    },
-    {
-      "probe": "multiply_tool_call",
-      "expected": {
-        "name": "multiply",
-        "arguments": {
-          "a": 17,
-          "b": 19
-        }
-      },
-      "actual": {
-        "name": "multiply",
-        "arguments": {
-          "a": 17,
-          "b": 19
-        }
+    "tilelang_jit": {
+      "file_count": 0,
+      "manifest_sha256": "abcfa6a9d4df344d1781bc2560b5e4cdcae08b39ed303063535e7e1e926a304a"
+    }
+  },
+  "zero_jit_gate": {
+    "passed": true,
+    "fresh_container": true,
+    "compiler_guards": [
+      "bundled ptxas",
+      "CUDA toolkit ptxas",
+      "nvcc",
+      "ninja"
+    ],
+    "compiler_invocations": 0,
+    "workload_cells": 16,
+    "prompt_output_lengths": [
+      [
+        32,
+        8
+      ],
+      [
+        256,
+        32
+      ],
+      [
+        1024,
+        64
+      ],
+      [
+        3072,
+        128
+      ]
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "tool_call": {
+      "name": "multiply",
+      "arguments": {
+        "a": 17,
+        "b": 19
       },
       "finish_reason": "tool_calls",
       "passed": true
     },
-    {
-      "probe": "direct_17_times_19_repeated",
-      "expected_prefix": "17*19 = 323",
-      "actual_prefix": "17*19 = 323",
-      "finish_reason": "length",
-      "passed": true,
-      "caveat": "Correct answer followed by repeated malformed reasoning markup; byte-identical on repeat."
-    }
-  ],
-  "short_benchmark": {
-    "kind": "serialized_fixed_prompt_smoke",
-    "prompt_tokens_per_request": 12,
-    "completion_tokens_per_request": 2,
-    "http_statuses": [
-      200,
-      200,
-      200
-    ],
-    "latency_seconds": [
-      0.879345,
-      1.160202,
-      1.152433
-    ],
-    "mean_latency_seconds": 1.063993
+    "cache_manifests_unchanged": true,
+    "monitor_caveat": "The Triton JIT monitor also reports disk-cache loads because it wraps JITFunction.compile()."
   },
-  "caveats": {
-    "first_request_triton_jit_kernel_count": 16,
-    "response_formatting": "One direct arithmetic prompt repeated malformed reasoning markup after the answer.",
-    "benchmark_scope": "Bounded health and determinism probe; not representative throughput."
+  "benchmark": {
+    "method": "one simultaneous batch per cell, random exact token lengths, temperature 0, ignore EOS, seed 731",
+    "columns": [
+      "prompt_tokens",
+      "output_tokens",
+      "concurrency",
+      "duration_s",
+      "mean_ttft_ms",
+      "mean_tpot_ms",
+      "output_tokens_per_s",
+      "total_tokens_per_s"
+    ],
+    "eager": [
+      [32, 8, 1, 2.697665, 409.338866, 326.778478, 2.965527, 14.827636],
+      [32, 8, 2, 4.214249, 916.923704, 416.148565, 3.796644, 18.983218],
+      [32, 8, 4, 6.968412, 1371.107267, 686.433665, 4.592151, 22.960756],
+      [32, 8, 8, 7.351869, 1607.476201, 759.706092, 8.705269, 43.526347],
+      [256, 32, 1, 12.368179, 874.742432, 370.721709, 2.587285, 23.285563],
+      [256, 32, 2, 12.685482, 1159.53116, 371.769904, 5.045137, 45.406236],
+      [256, 32, 4, 13.904083, 2003.843311, 377.872993, 9.205929, 82.853362],
+      [256, 32, 8, 13.634606, 2716.661092, 349.510534, 18.775754, 168.981787],
+      [1024, 64, 1, 24.048575, 1181.817344, 362.949465, 2.66128, 45.241766],
+      [1024, 64, 2, 22.320597, 1737.518769, 326.695323, 5.734614, 97.488431],
+      [1024, 64, 4, 24.415341, 3256.319232, 333.259699, 10.485211, 178.248589],
+      [1024, 64, 8, 25.525222, 3668.655895, 345.387414, 20.058591, 340.996054],
+      [3072, 128, 1, 47.888966, 2877.651049, 354.412154, 2.67285, 66.821238],
+      [3072, 128, 2, 49.075383, 2331.713947, 366.709916, 5.216465, 130.411616],
+      [3072, 128, 4, 49.859553, 4233.978467, 355.235237, 10.268845, 256.721116],
+      [3072, 128, 8, 53.53319, 6127.420417, 368.349404, 19.12832, 478.208005]
+    ],
+    "cuda_graph": [
+      [32, 8, 1, 1.102508, 417.228501, 97.754729, 7.256183, 36.280914],
+      [32, 8, 2, 1.417518, 566.888938, 121.339772, 11.287334, 56.43667],
+      [32, 8, 4, 2.227832, 1016.911279, 162.05589, 14.363743, 71.818715],
+      [32, 8, 8, 2.938468, 1429.686449, 207.780365, 21.780053, 108.900266],
+      [256, 32, 1, 4.094707, 874.935968, 103.828402, 7.814968, 70.334708],
+      [256, 32, 2, 5.059879, 1138.370126, 126.461441, 12.648524, 113.836715],
+      [256, 32, 4, 6.81208, 1806.809339, 158.923355, 18.79015, 169.111346],
+      [256, 32, 8, 9.0878, 2518.793527, 210.051396, 28.169635, 253.526711],
+      [1024, 64, 1, 8.68548, 1190.328988, 118.961162, 7.36862, 125.266532],
+      [1024, 64, 2, 11.163407, 1537.395443, 150.897226, 11.466033, 194.922564],
+      [1024, 64, 4, 14.197867, 3074.806355, 175.201305, 18.030877, 306.524914],
+      [1024, 64, 8, 17.598241, 3528.515501, 222.338447, 29.093817, 494.594897],
+      [3072, 128, 1, 20.871684, 2850.896845, 141.888246, 6.132711, 153.317765],
+      [3072, 128, 2, 24.309391, 2348.932513, 172.35482, 10.53091, 263.27274],
+      [3072, 128, 4, 29.925347, 4100.823046, 201.751606, 17.109242, 427.731046],
+      [3072, 128, 8, 39.505764, 5919.264712, 262.103587, 25.920268, 648.006704]
+    ],
+    "cuda_graph_tpot_speedup_range": [
+      1.41,
+      4.24
+    ]
+  },
+  "cuda_graph_qualification": {
+    "passed": true,
+    "remove_enforce_eager": true,
+    "capture_seconds": 8,
+    "graph_pool_gib_per_rank": {
+      "pp0": 0.6,
+      "pp1": 0.58
+    },
+    "tool_call_passed": true
+  },
+  "profile": {
+    "workload": "1024 prompt tokens, 16 output tokens, concurrency 1/2/4/8",
+    "trace_count": 17,
+    "trace_bytes_approx": 2100000000,
+    "representative_tp_rank": 0,
+    "kernel_time_columns_ms": [
+      "active",
+      "tp_collectives",
+      "pp_collectives",
+      "attention",
+      "kv",
+      "moe",
+      "other"
+    ],
+    "stages": {
+      "pp0": [64602.067507, 49334.011167, 1.214419, 2327.521717, 81.956493, 6614.819851, 1836.811819],
+      "pp1": [31654.696564, 15927.290045, 2175.250001, 2404.651006, 81.815066, 6437.704689, 1825.467455]
+    },
+    "microbatch_columns": [
+      "concurrency",
+      "pp0_active_ms",
+      "pp0_span_ms",
+      "pp0_utilization",
+      "pp0_bubble_fraction",
+      "pp1_active_ms",
+      "pp1_span_ms",
+      "pp1_utilization",
+      "pp1_bubble_fraction"
+    ],
+    "microbatches": [
+      [1, 12615.3, 17746.3, 0.711, 0.289, 6363.4, 14495.6, 0.439, 0.561],
+      [2, 13384.3, 13776.0, 0.972, 0.028, 6520.3, 12643.2, 0.516, 0.484],
+      [4, 16511.2, 16911.0, 0.976, 0.024, 7821.8, 15308.6, 0.511, 0.489],
+      [8, 19504.8, 19903.0, 0.98, 0.02, 9223.7, 17785.3, 0.519, 0.481]
+    ]
+  },
+  "pipeline_split_decision": {
+    "changed": false,
+    "retained": [
+      22,
+      21
+    ],
+    "reason": "Attention, KV, MoE, and other compute are balanced; the measured gap is collective and PP wait time."
   },
   "artifacts": {
-    "remote_directory": "/home/riftuser/onecat-dsv4-0731/artifacts",
-    "raw_accuracy_glob": "accuracy-*.json",
-    "raw_benchmark_glob": "benchmark-short-*",
-    "server_log": "server-attempt3.log",
-    "route_audit": "route-audit.log",
-    "jit_audit": "error-jit-audit.log",
-    "docker_push_log": "docker-push.log"
+    "remote_root": "/home/riftuser/onecat-dsv4-0731/optimization",
+    "eager_zero_jit": "zero-jit-full-matrix",
+    "cuda_graph_benchmark": "graph-trial",
+    "final_cuda_graph_zero_jit": "zero-jit-graph-final",
+    "profile": "profile-eager",
+    "profile_summary": "profile-eager/profile-summary-v2.json"
   },
   "teardown": {
     "task_containers": 0,

@@ -641,8 +641,8 @@ def test_checkpoint_quant_digest_separates_rungs_a_config_hash_cannot(tmp_path):
     assert checkpoint_quant_summary(plain) == "unquantized"
 
 
-def test_checkpoint_quant_format_names_only_owned_formats(tmp_path):
-    from emmy.compiler.loader.quant import checkpoint_quant_format
+def test_is_exl3_checkpoint_is_the_narrow_coded_trunk_decision(tmp_path):
+    from emmy.compiler.loader.quant import is_exl3_checkpoint
 
     exl3 = _rung(tmp_path / "exl3", 1.98)
     fp8 = tmp_path / "fp8"
@@ -652,10 +652,10 @@ def test_checkpoint_quant_format_names_only_owned_formats(tmp_path):
     (fp8 / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "fp8"}}))
     (plain / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "gptq"}}))
 
-    assert checkpoint_quant_format(exl3) == "exl3"
-    assert checkpoint_quant_format(fp8) == "fp8"
-    assert checkpoint_quant_format(plain) is None
-    assert checkpoint_quant_format(tmp_path / "absent") is None
+    assert is_exl3_checkpoint(exl3)
+    assert not is_exl3_checkpoint(fp8)
+    assert not is_exl3_checkpoint(plain)
+    assert not is_exl3_checkpoint(tmp_path / "absent")
 
 
 # ===================================================================

@@ -685,13 +685,13 @@ class EmmyGenRunner:
             # EXL3 keeps the TRUNK coded too — the whole point of a 2-bit checkpoint is that the
             # decoded trunk (GLM-4.5-Air: ~14 GiB) does not fit beside the experts. fp8 trunks
             # stay on the decoded lane, where the values are what the fp8 expert path expects.
-            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_format, checkpoint_quant_summary
+            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary, is_exl3_checkpoint
             from emmy.compiler.trace.huggingface import load_quantized_split
 
             # EXL3's generic reconstruction algebra is dissolved before lowering, so its
             # checkpoint sources can stay coded on the card. FP8 keeps the existing
             # value-trunk lane; only its routed experts are input-spelled today.
-            coded_trunk = checkpoint_quant_format(qdir) == "exl3"
+            coded_trunk = is_exl3_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.

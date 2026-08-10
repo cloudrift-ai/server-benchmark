@@ -296,9 +296,12 @@ def strip_width(extent: int, width: int) -> str | None:
 def fragment_epilogue(epilogue: Body) -> str | None:
     """The mma store folds the projection into a ``RegEpilogue`` whose leaf ``Load``\\ s are
     evaluated independently per fragment element, so a load whose INDEX reads a name an earlier
-    epilogue stmt defined (an embedding gather) cannot be threaded through it."""
+    epilogue stmt defined (an embedding gather) cannot be threaded through it. A nested output
+    sweep is likewise not a per-fragment straight-line epilogue."""
     defs: set[str] = set()
     for s in epilogue:
+        if isinstance(s, Loop):
+            return "warp TILE: the projection epilogue contains an output sweep — use the scalar tier"
         if isinstance(s, Load) and {v for e in s.index for v in e.free_vars()} & defs:
             return (
                 "warp TILE: the projection epilogue gathers through another epilogue load (a "

@@ -1,103 +1,89 @@
 # DeepSeek-V4-Flash-0731 compiler qualification on 16× V100 SXM3 32 GB
 
-Status: reduced-scope compiler qualification. The exact checkpoint cannot be served on the requested Volta system.
-The committed working golden covers an FP16 architecture twin of layer 0; it is not whole-model or serving evidence.
+Status: partial compiler experiment. The architecture-wide trace exposed an output-live aliased mutation that Graph IR
+cannot represent. The partial YAML preserves valid tuning and O3 evidence, but it is not a complete model golden and
+must not be copied into `emmy/compiler/pipeline/search/goldens/`.
 
 ## Scope
 
 - Date: 2026-08-09
 - Model: `deepseek-ai/DeepSeek-V4-Flash-0731`
 - Immutable model revision: `7872f01b1d1fe23eabc4c98b48bffcef5a386062`
-- Emmy base revision: `4438c84a2027b87091fefd43f5cbbd5ea2bb4a5f`, plus the trace and lowering fixes in this PR
-- Hardware: 16× `Tesla V100-SXM3-32GB`, compute capability 7.0, driver 580.173.02
-- Trace profile: layer 0, static sequence length 512, FP16 architecture twin, target `sm_70`
+- Hardware: 16× `Tesla V100-SXM3-32GB`, compute capability 7.0, 512 GB aggregate GPU memory
+- Trace profile: static sequence length 512, FP16 architecture and shape coverage, target `sm_70`
 
-The [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) and exact configuration describe a
-304.18B-parameter, 43-layer model with a 1,048,576-token native context. The checkpoint combines BF16 residual
-tensors, block-scaled FP8 attention and shared weights with E8M0 scales, and packed FP4 experts stored in I8 carriers.
+These artifacts use architecture-derived FP16 representative constants. They do not establish checkpoint
+representation support, whole-model numerical parity, serving eligibility, or end-to-end serving performance.
 
-## Serving and checkpoint gates
+## Architecture inventory and semantic boundary
 
-The live qualification used all 16 GPUs and the official
-`vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404` image at digest
-`sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8`. vLLM resolved the architecture and
-checkpoint format, then stopped before weight loading:
+The inventory covered every config-derived decoder path and model seam:
 
-```text
-The quantization method deepseek_v4_fp8 is not supported for the current GPU.
-Minimum capability: 75. Current capability: 70.
-```
+- layers 0–1: sliding HCA plus hash MoE
+- layer 2: CSA ratio 4 plus hash MoE
+- odd layers 3–41: HCA ratio 128 plus learned MoE
+- even layers 4–42: CSA ratio 4 plus learned MoE
+- DSpark remapped layers 43–45
+- token embedding, initial HC broadcast, final HC collapse, final norm, LM head, DSpark combine, Markov embedding,
+  Markov bias, and confidence seams
 
-Emmy also fails checkpoint-representation eligibility. Its serving loader does not preserve the checkpoint's E8M0
-scale encoding or packed-I8 FP4 experts. Dequantizing 304.18B parameters to FP16 would require more than 608 GB for
-weights alone, exceeding the supplied 512 GB aggregate GPU memory before runtime state and KV cache.
+The alias-aware run initially produced 575 raw entries, deduplicated to 69 exact single-Loop targets. All 69 lowered
+and their 96 unique CUDA sources compiled for `sm_70` at O1. That is syntactic compiler evidence only: a later exact
+semantic audit showed that target 34 had been generated from an unsound functional interpretation of `aten.copy_`.
 
-No serving recipe, serving experiment, canonical golden, checkpoint accuracy claim, or Docker image is therefore
-published for this model and hardware.
-
-## Trace coverage
-
-Layer 0 traced successfully: 547 FX nodes became 928 stable Torch IR nodes and 77 distinct kernel targets. The
-self-contained result is [layer0_tuned_working_golden.yaml](layer0_tuned_working_golden.yaml).
-
-A representative compressed-attention layer 10 advanced through the constructor, functional copy, no-grad export,
-and ternary masked-fill fixes in this PR. It then reached the architecture-specific sparse indexer and stopped at the
-remaining multi-output boundary:
+The layer-2 compressor creates `new_kv`/`new_gate` bases, writes through destination slices with `copy_`, then reads
+the original bases. Graph IR can model consumers of the returned `copy_` value, but it has no functional slice update
+that reassembles the base. The tracer now fails closed at the first observable mutation:
 
 ```text
-NotImplementedError: no tracer mapping for multi-output op aten.topk (2 outputs)
+NotImplementedError: aten.copy_ observable alias mutation is unsupported: later live node 'slice_15' reads original
+destination alias 'new_zeros'; functional copy_ is supported only through its returned value
 ```
 
-The working golden consequently covers only layer 0. Treating it as model-wide coverage would omit the compressed
-attention path used by the checkpoint.
+The sparse `topk`/`scatter_` branch investigated earlier is output-dead and remains correctly pruned. The live
+`copy_` mutation above is the honest first unsupported operation. A focused regression proves the failure, while the
+existing direct-return functional `copy_`, mutation-through-returned-view liveness, and dead-local-mutation cases
+remain green.
 
 ## Equal-budget tuning
 
-Both final arms used all 16 GPUs, seed 731, two candidates per target, patience 2, separate empty databases and online
-priors, separate cubin caches, and `-Xcicc -O1` ranking compiles.
+Both final arms started cold from isolated databases, online priors, cubin caches, and output directories. They used
+all 16 homogeneous GPUs, seed 731, two candidates per target, patience 2, and O1 ranking compiles. A prior
+contention-affected attempt was excluded before these final arms.
 
-| Arm | Successful rows | `bench_fail` rows | O1 search winners | Prior benches | Post-fit Spearman |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| MCTS-only | 90 | 107 | 31 | 325 | +0.71 |
-| Model proposals plus MCTS | 128 | 75 | 50 | 334 | +0.57 |
+| Arm | Targets complete | Successful rows | `bench_fail` rows | Ranked winners |
+| --- | ---: | ---: | ---: | ---: |
+| MCTS-only | 69/69 | 129 | 109 | 21 |
+| Model proposals plus MCTS | 69/69 | 97 | 120 | 21 |
 
-The hybrid arm reserved six model-proposal rows. Four were `bench_fail`, two were `pin_unmatched`, and none won. Its
-50 winners came from search. O1 measurements rank candidates only and are not deployable performance measurements.
-The committed working golden is the MCTS-only artifact, retaining all 77 targets and its 31 ranking winners.
+The exact-Loop finalist selector chose 29 searched schedules and 40 measured greedy fallbacks. These results were
+measured against the then-current 69-target inventory and remain useful continuation evidence, but the semantic trace
+failure prevents model-wide promotion.
 
-## Compiler fixes found by the run
+## Deployable O3 evidence
 
-Three independently reproduced lowering defects now have focused regressions:
+Every O3 attempt used one exact single-Loop program, explicit realized knobs, production O3 compiler flags, 10 warmup
+iterations, 100 measured iterations, and accuracy comparison with its Loop reference. Once the semantic trace issue
+invalidated complete coverage, three remaining long-running task shards were stopped to free the serving host.
 
-- Scalar per-cell projection copied an output-sweep coordinate as per-cell SSA and emitted undefined component axes.
-- A zero-axis projection root reassembled its boundary store outside the output sweep.
-- An inapplicable graph-wide warp pin left a mixed-dtype linear term unmapped; materialization then omitted its free
-  axes. The scalar fallback now binds both axes, and the exact source compiles with
-  `nvcc --cubin -arch=sm_70 --use_fast_math -Xcicc -O1`.
+- source inventory: 69 targets
+- semantically invalid target excluded: 1 (index 34, `k_softmax_mean_reduce_342131.4dea1e03816a`)
+- partial inventory: 68 targets
+- O3 and Loop-reference verified: 62 targets, all with captured execution and positive timings
+- verified source split: 27 searched schedules and 35 greedy fallbacks
+- O3 watchdog failure: 1 target (index 31, runtime exceeded the 2-second per-launch guard)
+- explicitly unfinished: 5 targets (indices 33, 49, 57, 63, and 65)
 
-The original arm measurements were preserved. Fix validation happened after each fair arm completed.
+The 62 verified rows contain no accuracy error. Their reference backend is the Loop interpreter, so their timing
+ratios are kernel qualification evidence rather than an end-to-end model speedup claim. Failed and unfinished targets
+have no fabricated timing or knob record.
 
-## O3 accuracy and latency
+## Artifacts
 
-Finalists were rebuilt with production O3 flags using a fresh cubin cache, 10 warmup iterations, 100 measured
-iterations, exact realized-knob checks, and the eager accuracy gate.
+- `partial_exact_loop.yaml`: 68-target non-canonical continuation artifact; 62 targets have explicit verified O3 rows
+- `partial_o3_report.json`: per-target source, knobs, timings, accuracy status, failure, and unfinished records
+- `partial_coverage.json`: decoder/seam inventory, semantic exclusion, and exact partial counts
+- `evidence_hashes.json`: SHA-256 hashes of the source inventory, selection, shard records, and partial outputs
 
-| Finalist | Eager | Greedy Emmy | Pinned finalist | Decision |
-| --- | ---: | ---: | ---: | --- |
-| Fused div-reduce, run 1 | 56.073844 µs | 1.361582 µs | 1.378462 µs | Accuracy pass; retain evidence |
-| Fused div-reduce, run 2 | 56.326978 µs | 1.362930 µs | 1.377694 µs | Accuracy pass; retain evidence |
-| Attention linear | 145.408005 µs | 861.184001 µs | 1451.007962 µs | Accuracy pass; reject schedule |
-| RMS mean | unavailable | 22.072889 µs | 151.259422 µs | Reject; random input is outside eager domain |
-
-The fused div-reduce median is 56.200411 µs eager, 1.362256 µs greedy Emmy, and 1.378078 µs pinned. Both pinned runs
-reported `status: ok`, exact realized knobs, empty integrity flags, and no accuracy, NaN, or wrong-answer warning.
-
-No row is promoted to the canonical V100 golden: the exact checkpoint representation and compressed layers remain
-ineligible, and one representative kernel's O3 evidence cannot establish deployable model coverage.
-
-## Limitations
-
-- The working golden is architecture-derived FP16 layer-0 evidence at sequence length 512.
-- Compressed-attention layers remain blocked at multi-output `aten.topk` tracing.
-- The checkpoint cannot run on SM70 through the tested mainstream or Emmy serving paths.
-- Whole-model accuracy and serving performance were not measured and are not implied by the kernel results above.
+No canonical V100 golden is produced. Complete promotion requires a semantically correct functional slice-update/base
+reassembly representation, a fresh full trace, and deployable O3/reference measurements for every resulting target.

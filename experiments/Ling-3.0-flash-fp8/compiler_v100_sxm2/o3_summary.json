@@ -1,0 +1,202 @@
+{
+  "compile_lane": "nvcc default -O3",
+  "gpu": "NVIDIA Tesla V100 SXM2 16GB",
+  "warmup": 5,
+  "iterations": 20,
+  "seed": 0,
+  "representative_targets": 3,
+  "pinned_measurements": 10,
+  "all_pins_status_ok_and_flags_empty": true,
+  "results": [
+    {
+      "role": "largest_hybrid_improvement",
+      "name": "k_linear_7c6322.b237d1a068da",
+      "o1_mcts_us": 459.26401019096375,
+      "o1_hybrid_us": 5.203027016407734,
+      "runs": [
+        {
+          "repetition": 1,
+          "eager_us": 44.03200000524521,
+          "pinned": [
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": ""
+              },
+              "latency_us": 508.41599702835083,
+              "status": "ok",
+              "flags": []
+            },
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "coop",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": "t128"
+              },
+              "latency_us": 4.214153839991643,
+              "status": "ok",
+              "flags": []
+            }
+          ]
+        },
+        {
+          "repetition": 2,
+          "eager_us": 45.05600035190582,
+          "pinned": [
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": ""
+              },
+              "latency_us": 535.040020942688,
+              "status": "ok",
+              "flags": []
+            },
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "coop",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": "t128"
+              },
+              "latency_us": 4.429167537597948,
+              "status": "ok",
+              "flags": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "largest_hybrid_regression",
+      "name": "k_reshape_slice_unsqueeze_reduce_3dd609.8957447a079e",
+      "o1_mcts_us": 7.313194114770463,
+      "o1_hybrid_us": 23.722667069662187,
+      "runs": [
+        {
+          "repetition": 1,
+          "eager_us": 109.07252116869854,
+          "pinned": [
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": ""
+              },
+              "latency_us": 9.005457998436187,
+              "status": "ok",
+              "flags": []
+            },
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "coop",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": "t128"
+              },
+              "latency_us": 19.53631405736886,
+              "status": "ok",
+              "flags": []
+            }
+          ]
+        },
+        {
+          "repetition": 2,
+          "eager_us": 106.83402274418803,
+          "pinned": [
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": ""
+              },
+              "latency_us": 9.062878439359576,
+              "status": "ok",
+              "flags": []
+            },
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "coop",
+                "STAGE": "",
+                "TILE": "",
+                "WORK": "t128"
+              },
+              "latency_us": 19.47607830458996,
+              "status": "ok",
+              "flags": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "same_pin_control",
+      "name": "k_repeat_interleave_3_dup_reshape_87_dup_sum_31_pointwise.416bc42dfb06",
+      "o1_mcts_us": 1.5391851101841194,
+      "o1_hybrid_us": 1.539150751554049,
+      "runs": [
+        {
+          "repetition": 1,
+          "eager_us": null,
+          "pinned": [
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "",
+                "STAGE": "",
+                "TILE": "f4",
+                "WORK": ""
+              },
+              "latency_us": 1.7407999749769245,
+              "status": "ok",
+              "flags": []
+            }
+          ]
+        },
+        {
+          "repetition": 2,
+          "eager_us": null,
+          "pinned": [
+            {
+              "pin": {
+                "LOOPIFY": "0",
+                "RASTER": "",
+                "REDUCE": "",
+                "STAGE": "",
+                "TILE": "f4",
+                "WORK": ""
+              },
+              "latency_us": 1.7431313644983721,
+              "status": "ok",
+              "flags": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

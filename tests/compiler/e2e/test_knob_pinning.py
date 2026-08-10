@@ -355,6 +355,37 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     assert "a4__c" not in source
 
 
+def test_output_sweep_declines_the_warp_tier(monkeypatch):
+    """A matmul whose boundary store adds an output sweep cannot use the straight-line MMA
+    fragment epilogue. Unpinned scheduling must keep the bound scalar fallback."""
+    import torch
+    import torch.nn as nn
+
+    monkeypatch.setenv("EMMY_LOOPIFY", "0")
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class StackMatmul(nn.Module):
+        def forward(self, x, a, b):
+            return torch.stack((-x, torch.matmul(a, b)[..., :2]), dim=-1)
+
+    graph = trace_module(
+        StackMatmul(),
+        (
+            torch.randn(1, 4, 8, 2),
+            torch.randn(1, 4, 8, 8),
+            torch.randn(1, 4, 8, 8),
+        ),
+    )
+    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
+    source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
+    assert "for (int a4 = 0; a4 < 2; a4++)" in source
+    assert "mma.sync" not in source
+
+
 def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
     """A graph-wide warp pin can be inapplicable to a mixed-dtype sibling. The scheduler then
     leaves that term unmapped; scalar materialization must restore its free-axis grid rather than

@@ -115,8 +115,18 @@ def trace_module_with_constants(
         exported = torch.export.export(module, example_inputs, **export_kwargs)
     gm = exported.graph_module
     t1 = time.monotonic()
-    n_fx_nodes = sum(1 for _ in gm.graph.nodes)
-    logger.info("torch.export.export() done in %.1fs (%d FX nodes)", t1 - t0, n_fx_nodes)
+    fx_nodes = list(gm.graph.nodes)
+    live_fx_nodes = _output_live_fx_nodes(fx_nodes)
+    # Runtime inputs are the exported call signature, even when this implementation does not
+    # read one of them. Dynamic-shape declarations and callers still bind them by name.
+    retained_fx_nodes = live_fx_nodes | {node for node in fx_nodes if node.op == "placeholder"}
+    dead_count = len(fx_nodes) - len(retained_fx_nodes)
+    logger.info(
+        "torch.export.export() done in %.1fs (%d retained FX nodes%s)",
+        t1 - t0,
+        len(retained_fx_nodes),
+        f", pruned {dead_count} dead" if dead_count else "",
+    )
 
     sym_rename = _sym_rename_map(exported, dynamic_shapes) if dynamic_shapes else {}
 
@@ -128,7 +138,9 @@ def trace_module_with_constants(
     const_targets.update(sig.inputs_to_parameters)
     const_targets.update(sig.inputs_to_buffers)
 
-    for fx_node in gm.graph.nodes:
+    for fx_node in fx_nodes:
+        if fx_node not in retained_fx_nodes:
+            continue
         if fx_node.op == "placeholder":
             _handle_placeholder(g, fx_node, node_map, module, const_targets, sym_rename=sym_rename)
         elif fx_node.op == "call_function":
@@ -140,6 +152,132 @@ def trace_module_with_constants(
     logger.info("FX→Graph IR walk done in %.1fs (%d IR nodes)", time.monotonic() - t1, len(g.nodes))
 
     return g, const_targets
+
+
+def _output_live_fx_nodes(nodes: list[Any]) -> set[Any]:
+    """Return the FX nodes observable through the exported value outputs.
+
+    ``torch.export`` can retain a dead local mutation because FX's stock dead-code pass treats
+    every mutating ATen schema as impure. Reverse reachability removes that branch, but must also
+    retain a mutation through a view of a returned tensor. ATen schema aliases identify the
+    storage roots that a write can affect; unsupported observable writes therefore still fail in
+    the walker instead of being silently pruned.
+    """
+    outputs = [node for node in nodes if node.op == "output"]
+    if len(outputs) != 1:
+        raise ValueError(f"torch export graph must contain exactly one output node, got {len(outputs)}")
+
+    alias_roots = _fx_alias_roots(nodes)
+
+    live: set[Any] = set()
+
+    def add_ancestors(seeds) -> None:
+        stack = list(seeds)
+        while stack:
+            node = stack.pop()
+            if node in live:
+                continue
+            live.add(node)
+            stack.extend(node.all_input_nodes)
+
+    add_ancestors(outputs)
+    while True:
+        live_roots = set().union(*(alias_roots[node] for node in live))
+        writes = [
+            node
+            for node in nodes
+            if node not in live and any(alias_roots.get(target, {target}) & live_roots for target in _written_fx_nodes(node))
+        ]
+        if not writes:
+            break
+        add_ancestors(writes)
+    return live
+
+
+def _fx_alias_roots(nodes: list[Any]) -> dict[Any, set[Any]]:
+    """Return each FX value's storage roots from ATen schema alias labels."""
+    alias_roots: dict[Any, set[Any]] = {}
+    for node in nodes:
+        roots = {node}
+        schema = getattr(node.target, "_schema", None) if node.op == "call_function" else None
+        if schema is not None:
+            argument_roots: dict[str, set[Any]] = {}
+            for index, argument in enumerate(schema.arguments):
+                alias = argument.alias_info
+                if alias is None:
+                    continue
+                value = node.kwargs.get(argument.name, node.args[index] if index < len(node.args) else None)
+                for source in _fx_nodes_in_arg(value):
+                    for label in alias.before_set | alias.after_set:
+                        argument_roots.setdefault(label, set()).update(alias_roots.get(source, {source}))
+            returned_roots: set[Any] = set()
+            for result in schema.returns:
+                alias = result.alias_info
+                if alias is None:
+                    continue
+                for label in alias.before_set | alias.after_set:
+                    returned_roots.update(argument_roots.get(label, ()))
+            if returned_roots:
+                roots = returned_roots
+        alias_roots[node] = roots
+    return alias_roots
+
+
+def _observable_alias_read_after_write(node) -> tuple[Any, Any] | None:
+    """Find a live later read of written storage that bypasses ``node``'s returned value."""
+    nodes = list(node.graph.nodes)
+    aliases = _fx_alias_roots(nodes)
+    written = _written_fx_nodes(node)
+    if not written:
+        return None
+    written_roots = set().union(*(aliases.get(target, {target}) for target in written))
+
+    returned_descendants = {node}
+    stack = list(node.users)
+    while stack:
+        descendant = stack.pop()
+        if descendant in returned_descendants:
+            continue
+        returned_descendants.add(descendant)
+        stack.extend(descendant.users)
+
+    live = _output_live_fx_nodes(nodes)
+    position = nodes.index(node)
+    for later in nodes[position + 1 :]:
+        if later not in live:
+            continue
+        for source in later.all_input_nodes:
+            if source in returned_descendants:
+                continue
+            if aliases.get(source, {source}) & written_roots:
+                return later, source
+    return None
+
+
+def _fx_nodes_in_arg(value) -> list[Any]:
+    if hasattr(value, "all_input_nodes") and hasattr(value, "op"):
+        return [value]
+    if isinstance(value, (tuple, list)):
+        return [node for item in value for node in _fx_nodes_in_arg(item)]
+    if isinstance(value, dict):
+        return [node for item in value.values() for node in _fx_nodes_in_arg(item)]
+    return []
+
+
+def _written_fx_nodes(node) -> list[Any]:
+    if node.op != "call_function":
+        return []
+    schema = getattr(node.target, "_schema", None)
+    if schema is None:
+        return []
+    written: list[Any] = []
+    for index, argument in enumerate(schema.arguments):
+        alias = argument.alias_info
+        if alias is None or not alias.is_write:
+            continue
+        value = node.kwargs.get(argument.name, node.args[index] if index < len(node.args) else None)
+        written.extend(_fx_nodes_in_arg(value))
+    return written
 
 
 def _expand_dynamic_shapes(module, example_inputs: tuple, kwargs: dict, user_dynamic: dict) -> dict:
@@ -799,12 +937,20 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         node_map[name] = broadcast_to(g, scalar_id, shape).id
         return
 
-    # ``copy_(dest, src)`` returns destination-shaped source values. Torch export makes the
-    # mutation functional at this node, so the old destination values are not an operand; only
-    # source broadcasting and the destination dtype remain semantically observable.
+    # ``copy_(dest, src)`` returns destination-shaped source values. That return is functional
+    # only while every later live read follows it; a read through the original destination alias
+    # would require reassembling the mutated base, which Graph IR cannot yet represent.
     if op_name == "copy_":
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
+        observable = _observable_alias_read_after_write(fx_node)
+        if observable is not None:
+            later, source = observable
+            raise NotImplementedError(
+                "aten.copy_ observable alias mutation is unsupported: "
+                f"later live node {later.name!r} reads original destination alias {source.name!r}; "
+                "functional copy_ is supported only through its returned value"
+            )
         if len(input_ids) < 2:
             raise ValueError("aten.copy_ requires resolved destination and source tensors")
         copied = broadcast_to(g, input_ids[1], shape)

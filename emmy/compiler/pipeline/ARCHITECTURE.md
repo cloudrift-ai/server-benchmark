@@ -1111,14 +1111,22 @@ dimensions as integers to keep the persistence surface small.
 may contain an inventory entry (no knobs or timings), a proposed candidate (knobs but no timings), or a verified
 candidate (knobs plus paired positive Emmy/reference measurements). `load_golden_file` and `dump_golden_file` validate
 this format without mutating the parsed entries; dumping refuses to replace an existing file unless its caller opts
-in explicitly. A traced inventory embeds stable frontend Torch IR and selects targets by origin IDs or a Loop IR fallback. Repository
-promotion is stricter: every entry must carry an explicit knobs mapping
+in explicitly. A traced inventory embeds stable frontend Torch IR and selects targets by origin IDs or a Loop IR
+fallback. Repository promotion is stricter: every entry must carry an explicit knobs mapping
 (possibly empty for a verified forkless anchor) plus both positive finite timings. Missing, one-sided, zero, NaN,
 and infinite measurements are rejected before they can become trusted deploy evidence. A working entry may also
 carry an opaque `ranking` mapping
 for fast-compile feedback (`status`, `latency_us`, compile flags, and measured knobs); it does not change the entry's
 state and is rejected by repository validation because only
 deployable-regime timings belong in trusted goldens.
+
+The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
+Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
+post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
+compiled, repeated O3 `emmy-greedy` row as its positive reference only when the candidate and reference execute on
+identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
+this checks compiler-configuration parity rather than independent framework correctness. The original frontend
+program remains embedded for provenance, while the selected standalone target is what both configurations execute.
 
 The three historical RTX 4080 rows without measurements were dropped during migration; repository validation has no
 provisional exception.

@@ -351,6 +351,25 @@ def test_trace_copy_uses_broadcast_source_values_and_matches_eager():
     np.testing.assert_array_equal(got, Copy()(template, source).numpy())
 
 
+def test_trace_rejects_copy_mutation_observed_through_original_base():
+    """A functional copy result cannot stand in for a later read through its mutated base."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class CopyThenReadBase(nn.Module):
+        def forward(self, template, source):
+            base = template.new_zeros((1, 3, 8, 16))
+            base[:, 1:].copy_(source)
+            return base + 1.0
+
+    template = torch.randn(1, 3, 4, 32)
+    source = torch.randn(1, 2, 8, 16)
+    with pytest.raises(NotImplementedError, match="observable alias mutation.*original destination"):
+        trace_module(CopyThenReadBase(), (template, source))
+
+
 def test_trace_exports_in_inference_grad_mode_without_higher_order_wrapper():
     """A ``no_grad`` helper must export its tensor ops directly, not as a tuple-valued HOP."""
     import numpy as np
@@ -867,6 +886,58 @@ def test_trace_rejects_unmapped_multi_output_op():
 
     with pytest.raises(NotImplementedError, match="topk"):
         trace_module(TopK(), (torch.randn(2, 8),))
+
+
+def test_trace_prunes_output_dead_local_mutation_before_unsupported_op_mapping():
+    """An unobserved local scatter branch is not part of the exported function value.
+
+    FX retains the mutating branch as impure, but Emmy must walk only output-live nodes. A live
+    topk remains covered by ``test_trace_rejects_unmapped_multi_output_op`` above.
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class DeadTopKScatter(nn.Module):
+        def forward(self, x):
+            _values, indices = torch.topk(x, x.shape[-1], dim=-1)
+            local = x.new_full((x.shape[0], x.shape[1] + 1), float("-inf"))
+            local.scatter_(-1, indices, 0.0)
+            local[..., : x.shape[-1]]  # noqa: B018 — deliberately dead descendant
+            return x * 2.0
+
+    module = DeadTopKScatter()
+    x = torch.randn(2, 8)
+    exported = torch.export.export(module, (x,))
+    assert any("aten.topk" in str(node.target) for node in exported.graph_module.graph.nodes)
+
+    graph = trace_module(module, (x,))
+    assert all("topk" not in node.id for node in graph.nodes.values())
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_allclose(next(iter(result.outputs.values())), (x * 2.0).numpy(), rtol=1e-6, atol=1e-6)
+
+
+def test_trace_keeps_a_mutation_through_a_view_of_the_output():
+    """A no-user write remains observable when its receiver aliases the returned tensor."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import _output_live_fx_nodes
+
+    class ReturnedAliasMutation(nn.Module):
+        def forward(self, x):
+            shifted = torch.roll(x, -1, 1)
+            shifted[:, -1].fill_(0)
+            return shifted
+
+    exported = torch.export.export(ReturnedAliasMutation(), (torch.arange(9).reshape(1, 9),))
+    nodes = list(exported.graph_module.graph.nodes)
+    live = _output_live_fx_nodes(nodes)
+    assert {node.name for node in live} == {"x", "roll", "select", "fill_", "output"}
 
 
 def test_trace_chunk_rejects_invalid_tuple_index():

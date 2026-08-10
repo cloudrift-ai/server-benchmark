@@ -31,10 +31,13 @@ Two deterministic chat checks passed: the model answered the capital-of-France p
 OpenAI `tool_calls` field. The reasoning parser also logged that automatic reasoning-token initialization failed, so
 structured tool calls and parsed reasoning are not qualified by this result.
 
-The Emmy layer trace is architecture-derived rather than a serving path. The exact checkpoint's per-expert FP8
-tensors do not map to Emmy's packed traced expert inputs, the baked Emmy runner is single-GPU, and a full-checkpoint
-layer parity run exceeded 622 GiB of host RAM before reaching GPU execution. Serving accuracy is therefore established
-only for the measured 1Cat fallback above.
+The [compiler golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml)
+covers all 48 decoder layers plus token embedding, final normalization, and the output head. It is
+architecture-derived rather than an Emmy serving path: the exact checkpoint's per-expert FP8 tensors do not map to
+Emmy's packed traced expert inputs, the baked Emmy runner is single-GPU, and a full-checkpoint layer parity run
+exceeded 622 GiB of host RAM before reaching GPU execution. Serving accuracy is therefore established only for the
+measured 1Cat fallback above; compiler scope and per-target O3 evidence are documented in the
+[compiler experiment](../../experiments/Laguna-S-2.1-FP8/compiler_v100_sxm3/RESULTS.md).
 
 ## One-request benchmark
 

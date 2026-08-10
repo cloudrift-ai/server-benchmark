@@ -1,76 +1,89 @@
 # Laguna-S-2.1-FP8 compiler qualification on 8× V100 SXM3 32 GB
 
-Status: tuned working golden produced for an FP16 architecture twin of layer 1. It is not a canonical golden or
-checkpoint-accuracy claim. The independently qualified 1Cat serving fallback is documented in
+Status: complete model-level compiler inventory and canonical V100 SM70 golden. The compiler result is
+architecture-derived rather than checkpoint-accuracy or serving evidence. The independent 1Cat serving qualification
+is documented in
 [`recipes/Laguna-S-2.1-FP8/RESULTS.md`](../../../recipes/Laguna-S-2.1-FP8/RESULTS.md).
 
-## Scope
+## Exact scope
 
 - Date: 2026-08-09
 - Model: `poolside/Laguna-S-2.1-FP8`
-- Immutable revision: `9e0b8ba630080b0e6f20a7b43294a9f2232fd247`
+- Immutable model revision: `9e0b8ba630080b0e6f20a7b43294a9f2232fd247`
 - Emmy base revision: `4438c84a2027b87091fefd43f5cbbd5ea2bb4a5f`, plus this PR's trace and lowering fixes
 - Hardware: 8× `Tesla V100-SXM3-32GB`, compute capability 7.0, driver 580.159.03
-- Trace profile: layer 1, static sequence length 512, FP16 architecture twin, target `sm_70`
+- Trace profile: decoder, embedding, and final-normalization sequence length 512; single-token output head; FP16
+  architecture twins; target `sm_70`
 
-The exact checkpoint contains 117,561,977,600 parameters and occupies 131,264,796,160 bytes (122.25 GiB). Routed
-expert matrices in sparse layers 1 through 43 use dynamic-activation, 128×128 block-scaled E4M3 FP8; attention,
-shared experts, layer 0, and layers 44 through 47 remain BF16 or are excluded by the quantization configuration.
+Architecture-only tracing replaces each sparse MoE block with representative expert compute. Router sorting,
+dispatch, combination, and the serving engine's FP8 storage decoder remain host/runtime orchestration. The inventory
+therefore covers every compiler-visible model path and layout, but does not claim to reproduce the checkpoint's
+256-expert routing or preserve its on-disk FP8 representation in Emmy serving.
 
-## Trace and eligibility
+## Complete model coverage
 
-The first exact trace exposed a rotary-label mismatch: Laguna attention stores `layer_idx` but not `layer_type`,
-while its rotary module is keyed by the labels in `config.layer_types`. The compiler now derives that label and
-passes the one `(cos, sin)` tuple the block consumes. The fixed run traced 121 FX nodes into 171 Graph IR nodes and
-emitted 20 distinct kernel targets in
-[layer1_tuned_working_golden.yaml](layer1_tuned_working_golden.yaml).
+The exact checkpoint has five layer/checkpoint-layout classes and three distinct stable Torch programs:
 
-Laguna also exposed two omitted block semantics in the serving split wrappers. The post-attention program now
-retains the softplus per-head `g_proj` gate, and routed expert results receive `routed_scaling_factor=2.5` before the
-unscaled shared expert is added. Focused dense and MoE parity tests cover both changes.
+| Layers | Attention | MLP | Routed expert storage | Representative |
+| --- | --- | --- | --- | ---: |
+| 0 | full | dense | BF16 dense MLP | 0 |
+| 1-43 except multiples of four | sliding | sparse | E4M3 FP8 plus FP32 scales | 1 |
+| 4, 8, ..., 40 | full | sparse | E4M3 FP8 plus FP32 scales | 4 |
+| 44 | full | sparse | BF16 routed experts | 44 |
+| 45-47 | sliding | sparse | BF16 routed experts | 45 |
 
-The working golden remains architecture-derived. The checkpoint stores separate per-expert projection and inverse
-scale tensors, while the trace exposes packed expert inputs; Emmy does not preserve that checkpoint representation.
-The baked Emmy serving runner is also single-GPU. Actual TP8 serving was therefore qualified independently through
-the pinned 1Cat engine.
+The final four layers are sparse, not dense. Separate layer-44 and layer-45 traces have exactly the same target sets
+as layers 4 and 1, respectively. Across the five decoder representatives, 91 emitted targets deduplicate by stable
+target identity to 33 unique targets. Independent token-embedding, final-normalization, and output-head traces add
+three targets, making the complete model inventory 36.
 
-## Equal-budget tuning
+[coverage.json](coverage.json) maps every layer 0-47 and all three non-layer seams to its representative and target
+list.
 
-Both arms began from the same 20-target inventory, empty arm-specific databases and online priors, empty cubin
-caches, seed 0, six candidates per target, patience 4, all eight GPUs, and `-Xcicc -O1` ranking compiles.
+## Canonical golden and validation
 
-| Arm | Successful rows | `bench_fail` rows | O1 search winners | Prior benches | Post-fit Spearman |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| MCTS-only | 187 | 26 | 10 | 399 | +0.88 |
-| Model proposals plus MCTS | 182 | 22 | 11 | 381 | +0.89 |
+- [v100_sm70_laguna_s_2_1_fp8.yaml](../../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml)
+  is the canonical repository golden. It contains 36 self-contained single-target Loop IR records, explicit realized
+  knobs, and paired positive deployable O3/reference measurements for every target; it has no O1 `ranking` metadata.
+- Every target reconstructed and lowered on the live SM70 compiler. The repeated O3 promotion run compiled and
+  executed all 36 candidates on the requested V100 system and checked their output against their measured reference.
+- Two targets used Torch eager as the independent accuracy and timing reference. The 34 targets whose self-contained
+  Loop IR has no independently callable Torch geometry used a separately compiled Emmy greedy configuration on
+  identical deterministic inputs; these rows prove compiler-configuration parity, not independent framework
+  correctness.
 
-The hybrid arm reserved three proposal rows. Every proposal was `pin_unmatched` and produced no CUDA kernel, so none
-was eligible for promotion. The committed working golden is the clean MCTS-only artifact: all 20 inventory targets
-plus ten O1 ranking winners. O1 costs rank search candidates only; they are not deployable performance evidence.
+The ordinary origin-based trace format exposed a durability defect: unique origin sets can reconstruct a larger
+multi-target cone, and three fused rotary/attention targets did not resolve at all after reload. The canonical file
+therefore uses the exact single-target Loop IR for all 36 rows. Each row lowered to exactly one CUDA kernel under its
+stored knobs; the full current trace program remains embedded for provenance.
 
-## O3 verification
+## Bounded continuation tuning
 
-The one extra hybrid search finalist, `k_linear_29ca57` at `WORK=t16x8,TILE=f2x4`, took 33.34 and 34.79 ms versus
-0.387–0.390 ms eager and 13.47–13.48 ms for greedy Emmy. The alternate `TILE=f1x8` took 23.26–23.28 ms. The sliced
-reference also exceeded the eager accuracy tolerance twice, so both schedules were rejected.
+The original layer-1 inventory had 18 unique kernel names; complete coverage added 15. Only those 15 new targets
+were tuned, with seed 0, six candidates per target, patience 4, all eight GPUs, and `-Xcicc -O1` ranking compiles.
 
-The remaining MCTS changes were rebuilt twice at O3 after the lowering fixes:
+The sweep completed 15/15 targets and recorded 111 prior benches, 58 successful and 11 `bench_fail` distinct perf
+rows, and post-warmup Spearman +0.77. Thirteen targets received a winner. The two large reductions without a winner
+were `k_linear_mean_reduce_4425bf.0b4325f6d5d4` and `k_linear_reduce_093b9a.731834dc09a4`; their candidates crossed
+the two-second GPU-run watchdog.
 
-| Kernel | MCTS winner, µs | Comparison, µs | Live eager, µs | Decision |
-| --- | ---: | ---: | ---: | --- |
-| Cast pointwise | `f2`: 12.573 / 12.567 | `f4`: 12.352 / 12.352 | unavailable | Reject; not best |
-| Linear pointwise | empty: 1.721 / 1.487 | `f4`: 1.399 / 1.388 | unavailable | Reject; not best |
-| Softplus pointwise | empty: 1.553 / 1.552 | `f4`: 1.536 / 1.535 | 26.867 / 26.864 | Reject; not best |
-| Transpose | `f2`: 26.652 / 26.652 | `f4`: 31.282 / 31.232 | 4.960 / 2.341 | Reject; slower than eager |
-
-No canonical V100 golden was changed: all proposed changes either failed to realize, lost the O3 comparison, were
-slower than eager, or failed accuracy.
+The final exact-target promotion lane submitted one explicit configuration for every row and compared it with a fresh
+greedy compile. Twenty-three submitted configurations were retained; thirteen regressed at O3 and fell back to the
+measured greedy configuration. Thus every canonical row is deployable O3 evidence; the O1 values remain search
+rankings only.
 
 ## Accuracy limit
 
-An exact full-checkpoint layer-1 parity run did not reach GPU execution. Host materialization grew to 653,208,220
-KiB RSS (93.1% of host RAM), leaving about 39 GiB and no swap; it was stopped before host OOM. The trace and working
-golden are valid operation-inventory evidence, but they do not imply checkpoint or whole-model Emmy accuracy.
+Exact full-checkpoint layer parity did not reach GPU execution. Host materialization reached 653,208,220 KiB RSS
+(93.1% of host RAM), leaving about 39 GiB and no swap, so it was stopped before host OOM. The canonical golden is
+valid architecture, lowering, per-target correctness, and tuning evidence; it does not imply checkpoint or
+whole-model Emmy accuracy. The successful 1Cat serving checks provide the separate end-to-end model accuracy result.
+
+## Artifact hashes
+
+- `v100_sm70_laguna_s_2_1_fp8.yaml`:
+  `656147e221b23983e41b75182cd198c1e9bfe37e7f6994688a12cf99ed999bab`
+- `coverage.json`: `9a373a1a39536164555a65ab69d1a6c92623b90324a34e4d5b299bedd91518e3`
 
 ## Sources
 

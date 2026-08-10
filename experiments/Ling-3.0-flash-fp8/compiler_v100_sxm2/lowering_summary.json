@@ -1,0 +1,11 @@
+{
+  "golden": "partial_traced_working.yaml",
+  "compute_capability": [
+    7,
+    0
+  ],
+  "targets": 341,
+  "lowered": 341,
+  "failures": [],
+  "elapsed_s": 34.96525017800741
+}

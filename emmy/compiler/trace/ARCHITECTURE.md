@@ -21,8 +21,11 @@ stamp the output tensor.
 
 Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
 constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
-`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. `masked_fill` lowers to ternary
-`where(mask, fill, self)` so an unselected infinity is preserved instead of becoming NaN through arithmetic selection.
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source only when later consumers use
+that returned value. A later live read through the original destination base or another view fails closed: Graph IR
+has no functional slice-update operation that can reassemble the mutated base, so mapping only the `copy_` result
+would silently preserve the old destination values. `masked_fill` lowers to ternary `where(mask, fill, self)` so an
+unselected infinity is preserved instead of becoming NaN through arithmetic selection.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
@@ -151,6 +154,13 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   operand may keep less, e.g. padding — it stays applied), which is what lets the lowering skip key blocks wholly
   outside the band and both reference backends (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
   `commands/compile.py` calls it after every model/layer `trace_module`.
+
+`torch.py` converts only FX nodes observable through the exported value output. FX's stock dead-code elimination
+deliberately retains every mutating ATen schema as impure, including mutations of local tensors whose values never
+escape the function. Reverse reachability removes those local branches; ATen schema aliases additionally retain a
+write through a view of a returned tensor. An unsupported operation on an observable path remains live and fails
+loudly, so the filter is not an operator-support fallback. Retaining a write does not itself functionalize storage:
+handlers such as `copy_` separately reject an observable read that bypasses the mutation node's returned value.
 
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —

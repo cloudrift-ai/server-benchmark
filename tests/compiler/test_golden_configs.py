@@ -31,10 +31,11 @@ def test_repository_golden_deserializes(path: Path) -> None:
     assert all("ir_version" not in program for program in document["programs"])
     for record in records:
         assert record.program.nodes
+        assert bool(record.origins) != (record.loop_wire is not None)
         if record.loop_wire is not None:
             assert record.target_program.nodes
+            assert record.target_program.outputs
         else:
-            assert record.origins
             assert set(record.origins) <= set(record.program.nodes)
 
 

@@ -1,0 +1,48 @@
+# Reproducible serving workload for the exact TP8xPP2 configuration qualified on 16x V100 SXM3 32GB.
+# The tag was validated locally; Docker Hub publication is pending cloudriftai namespace access.
+model:
+  huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    gpu_memory_utilization: 0.80
+    context_length: 4096
+    max_concurrent_requests: 1
+    vllm:
+      image: "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608"
+      extra_args: >-
+        --revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+        --dtype half
+        --distributed-executor-backend mp
+        --kv-cache-dtype fp8
+        --block-size 256
+        --max-num-batched-tokens 4096
+        --enforce-eager
+        --tokenizer-mode deepseek_v4
+        --reasoning-parser deepseek_v4
+        --tool-call-parser deepseek_v4
+        --enable-auto-tool-choice
+      extra_env:
+        VLLM_SM70_FLASH_ATTN_V100: "1"
+        VLLM_SM70_FLASH_V100_0DOT3_COMPILE_GRAPH: "1"
+        VLLM_SM70_FP8_TURBOMIND: "1"
+        VLLM_SM70_MXFP4_TURBOMIND: "1"
+        VLLM_SM70_QUANT_BACKEND: "turbomind"
+        VLLM_SM70_QWEN_GDN_DISABLE_FULL_FORWARD: "0"
+        VLLM_SM70_QWEN_GDN_FULL_FORWARD: "0"
+        VLLM_SM70_QWEN_GDN_SPEC_CORE_OP: "0"
+
+benchmark:
+  max_concurrency: 1
+  num_prompts: 3
+  random_input_len: 12
+  random_output_len: 2
+  seed: 731
+  temperature: 0.0
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 16

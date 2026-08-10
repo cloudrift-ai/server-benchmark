@@ -1,0 +1,23 @@
+{
+  "_tune/onboard-deepseek-v4-complete/exact-loop-inventory.yaml": "fa1062dab417f89a7c58acfadebb37f3f23ba0e4d740af1f0e611423d9f47c1a",
+  "_tune/onboard-deepseek-v4-complete/exact-loop-finalist-selection.json": "64dce2af40f8f81a66915e62eedb8a9803a366ba6dae8dda58e73f6465f0322a",
+  "_tune/onboard-deepseek-v4-complete/partial-exact-loop.yaml": "1801b3617a5d2d614e040e8f414c409be1797fee4608e31150845881bc8f3a2c",
+  "_tune/onboard-deepseek-v4-complete/partial-o3-report.json": "b030467a334689db80c77d40fdc2a91355e19ee5a62cbc8c1091290d25372cd0",
+  "_tune/onboard-deepseek-v4-complete/partial-coverage.json": "7e17e4b3c177b06aface67265b8f7afed13e8ed7ad49bf1121b4a7bf076f3a3c",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-0.json": "55e3f97edbbb5d5668cc592f9a37213895dafc5caf344dcc254f6a384b81c301",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-1.json": "608b9a6b061f9b81e934736785e3db4068ccb6522eb97cd77bd57aa35faab7e7",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-10.json": "7f5a4988f72b065fed31c4170dcb47f007eb39cacd6792cb5fcaf143cd1e1929",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-11.json": "037a54f90c40070eb1127192f85a851a7aa88b301c47c272b23bc83a095d7b6e",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-12.json": "bb9bc2bd1f3f5e0727e56716dedb805c2335647fccaeaacc920c1fbc7ef6b734",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-13.json": "af83da7b4575b896c703782df0a074c4a5f4ee6881c11401986e204696964e02",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-14.json": "741c0bf7add93aec9bb1ef2d2d8e4fe00d8f65b1f63d099065022be5ed4d888d",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-15.json": "2ed975ee6d3021ccab73417227e58c076e60cb81d0be7e3d3b8d684e98994e75",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-2.json": "f6ea93ee47d81865df79e0abb49aed374db6411ccb13cb563b6e26ac5465998a",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-3.json": "6d4b3b8d37b8b05355d496c5c87d23360629dbc952ab7a8db0ee2c91e204c22e",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-4.json": "6dfccc8af9df76b97a60d6b05de807dd6d9e2f2cd40a42158bf424e44fd73399",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-5.json": "fa0414a3a69eec43af7e7f61be7b614f77f2ef3350c90416f78895465781f058",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-6.json": "683468bc5784605a8f3521b867c4508cc66edd7bcd18c273c496e9c949ac59b2",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-7.json": "9a1e0548bcae5c83bd4d652eabb3e85267a4866146b258a3f447b99cd9c42800",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-8.json": "3dce14ddc6839c6a19f40d172e1f08d76ee8c3ddc5d8fc768facadf0341454f1",
+  "_tune/onboard-deepseek-v4-complete/o3-exact/shard-9.json": "ac7f2cb85b5101c04859da2026f1a383a7352872b446ea6b8470fd8021404368"
+}

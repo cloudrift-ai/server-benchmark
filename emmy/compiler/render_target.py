@@ -11,9 +11,9 @@ Distinct from :mod:`emmy.compiler.target`, which represents the
 — consulted by the tile-IR passes that gate on hardware features).
 :class:`RenderTarget` is purely about source-text emission shapes.
 
-Today the only implementation is :class:`CudaRenderTarget` in
-``emmy/compiler/backend/cuda/render_target.py``. Add a new
-implementation per backend that wants to share the Stmt renderer.
+The CUDA backend uses :class:`CudaRenderTarget`; the float32-reference
+Loop runner uses :class:`LoopRenderTarget`. Add one implementation per
+backend that shares the Stmt renderer.
 """
 
 from __future__ import annotations

@@ -334,6 +334,12 @@ def test_moe_fixed_slot_combine_matches_routed_oracle():
     runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
     assert runner.has_moe_fixed_slot, "the fixed-slot tier must build for the plain OLMoE expert shape"
     assert len(runner._expert_slots) == config.num_experts_per_tok
+    slots = runner._expert_slots
+    assert len({slot.program.slab_plan.slab.data.ptr for slot in slots}) == 1, "fixed slots must share scratch"
+    assert len({slot.program.arrays["x"].data.ptr for slot in slots}) == 1, "fixed slots must share their ordered input"
+    assert len({slot.program.arrays[slot.output_names[0]].data.ptr for slot in slots}) == len(slots), (
+        "each fixed slot must retain its own partial output"
+    )
 
     torch.manual_seed(1)
     for layer in (0, 1):

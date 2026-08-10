@@ -4,7 +4,7 @@ correctness are covered on GPU by ``test_gen_runner_gpu.py`` / ``test_vllm_plugi
 import numpy as np
 import pytest
 
-from emmy.serving.gen_runner import _pad_rows
+from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _static_decode_covers_capacity
 
 
 def test_pad_rows_pads_with_zeros_and_preserves_real_rows():
@@ -19,6 +19,48 @@ def test_pad_rows_pads_with_zeros_and_preserves_real_rows():
 def test_pad_rows_is_passthrough_when_already_at_bucket():
     a = np.ones((4, 8), dtype=np.float16)
     assert _pad_rows(a, 4) is a  # no copy when t == bucket
+
+
+@pytest.mark.parametrize(
+    ("max_tokens", "decode_bucket", "prefill_bucket", "expected"),
+    [
+        (None, 16, 0, False),
+        (1, 1, 0, True),
+        (1, 16, 0, True),
+        (16, 16, 0, True),
+        (17, 16, 0, False),
+        (1, 0, 0, False),
+        (1, 16, 32, False),
+    ],
+)
+def test_static_decode_capacity_proof(max_tokens, decode_bucket, prefill_bucket, expected):
+    assert _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) is expected
+
+
+def test_static_only_runner_counts_layers_without_symbolic_programs():
+    runner = EmmyGenRunner(
+        embed_weight=np.empty((1, 1), dtype=np.float16),
+        norm=None,
+        pre=[],
+        post=[],
+        attn_meta=[(1, 1, 1, 1.0), (1, 1, 1, 1.0)],
+        np_dtype=np.dtype("float16"),
+        pre_decode=[object(), object()],
+        post_decode=[object(), object()],
+        decode_bucket=1,
+        prefill_capacity=1,
+    )
+    assert runner.num_layers == 2
+    assert runner.prefill_capacity == 1
+    assert runner.has_device_decode
+    with pytest.raises(RuntimeError, match="token width 2 exceeds static-only capacity 1"):
+        runner.forward_layer_pre(0, np.zeros((2, 1), dtype=np.float16))
+    with pytest.raises(RuntimeError, match="token width 2 exceeds static-only capacity 1"):
+        runner.forward_layer_post(
+            0,
+            np.zeros((2, 1), dtype=np.float16),
+            np.zeros((2, 1), dtype=np.float16),
+        )
 
 
 @pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("fp8", False)])

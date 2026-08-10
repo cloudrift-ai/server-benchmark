@@ -12,13 +12,12 @@ import numpy as np
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SliceOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
     ElementwiseOp,
-    GatherOp,
     IndexMapOp,
     IndexSource,
     RangeOp,
@@ -86,14 +85,17 @@ class _Builder:
             output=Tensor(f"{self.prefix}_{suffix}", (stop,), "i32"),
         )
 
-    def strided(self, src: str, shape: tuple[int, ...], stride: int, offset: int, suffix: str) -> str:
-        last = len(shape) - 1
-        coords = tuple(placeholder(i) for i in range(last)) + (placeholder(last) * Literal(stride, "int") + Literal(offset, "int"),)
+    def indexed(self, src: str, shape: tuple[int, ...], coords: tuple, suffix: str) -> str:
         return self.graph.add_node(
             op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=coords),)),
             inputs=[src],
             output=Tensor(f"{self.prefix}_{suffix}", shape, self.node(src).output.dtype),
         )
+
+    def strided(self, src: str, shape: tuple[int, ...], stride: int, offset: int, suffix: str) -> str:
+        last = len(shape) - 1
+        coords = tuple(placeholder(i) for i in range(last)) + (placeholder(last) * Literal(stride, "int") + Literal(offset, "int"),)
+        return self.indexed(src, shape, coords, suffix)
 
 
 def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
@@ -108,29 +110,26 @@ def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
     odd_hi = b.binary("left_shift", odd, b.scalar("shift16", 16, "u32"), word_shape, "u32", "word_odd_hi")
     words = b.binary("bitwise_or", even, odd_hi, word_shape, "u32", "words")
 
-    step = b.range(256, "step")
-    ints = {v: b.scalar(f"i32_{v}", v, "i32") for v in (1, 16, 32, 48, K, 256 * K, 8 * K)}
-    step1 = b.binary("add", step, ints[1], (256,), "i32", "step1")
-    bit_end = b.binary("multiply", step1, ints[K], (256,), "i32", "bit_end")
-    raw_start = b.binary("subtract", bit_end, ints[16], (256,), "i32", "bit_start_raw")
-    start = b.binary("remainder", raw_start, ints[256 * K], (256,), "i32", "bit_start")
-    word_idx = b.binary("floor_divide", start, ints[32], (256,), "i32", "word_idx")
-    next_raw = b.binary("add", word_idx, ints[1], (256,), "i32", "next_word_raw")
-    next_idx = b.binary("remainder", next_raw, ints[8 * K], (256,), "i32", "next_word")
-    intra = b.binary("remainder", start, ints[32], (256,), "i32", "intra_word")
-    shift = b.binary("subtract", ints[48], intra, (256,), "i32", "window_shift")
-
     shape = (kt, nt, 256)
-    lo = b.graph.add_node(
-        op=GatherOp(axis=-1),
-        inputs=[words, word_idx],
-        output=Tensor(f"{b.prefix}_window_lo", shape, "u32"),
-    )
-    hi = b.graph.add_node(
-        op=GatherOp(axis=-1),
-        inputs=[words, next_idx],
-        output=Tensor(f"{b.prefix}_window_hi", shape, "u32"),
-    )
+    step = placeholder(2)
+    modulus = 256 * K
+    # Adding one full modulus before ``%`` makes the dividend non-negative
+    # for every K/step, so Python evaluation and rendered C agree exactly.
+    start = ((step + 1) * K - 16 + modulus) % modulus
+    word_idx = BinaryExpr("//", start, Literal(32, "int"))
+    next_idx = (word_idx + 1) % (8 * K)
+    leading = (placeholder(0), placeholder(1))
+    lo = b.indexed(words, shape, leading + (word_idx,), "window_lo")
+    hi = b.indexed(words, shape, leading + (next_idx,), "window_hi")
+
+    shift_step = b.range(256, "shift_step")
+    one = b.scalar("shift_one", 1, "i32")
+    start = b.binary("add", shift_step, one, (256,), "i32", "shift_step1")
+    start = b.binary("multiply", start, b.scalar("shift_k", K, "i32"), (256,), "i32", "shift_end")
+    start = b.binary("subtract", start, b.scalar("shift_bias", 16, "i32"), (256,), "i32", "shift_start")
+    start = b.binary("add", start, b.scalar("shift_modulus", modulus, "i32"), (256,), "i32", "shift_start_nonnegative")
+    intra = b.binary("remainder", start, b.scalar("shift_word", 32, "i32"), (256,), "i32", "shift_intra")
+    shift = b.binary("subtract", b.scalar("shift_top", 48, "i32"), intra, (256,), "i32", "window_shift")
     lo64, hi64 = b.cast(lo, "u64", "window_lo_u64"), b.cast(hi, "u64", "window_hi_u64")
     joined_hi = b.binary(
         "left_shift",
@@ -187,32 +186,15 @@ def _codebook(b: _Builder, windows: str, cb: int, shape: tuple[int, ...]) -> str
 
 def _tile_order(b: _Builder, values: str, kt: int, nt: int) -> str:
     """MMA-fragment step order → row-major tiled matrix, derived from coordinates."""
-    pos = b.range(256, "tile_pos")
-
-    def i(suffix: str, value: int) -> str:
-        return b.scalar(f"i32_{value}_{suffix}", value, "i32")
-
-    row = b.binary("floor_divide", pos, i("row", 16), (256,), "i32", "tile_row")
-    col = b.binary("remainder", pos, i("col", 16), (256,), "i32", "tile_col")
-    row8 = b.binary("remainder", row, i("row8", 8), (256,), "i32", "tile_row8")
-    lane_lo = b.binary("floor_divide", row8, i("lane2", 2), (256,), "i32", "tile_lane_lo")
-    col8 = b.binary("remainder", col, i("col8", 8), (256,), "i32", "tile_col8")
-    lane_hi = b.binary("multiply", col8, i("lane4", 4), (256,), "i32", "tile_lane_hi")
-    lane = b.binary("add", lane_hi, lane_lo, (256,), "i32", "tile_lane")
-    j0 = b.binary("bitwise_and", row, i("j0", 1), (256,), "i32", "tile_j0")
-    row3 = b.binary("right_shift", row, i("row3", 3), (256,), "i32", "tile_row3")
-    j1bit = b.binary("bitwise_and", row3, i("j1bit", 1), (256,), "i32", "tile_j1bit")
-    j1 = b.binary("multiply", j1bit, i("j1", 2), (256,), "i32", "tile_j1")
-    j2bit = b.binary("floor_divide", col, i("j2bit", 8), (256,), "i32", "tile_j2bit")
-    j2 = b.binary("multiply", j2bit, i("j2", 4), (256,), "i32", "tile_j2")
-    j = b.binary("add", b.binary("add", j0, j1, (256,), "i32", "tile_j01"), j2, (256,), "i32", "tile_j")
-    lane8 = b.binary("multiply", lane, i("lane8", 8), (256,), "i32", "tile_lane8")
-    step = b.binary("add", lane8, j, (256,), "i32", "tile_step")
-    ordered = b.graph.add_node(
-        op=GatherOp(axis=-1),
-        inputs=[values, step],
-        output=Tensor(f"{b.prefix}_tiles_row_major", (kt, nt, 256), "f16"),
-    )
+    pos = placeholder(2)
+    row, col = BinaryExpr("//", pos, Literal(16, "int")), pos % 16
+    lane = (col % 8) * 4 + BinaryExpr("//", row % 8, Literal(2, "int"))
+    j0 = BinaryExpr("&", row, Literal(1, "int"))
+    j1 = BinaryExpr("&", BinaryExpr(">>", row, Literal(3, "int")), Literal(1, "int")) * 2
+    j2 = BinaryExpr("//", col, Literal(8, "int")) * 4
+    step = lane * 8 + j0 + j1 + j2
+    shape = (kt, nt, 256)
+    ordered = b.indexed(values, shape, (placeholder(0), placeholder(1), step), "tiles_row_major")
     tiles = b.reshape(ordered, (kt, nt, 16, 16), "tiles")
     tiled = b.graph.add_node(
         op=TransposeOp(axes=(0, 2, 1, 3)),

@@ -454,16 +454,26 @@ def _bind_and_run_spelled(graph, checkpoint):
 def test_spell_trellis_builds_generic_cone(tmp_path):
     from emmy.compiler.ir.base import ConstantOp
     from emmy.compiler.ir.frontend.ir import MatmulOp
-    from emmy.compiler.ir.tensor.ir import BitcastOp, GatherOp, RangeOp
+    from emmy.compiler.ir.tensor.ir import BitcastOp, GatherOp, IndexMapOp, RangeOp
 
     g, _ref = _spelled_exl3(tmp_path)
     consts = {nn.op.source_path: nn for nn in g.nodes.values() if isinstance(nn.op, ConstantOp) and nn.op.source_path is not None}
     assert set(consts) == {"layer.trellis", "layer.suh", "layer.svh"}
     assert consts["layer.trellis"].output.dtype.name == "i16" and consts["layer.trellis"].op.source_dtype == "i16"
     assert consts["layer.suh"].output.dtype.name == "f16"
+    # Hadamard and the one per-step shift remain generic source-free range
+    # algebra. The three deterministic gather indices are address expressions,
+    # not materialized tensors.
     assert any(isinstance(nn.op, RangeOp) for nn in g.nodes.values())
     assert any(isinstance(nn.op, BitcastOp) for nn in g.nodes.values())
-    assert any(isinstance(nn.op, GatherOp) for nn in g.nodes.values())
+    assert not any(isinstance(nn.op, GatherOp) for nn in g.nodes.values())
+    direct_maps = {
+        nn.output.name: nn.op
+        for nn in g.nodes.values()
+        if isinstance(nn.op, IndexMapOp) and nn.output.name.endswith(("window_lo", "window_hi", "tiles_row_major"))
+    }
+    assert len(direct_maps) == 3
+    assert all(any(op in src.coord_map[-1].pretty() for op in ("%", "//")) for src in direct_maps.values() for src in src.sources)
     assert sum(isinstance(nn.op, MatmulOp) for nn in g.nodes.values()) == 2
     # Interface invariance: the cone's output is exactly what the trace promised.
     out = g.nodes[g.outputs[0]].output
@@ -520,7 +530,14 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     plan = plan_from_graph(lowered)
     assert plan.launches and plan.weights
     assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
-    assert "w_decoded_tile_step" in plan.weights
+    for table in ("bit_start", "word_idx", "next_word", "tile_step"):
+        assert f"w_decoded_{table}" not in plan.weights
+    shift_tables = {
+        name: spec
+        for name, spec in plan.weights.items()
+        if name.startswith("w_decoded_") and spec.generated is not None and spec.generated[1] == (256,)
+    }
+    assert set(shift_tables) == {"w_decoded_shift_step"}
     assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
     from emmy.serving.gen_runner import _bind_plan_constants
 
@@ -613,7 +630,8 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     feed = bind_constants(lowered, {})
     assert "y_factor32" in feed and np.any(feed["y_factor32"])
     decoded_constants = [name for name in feed if name.startswith("w_decoded_")]
-    assert len(decoded_constants) == 4 and all(np.any(feed[name]) for name in decoded_constants)
+    assert set(decoded_constants) == {"w_decoded_shift_step"}
+    assert all(np.any(feed[name]) for name in decoded_constants)
     feed.update(
         {
             "x": x,
@@ -751,7 +769,9 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     assert paths == {"layer.trellis", "layer.suh", "layer.svh"}
     assert all(weight.load_ops is not None for weight in plan.weights.values())
     assert any(weight.generated is not None for weight in plan.weights.values())
-    assert "p_w_tile_step" in plan.weights
+    for table in ("bit_start", "word_idx", "next_word", "tile_step"):
+        assert f"p_w_{table}" not in plan.weights
+    assert "p_w_shift_step" in plan.weights
     assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
 
     sources = _plan_sources(plan, torch.nn.Module(), np.float16, str(tmp_path), {})
@@ -762,7 +782,10 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
         np.testing.assert_array_equal(by_path[path], tensors[path].numpy())
 
 
-@pytest.mark.parametrize(("n", "k", "K", "cb"), [(256, 128, 2, 0), (192, 128, 3, 1), (128, 128, 6, 2)])
+@pytest.mark.parametrize(
+    ("n", "k", "K", "cb"),
+    [(128, 128, 1, 0), (256, 128, 2, 0), (192, 128, 3, 1), (128, 128, 6, 2)],
+)
 def test_loader_binds_spelled_trellis_weight_exact(tmp_path, n, k, K, cb):
     """spell → bind → generic evaluation reproduces the direct decode exactly (the fp16 decode cast to the
     traced f32 — one widening, bit-preserving). ``n=192`` exercises the encode padding slice;

@@ -148,12 +148,36 @@ def register_eval_command(subparsers) -> None:
         "--in-model",
         action="store_true",
         help="In-model drift audit: re-trace each model-tagged golden file's serving twins weight-free (config-only, "
-        "no checkpoint download) and verify every recorded golden still deploys in them — MATCH/DRIFT/GAP per fork, "
+        "plus quantization allocation metadata, no weight payloads) and verify every recorded golden still deploys in them — "
+        "MATCH/DRIFT/GAP per fork, "
         "uncovered warp-contraction forks flagged as MAJOR GAP. Exits non-zero on any DRIFT or compile failure.",
     )
     pg.add_argument(
         "--model",
         help="With --in-model: audit only this HF model id (default: every model tagged in the golden files).",
+    )
+    pg.add_argument(
+        "--strict-major-gaps",
+        action="store_true",
+        help=(
+            "With --in-model, make uncovered warp-contraction forks a non-zero-exit release failure. "
+            "The default in-model audit keeps GAPs informational."
+        ),
+    )
+    pg.add_argument(
+        "--serving-width",
+        action="append",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --in-model, include another configured release decode/prefill width. Repeatable.",
+    )
+    pg.add_argument(
+        "--checkpoint",
+        help=(
+            "With --in-model --model REPO@REVISION, trace this exact local/preseeded checkpoint while filtering "
+            "and reporting against the model provenance. Default: trace the model provenance from the Hub."
+        ),
     )
     pg.set_defaults(func=handle_eval_golden)
 
@@ -274,8 +298,22 @@ def handle_eval_golden(args) -> None:
         if args.features or args.kernel:
             logger.error("--in-model audits whole serving twins — --features / --kernel apply only to the per-config check")
             sys.exit(2)
-        _in_model_audit(args.model)
+        if any(width <= 0 for width in (args.serving_width or ())):
+            logger.error("--serving-width values must be positive")
+            sys.exit(2)
+        if args.checkpoint and not args.model:
+            logger.error("--checkpoint requires --model REPO@REVISION")
+            sys.exit(2)
+        _in_model_audit(
+            args.model,
+            strict_major_gaps=args.strict_major_gaps,
+            extra_widths=tuple(args.serving_width or ()),
+            checkpoint=args.checkpoint,
+        )
         return
+    if args.strict_major_gaps or args.serving_width or args.checkpoint:
+        logger.error("--strict-major-gaps / --serving-width / --checkpoint require --in-model")
+        sys.exit(2)
     require_source(args, {"golden"}, "eval golden compares against recorded golden knobs — --dataset db has no golden to compare to.")
     resolve_online_arg(args)
     if args.features:
@@ -286,7 +324,13 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
 
-def _in_model_audit(model_filter: str | None) -> None:
+def _in_model_audit(
+    model_filter: str | None,
+    *,
+    strict_major_gaps: bool = False,
+    extra_widths: tuple[int, ...] = (),
+    checkpoint: str | None = None,
+) -> None:
     """``eval golden --in-model`` — the in-model half of the golden reproduction check.
 
     The isolated check above compiles each golden's own snippet; this one re-traces the
@@ -310,8 +354,10 @@ def _in_model_audit(model_filter: str | None) -> None:
 
     failed = False
     for model in models:
-        print(f"=== {model}: tracing serving twins (weight-free) ===")
-        graphs = capture_twin_graphs(model)
+        source = checkpoint or model
+        local = f" from local checkpoint {checkpoint}" if checkpoint else ""
+        print(f"=== {model}: tracing serving twins{local} (weight-free) ===")
+        graphs = capture_twin_graphs(source, extra_widths=extra_widths)
         for gpu_name, cap in sorted({(g.gpu_name, tuple(g.compute_cap)) for g in GOLDEN_RECORDS if g.model == model}):
             res = audit_card(graphs, gpu_name, cap)
             counts = summarize(res)
@@ -325,16 +371,16 @@ def _in_model_audit(model_filter: str | None) -> None:
                         print(f"  DRIFT        {name} {r['node']}: {r['golden']} no longer realize(s)  [{r['key']}]")
                     elif r["verdict"] == COMPILE_FAIL:
                         print(f"  COMPILE_FAIL {name}: {r['error']}")
-            for key in sorted(major_gap_keys(res), key=str):
+            major_gaps = major_gap_keys(res)
+            for key in sorted(major_gaps, key=str):
                 print(f"  MAJOR GAP    uncovered warp-contraction fork: {key}")
-            if counts["DRIFT"] or counts[COMPILE_FAIL]:
+            if counts["DRIFT"] or counts[COMPILE_FAIL] or (strict_major_gaps and major_gaps):
                 failed = True
     if failed:
         logger.error(
-            "golden drift audit FAILED — a recorded golden no longer deploys in the serving graph (or a twin failed "
-            "to compile). Either a compiler graph/enumeration change re-keyed the fork (fix the drift or re-record "
-            "the golden), or a transformers bump changed the traced model — the twins track the installed modeling "
-            "code, exactly as serving does."
+            "golden serving audit FAILED — a recorded golden no longer deploys, a twin failed to compile, or "
+            "strict release coverage found an uncovered warp-contraction fork. Fix/re-record drift and close every "
+            "major release-width gap before warming; the twins track the installed modeling code exactly as serving does."
         )
         sys.exit(1)
 

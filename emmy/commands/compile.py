@@ -128,7 +128,7 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
 
 
 def add_golden_arg(parser) -> None:
-    """Register ``--golden NAME`` (shared by ``run`` / ``compile``)."""
+    """Register golden selection arguments shared by ``run`` / ``compile``."""
     parser.add_argument(
         "--golden",
         metavar="NAME",
@@ -139,15 +139,26 @@ def add_golden_arg(parser) -> None:
             "available names. Mutually exclusive with --code / positional input / --ir."
         ),
     )
+    parser.add_argument(
+        "--golden-file",
+        metavar="PATH",
+        help=(
+            "Resolve the required --golden NAME from this explicit working YAML instead of the "
+            "canonical live-GPU corpus. Replays the file's exact provenance or Loop IR target; "
+            "only verified rows are automatically A/B-pinned."
+        ),
+    )
 
 
 def resolve_golden_arg(args) -> None:
     """Resolve ``--golden NAME`` to its embedded stable Torch IR program.
 
-    Every measured sibling for the selected name is retained on
-    ``args.golden_configs`` for pinned A/B reporting.  No Python snippet is
-    generated and dynamic shapes need no CLI reconstruction: they are already in
-    the decoded program.
+    Canonical selection retains every measured sibling on ``args.golden_configs``
+    for pinned A/B reporting. ``--golden-file`` instead resolves only inside that
+    working document and retains only its VERIFIED siblings as automatic pins;
+    inventory/proposal siblings still select the target graph. No Python snippet
+    is generated and dynamic shapes need no CLI reconstruction: they are already
+    in the decoded program.
 
     ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
     golden name first, else a name **substring** — so the identifier used to inspect
@@ -157,10 +168,13 @@ def resolve_golden_arg(args) -> None:
     Exits 2 on an unknown name (listing the available names) or a conflict with
     ``--code`` / positional input / ``--ir`` / ``--dynamic``."""
     name = getattr(args, "golden", None)
+    golden_file = getattr(args, "golden_file", None)
     args.golden_configs = []
+    if golden_file and not name:
+        logger.error("--golden-file requires --golden NAME")
+        sys.exit(2)
     if not name:
         return
-    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu
 
     # ``compile``'s ``--ir`` is an output STAGE (a key of _IR_STAGES), not an input
     # file — only ``run``'s ``--ir`` (a JSON path) conflicts with ``--golden``.
@@ -173,19 +187,36 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    # Scope to the live card's golden(s): on a multi-GPU goldens dir, A/B-ing the
-    # deployed pick against another card's recorded config (e.g. a PRO 6000 golden
-    # on a 5090 — both cc 12.0) is meaningless. For run/compile, cards with no
-    # recorded golden of their own fall back to the full set (the seed / transfer
-    # flow — the pinned config re-benches live); tune rejects that fallback before
-    # calling here (golden tuning targets the live card only). Exact name first
-    # (the fast, unambiguous path), else a name substring.
-    records = goldens_for_live_gpu()
-    matches = [record for record in records if record.name == name] or [record for record in records if name in record.name]
-    if not matches:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
+    from emmy.compiler.pipeline.search.golden import (
+        GOLDEN_RECORDS,
+        GoldenEntryState,
+        golden_entry_state,
+        goldens_for_live_gpu,
+        load_golden_file,
+        load_golden_records,
+    )
 
-        names = ", ".join(sorted({g.name for g in GOLDEN_RECORDS}))
+    # Canonical replay scopes to the live card as before. An explicit working file is
+    # intentionally literal: no repository union and no live-card filtering, because its
+    # purpose is to verify the exact target currently being tuned (including Loop IR fallbacks).
+    document = None
+    if golden_file:
+        try:
+            document = load_golden_file(golden_file)
+        except ValueError as exc:
+            logger.error(str(exc))
+            sys.exit(2)
+        records = load_golden_records(document)
+        available = records
+    else:
+        records = goldens_for_live_gpu()
+        available = GOLDEN_RECORDS
+
+    exact = [index for index, record in enumerate(records) if record.name == name]
+    match_indexes = exact or [index for index, record in enumerate(records) if name in record.name]
+    matches = [records[index] for index in match_indexes]
+    if not matches:
+        names = ", ".join(sorted({record.name for record in available}))
         logger.error("unknown golden config %r.\nAvailable: %s", name, names)
         sys.exit(2)
     distinct = sorted({m.name for m in matches})
@@ -204,13 +235,20 @@ def resolve_golden_arg(args) -> None:
     args._golden_graph = matches[0].target_program.copy()
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
 
-    args.golden_configs = [Sample.from_golden(match) for match in matches]
+    pinned = matches
+    if document is not None:
+        pinned = [records[index] for index in match_indexes if golden_entry_state(document["configs"][index]) == GoldenEntryState.VERIFIED]
+    args.golden_configs = [Sample.from_golden(match) for match in pinned]
     logger.info(
-        "[golden] %s → embedded program %s (%d recorded config%s)",
+        "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
         name,
-        matches[0].program_index,
+        f" from {golden_file}" if golden_file else "",
+        "Loop IR" if matches[0].loop_wire is not None else "program",
+        matches[0].loop_index if matches[0].loop_wire is not None else matches[0].program_index,
         len(matches),
         "" if len(matches) == 1 else "s",
+        len(pinned),
+        "" if len(pinned) == 1 else "s",
     )
 
 
@@ -559,20 +597,35 @@ def _trace_model(
         logger.error("torch and transformers are required: pip install torch transformers")
         sys.exit(1)
 
-    from emmy.compiler.trace.huggingface import load_quantized_trace_twin, load_quantized_twin, quantized_checkpoint_dir
+    from emmy.compiler.loader.safetensors import split_revision
+    from emmy.compiler.trace.huggingface import (
+        load_architecture_trace_twin,
+        load_quantized_trace_twin,
+        load_quantized_twin,
+        quantized_checkpoint_dir,
+    )
     from emmy.compiler.trace.torch import trace_module
 
     logger.info("Pulling %s...", model_id)
     dtype = torch.float32 if layer is None else torch.float16
     quant_dir = quantized_checkpoint_dir(model_id)
+    repo, revision = split_revision(model_id)
     if quant_dir is not None:
         # Quantized checkpoint (fp8 / EXL3): trace the architecture twin from config,
         # carrying the decoded real weights (from_pretrained would engage transformers'
         # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
         model = load_quantized_trace_twin(quant_dir, dtype, layer) if architecture_only else load_quantized_twin(quant_dir, dtype)
+    elif architecture_only and layer is not None:
+        # Inventory traces need shapes and module structure, not checkpoint
+        # values. Constructing from config under ``meta`` avoids downloading or
+        # allocating enormous source checkpoints such as Laguna-S-2.1.
+        model = load_architecture_trace_twin(repo, dtype, layer, revision=revision)
     else:
+        # A hub id may pin its branch or commit as ``<repo>@<revision>``, the same spelling the
+        # quantized lane above resolves through — a repo publishing one rung per branch has a
+        # different model on each, so the default branch is not a safe stand-in.
         try:
-            model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, torch_dtype=dtype)
         except ValueError as e:
             # Only fall back to executing the repo's custom modeling code when
             # transformers explicitly requires it (e.g. MiniCPM3). Models that ship
@@ -580,17 +633,20 @@ def _trace_model(
             # the built-in path — their remote code may not match this transformers.
             if "trust_remote_code" not in str(e):
                 raise
-            model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, torch_dtype=dtype, trust_remote_code=True)
     model.eval()
 
-    def _stamp(graph: Graph) -> Graph:
+    def _stamp(graph: Graph, wrapper=None) -> Graph:
         # The checkpoint's quantized weights are spelled as in-graph algebra immediately
         # after trace, before any pass runs — from here on the graph carries no
-        # quantization metadata; generic storage-decode algebra stays available to lowering.
+        # quantization metadata; only generic tensor algebra enters decomposition.
         # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
             from emmy.compiler.loader.quant import spell_quantized_constants, spell_trellis_constants  # noqa: PLC0415
+            from emmy.compiler.trace.huggingface import retarget_constants_to_model  # noqa: PLC0415
 
+            if wrapper is not None:
+                retarget_constants_to_model(graph, wrapper, model)
             spell_quantized_constants(graph, str(quant_dir))
             spell_trellis_constants(graph, str(quant_dir))
         return graph
@@ -608,13 +664,13 @@ def _trace_model(
             attention_mask = build_causal_mask(seq_len, dtype)
             position_ids = torch.arange(seq_len).unsqueeze(0)
             args_t = (input_ids, attention_mask, position_ids)
-            graph = _stamp(trace_module(wrapper, args_t, dynamic_shapes=dynamic_shapes))
+            graph = _stamp(trace_module(wrapper, args_t, dynamic_shapes=dynamic_shapes), wrapper)
             stamp_sliding_windows(graph, _find_text_decoder(model).config)
             return graph, (wrapper, args_t, {})
 
         wrapper = build_full_model_wrapper(model, seq_len, dtype)
         input_ids = torch.zeros((1, seq_len), dtype=torch.long)
-        graph = _stamp(trace_module(wrapper, (input_ids,), dynamic_shapes=dynamic_shapes))
+        graph = _stamp(trace_module(wrapper, (input_ids,), dynamic_shapes=dynamic_shapes), wrapper)
         stamp_sliding_windows(graph, _find_text_decoder(model).config)
         return graph, (wrapper, (input_ids,), {})
 
@@ -630,7 +686,8 @@ def _trace_model(
     if architecture_only:
         from emmy.compiler.trace.huggingface import replace_moe_with_traceable_expert
 
-        if replace_moe_with_traceable_expert(block):
+        already_replaced = bool(getattr(getattr(block, "mlp", None), "_emmy_traceable_expert", False))
+        if already_replaced or replace_moe_with_traceable_expert(block):
             logger.info("Tracing representative MoE expert compute (router/sort/combine remain host orchestration)")
 
     hidden_size = decoder.config.hidden_size
@@ -639,7 +696,12 @@ def _trace_model(
     x = torch.randn(*x_shape, dtype=dtype)
     # Some architectures (e.g. Gemma's sliding/global split) key RoPE on the
     # layer's attention type; pass it when the rotary module / layer expose it.
-    layer_type = getattr(getattr(block, "self_attn", None), "layer_type", None)
+    layer_type = _selected_layer_type(decoder, block, layer)
+    rotary_emb = decoder.rotary_emb
+    if layer_type == "sliding_attention" and getattr(decoder, "swa_rotary_emb", None) is not None:
+        # Compatibility with the original remote Laguna implementation. Newer
+        # transformers exposes one multi-RoPE module keyed by ``layer_type``.
+        rotary_emb = decoder.swa_rotary_emb
 
     if dynamic_shapes:
         # Dynamic mode: concrete (cos, sin) kwargs would specialise rotary to
@@ -647,24 +709,29 @@ def _trace_model(
         # instead. The wrapper's input is ``x`` → spec ``--dynamic seq_len@x:1``.
         from emmy.compiler.trace.huggingface import build_layer_wrapper, stamp_sliding_windows
 
-        wrapper = build_layer_wrapper(block, decoder.rotary_emb, hidden_size, dtype, layer_type=layer_type)
-        graph = _stamp(trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes))
+        wrapper = build_layer_wrapper(block, rotary_emb, hidden_size, dtype, layer_type=layer_type)
+        graph = _stamp(trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes), wrapper)
         stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
         return graph, (wrapper, (x,), {})
 
     position_ids = torch.arange(seq_len).unsqueeze(0)
-    rotary_layer_types = tuple(getattr(decoder.rotary_emb, "layer_types", ()) or ())
-    if rotary_layer_types:
+    rotary_layer_types = tuple(getattr(rotary_emb, "layer_types", ()) or ())
+    if rotary_layer_types and layer_type in rotary_layer_types:
+        # Laguna's block consumes the one ``(cos, sin)`` tuple selected by its
+        # configured full/sliding attention type. Passing the whole mapping
+        # makes its attention treat a string key as a tensor.
+        position_embeddings = rotary_emb(x, position_ids, layer_type)
+    elif rotary_layer_types:
         # Multi-RoPE models (DeepSeek V4) pass a mapping into every decoder
         # block; the attention module selects its own ``main`` / ``compress``
         # entry.  Its attention labels (for example ``sliding_attention``) are
         # deliberately not rotary-table keys.
-        position_embeddings = {rotary_type: decoder.rotary_emb(x, position_ids, rotary_type) for rotary_type in rotary_layer_types}
+        position_embeddings = {rotary_type: rotary_emb(x, position_ids, rotary_type) for rotary_type in rotary_layer_types}
     else:
         try:
-            position_embeddings = decoder.rotary_emb(x, position_ids, layer_type)
+            position_embeddings = rotary_emb(x, position_ids, layer_type)
         except (KeyError, TypeError):
-            position_embeddings = decoder.rotary_emb(x, position_ids)
+            position_embeddings = rotary_emb(x, position_ids)
 
     from emmy.compiler.trace.huggingface import build_synthetic_ple, stamp_sliding_windows
 
@@ -695,7 +762,7 @@ def _trace_model(
     ple = build_synthetic_ple(block, seq_len, dtype)
     if ple is not None:
         kwargs["per_layer_input"] = ple
-    graph = _stamp(trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes))
+    graph = _stamp(trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes), block)
     stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
     return graph, (block, (x,), kwargs)
 
@@ -716,3 +783,19 @@ def _find_text_decoder(model):
         logger.error("Could not locate a text decoder (a module with `.layers` + `.rotary_emb`) in %s", type(model).__name__)
         sys.exit(1)
     return best
+
+
+def _selected_layer_type(decoder, block, layer: int):
+    """Return the attention type for a selected decoder layer.
+
+    Laguna stores the authoritative full/sliding schedule on
+    ``decoder.config.layer_types`` rather than on ``self_attn.layer_type``.
+    Keep the module attributes as fallbacks for older/custom architectures.
+    """
+    configured = getattr(decoder.config, "layer_types", None)
+    if configured is not None and 0 <= layer < len(configured):
+        return configured[layer]
+    block_type = getattr(block, "attention_type", None)
+    if block_type is not None:
+        return block_type
+    return getattr(getattr(block, "self_attn", None), "layer_type", None)

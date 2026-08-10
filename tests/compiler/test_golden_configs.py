@@ -31,8 +31,11 @@ def test_repository_golden_deserializes(path: Path) -> None:
     assert all("ir_version" not in program for program in document["programs"])
     for record in records:
         assert record.program.nodes
-        assert record.origins
-        assert set(record.origins) <= set(record.program.nodes)
+        if record.loop_wire is not None:
+            assert record.target_program.nodes
+        else:
+            assert record.origins
+            assert set(record.origins) <= set(record.program.nodes)
 
 
 def test_repository_index_is_the_flat_corpus() -> None:
@@ -47,7 +50,7 @@ def test_repository_format_has_no_legacy_or_derived_target_fields() -> None:
         document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
         for entry in document["configs"]:
             assert not (forbidden & set(entry)), path
-            assert set(entry["target"]) == {"origins"}, path
+            assert set(entry["target"]) in ({"origins"}, {"loop"}), path
 
 
 def test_production_tree_has_no_retired_golden_surfaces() -> None:

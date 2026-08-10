@@ -212,7 +212,7 @@ def handle_run(args):
         if not args.bench:
             logger.error("--ab requires --bench (the A/B rows render in the kernel table)")
             sys.exit(2)
-        if args.code is None and ir_path is None:
+        if args.code is None and ir_path is None and not hasattr(args, "_golden_graph"):
             logger.error("--ab requires a re-lowerable input: --code, --golden, or --ir (each config re-lowers a fresh graph)")
             sys.exit(2)
         try:
@@ -1592,6 +1592,14 @@ async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, war
     return await _bench_interleaved_captured(cuda_module, cuda_args, cuda_kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns)
 
 
+def _pinned_samples_for_ir(args, embedded):
+    """Automatic verified pins plus explicit ``--ab`` pins for an embedded golden target."""
+    pinned = list(getattr(args, "golden_configs", None) or [])
+    if embedded is not None and (specs := getattr(args, "ab", None)):
+        pinned.extend(_ab_samples(specs, dynamic=getattr(args, "dynamic", None)))
+    return pinned
+
+
 def _handle_run_ir(args, CudaBackend, CompilerDump):
     """Run path: load JSON IR (any stage), finish lowering, execute, bench."""
     import json
@@ -1690,7 +1698,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]
-            pinned = list(getattr(args, "golden_configs", None) or [])
+            pinned = _pinned_samples_for_ir(args, embedded)
             if pinned and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)

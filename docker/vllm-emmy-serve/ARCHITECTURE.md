@@ -23,6 +23,15 @@ that disagreed between the warm and the bake would silently load two different c
 cache-key parity failure the rest of this document exists to prevent. Onboarding a model is therefore one new
 `models/<slug>.env` — no new Makefile targets, no new Dockerfile, no new scripts.
 
+**The slug does not encode the revision.** An HF id that publishes several variants under one repo — an EXL3
+checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every one
+of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and
+it separates them only inside the config: two rungs of one repo cannot be released side by side without distinct
+image names. Pin it by **commit sha**, never a branch name — a branch can be re-cut under the same name (which
+would move the weights under a config that claims to be sealed), and an offline boot resolves `snapshots/<sha>`
+directly. A config that pins nothing warms whatever the default branch points at, so `warm.sh` refuses an unpinned
+revision on any repo with more than one branch.
+
 Every step is `make <target> MODEL=<hf-id>`; `make serve-config MODEL=<id>` prints the resolved slug, config, tag
 and target GPU, and `make serve-models` lists the models that already have a pinned config.
 
@@ -46,8 +55,11 @@ Hence the warm: one real serving run on the target card, inside the image. The f
 - `source` — live-probed target-card featurization + the real program enumeration (above).
 - `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
 - `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set (tune's `-Xcicc -O1` would poison the key).
-- The serving config (model / dtype / max-model-len / max-num-batched-tokens / decode bucket) changes **which
-  programs exist and their shapes** — warm and release must use identical values.
+- The serving config (model / revision / dtype / max-model-len / max-num-batched-tokens / decode bucket / cudagraph
+  capture ladder / any pinned flag that moves the plugin's path, such as `--kv-cache-dtype`) changes **which
+  programs exist and their shapes** — warm and release must use identical values. The revision is the one whose
+  absence is silent: the wrong rung boots, verifies and publishes with nothing flagging it, which is why it has its
+  own gate in `warm.sh` and its own image-vs-config comparison in `verify.sh`.
 
 The preflight script is the flip side: the *toolchain acceptance* question ("does this nvcc compile every
 kernel family for `sm_120`?") IS answerable by cross-compilation, so that part runs anywhere, before the rental.
@@ -68,7 +80,9 @@ customer boots would recompile at runtime). The boot-to-boot pick flip is a real
 should be deterministic across processes); the fixpoint warm contains it but does not excuse it.
 
 **The pack changes the fixpoint's role.** The online pass also writes the execution-plan pack (`warm/pack`, keyed
-on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it), and every
+on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it; a
+compressed checkpoint adds a digest of its compression declaration, which the config hash cannot see, so two rungs
+of one conversion never share a pack), and every
 subsequent boot — the offline fixpoint passes, verify, customer boots — loads it: fork picks are frozen in the
 artifact, so the bimodal-pick class vanishes and the fixpoint converges immediately whenever the pack takes. The
 loop stays as a safety net for the case where the pack write was skipped (a weight outside the pack vocabulary) or
@@ -98,15 +112,32 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
 ## Files
 
 - `models/<slug>.env` — the pinned serving config, one file per model (the filename IS the slug). Every value is cache-key-relevant; it must be **final before warming**
-  (re-measure memory headroom on the card first — see the workflow). Make-includable `VAR=value` syntax.
+  (re-measure memory headroom on the card first — see the workflow). Make-includable `VAR=value` syntax. Six keys
+  are required (`SERVE_MODEL`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_BATCHED_TOKENS`, `SERVE_GPU_MEM_UTIL`,
+  `SERVE_DECODE_BUCKET`, `SERVE_GPU`); the rest are per-checkpoint opt-ins whose defaults reproduce a dense,
+  unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
+  `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
+  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`). The latter four map
+  immutably to their `EMMY_GEN_*` variables in initial warm, every shape fixpoint, the baked image, and verify;
+  an extra warm shape's prefill field overrides the pinned bucket. A test rejects any other key, because a
+  misspelled one reads as a value nothing consumes.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
   compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
-  `SERVE_*` config; keep in sync with `_generate_compile_args` in `emmy/commands/serve.py`).
+  `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
+  CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
+  seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
+  quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
+  every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
+  cap at `[1]`**: single-token steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
+  while wider decode steps keep the routed dispatch, which host-syncs and stays eager.
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`
-  (the execution-plan pack the first boot writes).
+  (the execution-plan pack the first boot writes). Before any of it, two refusals: the live GPU against `SERVE_GPU`,
+  and an unpinned `SERVE_REVISION` against the repo's branch list (one HTTP call to the HF refs API; unreachable
+  refs skip the check rather than fail it, since warming offline off a pre-seeded snapshot is supported).
+  `SKIP_REVISION_CHECK=1` overrides, for the case where the default branch really is the target.
 - `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` + `COPY warm/pack` to `/opt/emmy`, bakes
   the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
   on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
@@ -115,8 +146,10 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
   generated compose and skips the download step entirely. Deploy used to override `HF_HOME` unconditionally, which
   hid the baked snapshot while offline mode stayed on — the download then failed outright and no deploy from a
   prebuilt image was possible.
-- `verify.sh` — cold-starts the **baked** image with no token, issues one completion, and diffs the cubin file set
-  before/after: an empty diff proves 100% cache hit (zero compiles), and the offline boot proves zero downloads.
+- `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
+  serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
+  issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% cache hit (zero
+  compiles), and the offline boot proves zero downloads.
   When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
   the cubin check while re-paying the frontend on every customer boot). The hit signal is the runner's "pack hit"
   line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a log handler under
@@ -160,11 +193,23 @@ The full release session on a rented card (each step from the repo checkout; hos
    those picks are then frozen into the shipped cubins **and the pack**, where no later boot revisits them. So a
    golden-less release does not ship a slightly slower image; it ships a permanently bad one.
 
-   Matching is by the golden's recorded `model:` provenance, compared as slugs, with a `-`-boundary prefix rule so
-   a base checkpoint's goldens cover its instruction-tuned sibling (same layer geometry, same kernel shapes) while a
-   quantized or resized variant correctly misses. On FAIL the script distinguishes "this card has no goldens at all"
-   from "this card is tuned, but for other models" and names them — that difference decides what to do next, so it
-   is a question for a human, not something to proceed through.
+   Matching is by the golden's recorded `model:` provenance, in two halves. The **repo** half compares as slugs,
+   with a `-`-boundary prefix rule so a base checkpoint's goldens cover its instruction-tuned sibling (same layer
+   geometry, same kernel shapes) while a quantized or resized variant correctly misses. The **revision** half
+   compares against `SERVE_REVISION`, which `make serve-goldens` forwards: since the slug deliberately does not
+   encode the revision (above) and a repo's revisions do NOT share kernel shapes — an EXL3 rung differs in exactly
+   the per-tensor bit allocation the shape keys carry — a golden may tag its provenance `<repo>@<revision>`, and
+   such an entry covers that revision and no other. An **untagged** golden makes no revision claim and covers every
+   revision of its repo, which is how every non-coded golden file behaves. Tagged goldens plus a release that named
+   no revision is **unevaluable**: the gate fails saying so, rather than reporting zero coverage for a card that
+   plainly has some. Revisions compare as exact strings (an abbreviated hex sha matches the full one it prefixes);
+   a branch name and a commit sha never match, because nothing offline can resolve one to the other.
+
+   On FAIL the script distinguishes "this card has no goldens at all" from "this card is tuned, but for other
+   models" from "it is tuned for this model, at another revision" and names them — that difference decides what to
+   do next, so it is a question for a human, not something to proceed through. On PASS it still reports any
+   repo-matching goldens the revision rule excluded, since the fork resolution will consult them regardless (the
+   `model:` tag is provenance, never a join key).
 
 1. Build the base image the warm will compile inside of:
 
@@ -184,9 +229,9 @@ The full release session on a rented card (each step from the repo checkout; hos
        cloudriftai/vllm-emmy:TAG /scripts/preflight_serving_kernels.sh   # expect: <N> OK, 0 FAIL
    ```
 
-   The enumeration is this model's golden set (the same matcher as step 0), so the preflight covers exactly the
-   picks the warm will deploy. `<N>` grows as goldens land — the gate is **0 FAIL with at least one OK**, never a
-   specific count.
+   The enumeration is this model's golden set (the same matcher as step 0, revision half included — pass
+   `-e REVISION=$SERVE_REVISION` when the goldens are tagged), so the preflight covers exactly the picks the warm
+   will deploy. `<N>` grows as goldens land — the gate is **0 FAIL with at least one OK**, never a specific count.
 
 3. **Re-measure memory headroom** and finalize `models/<slug>.env` — the config seals the cache key, so it cannot change
    after this point without re-warming. Step `--max-model-len` / `--max-num-batched-tokens` up from the old floor
@@ -197,7 +242,12 @@ The full release session on a rented card (each step from the repo checkout; hos
        --max-model-len 2048 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.97
    ```
 
-   Write the largest passing values into `models/<slug>.env`, including `SERVE_GPU`.
+   Write the largest passing values into `models/<slug>.env`, including `SERVE_GPU` — and, before the sweep rather
+   than after it, the per-checkpoint keys, since they decide what the sweep is even measuring: `SERVE_REVISION` (the
+   commit sha; sweep the rung you will ship), `SERVE_QUANT`, `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`. The sweep
+   command above is `emmy serve --generate`, which derives the same three from the checkpoint itself — pass
+   `--revision <sha>` there so it derives them from the right one. Then `make serve-config MODEL=<id>` prints the
+   whole resolved config, revision included; read it back before starting a multi-hour warm.
 4. Correctness gate at the pinned config (A/B vs HF eager; the Phase-A exit check):
 
    ```bash
@@ -228,11 +278,13 @@ rental/teardown. The local-only deltas:
   mismatch, but a multi-GPU box still needs `GPU_DEVICE` pointed at the right index.
 - **Skip the 24 GB download by pre-seeding the snapshot.** If the model is already in the local HF cache, copy it
   into the warm dir before warming — the hub client finds it and downloads nothing, and `HF_TOKEN` becomes
-  unnecessary (`warm.sh` only requires the token when the snapshot is absent):
+  unnecessary (`warm.sh` only requires the token when the snapshot is absent). Add `HF_HUB_OFFLINE=1` to make the
+  initial boot fail closed if that exact snapshot is incomplete or its pinned revision cannot be resolved locally:
 
   ```bash
   mkdir -p docker/vllm-emmy-serve/warm/hf/hub
   cp -r ~/.cache/huggingface/hub/models--google--gemma-4-12B docker/vllm-emmy-serve/warm/hf/hub/
+  HF_HUB_OFFLINE=1 make serve-warm MODEL=google/gemma-4-12B-it
   ```
 
 - **Disk budget: ~100 GB free** (measured, not the earlier ~60 GB estimate): base images (~21 GB unpacked) +
@@ -257,4 +309,3 @@ rental/teardown. The local-only deltas:
 gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker Hub tag is permitted. The bake copies
 the HF snapshot (resharded, per-tensor identical — see above), which carries its LICENSE/NOTICE files — keep them
 (that is the attribution obligation), and don't imply Google endorsement in the tag name or description.
-

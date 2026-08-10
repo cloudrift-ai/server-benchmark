@@ -217,6 +217,23 @@ def _is_cuda_item(item) -> bool:
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")
 
 
+def _cuda_toolchain_available() -> bool:
+    """Whether tests can compile and execute Emmy CUDA programs.
+
+    A visible device and importable CuPy are not sufficient: Emmy compiles its
+    kernels with the CUDA toolkit's ``nvcc`` binary.  Some CI runners expose a
+    GPU through the driver while installing only the CuPy runtime wheel.
+    """
+    try:
+        import cupy as cp
+
+        from emmy.compiler.backend.cuda.nvcc import nvcc_path
+
+        return cp.cuda.runtime.getDeviceCount() > 0 and nvcc_path() is not None
+    except Exception:  # noqa: BLE001 -- an unusable CUDA runtime means skip
+        return False
+
+
 # xdist_group for every IN-PROCESS CUDA-touching test. The host only has
 # one GPU; running CUDA tests across multiple xdist workers concurrently
 # would mean two processes pushing kernels onto the same device. Even
@@ -274,8 +291,12 @@ def pytest_collection_modifyitems(config, items):
     # already grouped.
     cuda_items: list = []
     other_items: list = []
+    cuda_available = _cuda_toolchain_available()
+    skip_cuda = pytest.mark.skip(reason="CUDA not available (need cupy + GPU + nvcc)")
     for it in items:
         if _is_cuda_item(it):
+            if not cuda_available:
+                it.add_marker(skip_cuda)
             group = _CUDA_CLI_GROUP if "run_cli" in getattr(it, "fixturenames", ()) else _CUDA_GROUP
             it.add_marker(pytest.mark.xdist_group(group))
             cuda_items.append(it)

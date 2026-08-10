@@ -203,9 +203,16 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
 
     weights: dict[str, WeightSpec] = {}
     for nid, op in graph.loadable_constants():
+        load_ops = _encode_load_ops(op.load_ops)
+        if op.source_graph is not None:
+            # A bind record the plan cannot reproduce: the weight has no checkpoint key either,
+            # so a plan-side bind would silently drop it. Mark it unbindable — the pack save
+            # refuses (see ``_save_pack``) instead of writing a pack that boots weightless.
+            logger.warning("plan: constant %r rides a bind record outside the plan vocabulary; weight will not rebind from a pack", nid)
+            load_ops = None
         weights[nid] = WeightSpec(
             source_path=op.source_path,
-            load_ops=_encode_load_ops(op.load_ops),
+            load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
         )
 
@@ -248,12 +255,55 @@ def _normalize_spec(spec) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def _encode_index_map(op) -> tuple | None:
+    """Encode a single-source ``IndexMapOp`` as ``("slice", (start, step, extent, ...))`` when
+    it is a per-axis affine read of its input — the form a folded ``SliceOp`` takes.
+    ``None`` for anything richer (a cat's ``select``, an axis
+    permutation, a coord that mixes axes).
+
+    Detection is by CONSTRUCTION, not by sampling: each output axis' coord expression must be
+    affine in its OWN placeholder alone, which is checked by substituting the other axes' vars
+    away and requiring the residual to evaluate to ``a·i + b`` at every i in range."""
+    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
+
+    if len(op.sources) != 1 or op.sources[0].select is not None:
+        return None
+    shape = [d.as_static() if d.is_static else None for d in op.out_shape]
+    if any(d is None for d in shape) or len(op.sources[0].coord_map) != len(shape):
+        return None
+    spans: list[int] = []
+    for axis, coord in enumerate(op.sources[0].coord_map):
+        env = {f"{PLACEHOLDER_PREFIX}{i}": 0 for i in range(len(shape))}
+        try:
+            base = int(coord.eval(env))
+            env[f"{PLACEHOLDER_PREFIX}{axis}"] = 1
+            step = int(coord.eval(env)) - base if shape[axis] > 1 else 1
+            for i in range(shape[axis]):
+                env[f"{PLACEHOLDER_PREFIX}{axis}"] = i
+                if int(coord.eval(env)) != base + step * i:
+                    return None
+            # Independence from the other axes: a mixing coord (a reshape/transpose) is not a slice.
+            for other in range(len(shape)):
+                if other == axis or shape[other] < 2:
+                    continue
+                probe = dict(env, **{f"{PLACEHOLDER_PREFIX}{axis}": 0, f"{PLACEHOLDER_PREFIX}{other}": shape[other] - 1})
+                if int(coord.eval(probe)) != base:
+                    return None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+        if step < 1:
+            return None
+        spans += [base, step, shape[axis]]
+    return ("slice", tuple(spans))
+
+
 def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
     """Encode a ``ConstantOp.load_ops`` chain into the plan's vocabulary
-    (``("transpose", axes)`` / ``("reshape", shape)``), or ``None`` when a chain member isn't
-    expressible — the plan still runs (binding came from the live module), it just can't rebind
-    that weight from a pack."""
+    (``("transpose", axes)`` / ``("reshape", shape)`` / ``("slice", spans)``), or ``None`` when a
+    chain member isn't expressible — the plan still runs (binding came from the live module), it
+    just can't rebind that weight from a pack."""
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import IndexMapOp  # noqa: PLC0415
 
     out: list[tuple] = []
     for op in load_ops:
@@ -261,6 +311,8 @@ def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
             out.append(("transpose", tuple(int(a) for a in op.axes)))
         elif isinstance(op, ReshapeOp) and all(isinstance(d, int) for d in op.shape):
             out.append(("reshape", tuple(op.shape)))
+        elif isinstance(op, IndexMapOp) and (enc := _encode_index_map(op)) is not None:
+            out.append(enc)
         else:
             logger.warning("plan: load op %r not expressible in the pack vocabulary; weight will not rebind from a pack", op)
             return None
@@ -277,6 +329,9 @@ def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.nd
             a = np.swapaxes(a, arg[0] % a.ndim, arg[1] % a.ndim) if len(arg) == 2 else np.transpose(a, arg)
         elif kind == "reshape":
             a = a.reshape(arg)
+        elif kind == "slice":
+            spans = [tuple(arg[i : i + 3]) for i in range(0, len(arg), 3)]
+            a = a[tuple(slice(start, start + step * extent, step) for start, step, extent in spans)]
         else:
             raise ValueError(f"apply_weight_loads: unknown load op kind {kind!r}")
     return np.ascontiguousarray(a)

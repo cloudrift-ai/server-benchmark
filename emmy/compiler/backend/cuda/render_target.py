@@ -1,7 +1,7 @@
 """CUDA implementation of :class:`RenderTarget`.
 
 Owns every CUDA C-spelling decision the Kernel-IR renderer makes:
-type names (``float`` / ``__half``), conversion intrinsics
+type names (``float`` / ``__half`` / fixed-width integer carriers), conversion intrinsics
 (``__half2float`` / ``__float2half``), per-dtype op intrinsics
 (``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...), and the set of
 ops with native fp16 forms.
@@ -20,7 +20,31 @@ _TYPE_NAME: dict[str, str] = {
     "f16x2": "__half2",
     "f8e4m3": "__nv_fp8_e4m3",
     "f8e5m2": "__nv_fp8_e5m2",
+    "i16": "short",
+    "i32": "int",
+    "i64": "long long",
+    "u16": "unsigned short",
+    "u32": "unsigned int",
+    "u64": "unsigned long long",
+    "bool": "bool",
 }
+
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_NATIVE_OPS = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "floor_divide",
+        "remainder",
+        "mod",
+        "left_shift",
+        "right_shift",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+    }
+)
 
 # fp8 storage dtypes (M2/M3 of the FP8 plan). A kernel never computes ON fp8 —
 # the only legal uses of an fp8 SSA value are the decode conversion out of it
@@ -162,6 +186,8 @@ class CudaRenderTarget:
             return True
         if dtype in ("f16", "f16x2"):
             return op_name in _NATIVE_FP16_OPS
+        if dtype in _INTEGER_DTYPES:
+            return op_name in _INTEGER_NATIVE_OPS
         return False
 
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:

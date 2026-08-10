@@ -56,6 +56,8 @@ GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
+GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
+GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 READABLE = "EMMY_READABLE"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
@@ -351,6 +353,39 @@ def gen_prefill_bucket(default: int = -1) -> int:
     hot chunk width); **0 disables** the twin (prefill stays on the symbolic masked-tile
     programs). See `serving/gen_runner.py`."""
     return int_env(GEN_PREFILL_BUCKET, default)
+
+
+def gen_prefill_capacity(default: int = -1) -> int:
+    """``EMMY_GEN_PREFILL_CAPACITY`` — the token width the generative runner's symbolic
+    programs size their device buffers at. The default ``-1`` means the dynamic-dim cap
+    (``DYNAMIC_DIM_MAX``), which is what ``max_num_batched_tokens`` defaults to as well.
+
+    Set it when the ACTIVATION ARENA is competing with the KV cache. Capacity is otherwise
+    independent of ``max_num_batched_tokens`` on purpose — the pack key carries it, so tying it
+    to the scheduler knob recompiles the whole program set every time a lane is retuned — but a
+    model that fills the card with weights (GLM-4.5-Air at 2.25 bpw leaves ~1.3 GiB) pays for
+    every token of capacity it never serves. Pin it at the width the deployment actually runs
+    and lower ``--max-num-batched-tokens`` to match. See `serving/vllm_model_gen.py`."""
+    return int_env(GEN_PREFILL_CAPACITY, default)
+
+
+def gen_embed_host(default: int = 0) -> int:
+    """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
+    **mapped host memory** instead of device memory (default 0 = device-resident).
+
+    The gather kernel reads the rows straight over PCIe (the allocation is
+    ``cudaHostAlloc``-mapped, so its host address IS a valid device address), which keeps the
+    lookup a plain device-side gather — no host round trip, so the whole-step decode capture
+    still records it. The table then costs zero VRAM, and on a card the weights already fill
+    that is KV-cache budget: a vocab-sized fp16 table is over a GiB (GLM-4.5-Air: 151552 x 4096
+    = 1.156 GiB, and the checkpoint is untied so nothing else shares it).
+
+    The price is PCIe latency on every embedded token — about 8 KiB per token, so the per-step
+    cost scales with the step's width. Leave it off on any deployment with device headroom; a
+    device-resident gather is roughly two orders of magnitude faster. Ignored when a tied
+    checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
+    nothing to share. See `serving/gen_runner.py`."""
+    return int_env(GEN_EMBED_HOST, default)
 
 
 def gen_m1_tier(default: int = 1) -> int:

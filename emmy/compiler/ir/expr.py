@@ -182,8 +182,16 @@ def apply_binop(op: str, lv: object, rv: object) -> object:
             import numpy as np
 
             return np.logical_or(lv, rv)
+    if op == "&":
+        return lv & rv
+    if op == "|":
+        return lv | rv
     if op == "^":
-        return int(lv) ^ int(rv)
+        return lv ^ rv
+    if op == "<<":
+        return lv << rv
+    if op == ">>":
+        return lv >> rv
     raise ValueError(f"Unknown BinOp: {op}")
 
 
@@ -607,6 +615,8 @@ _PRECEDENCE: dict[str, int] = {
     "^": 4,  # bitwise XOR — match relational so ``a ^ b + c`` always parens
     "&": 4,  # bitwise AND — same intent: ``a & b * c`` must paren as ``(a & b) * c``
     "|": 4,  # bitwise OR — symmetric with ``&`` / ``^``
+    "<<": 4,
+    ">>": 4,
     "+": 5,
     "-": 5,
     "*": 6,

@@ -5,7 +5,11 @@ import logging
 import sys
 from pathlib import Path
 
-from emmy.compiler.pipeline.search.working_golden import preflight_trace_inventory, write_trace_inventory
+from emmy.compiler.pipeline.search.working_golden import (
+    preflight_trace_inventory,
+    write_trace_inventories,
+    write_trace_inventory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +23,50 @@ def register_trace_command(subparsers):
     )
     add_input_args(parser, include_dump_dir=False)
     parser.add_argument("--output", "-o", help="Output golden YAML path (default: <trace-name>.golden.yaml)")
+    parser.add_argument(
+        "--loop-targets",
+        action="store_true",
+        help=(
+            "Persist every target as exact post-fusion Loop IR. Use for compiler-sensitive storage formats "
+            "whose fusion grouping is not a stable frontend-provenance selector."
+        ),
+    )
+    parser.add_argument(
+        "--serving-twins",
+        action="store_true",
+        help=(
+            "Capture every config-only pre/post/expert serving twin and combine its distinct kernels into one "
+            "exact-Loop-IR working golden. Reads model config and quantization allocation metadata, not weight payloads."
+        ),
+    )
+    parser.add_argument(
+        "--decode-bucket",
+        type=int,
+        default=32,
+        help="With --serving-twins, include this deployed decode width (default: 32).",
+    )
+    parser.add_argument(
+        "--prefill-bucket",
+        type=int,
+        default=256,
+        help="With --serving-twins, include this deployed prefill width (default: 256).",
+    )
+    parser.add_argument(
+        "--serving-width",
+        action="append",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --serving-twins, include another configured release width. Repeatable.",
+    )
+    parser.add_argument(
+        "--model-provenance",
+        metavar="REPO@REVISION",
+        help=(
+            "Record this exact model provenance in the working YAML instead of the input path. "
+            "Use the uploaded HF repo plus its 40-character checkpoint revision for release goldens."
+        ),
+    )
     parser.set_defaults(func=handle_trace)
 
 
@@ -33,6 +81,49 @@ def handle_trace(args):
     from emmy.compiler.target import apply_target_arg  # noqa: PLC0415
 
     apply_target_arg(args)
+    if args.serving_twins:
+        conflicts = []
+        if args.code:
+            conflicts.append("--code")
+        if args.layer is not None:
+            conflicts.append("--layer")
+        if args.dynamic:
+            conflicts.append("--dynamic")
+        if args.adapter != "causal-lm":
+            conflicts.append("--adapter dit")
+        input_path = Path(args.input) if args.input else None
+        if input_path is not None and input_path.suffix == ".json" and input_path.exists():
+            conflicts.append("a JSON IR input")
+        if conflicts:
+            logger.error("--serving-twins is incompatible with %s", ", ".join(conflicts))
+            sys.exit(2)
+        if args.decode_bucket < 0 or args.prefill_bucket < 0 or any(width <= 0 for width in (args.serving_width or ())):
+            logger.error("serving decode/prefill buckets must be non-negative and additional --serving-width values positive")
+            sys.exit(2)
+        from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+
+        graphs = capture_twin_graphs(
+            args.input,
+            decode_bucket=args.decode_bucket,
+            prefill_bucket=args.prefill_bucket,
+            extra_widths=tuple(args.serving_width or ()),
+        )
+        source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
+        destination = args.output or f"{source_name}.serving-twins.golden.yaml"
+        try:
+            preflight_trace_inventory(destination)
+        except FileExistsError as e:
+            logger.error(str(e))
+            sys.exit(2)
+        model = args.model_provenance or args.input
+        result = write_trace_inventories(graphs, destination, model=model)
+        logger.info(
+            "Saved serving-twin golden YAML: %s (%d graph(s), %d distinct kernel(s))",
+            result.path,
+            len(graphs),
+            result.target_count,
+        )
+        return
     # A trace inventory records programs and shapes, not checkpoint values.  On a
     # On a multi-hundred-billion-parameter checkpoint, avoid materializing a
     # full eager architecture twin merely to export one requested layer.
@@ -45,8 +136,10 @@ def handle_trace(args):
         sys.exit(2)
     _log_trace(graph)
     input_path = Path(args.input) if args.input else None
-    model = args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
-    result = write_trace_inventory(graph, destination, model=model)
+    model = args.model_provenance or (
+        args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
+    )
+    result = write_trace_inventory(graph, destination, model=model, force_loop_targets=args.loop_targets)
     logger.info("Saved golden YAML: %s (%d distinct kernel(s))", result.path, result.target_count)
 
 

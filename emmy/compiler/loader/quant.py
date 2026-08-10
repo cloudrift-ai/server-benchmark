@@ -30,9 +30,11 @@ architecture-twin construction). Two checkpoint families share the design — FP
   it feeds the architecture twin before any graph exists, and its whole-dict
   semantics, consumed scales dropped, have no graph counterpart).
 - :func:`spell_trellis_constants` and :func:`spell_trellis_inputs`: EXL3
-  checkpoint siblings are rewritten at graph birth into the format-neutral
-  reconstruction algebra in loader/trellis.py. Checkpoint metadata stops in
-  the loader; only generic tensor and layout operations enter decomposition.
+  checkpoint siblings and their sole linear consumer are rewritten together at
+  graph birth into the format-neutral factorized algebra in loader/trellis.py.
+  No materialized decoded-weight fallback enters the compiler. Checkpoint
+  metadata stops in the loader; only generic tensor and layout operations enter
+  decomposition.
   :func:`load_dequantized_state_dict` uses the same decode for the eager twin.
 """
 
@@ -516,7 +518,7 @@ def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) ->
     ``(n, k)`` are the traced logical ``(out, in)`` dims; ``(n_pad, k_pad)`` the 128-padded
     extents the checkpoint actually stores. ``None`` (with a warning) when the siblings do not
     reproduce the traced weight shape, or when the constant is not a pristine single-source
-    trace constant — never a compile error.
+    trace constant.
     """
     node = graph.nodes[nid]
     op, out = node.op, node.output
@@ -534,14 +536,6 @@ def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) ->
     # the traced dims' roundups.
     pad_ok = (-(-k // 128) * 128, -(-n // 128) * 128) == (k_pad, n_pad) if k > 0 and n > 0 else False
     if len(t_shape) != 3 or not pad_ok or (t_shape[0] * 16, t_shape[1] * 16) != (k_pad, n_pad):
-        logger.warning(
-            "trellis weight %s: sibling shapes trellis=%s suh=%s svh=%s do not reproduce %s; constant left alone",
-            nid,
-            t_shape,
-            suh_shape,
-            svh_shape,
-            (n, k),
-        )
         return None
     return n, k, n_pad, k_pad
 
@@ -561,29 +555,64 @@ def _trellis_leaves(frag: Graph, node, base: str, shapes: dict[str, tuple[int, .
     )
 
 
-def _spell_trellis_one(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> bool:
-    """Rewrite one coded checkpoint weight into format-neutral tensor algebra."""
-    from emmy.compiler.loader.trellis import spell_reconstruction  # noqa: PLC0415
+def _linear_consumer(graph: Graph, nid: str):
+    """Return the sole direct ``LinearOp`` consuming weight ``nid``, or fail closed."""
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+
+    users = graph.users(nid)
+    if len(users) != 1:
+        raise ValueError(f"coded weight {nid!r} must have exactly one consumer, found {sorted(users)}")
+    linear = graph.nodes[next(iter(users))]
+    weight = graph.nodes[nid]
+    if not isinstance(linear.op, LinearOp) or len(linear.inputs) < 2 or graph.producer(linear.inputs[1]) is not weight:
+        raise ValueError(f"coded weight {nid!r} is not the direct B operand of one LinearOp")
+    if linear.op.has_bias != (len(linear.inputs) == 3):
+        raise ValueError(f"coded linear {linear.id!r} has inconsistent bias declaration/inputs")
+    return linear
+
+
+def _spell_trellis_linear(graph: Graph, nid: str, *, base: str, cb: int, shapes: dict[str, tuple[int, ...]]) -> None:
+    """Rewrite one coded checkpoint weight and its linear consumer at graph birth."""
+    from emmy.compiler.loader.trellis import spell_factored_linear  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment  # noqa: PLC0415
 
     dims = _trellis_dims(graph, nid, shapes)
     if dims is None:
-        return False
+        raise ValueError(f"coded weight {nid!r} does not match its checkpoint storage geometry")
     n, k, _n_pad, _k_pad = dims
-    out = graph.nodes[nid].output
+    weight = graph.nodes[nid]
+    linear = _linear_consumer(graph, nid)
+    x = graph.producer(linear.inputs[0])
+    bias = graph.producer(linear.inputs[2]) if linear.op.has_bias else None
+    if x is None or (linear.op.has_bias and bias is None):
+        raise ValueError(f"coded linear {linear.id!r} has an unsourced activation or bias")
 
-    frag = Graph()
-    codes, suh, svh = _trellis_leaves(frag, graph.nodes[nid], base, shapes)
-    frag.outputs = [spell_reconstruction(frag, codes, suh, svh, cb=cb, shape=(n, k), name=out.name, dtype=out.dtype)]
-    graph.splice(frag, consumed=[nid], output=nid)
-    return True
+    frag = open_fragment(graph, [x, *([bias] if bias is not None else [])])
+    codes, suh, svh = _trellis_leaves(frag, weight, base, shapes)
+    frag.outputs = [
+        spell_factored_linear(
+            frag,
+            codes,
+            suh,
+            svh,
+            cb=cb,
+            weight_shape=(n, k),
+            x=x.id,
+            bias=bias.id if bias is not None else None,
+            out=linear.output,
+            weight_name=weight.output.name,
+        )
+    ]
+    graph.splice(frag, consumed=[nid, linear.id], output=linear.id)
 
 
 def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
-    """Spell every EXL3 coded weight as generic tensor algebra at graph birth.
+    """Spell every EXL3 coded linear as generic factorized algebra at graph birth.
 
     Checkpoint-specific sibling discovery and codebook selection stop in this loader.
-    The emitted graph contains only ordinary tensor/layout operations, which the normal
-    decomposition and constant-folding policies consume before Loop IR.
+    The emitted graph contains only ordinary tensor/layout operations and never constructs
+    the decoded dense weight. A coded weight outside the supported direct-linear contract is
+    a compile error rather than an implicit materialization fallback.
     """
     from safetensors import safe_open  # noqa: PLC0415
 
@@ -613,11 +642,10 @@ def spell_trellis_constants(graph: Graph, model_id_or_path: str) -> int:
             if base is None:
                 continue
             if base + ".suh" not in index or base + ".svh" not in index:
-                logger.warning("coded weight %s: no suh/svh channel vectors; constant left alone", nid)
-                continue
+                raise ValueError(f"coded weight {nid!r}: checkpoint entry {base!r} has no suh/svh channel vectors")
             shapes = {leaf: _shape(base + "." + leaf) for leaf in ("trellis", "suh", "svh")}
-            if _spell_trellis_one(graph, nid, base=base, cb=_exl3_codebook(index, base), shapes=shapes):
-                spelled += 1
+            _spell_trellis_linear(graph, nid, base=base, cb=_exl3_codebook(index, base), shapes=shapes)
+            spelled += 1
     if spelled:
         logger.info("spelled %d coded weight constant(s) from %s", spelled, model_dir)
     return spelled
@@ -710,15 +738,16 @@ def spell_quantized_inputs(
 
 
 def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ...]]]) -> dict[str, tuple[str, str]]:
-    """Spell coded weight inputs as generic reconstruction algebra.
+    """Spell coded weight inputs and their linear consumers as factorized algebra.
 
-    Each dense weight input is replaced by the packed int16 codes input plus full padded
-    suh and svh vector inputs. The reconstruction is the same format-neutral
-    range/cast/bitcast/elementwise/gather/index-map/layout/matmul graph used for checkpoint
-    constants; no checkpoint-shaped operation enters Loop IR.
+    Each logical weight input becomes packed int16 codes plus full channel-vector inputs.
+    Its sole ``LinearOp`` consumer becomes the same generic factorized execution graph used
+    for checkpoint constants. No decoded dense weight or checkpoint-shaped operation enters
+    the compiler pipeline.
     """
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.loader.trellis import spell_reconstruction  # noqa: PLC0415
+    from emmy.compiler.loader.trellis import spell_factored_linear  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     out_map: dict[str, tuple[str, str]] = {}
@@ -736,6 +765,11 @@ def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ..
         k_pad, n_pad = codes_shape[0] * 16, codes_shape[1] * 16
         if (k_pad, n_pad) != (-(-k // HAD_BLOCK) * HAD_BLOCK, -(-n // HAD_BLOCK) * HAD_BLOCK):
             raise ValueError(f"spell_trellis_inputs: {name!r} codes shape {codes_shape} does not pad weight shape {(n, k)}")
+        linear = _linear_consumer(graph, name)
+        x = graph.producer(linear.inputs[0])
+        bias = graph.producer(linear.inputs[2]) if linear.op.has_bias else None
+        if x is None or (linear.op.has_bias and bias is None):
+            raise ValueError(f"spell_trellis_inputs: coded linear {linear.id!r} has an unsourced activation or bias")
 
         tmp = f"{name}__coded_src"
         graph.rename_node(name, tmp)
@@ -745,17 +779,21 @@ def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ..
         svh = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_svh", (n_pad,), "f16"), node_id=f"{name}_svh")
         graph.inputs += [suh, svh]
 
-        decoded = spell_reconstruction(
-            graph,
-            codes,
-            suh,
-            svh,
-            cb=cb,
-            shape=(n, k),
-            name=f"{out.name}_decoded",
-            dtype=out.dtype,
-        )
-        graph.replace_node(tmp, decoded)
-        graph.remove_node(tmp)
+        frag = open_fragment(graph, [x, codes, suh, svh, *([bias] if bias is not None else [])])
+        frag.outputs = [
+            spell_factored_linear(
+                frag,
+                codes,
+                suh,
+                svh,
+                cb=cb,
+                weight_shape=(n, k),
+                x=x.id,
+                bias=bias.id if bias is not None else None,
+                out=linear.output,
+                weight_name=f"{out.name}_decoded",
+            )
+        ]
+        graph.splice(frag, consumed=[tmp, linear.id], output=linear.id)
         out_map[name] = (suh, svh)
     return out_map

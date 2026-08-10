@@ -339,7 +339,7 @@ def _spell_one(
     graph: Graph, storage: dict, by_layer: list[tuple[int, list[str]]], *, allowed_layers: set[int] | None = None
 ) -> dict[str, Graph]:
     """``{rate label: spelled copy}`` for one twin — empty when it holds no coded weight."""
-    from emmy.compiler.loader.quant import _spell_trellis_one  # noqa: PLC0415
+    from emmy.compiler.loader.quant import _spell_trellis_linear  # noqa: PLC0415
 
     weights = {op.source_path[: -len(".weight")]: nid for nid, op in graph.loadable_constants() if _is_weight(op)}
     out: dict[str, Graph] = {}
@@ -359,9 +359,8 @@ def _spell_one(
             continue
         seen.add(profile)
         g = graph.copy()
-        spelled = sum(_spell_trellis_one(g, weights[mod], **_spell_args(base, storage[base])) for mod, base in hits.items())
-        if spelled < len(hits):
-            logger.warning("coded twin: %d of %d coded weights declined generic reconstruction", len(hits) - spelled, len(hits))
+        for mod, base in hits.items():
+            _spell_trellis_linear(g, weights[mod], **_spell_args(base, storage[base]))
         out["-".join(str(b) for b in sorted({b for _, b in profile}))] = g
     return out
 

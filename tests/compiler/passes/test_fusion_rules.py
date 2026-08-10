@@ -1,8 +1,8 @@
 """Tests for the fusion pass (lift-then-splice).
 
 The fusion pass lifts each tensor op into a trivial ``LoopOp`` and then
-splices adjacent ``LoopOp`` pairs via the tree-splicer in
-``passes/fusion/_splice.py``. Tests verify post-fixpoint structural
+splices adjacent pairs and closed reconvergent ``LoopOp`` DAGs through
+the SSA-preserving N-way splicer. Tests verify post-fixpoint structural
 properties (kernel count, graph composition, expected ops in SSA bodies)
 *and* numeric correctness — each fixture is executed via ``NumpyBackend``
 both pre- and post-fusion, and the outputs must match. ``LoopOp.forward``
@@ -15,7 +15,7 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
+from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp
 from emmy.compiler.pipeline import Pipeline
 
@@ -130,6 +130,88 @@ def test_pointwise_chain_no_residual_copies():
     result = _fuse(_make_pointwise_chain())
     kernel = _kernel_nodes(result)[0]
     assert _count_copies(kernel.op.body) == 0
+
+
+# ===================================================================
+# Reconvergent producer DAG: one SSA definition, multiple consumers.
+# ===================================================================
+
+
+def _make_pointwise_diamond():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("a", (8,)), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (8,)), node_id="b")
+    g.add_node(ElementwiseOp("negative"), ["x"], Tensor("shared", (8,)), node_id="shared")
+    g.add_node(ElementwiseOp("add"), ["shared", "a"], Tensor("left", (8,)), node_id="left")
+    g.add_node(ElementwiseOp("multiply"), ["shared", "b"], Tensor("right", (8,)), node_id="right")
+    g.add_node(ElementwiseOp("add"), ["left", "right"], Tensor("out", (8,)), node_id="out")
+    g.inputs, g.outputs = ["x", "a", "b"], ["out"]
+    return g
+
+
+def test_reconvergent_dag_fuses_as_one_ssa_region():
+    result = _fuse(_make_pointwise_diamond())
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 1
+    fns = _assign_fns(kernels[0].op.body)
+    assert fns.count("negative") == 1
+    assert fns.count("add") == 2
+    assert fns.count("multiply") == 1
+
+
+def test_reconvergent_dag_fusion_is_numerically_exact():
+    inputs = {name: rng.standard_normal(8).astype(np.float32) for name in ("x", "a", "b")}
+    before = _run(_make_pointwise_diamond(), inputs)
+    after = _run(_fuse(_make_pointwise_diamond()), inputs)
+    _assert_close(before, after)
+
+
+def test_non_reconvergent_fanout_stays_materialized():
+    graph = _make_pointwise_diamond()
+    graph.add_node(ElementwiseOp("exp"), ["shared"], Tensor("escape", (8,)), node_id="escape")
+    graph.outputs.append("escape")
+    result = _fuse(graph)
+    shared = result.nodes.get("shared")
+    assert shared is not None and isinstance(shared.op, LoopOp)
+    assert len(result.outputs) == 2
+
+
+def _make_indexmap_diamond():
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 4)), node_id="x")
+    shared = const_bc(g, name="one", value=1.0, target_shape=(2, 4), dtype="f32")
+    g.add_node(ElementwiseOp("add"), ["x", shared], Tensor("left", (2, 4)), node_id="left")
+    g.add_node(ElementwiseOp("multiply"), ["x", shared], Tensor("right", (2, 4)), node_id="right")
+    g.add_node(ElementwiseOp("add"), ["left", "right"], Tensor("out", (2, 4)), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+    return g
+
+
+def test_reconvergent_indexmap_is_owned_by_shared_region_merge():
+    lifted = Pipeline.build(["loop/lifting"]).run(_make_indexmap_diamond())
+    split_only = Pipeline.build(["loop/fusion"], select={"split_shared_indexmap"}).run(lifted)
+    assert "one_bc" in split_only.nodes
+
+    result = Pipeline.build(["loop/fusion"]).run(split_only)
+    (kernel,) = _kernel_nodes(result)
+    assert sum(isinstance(stmt, Load) and stmt.input == "one" for stmt in kernel.op.body.iter()) == 1
+
+
+def test_typed_copy_fanout_stays_outside_pending_contraction():
+    """A fan-out cannot bypass the same typed contraction boundary as a pair."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 4), "f32"), node_id="x")
+    g.add_node(ElementwiseOp("copy"), ["x"], Tensor("narrow", (2, 4), "f16"), node_id="narrow")
+    g.add_node(ElementwiseOp("negative"), ["narrow"], Tensor("left", (2, 4), "f16"), node_id="left")
+    g.add_node(ElementwiseOp("multiply"), ["narrow", "left"], Tensor("product", (2, 4), "f16"), node_id="product")
+    g.add_node(ReduceOp("sum", -1), ["product"], Tensor("out", (2, 1), "f16"), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+
+    result = _fuse(g)
+    assert any(node.output.dtype.name == "f16" and _assign_fns(node.op.body) == ["copy"] for node in _kernel_nodes(result))
 
 
 # ===================================================================
@@ -472,13 +554,12 @@ def test_softmax_has_both_accumulators():
 
 
 # ===================================================================
-# Split shared (multi-consumer) index-map fan-out (005) so merge inlines it.
+# Split non-reconvergent shared index-map fan-out (005).
 #
-# A pure-indexmap LoopOp (broadcast / transpose) that fans out to ≥2
-# consumers is never absorbed by ``merge_loop_ops`` (the match-walker only
-# extends single-consumer edges). ``005_split_shared_indexmap`` peels each
-# consumer onto a private copy so every edge becomes single-consumer and
-# merge folds them — leaving no pure-indexmap copy kernel behind.
+# Closed reconvergent fan-out is absorbed as one SSA region by
+# ``merge_loop_ops``. When consumers remain separate, a pure index map can be
+# cheaply copied into each consumer; ``005_split_shared_indexmap`` performs
+# that multi-output rewrite and leaves no copy kernel behind.
 # ===================================================================
 
 

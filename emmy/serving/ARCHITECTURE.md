@@ -239,8 +239,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   card, the rest is vLLM's KV budget.
   **EXL3 experts.** The loader stacks each per-expert checkpoint module into E-leading
   codes and padded channel-vector tensors. Gate and up remain separate program inputs.
-  `spell_trellis_inputs` replaces each logical weight input with the generic reconstruction
-  algebra from `loader/trellis.py`; all per-expert sources remain table-resolved inputs.
+  `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the
+  generic factorized contraction from `loader/trellis.py`; all per-expert sources remain
+  table-resolved inputs and no decoded dense expert weight exists.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
@@ -255,10 +256,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   ALL-OR-NOTHING across groups (`_slots_ok`): a whole-step capture records one launch set for every layer, so a
   group left on the routed eager path would make the captured step wrong for its layers.
 
-  **EXL3 trunk.** The correctness lane materializes logical trunk values through
-  `load_quantized_split` before tracing. This deliberately avoids a checkpoint-specific
-  post-decomposition kernel path. A future compressed lane must optimize the generic reconstruction
-  graph while preserving the compiler's dialect boundary.
+  **EXL3 trunk.** Serving always requests the coded trunk from `load_quantized_split`; placeholder
+  module parameters are never read. Birth-time spelling re-sources the traced constants from the
+  checkpoint and replaces each coded linear directly with generic factorized contractions. Any
+  unmatched coded trunk weight aborts compilation instead of expanding to a dense fallback.
 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes

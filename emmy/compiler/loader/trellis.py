@@ -294,9 +294,15 @@ def spell_factored_linear(
     if k_pad < k or n_pad < n:
         raise ValueError(f"coded linear {weight_name}: padded storage {(n_pad, k_pad)} cannot execute directly as logical weight {(n, k)}")
     x_node = graph.nodes[x]
-    x_shape = tuple(d.as_static() for d in x_node.output.shape)
-    out_shape = tuple(d.as_static() for d in out.shape)
-    if not x_shape or x_shape[-1] != k or out_shape != x_shape[:-1] + (n,):
+    # Only the contraction axes are intrinsically static.  Serving's symbolic
+    # twins tie every leading activation/result axis to the same runtime Dim;
+    # retain those Dim objects throughout the factored contraction instead of
+    # forcing the whole tensor shape through ``as_static``.
+    x_shape = tuple(d.as_static() if d.is_static else d for d in x_node.output.shape)
+    out_shape = tuple(d.as_static() if d.is_static else d for d in out.shape)
+    x_k = x_shape[-1] if x_shape and isinstance(x_shape[-1], int) else None
+    out_n = out_shape[-1] if out_shape and isinstance(out_shape[-1], int) else None
+    if not x_shape or x_k != k or out_n != n or out_shape[:-1] != x_shape[:-1]:
         raise ValueError(f"coded linear {weight_name}: activation/result shapes {x_shape}/{out_shape} do not match {(n, k)}")
     if x_node.output.dtype.name not in {"f16", "f32"} or out.dtype.name not in {"f16", "f32"}:
         raise ValueError(
@@ -314,17 +320,17 @@ def spell_factored_linear(
     core = _tile_order(b, _codebook(b, windows, cb, (kt, nt, 256)), kt, nt)
     factor = _hadamard(b)
 
-    def copy(src: str, name: str, shape: tuple[int, ...], dtype: str) -> str:
+    def copy(src: str, name: str, shape: tuple, dtype: str) -> str:
         return graph.add_node(op=ElementwiseOp(op="copy"), inputs=[src], output=Tensor(name, shape, dtype))
 
-    def reshape(src: str, name: str, shape: tuple[int, ...]) -> str:
+    def reshape(src: str, name: str, shape: tuple) -> str:
         return graph.add_node(
             op=ReshapeOp(shape=shape),
             inputs=[src],
             output=Tensor(name, shape, graph.nodes[src].output.dtype),
         )
 
-    def matmul(lhs: str, rhs: str, name: str, shape: tuple[int, ...]) -> str:
+    def matmul(lhs: str, rhs: str, name: str, shape: tuple) -> str:
         return graph.add_node(op=MatmulOp(), inputs=[lhs, rhs], output=Tensor(name, shape, "f32"))
 
     factor32 = copy(factor, f"{out.name}_factor32", (128, 128), "f32")

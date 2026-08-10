@@ -10141,11 +10141,11 @@ configs:
   knobs:
     WORK: w2x4
     TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g4a
+    REDUCE: g4k
     RASTER: gm8
     STAGE: d2/tma
   measurements:
-    emmy_us: 41.8
+    emmy_us: 41.6
     reference_us: 47.0
     reference_backend: cublas
 - name: gemma4_12b.o_proj.m192.lin
@@ -10155,12 +10155,12 @@ configs:
     - linear
   knobs:
     WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x2/k4
-    REDUCE: g4a
+    TILE: mma_m16n8k16_f16_f32/f2x2/k2
+    REDUCE: g8k
     RASTER: gm8
     STAGE: d2/tma
   measurements:
-    emmy_us: 37.9
+    emmy_us: 37.6
     reference_us: 47.0
     reference_backend: cublas
 - name: gemma4_12b.o_proj_global.m192.lin
@@ -10171,11 +10171,11 @@ configs:
   knobs:
     WORK: w2x4
     TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8a
+    REDUCE: g4k
     RASTER: gm8
     STAGE: d2/tma
   measurements:
-    emmy_us: 71.9
+    emmy_us: 77.8
     reference_us: 74.0
     reference_backend: cublas
 - name: gemma4_12b.o_proj_global.m192.lin
@@ -10185,12 +10185,12 @@ configs:
     - linear
   knobs:
     WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: g8a
+    TILE: mma_m16n8k16_f16_f32/f2x2/k2
+    REDUCE: g8k
     RASTER: gm8
     STAGE: d2/tma
   measurements:
-    emmy_us: 71.3
+    emmy_us: 70.9
     reference_us: 74.0
     reference_backend: cublas
 - name: gemma4_12b.norm_gate_up.m192.lin

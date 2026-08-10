@@ -136,6 +136,12 @@ def test_reassociation_removes_dense_reconstruction_and_stays_generic():
     )
     active = "\n".join(f"{type(node.op).__module__}.{type(node.op).__name__}" for node in result.nodes.values())
     assert "trellis" not in active.lower() and "exl3" not in active.lower()
+    # Precision boundaries created by this rewrite remain typed generic
+    # copies so they can fuse into the adjacent contractions. Frontend
+    # CastOps elsewhere retain their ordinary backend/interpreter semantics.
+    assert not any(isinstance(node.op, CastOp) for node in result.nodes.values())
+    copies = [node for node in result.nodes.values() if isinstance(node.op, ElementwiseOp) and node.op.name == "copy"]
+    assert {node.output.dtype.name for node in copies} == {"f16", "f32"}
 
 
 def test_reassociation_tracks_materialized_fp16_weight_error():

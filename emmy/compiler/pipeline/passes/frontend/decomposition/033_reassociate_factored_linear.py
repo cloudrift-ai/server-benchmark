@@ -226,6 +226,12 @@ def _reshape(frag: Graph, x: Node | str, *, name: str, shape: tuple) -> Node:
     return frag.nodes[nid]
 
 
+def _cast(frag: Graph, x: Node | str, *, name: str, shape: tuple, dtype: str) -> Node:
+    """Keep an intentional precision boundary fuseable as a typed copy."""
+    nid = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[x], output=Tensor(name, shape, dtype))
+    return frag.nodes[nid]
+
+
 def rewrite(match: Match, linear: Node, inp_x: Node, inp_w: Node, inp_b: Node | None, out: Tensor) -> Graph:
     factored = _factored_weight(match.graph, inp_w)
     x_shape = _shape(inp_x)
@@ -244,21 +250,17 @@ def rewrite(match: Match, linear: Node, inp_x: Node, inp_w: Node, inp_b: Node | 
         exts.append(inp_b)
     frag = open_fragment(match.graph, exts)
 
-    factor32_id = frag.add_node(
-        op=CastOp(dtype="f32"),
-        inputs=[factored.factor],
-        output=Tensor(f"{out.name}_factor32", (_BLOCK, _BLOCK), "f32"),
-    )
-    factor32 = frag.nodes[factor32_id]
+    factor32 = _cast(frag, factored.factor, name=f"{out.name}_factor32", shape=(_BLOCK, _BLOCK), dtype="f32")
 
-    x32_id = frag.add_node(op=CastOp(dtype="f32"), inputs=[inp_x], output=Tensor(f"{out.name}_x32", x_shape, "f32"))
-    x32 = frag.nodes[x32_id]
-    left_scale32_id = frag.add_node(
-        op=CastOp(dtype="f32"),
-        inputs=[factored.left_scale],
-        output=Tensor(f"{out.name}_left_scale32", (factored.k,), "f32"),
+    x32 = _cast(frag, inp_x, name=f"{out.name}_x32", shape=x_shape, dtype="f32")
+    left_scale32 = _cast(
+        frag,
+        factored.left_scale,
+        name=f"{out.name}_left_scale32",
+        shape=(factored.k,),
+        dtype="f32",
     )
-    left_bc = broadcast_to(frag, frag.nodes[left_scale32_id], x_shape)
+    left_bc = broadcast_to(frag, left_scale32, x_shape)
     scaled_x_id = frag.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[x32, left_bc],
@@ -269,12 +271,7 @@ def rewrite(match: Match, linear: Node, inp_x: Node, inp_w: Node, inp_b: Node | 
     left_blocks = _reshape(frag, scaled_x, name=f"{out.name}_left_blocks", shape=left_block_shape)
     left = _matmul(frag, left_blocks, factor32, name=f"{out.name}_left_factor", shape=left_block_shape, dtype="f32")
     left_flat32 = _reshape(frag, left, name=f"{out.name}_left_flat32", shape=x_shape)
-    left_flat_id = frag.add_node(
-        op=CastOp(dtype="f16"),
-        inputs=[left_flat32],
-        output=Tensor(f"{out.name}_left_flat", x_shape, "f16"),
-    )
-    left_flat = frag.nodes[left_flat_id]
+    left_flat = _cast(frag, left_flat32, name=f"{out.name}_left_flat", shape=x_shape, dtype="f16")
 
     core_shape = x_shape[:-1] + (factored.n,)
     core_out = _matmul(frag, left_flat, factored.core, name=f"{out.name}_core", shape=core_shape, dtype="f32")
@@ -283,12 +280,14 @@ def rewrite(match: Match, linear: Node, inp_x: Node, inp_w: Node, inp_b: Node | 
     right = _matmul(frag, right_blocks, factor32, name=f"{out.name}_right_factor", shape=right_block_shape, dtype="f32")
     right_flat = _reshape(frag, right, name=f"{out.name}_right_flat", shape=core_shape)
 
-    right_scale32_id = frag.add_node(
-        op=CastOp(dtype="f32"),
-        inputs=[factored.right_scale],
-        output=Tensor(f"{out.name}_right_scale32", (factored.n,), "f32"),
+    right_scale32 = _cast(
+        frag,
+        factored.right_scale,
+        name=f"{out.name}_right_scale32",
+        shape=(factored.n,),
+        dtype="f32",
     )
-    right_bc = broadcast_to(frag, frag.nodes[right_scale32_id], core_shape)
+    right_bc = broadcast_to(frag, right_scale32, core_shape)
     scaled_id = frag.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[right_flat, right_bc],
@@ -296,24 +295,15 @@ def rewrite(match: Match, linear: Node, inp_x: Node, inp_w: Node, inp_b: Node | 
     )
     scaled32 = frag.nodes[scaled_id]
     if inp_b is not None:
-        bias32_id = frag.add_node(
-            op=CastOp(dtype="f32"),
-            inputs=[inp_b],
-            output=Tensor(f"{out.name}_bias32", (factored.n,), "f32"),
-        )
-        bias_bc = broadcast_to(frag, frag.nodes[bias32_id], core_shape)
+        bias32 = _cast(frag, inp_b, name=f"{out.name}_bias32", shape=(factored.n,), dtype="f32")
+        bias_bc = broadcast_to(frag, bias32, core_shape)
         biased_id = frag.add_node(
             op=ElementwiseOp(op="add"),
             inputs=[scaled32, bias_bc],
             output=Tensor(f"{out.name}_biased32", core_shape, "f32"),
         )
         scaled32 = frag.nodes[biased_id]
-    final_id = frag.add_node(
-        op=CastOp(dtype="f16"),
-        inputs=[scaled32],
-        output=Tensor(out.name, core_shape, "f16"),
-    )
-    final = frag.nodes[final_id]
+    final = _cast(frag, scaled32, name=out.name, shape=core_shape, dtype="f16")
     frag.outputs = [final.id]
     match.consumed = consumed
     return frag

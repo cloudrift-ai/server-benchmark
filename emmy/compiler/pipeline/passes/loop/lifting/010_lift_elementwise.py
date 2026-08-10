@@ -1,8 +1,8 @@
 """Lift pointwise tensor compute to a trivial single-op ``LoopOp``.
 
-Every ``ElementwiseOp``, numerical ``CastOp``, and same-width ``BitcastOp`` in the
-post-decomposition graph is wrapped as a one-op kernel that reads its inputs via identity Ports, applies the op, and writes
-the result. Broadcasts on input buffers are handled by right-aligning non-
+Every ``ElementwiseOp`` and same-width ``BitcastOp`` in the post-decomposition
+graph is wrapped as a one-op kernel that reads its inputs via identity Ports,
+applies the op, and writes the result. Broadcasts on input buffers are handled by right-aligning non-
 size-1 dims onto kernel axes (matching the iteration space of the output).
 
 Mergeable pairs (producer/consumer LoopOp) are collapsed later by the merge
@@ -18,10 +18,10 @@ from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Stmt, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.base import dtype_promote
-from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp
+from emmy.compiler.ir.tensor.ir import BitcastOp, ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
 
-PATTERN = [Pattern("root", (ElementwiseOp, CastOp, BitcastOp))]
+PATTERN = [Pattern("root", (ElementwiseOp, BitcastOp))]
 
 
 def rewrite(match: Match, root: Node) -> Graph | None:
@@ -50,15 +50,15 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         op = root.op.op
     elif isinstance(root.op, BitcastOp):
         op = ElementwiseImpl("bitcast")
-    else:
-        op = ElementwiseImpl("copy")
-    # ``copy`` is also the generic spelling of a numerical tensor cast.  Unlike ordinary
-    # pointwise arithmetic, its declared output dtype is the operation itself, not merely the
-    # eventual store type.  Stamp the scalar assignment so fusion cannot erase a widening cast
-    # (for example u32 -> u64 before a packed shift).
+    # ``copy`` is also the generic spelling used by rewrites that deliberately
+    # keep a numerical precision boundary inside a fused contraction. Unlike
+    # ordinary pointwise arithmetic, its declared output dtype is the operation
+    # itself, not merely the eventual store type. Stamp the scalar assignment so
+    # fusion cannot erase a widening cast (for example u32 -> u64 before a
+    # packed shift).
     input_dtypes = [graph.buffer(nid).dtype.name for nid in root.inputs if graph.buffer(nid) is not None]
     promoted = dtype_promote(op.name, input_dtypes) if isinstance(root.op, ElementwiseOp) else None
-    assign_dtype = root.output.dtype if op.name in ("copy", "bitcast") or root.output.dtype.name != promoted else None
+    assign_dtype = root.output.dtype if op.name == "bitcast" or root.output.dtype.name != promoted else None
     inner: Body = (
         *load_stmts,
         Assign(name="v", op=op, args=tuple(load_names), dtype=assign_dtype),

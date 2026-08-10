@@ -37,5 +37,7 @@ def test_static_runtime_cast_and_bitcast_are_plannable_cuda_copies():
     assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
     source = "\n".join(node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))
     assert "emmy_bitcast<unsigned short>(in0)" in source
-    assert "unsigned long long v1 = v0" in source
-    assert len(plan_from_graph(lowered).launches) == 1
+    # Ordinary tensor casts retain the generic static-conversion lowering;
+    # only the bitcast needs to live in the fused scalar body.
+    assert "static_cast<unsigned long long>(inp[i])" in source
+    assert len(plan_from_graph(lowered).launches) == 2

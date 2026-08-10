@@ -1444,6 +1444,20 @@ class EmmyGenRunner:
             from emmy.compiler.backend.gpu_lock import gpu_lock
 
             with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                # Program construction churns both allocator pools. Release their FREE blocks
+                # before the dominant expert-store transfer: vLLM cannot reclaim them until
+                # ``load_weights`` returns, and on a 32-GiB card that ordering alone can make
+                # the final layer's codes fail despite enough live-memory headroom.
+                before = torch.cuda.mem_get_info()[0]
+                torch.cuda.empty_cache()
+                cp.get_default_memory_pool().free_all_blocks()
+                free, total = torch.cuda.mem_get_info()
+                logger.info(
+                    "[gen_runner] pre-expert allocator reclaim: %.3f GiB released; %.3f of %.3f GiB free",
+                    (free - before) / 2**30,
+                    free / 2**30,
+                    total / 2**30,
+                )
                 for m in self._moe:
                     if m is None:
                         continue

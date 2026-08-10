@@ -3,9 +3,9 @@
 The exact checkpoint revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062` was qualified on sixteen V100 SXM3
 32 GB GPUs with TP8, PP2, FP16 weights, FP8 KV cache, a 4096-token context, and eight concurrent requests. The
 runtime is 1Cat revision `d76126608155c334df7c2fb9b75096f879624859`, with the original 22/21 transformer-layer
-pipeline split. The qualified local image is
-`cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree` (image ID
-`sha256:970b8c418271d443337acadb5bc7f7b3a7d470d4bb033c79c0cd8e666a4b8a78`).
+pipeline split. The qualified canonical local image is
+`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (image ID
+`sha256:0f027cba5ef47d094c28241e02bb3f449d6dc4a27e8f84c43cca4c15fb77442b`).
 
 ## Cache bake and zero-JIT gate
 
@@ -48,10 +48,10 @@ was then baked before the final image was built.
 
 The final zero-JIT gate started a fresh container from that image with fail-closed guards mounted over both `ptxas`
 locations, `nvcc`, and `ninja`. Startup, all 16 benchmark cells, and the structured tool call completed with zero
-compiler invocations, and the live cache manifests remained byte-identical to the image labels. The runtime's
-Triton monitor hooks `JITFunction.compile()` before Triton decides between a disk-cache load and backend compilation,
-so it still reports cache loads as “JIT compilation.” The empty compiler-guard log and unchanged manifests are the
-authoritative zero-JIT evidence.
+compiler invocations, and the normalized live cache manifests remained byte-identical to the image labels. The
+runtime's Triton monitor hooks `JITFunction.compile()` before Triton decides between a disk-cache load and backend
+compilation, so it still reports cache loads as “JIT compilation.” The empty compiler-guard log and unchanged
+manifests are the authoritative zero-JIT evidence.
 
 ## Serving benchmark
 
@@ -108,10 +108,41 @@ Attention, KV, MoE, and other compute are already nearly balanced across the two
 collective behavior and PP1 waiting, which moving one transformer layer cannot correct. The 22/21 split is retained;
 the next optimization target is pipeline communication and scheduling, not layer reassignment.
 
+### TP16/PP1 trial
+
+TP16/PP1 cannot serve this checkpoint with the current model geometry. The config has eight output groups, and the
+attention path computes `n_local_groups = o_groups // tensor_parallel_size`; TP16 therefore produces zero local
+groups. The qualified TurboMind lane failed during weight preparation with `groups=0, weight=(512, 4096)` before
+profiling or graph capture. Its compiler guard stayed empty.
+
+A diagnostic automatic-backend fallback reached the profile run but failed at `reshape([4096, 0, -1])`. It also
+generated a previously unseen `_sm70_inverse_rope_kernel`, so it would violate the baked-cache contract even if the
+zero-group error were repaired. No TP16 benchmark or tool-call result is valid. TP8/PP2 and the 22/21 split remain
+the qualified configuration.
+
+### PP scheduling and collective trial
+
+Source inspection confirmed that asynchronous scheduling is already enabled and the PP2 batch queue already allows
+two concurrent batches. The remaining low-risk collective switch was `--disable-custom-all-reduce`, which changes
+the TP path from custom all-reduce with PYNCCL fallback to PYNCCL only. A guarded fresh-container comparison produced:
+
+| Prompt/output, C8 | Duration | Output throughput | TTFT | TPOT |
+| --- | ---: | ---: | ---: | ---: |
+| 1024/64 | +18.65% | -15.72% | +79.92% | +1.75% |
+| 3072/128 | +6.23% | -5.87% | +92.10% | -9.15% |
+
+The long-context decode TPOT gain did not offset the prefill and end-to-end regressions. The tool call still passed,
+the compiler guard remained empty, and the baked Triton and TileLang caches did not change. NCCL-only is rejected;
+the qualified custom-all-reduce path with PYNCCL fallback is retained.
+
 ## Artifacts and publication
 
 Machine-readable evidence is in [qualification.json](qualification.json). Raw benchmark JSON, fresh-container logs,
 cache manifests, compiler-guard logs, and 17 compressed Torch traces remain on the VM under
-`/home/riftuser/onecat-dsv4-0731/optimization`. The final image is retained locally on the V100 node. It has not been
-pushed: the release workflow requires explicit human approval before publication, and the earlier source-image push
-also showed that the current Docker credentials lack the `cloudriftai` namespace scope.
+`/home/riftuser/onecat-dsv4-0731/optimization`; the rejected parallelism and collective trials are under
+`tp16-pp1-trial/` and `pp2-nccl-trial/`; the canonical-image fresh-container gate is in
+`canonical-zero-jit-v123/`. The final image is retained locally on the V100 node. It has not been pushed. `emmy
+publish --dry-run` passed its local
+naming and metadata checks, then stopped at the registry collision gate because Docker Hub returned
+`insufficient_scope` for the absent or inaccessible repository. No publication approval or credentials were
+requested.

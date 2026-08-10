@@ -1,12 +1,12 @@
 # DeepSeek V4 Flash 0731 on 16x V100 SXM3 32GB
 
-Status: serving-qualified; Docker Hub publication is blocked on namespace credentials.
+Status: serving-qualified under the canonical local image name; Docker Hub publication still requires separate
+approval and namespace credentials.
 
 Measured on 2026-08-10 with model revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062`, sixteen 32 GB V100
-SXM3 GPUs, and 1Cat commit `d76126608155c334df7c2fb9b75096f879624859`. The local native-SM70 image is
-`cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608`; its image ID and local manifest digest are
-`sha256:d08f373fe9558def8b6ab6589b4d80e5b021caa3e1e40687192305a49c5b11c6`, and its size is 10,968,934,035
-bytes. The supporting 1Cat changes are in
+SXM3 GPUs, and 1Cat commit `d76126608155c334df7c2fb9b75096f879624859`. The baked native-SM70 cache image is
+`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608`, with local image ID
+`sha256:0f027cba5ef47d094c28241e02bb3f449d6dc4a27e8f84c43cca4c15fb77442b`. The supporting 1Cat changes are in
 [cloudrift-ai/1Cat-vLLM pull request 2](https://github.com/cloudrift-ai/1Cat-vLLM/pull/2).
 
 ## Recommended configuration
@@ -16,9 +16,9 @@ qualified lane uses FP16 activations, FP8 KV cache, the SM70 sparse MLA route, T
 paths, and the TurboMind MXFP4 MoE path. Model loading took 19.83 seconds and engine profiling, KV-cache creation,
 and warmup took 84.05 seconds. The healthy service used about 27.0 GiB per GPU on PP0 and 28.5 GiB per GPU on PP1.
 
-The recipe keeps the tested 4096-token context, one-request concurrency, and eager execution. The
-`VLLM_SM70_FLASH_V100_0DOT3_COMPILE_GRAPH` setting was present in the qualified launch but is inactive under eager
-execution; it remains in the recipe to preserve the exact launch environment.
+The recipe keeps the tested 4096-token context and eight-request concurrency. It removes `--enforce-eager`; vLLM
+selected `FULL_AND_PIECEWISE` graph mode and captured decode sizes 1, 2, 4, 8, and 16. Graph mode improved TPOT by
+1.41–4.24x across the 16-cell qualification matrix.
 
 ## Accuracy and capability checks
 
@@ -28,27 +28,26 @@ probe emitted an OpenAI-compatible `multiply` call with arguments `{"a": 17, "b"
 reasoning markup until the 32-token limit. This is a response-formatting caveat, not a numerical mismatch; concise
 answer-only prompts stopped normally.
 
-The first live request JIT-compiled 16 Triton kernels that the image warmup did not cover. Later serialized `OK`
-requests all returned HTTP 200 with two completion tokens in 0.879345, 1.160202, and 1.152433 seconds. This bounded
-smoke workload establishes a coherent service, not representative throughput. Exact probes, route evidence, and
-artifact locations are in the
+Request-time warming reached 19 Triton functions across prefill, decode, batching, and tool-call shapes. The baked
+image then passed the complete 16-cell matrix and structured tool call from a fresh container while fail-closed
+compiler guards stayed empty and all cache manifests remained unchanged. Exact probes, route evidence, and artifact
+locations are in the
 [serving experiment](../../experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/RESULTS.md).
 Compiler coverage and tuning evidence are documented separately in the
 [compiler experiment](../../experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/RESULTS.md).
 
 ## Image publication
 
-The Docker Hub push failed with `insufficient_scope`; no Docker credential was created or left on the VM. The exact
-image and checkpoint remain on `riftuser@185.165.50.61`. After creating the Docker Hub repository and obtaining a
-Docker Hub personal access token with write access to the `cloudriftai` namespace, retry on that VM with:
+An earlier source-image push failed with `insufficient_scope`; no Docker credential was created or left on the VM.
+The canonical image and checkpoint remain on `riftuser@185.165.50.61`. Publication now goes only through the recipe
+gate. First run its read-only check and show the exact image ID, destination, labels, and collision result:
 
 ```bash
-read -r DOCKERHUB_USER
-read -rs DOCKERHUB_PAT
-printf '%s' "${DOCKERHUB_PAT}" | sudo docker login --username "${DOCKERHUB_USER}" --password-stdin
-sudo docker push cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608
-sudo docker logout
-unset DOCKERHUB_PAT DOCKERHUB_USER
+emmy publish recipes/DeepSeek-V4-Flash-0731 \
+  --source-image cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608 \
+  --dry-run
 ```
 
-Use a Docker Hub token for this operation, not `HF_TOKEN`.
+Only after a separate human approval should an operator obtain a short-lived Docker Hub token, log in with tracing
+disabled, replace `--dry-run` with `--yes`, verify the registry digest, and log out. Use a Docker Hub token for this
+operation, not `HF_TOKEN`.

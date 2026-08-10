@@ -1,7 +1,11 @@
 ---
 name: release-serving-image
-description: Use this skill when the user asks to "release the serving image for <model>", "build the prebuilt image for <HF model id>", "warm and bake the kernels for <model>", "create/publish the vllm-emmy docker image with prebuilt kernels", "release the gemma-4 image", or otherwise wants the per-model vllm-emmy serving image release pipeline executed end to end. Runs the documented workflow (docker/vllm-emmy-serve/ARCHITECTURE.md) on the model's target GPU — rented (via start-remote-server) or local — covering the golden coverage gate, base image, toolchain preflight, memory-headroom sweep that pins the model config, HF-parity validation gate, warm, bake, offline zero-recompile verify, and push, with hard abort gates at every step, a human approval pause before the push, and guaranteed teardown.
-version: 0.2.0
+description: >-
+  Use this skill when the user asks to release, build, warm, bake, qualify, or publish a per-model serving image,
+  including requests to run `emmy publish RECIPE`. Runs the documented vllm-emmy release workflow on the model's
+  target GPU, covering golden coverage, toolchain and memory gates, HF parity, warm and bake, offline zero-recompile
+  verification, canonical image naming, a distinct human approval before registry publication, and guaranteed
+  teardown.
 ---
 
 # Release a prebuilt serving image for one model
@@ -21,8 +25,27 @@ make serve-config MODEL=google/gemma-4-12B-it   # model / slug / config path / i
 make serve-models                               # which models already have a pinned config
 ```
 
+The serving recipe is the publication input. Before warming, resolve its one concrete model, engine image, target
+hardware, and serving shape; reject experiment grids or multiple image variants. The recipe image must use the
+canonical immutable reference that `emmy publish` validates:
+
+```text
+cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>
+```
+
+Supported runtime families are `vllm-emmy` and `1cat-vllm`. The model slug comes only from `model.huggingface`
+through Emmy's slug implementation. GPU architecture, zero-recompile status, cache manifests, checkpoint revision,
+and serving shape are image labels and qualification evidence, never tag suffixes. Refuse `latest`, `jitfree`, GPU
+names, or mutable aliases in the primary recipe reference.
+
+The exact local image must label `ai.emmy.publish.family`, `ai.emmy.model.id`, `ai.emmy.model.revision`,
+`ai.emmy.target.gpu`, `org.opencontainers.image.version`, and `org.opencontainers.image.revision`; cache-bearing
+images also carry their cache-manifest digests. Compare the model, checkpoint revision, target GPU, sealed serving
+shape, and cache manifests against the recipe, model config, and qualification evidence before publication. A label
+does not substitute for the fresh-container zero-recompile gate.
+
 Budget: ~2–3 h wall on a rental for a 12B-class model (image build ~20 min, headroom sweep ~30–60 min, validate
-~30 min, warm ~30 min, bake/verify/push ~30 min). **Hard cap: 4 h** — if the session exceeds it, capture logs, tear
+~30 min, warm ~30 min, bake/verify/publication ~30 min). **Hard cap: 4 h** — if the session exceeds it, capture
 down, report. A larger checkpoint scales this up; re-estimate before starting rather than inheriting these numbers.
 
 ## Inputs to confirm
@@ -38,12 +61,12 @@ Ask only for what the user hasn't already given:
    with the checkpoint.
 3. **`HF_TOKEN`** — needed for a gated download during headroom/validate/warm. Local mode with the model already in
    `~/.cache/huggingface` can skip it by pre-seeding (ARCHITECTURE.md "Running it locally").
-4. **Docker Hub credentials for the push** — ask the user for a **short-lived access token** (not their password;
-   `docker login -u <user> --password-stdin`) **and, in the same question, the username the token belongs to**: a PAT
-   authenticates only its owning account, which is usually a personal user with push rights to the `cloudriftai` org,
-   not `cloudriftai` itself — the wrong username fails as "incorrect username or password". Never echo the token;
-   `docker logout` in teardown regardless of outcome.
-5. **Env file** (CloudRift creds, rental mode) — default `.env`, per the `start-remote-server` sourcing rules.
+4. **Env file** (CloudRift creds, rental mode) — default `.env`, per the `start-remote-server` sourcing rules.
+
+Do not request registry credentials up front. Request the Docker username and a short-lived access token only after
+the baked image passes every gate, the publish dry-run succeeds, and the user separately approves registry
+publication. A PAT authenticates its owning account, normally a personal user with push rights to `cloudriftai`, not
+the organization name itself.
 
 ## Step 0 — Golden coverage (GATE, and it comes first)
 
@@ -83,6 +106,10 @@ the artifact, not a detail of the session.
 
 ## Step 1 — Provision (rental mode; skip in local mode)
 
+Define one cleanup path before provisioning and update it as soon as the lease handle, transient container names,
+and registry-login state become known. It must remove release containers, log out when login occurred, and delete
+and audit the rental on success, refusal, timeout, or any gate failure.
+
 Delegate to the `start-remote-server` skill, asking for the config's `SERVE_GPU`, e.g.
 `emmy vm create gpu --gpu "NVIDIA GeForce RTX 5090" --gpu-count 1` (CloudRift). On vast.ai instead: rent a **VM
 instance** template (e.g. "Ubuntu 22.04 VM", vastai/kvm, `vms_enabled=true` in search) — plain docker-container
@@ -97,11 +124,12 @@ degrades; `make` now guards this).
 
 **Ship the source at the pinned release commit — never rsync the live working tree.** The working tree is shared
 mutable state: a branch switch in another session mid-release yields a hybrid tree whose wheel fails in confusing,
-distant ways. Pin `origin/main`'s sha up front, get the tree onto the host (fresh clone, or rsync of the
-`git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify `git rev-parse HEAD` before any
-rebuild. Then `make setup` + `./venv/bin/pip install -e ".[serving]"` + cupy (the venv steps back the headroom
-sweep and the validate script). Host toolchain: a CUDA version whose nvcc supports the target arch (**>= 12.9** for
-sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75 or higher"); on non-CloudRift
+distant ways. Pin the selected release branch's commit SHA up front, get the tree onto the host (fresh clone, or
+rsync of the `git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify
+`git rev-parse HEAD` before any rebuild. Then run `make setup`, install `.[serving]` editable, and install cupy; the
+venv supports the headroom sweep and validation script. Host toolchain: a CUDA version whose nvcc supports the
+target arch (**>= 12.9** for sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75
+or higher"); on non-CloudRift
 hosts verify the NVIDIA container toolkit actually works (`docker run --gpus all ... nvidia-smi`) — a registered
 runtime with missing binaries fails with `could not select device driver`. The venv-based steps (headroom sweep,
 validate) additionally need `CUDA_HOME`/nvcc exported in the step's own environment (emmy refuses to serve without
@@ -142,8 +170,8 @@ session.
 
 For a **new model** this step *creates* `docker/vllm-emmy-serve/models/<slug>.env`; for an existing one it
 re-validates it. Policy (decode bucket stays at the model's tuned default): try
-`--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 → 4096 (stop at 4096 — the dynamic-dim cap),
-`--gpu-memory-utilization 0.97`, each via a detached
+`--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 → 4096 (stop at 4096 — the dynamic-dim
+cap), `--gpu-memory-utilization 0.97`, each via a detached
 `./venv/bin/emmy serve --generate <model> --bench --max-model-len N --max-num-batched-tokens N`. A config **passes**
 when the server reaches `/health`, the bench completes, AND the serve log has no `EngineCore encountered a fatal
 error` (the exit code alone hides tail crashes — a drained bench can die after its metrics print; grep the log). It
@@ -179,7 +207,10 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
 After writing it, run `make serve-config MODEL=<id>` and confirm every line reads back as intended — that is the
 cheap check that both readers agree before a multi-hour warm depends on it.
 
-**The config is sealed from here on** — any later change invalidates the warm.
+**The config is sealed from here on** — any later change invalidates the warm. For a new or changed config, this is
+also the point to commit the config and canonical recipe reference, update the pinned release commit on the remote,
+and rerun `make serve-config` from that clean checkout before Step 5. Headroom measurement may discover the values,
+but correctness, warm, bake, verify, and publication must all use one committed source snapshot.
 
 ## Step 5 — Correctness gate (GATE + human pause)
 
@@ -206,28 +237,56 @@ container, then runs the offline fixpoint passes). Confirm the summary line repo
 `warm/` is a single shared directory, so **one model at a time**: warming a second model into a populated `warm/`
 bakes a mixture of two models' caches. Clear it between models.
 
-## Step 7 — Bake, verify (GATE), push
+## Step 7 — Bake, verify, publish (GATES + separate human pause)
 
 ```bash
 make serve-image  MODEL=<id>
 make serve-verify MODEL=<id>     # GATE: must print "PASS — served offline with zero new cubins"
-docker login -u <user> --password-stdin   # the short-lived token from Inputs
-make serve-push   MODEL=<id>
-docker logout
+./venv/bin/emmy publish <recipe> --source-image <exact-local-image> --dry-run
 ```
 
 A verify FAIL means cache-key drift between warm and bake — capture the printed cubin diff (it names the recompiled
 kernels), abort, teardown, report. Do not push a partially-hitting image.
 
+The publish dry-run is another hard gate. It must resolve the recipe's canonical target, match the exact local image
+and its runtime/model provenance labels, reject a conflicting registry digest, and perform no tag or push mutation.
+Show the user the source image ID, canonical target, relevant labels, and registry collision result.
+When the local image already carries the recipe target, `--source-image` may be omitted; use the same source choice
+for dry-run and publication. If anonymous registry inspection is unavailable, stop at this gate rather than treating
+an authorization or missing-tool error as an absent target or requesting write credentials early.
+
+**Human pause: ask separately for explicit approval to publish that exact target.** Approval at the correctness gate
+does not authorize a registry write. Say that a rental continues billing during this pause. If the user declines or
+does not answer, preserve the local image and evidence, then log out if needed and tear down.
+
+Only after approval, request the Docker username and short-lived token. Read the token with shell tracing disabled,
+then publish and immediately log out:
+
+```bash
+set +x
+docker login -u <user> --password-stdin
+set -x
+./venv/bin/emmy publish <recipe> --source-image <exact-local-image> --yes
+set +x
+docker logout
+set -x
+```
+
+The command must refuse to replace a different digest. An existing target with the same digest is idempotent success.
+After a push, require the registry digest to match the local digest before declaring the release complete.
+
 ## Step 8 — Release side-effects + teardown
 
-1. On a feature branch: commit the finalized `models/<slug>.env`, point any recipe that should use the new image at
-   the pushed `cloudriftai/vllm-emmy-<slug>:<ver>-<sha>` tag, and open a PR (the repo contribution checklist
-   applies).
-2. **Teardown (rental mode) — always, including on every abort path above**: `emmy vm delete …` with the captured
-   handle, after `docker logout`. Report the total rental time.
-3. Report: pushed tag, pinned config, **the Step 0 golden coverage status**, validate summary, verify line, and any
-   findings.
+1. On the feature branch, confirm the pinned release commit already contains the finalized `models/<slug>.env` and
+   canonical recipe target used by warm, verify, and publish. Commit only the resulting qualification report or
+   release evidence now, then open or update the PR (the repo contribution checklist applies).
+2. **Teardown (rental mode) — always, including on every abort path above**: remove transient release containers,
+   run `docker logout` if login occurred, then `emmy vm delete …` with the captured handle and audit its absence.
+   Report the total rental time. A declined publication leaves the local image and evidence intact but does not keep
+   the rental running.
+3. Report: published target and registry digest, recipe/config digest, checkpoint and runtime revisions, target GPU,
+   cache manifests, **the Step 0 golden coverage status**, validate summary, zero-recompile verify line, teardown
+   audit, and any findings.
 
 ## Failure handling
 

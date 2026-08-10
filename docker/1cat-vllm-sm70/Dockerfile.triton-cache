@@ -8,7 +8,11 @@
 #     --build-arg TRITON_CACHE_MANIFEST_SHA256=<sha256> \
 #     --build-arg TILELANG_CACHE_MANIFEST_SHA256=<sha256> \
 #     --build-arg TILELANG_JIT_CACHE_MANIFEST_SHA256=<sha256> \
-#     -t cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree .
+#     --build-arg PUBLISH_VERSION=1.2.3 \
+#     --build-arg PUBLISH_REVISION=d76126608155c334df7c2fb9b75096f879624859 \
+#     --build-arg MODEL=deepseek-ai/DeepSeek-V4-Flash-0731 \
+#     --build-arg MODEL_REVISION=7872f01b1d1fe23eabc4c98b48bffcef5a386062 \
+#     -t cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608 .
 
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
@@ -16,6 +20,11 @@ FROM ${BASE_IMAGE}
 ARG TRITON_CACHE_MANIFEST_SHA256
 ARG TILELANG_CACHE_MANIFEST_SHA256
 ARG TILELANG_JIT_CACHE_MANIFEST_SHA256
+ARG PUBLISH_FAMILY=1cat-vllm
+ARG PUBLISH_VERSION
+ARG PUBLISH_REVISION
+ARG MODEL
+ARG MODEL_REVISION
 COPY --chown=root:root triton-cache/ /root/.triton/cache/
 COPY --chown=root:root tilelang-cache/ /root/.tilelang/cache/
 COPY --chown=root:root tilelang-jit-cache/ /root/.cache/tilelang/
@@ -26,4 +35,10 @@ ENV TRITON_CACHE_DIR=/root/.triton/cache \
 LABEL ai.vllm.triton-cache.manifest-sha256="${TRITON_CACHE_MANIFEST_SHA256}" \
       ai.vllm.tilelang-cache.manifest-sha256="${TILELANG_CACHE_MANIFEST_SHA256}" \
       ai.vllm.tilelang-jit-cache.manifest-sha256="${TILELANG_JIT_CACHE_MANIFEST_SHA256}" \
-      ai.vllm.jit-cache.target="NVIDIA Tesla V100 SXM3 32GB"
+      ai.vllm.jit-cache.target="NVIDIA Tesla V100 SXM3 32GB" \
+      ai.emmy.publish.family="${PUBLISH_FAMILY}" \
+      ai.emmy.model.id="${MODEL}" \
+      ai.emmy.model.revision="${MODEL_REVISION}" \
+      ai.emmy.target.gpu="NVIDIA Tesla V100 SXM3 32GB" \
+      org.opencontainers.image.version="${PUBLISH_VERSION}" \
+      org.opencontainers.image.revision="${PUBLISH_REVISION}"

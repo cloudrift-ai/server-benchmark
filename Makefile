@@ -14,8 +14,9 @@ help:
 	@echo "  wheel          - Build the emmy wheel into dist/"
 	@echo "  vllm-emmy-image - Build the vLLM + emmy serving image (docker/vllm-emmy)"
 	@echo "  vllm-emmy-push  - Push the serving image to Docker Hub (cloudriftai/)"
-	@echo "  serve-goldens / serve-warm / serve-image / serve-verify / serve-push  MODEL=<hf-id>"
-	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, push a"
+	@echo "  serve-goldens / serve-warm / serve-image / serve-verify  MODEL=<hf-id>"
+	@echo "  emmy publish <recipe> --dry-run / --yes  validate / publish the recipe image"
+	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
@@ -193,7 +194,11 @@ serve-image: git-sha-guard serve-config-guard
 	$(SERVE_DIR)/split_hf.sh
 	docker build -f $(SERVE_DIR)/Dockerfile \
 		--build-arg BASE_IMAGE=$(VLLM_EMMY_TAG) \
+		--build-arg PUBLISH_FAMILY=vllm-emmy \
+		--build-arg PUBLISH_VERSION=$(patsubst v%,%,$(VLLM_VERSION)) \
+		--build-arg PUBLISH_REVISION=$(shell git rev-parse HEAD) \
 		--build-arg MODEL=$(SERVE_MODEL) \
+		--build-arg TARGET_GPU='$(SERVE_GPU_NAME)' \
 		--build-arg MAX_MODEL_LEN=$(SERVE_MAX_MODEL_LEN) \
 		--build-arg MAX_NUM_BATCHED_TOKENS=$(SERVE_MAX_NUM_BATCHED_TOKENS) \
 		--build-arg GPU_MEM_UTIL=$(SERVE_GPU_MEM_UTIL) \
@@ -212,7 +217,8 @@ serve-verify: serve-config-guard
 	IMAGE=$(SERVE_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/verify.sh
 
 serve-push: serve-config-guard
-	docker push $(SERVE_TAG)
+	@echo "ERROR: direct serving-image pushes are disabled; use 'emmy publish <recipe>'." >&2
+	@exit 2
 
 bench: setup
 	@echo "Running benchmarks..."

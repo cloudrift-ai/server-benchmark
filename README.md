@@ -176,6 +176,20 @@ emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gp
 which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
 its run directories. A path that exists always wins, so an edited working copy is never overwritten.
 
+## Publish a serving image
+
+The serving recipe pins the canonical immutable image reference. Validate the local image, its provenance labels,
+and the registry collision before requesting publication approval; only then log in and perform the push:
+
+```bash
+emmy publish recipes/DeepSeek-V4-Flash-0731 --dry-run
+emmy publish recipes/DeepSeek-V4-Flash-0731 --source-image local-baked-image --yes
+```
+
+Published references use
+`cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>`; see the
+[prebuilt-serving-image architecture](docker/vllm-emmy-serve/ARCHITECTURE.md) for the release gates and labels.
+
 ## Serve (compiled embeddings via vLLM)
 
 ```bash

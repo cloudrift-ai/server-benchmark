@@ -42,7 +42,9 @@ compare configurations, add an experiment; then fold the winner back into the re
 
 - **The engine and image.** For emmy-accelerated models this is the prebuilt per-model image built by
   [`docker/vllm-emmy-serve/`](../docker/vllm-emmy-serve/ARCHITECTURE.md) — the model snapshot, warmed cubins and the
-  execution-plan pack are baked in, so a cold start pays no download, no `nvcc`, and no compiler frontend.
+  execution-plan pack are baked in, so a cold start pays no download, no `nvcc`, and no compiler frontend. Pin its
+  canonical immutable reference; the recipe is the publication input to `emmy publish` as well as the deployment
+  input.
 - **The serving shape**, matching what that image was warmed at. The pack is keyed on the shape (model,
   max-model-len, max-num-batched-tokens, decode bucket), so a recipe that drifts off it still deploys but re-runs
   the compiler frontend per program on every boot — measured at ~50 min of host CPU, which can exceed the compose
@@ -77,7 +79,8 @@ sweep rather than guessing (`release-serving-image` skill, Step 4).
 
 ## Adding a model
 
-1. Release an image for it: `make serve-goldens/serve-warm/serve-image/serve-verify/serve-push MODEL=<hf-id>` — see
+1. Qualify an image with `make serve-goldens/serve-warm/serve-image/serve-verify MODEL=<hf-id>`, pin its canonical
+   reference in the recipe, then validate and publish it with `emmy publish <recipe>` after approval — see
    [`docker/vllm-emmy-serve/ARCHITECTURE.md`](../docker/vllm-emmy-serve/ARCHITECTURE.md). The headroom sweep there
    produces the shape the recipe must match.
 2. Add `recipes/<model>/recipe.yaml` pinning that image and that shape, one variant, no `benchmark:` block.

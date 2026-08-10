@@ -20,6 +20,11 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG PUBLISH_FAMILY
+ARG PUBLISH_VERSION
+ARG PUBLISH_REVISION
+ARG TARGET_GPU
+
 ENV HF_HOME=/opt/emmy/hf \
     EMMY_CUBIN_CACHE=/opt/emmy/cubin \
     EMMY_PACK_DIR=/opt/emmy/pack \
@@ -76,6 +81,13 @@ ENV SERVE_REVISION="${REVISION}" \
     EMMY_GEN_PREFILL_CAPACITY="${PREFILL_CAPACITY}" \
     EMMY_GEN_PREFILL_BUCKET="${PREFILL_BUCKET}" \
     EMMY_GEN_M1_TIER="${M1_TIER}"
+
+LABEL ai.emmy.publish.family="${PUBLISH_FAMILY}" \
+      ai.emmy.model.id="${MODEL}" \
+      ai.emmy.model.revision="${REVISION}" \
+      ai.emmy.target.gpu="${TARGET_GPU}" \
+      org.opencontainers.image.version="${PUBLISH_VERSION}" \
+      org.opencontainers.image.revision="${PUBLISH_REVISION}"
 
 COPY serve.sh /opt/emmy/serve.sh
 RUN chmod +x /opt/emmy/serve.sh

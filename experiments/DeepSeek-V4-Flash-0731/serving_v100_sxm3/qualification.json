@@ -16,13 +16,17 @@
   "image": {
     "source_revision": "d76126608155c334df7c2fb9b75096f879624859",
     "source_id": "sha256:d08f373fe9558def8b6ab6589b4d80e5b021caa3e1e40687192305a49c5b11c6",
-    "local_tag": "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree",
-    "publication_tag": "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree",
-    "id": "sha256:970b8c418271d443337acadb5bc7f7b3a7d470d4bb033c79c0cd8e666a4b8a78",
-    "size_bytes": 10974534120,
+    "legacy_local_tag": "cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608-jitfree",
+    "local_tag": "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608",
+    "publication_tag": "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608",
+    "id": "sha256:0f027cba5ef47d094c28241e02bb3f449d6dc4a27e8f84c43cca4c15fb77442b",
+    "size_bytes": 10974535285,
     "publication": {
       "attempted": false,
       "approval_required": true,
+      "approval_requested": false,
+      "local_metadata_validation": "passed",
+      "registry_collision_gate": "blocked_insufficient_scope_or_repository_absent",
       "credential_caveat": "An earlier source-image push failed with insufficient_scope for cloudriftai."
     }
   },
@@ -99,6 +103,7 @@
   "zero_jit_gate": {
     "passed": true,
     "fresh_container": true,
+    "canonical_image_id": "sha256:0f027cba5ef47d094c28241e02bb3f449d6dc4a27e8f84c43cca4c15fb77442b",
     "compiler_guards": [
       "bundled ptxas",
       "CUDA toolkit ptxas",
@@ -242,6 +247,36 @@
       [8, 19504.8, 19903.0, 0.98, 0.02, 9223.7, 17785.3, 0.519, 0.481]
     ]
   },
+  "tp16_pp1_trial": {
+    "supported": false,
+    "model_output_groups": 8,
+    "derived_local_groups": 0,
+    "qualified_backend_result": "failed_before_profile_run",
+    "qualified_backend_error": "SM70 TurboMind grouped FP8 received groups=0 for weight (512, 4096)",
+    "compiler_guard_bytes": 0,
+    "fallback_result": "failed_during_profile_run",
+    "fallback_error": "shape [4096, 0, -1] is invalid",
+    "fallback_new_kernel": "_sm70_inverse_rope_kernel",
+    "benchmark_cells": 0,
+    "tool_calls": 0,
+    "cuda_graph_capture": "not_reached"
+  },
+  "nccl_only_trial": {
+    "flag": "--disable-custom-all-reduce",
+    "accepted": false,
+    "baseline_dispatch": "custom_all_reduce_then_pynccl_fallback",
+    "trial_dispatch": "pynccl_only",
+    "async_scheduling_already_enabled": true,
+    "pp_max_concurrent_batches": 2,
+    "columns": ["prompt_tokens", "output_tokens", "concurrency", "duration_delta", "output_throughput_delta", "ttft_delta", "tpot_delta"],
+    "results": [
+      [1024, 64, 8, 0.18651, -0.15719, 0.79918, 0.01754],
+      [3072, 128, 8, 0.06233, -0.05867, 0.92096, -0.09153]
+    ],
+    "tool_call_passed": true,
+    "compiler_guard_bytes": 0,
+    "cache_manifests_unchanged": true
+  },
   "pipeline_split_decision": {
     "changed": false,
     "retained": [
@@ -255,6 +290,9 @@
     "eager_zero_jit": "zero-jit-full-matrix",
     "cuda_graph_benchmark": "graph-trial",
     "final_cuda_graph_zero_jit": "zero-jit-graph-final",
+    "canonical_image_zero_jit": "canonical-zero-jit-v123",
+    "tp16_pp1_trial": "tp16-pp1-trial",
+    "nccl_only_trial": "pp2-nccl-trial",
     "profile": "profile-eager",
     "profile_summary": "profile-eager/profile-summary-v2.json"
   },

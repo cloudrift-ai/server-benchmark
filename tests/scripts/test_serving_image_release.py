@@ -23,6 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.publish import model_slug as library_model_slug
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SERVE_DIR = PROJECT_ROOT / "docker" / "vllm-emmy-serve"
 SLUG_SCRIPT = SERVE_DIR / "model_slug.sh"
@@ -67,8 +69,9 @@ def test_slug_rejects_empty_and_missing_args():
 
 
 def test_python_slug_matches_the_shell_schema():
-    """The gate shells out to the one implementation — assert it really agrees."""
+    """The library owns the rule; the gate and shell adapters must agree with it."""
     for model in ("google/gemma-4-12B-it", "Qwen/Qwen3-Embedding-0.6B", "org/Weird Model!!Name"):
+        assert library_model_slug(model) == slug(model)
         assert csg.model_slug(model) == slug(model)
 
 
@@ -424,6 +427,31 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
         assert f"ARG {build_arg}=" in dockerfile and f'{emmy}="${{{build_arg}}}"' in dockerfile
         assert f"--build-arg {build_arg}=$({serve})" in make
         assert serve in verify and emmy in verify
+
+
+def test_serving_images_carry_canonical_publication_labels():
+    make = (PROJECT_ROOT / "Makefile").read_text()
+    emmy_dockerfile = (SERVE_DIR / "Dockerfile").read_text()
+    onecat_dockerfile = (PROJECT_ROOT / "docker" / "1cat-vllm-sm70" / "Dockerfile.triton-cache").read_text()
+    for build_arg in ("PUBLISH_FAMILY", "PUBLISH_VERSION", "PUBLISH_REVISION", "MODEL"):
+        assert f"ARG {build_arg}" in emmy_dockerfile
+        assert f"ARG {build_arg}" in onecat_dockerfile
+    for label in (
+        "ai.emmy.publish.family",
+        "ai.emmy.model.id",
+        "ai.emmy.model.revision",
+        "ai.emmy.target.gpu",
+        "org.opencontainers.image.version",
+        "org.opencontainers.image.revision",
+    ):
+        assert label in emmy_dockerfile
+        assert label in onecat_dockerfile
+    assert "--build-arg PUBLISH_FAMILY=vllm-emmy" in make
+    assert "--build-arg PUBLISH_VERSION=" in make
+    assert "--build-arg PUBLISH_REVISION=" in make
+    push_body = make.split("serve-push:", 1)[1].split("\nbench:", 1)[0]
+    assert "emmy publish <recipe>" in push_body
+    assert "docker push" not in push_body
 
 
 def test_release_scripts_are_syntactically_valid():

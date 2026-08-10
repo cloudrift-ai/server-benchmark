@@ -88,11 +88,14 @@ def _style_program(program: Mapping) -> dict:
             node["inputs"] = _flow(node["inputs"])
         node["outputs"] = _flow(node["outputs"])
         styled_nodes.append(node)
-    return {
+    styled = {
         "inputs": _flow(program["inputs"]),
         "outputs": _flow(program["outputs"]),
         "nodes": styled_nodes,
     }
+    if "hints" in program:
+        styled["hints"] = _flow(program["hints"])
+    return styled
 
 
 class GoldenEntryState(StrEnum):

@@ -21,7 +21,7 @@ from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import Pipeline
 
-from ..conftest import from_pretrained_or_skip
+from ..conftest import from_pretrained_or_skip, requires_cuda
 
 
 def _seq_len_dim(*, min: int = 5, max: int = 4096):
@@ -100,6 +100,7 @@ def test_loop_forward_same_kernel_different_seq_lens():
         np.testing.assert_allclose(out, np.exp(x), rtol=1e-5, atol=1e-6)
 
 
+@requires_cuda
 def test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens():
     """M2 validation slice: same symbolic graph compiles to ONE CudaOp
     whose kernel signature carries ``int seq_len``; running it at two
@@ -162,6 +163,7 @@ def test_symbolic_sdpa_traces_and_decomposes():
     assert loop_op_count >= 1, "expected at least one LoopOp after lifting"
 
 
+@requires_cuda
 def test_cuda_softmax_over_symbolic_seq_len():
     """Softmax reducing over a symbolic ``seq_len`` axis compiles to a
     single kernel whose serial reduce loop's bound is the runtime
@@ -189,6 +191,7 @@ def test_cuda_softmax_over_symbolic_seq_len():
         np.testing.assert_allclose(y, ref, rtol=1e-5, atol=1e-5)
 
 
+@requires_cuda
 def test_cuda_sdpa_over_symbolic_seq_len():
     """Full causal SDPA with symbolic seq_len compiles + runs
     end-to-end. Stresses symbolic on free axes (Q/K/V leading seq dim)
@@ -227,6 +230,7 @@ def test_cuda_sdpa_over_symbolic_seq_len():
         np.testing.assert_allclose(y, ref, rtol=1e-4, atol=1e-4)
 
 
+@requires_cuda
 def test_cuda_symbolic_rmsnorm_traced_and_run():
     """End-to-end on a real ``torch.nn.RMSNorm`` traced with
     ``dynamic_shapes={"x": {1: Dim("seq_len")}}`` — compile once, run at
@@ -278,6 +282,7 @@ def test_reshape_negative_one_infers_through_symbolic_dim():
     assert any(e == Dim(32) for _, e in extents), f"reshape -1 didn't infer to static 32: {extents}"
 
 
+@requires_cuda
 def test_cuda_symbolic_linear_traced_and_run():
     """End-to-end on a real ``torch.nn.Linear`` traced with
     ``dynamic_shapes={"x": {1: Dim("seq_len")}}`` — covers the
@@ -324,6 +329,7 @@ def test_cuda_symbolic_linear_traced_and_run():
         np.testing.assert_allclose(y, ref, rtol=1e-4, atol=1e-4)
 
 
+@requires_cuda
 def test_qwen_whole_model_dynamic_compiles_and_matches_eager():
     """1-layer random-weight Qwen3 trunk, dynamic seq_len: compile once, run at
     the trace size AND two other seq_lens (via ``CompiledProgram.rebind``),
@@ -464,6 +470,7 @@ def _batched_dynamic_case(batch: int, run_seqs: tuple[int, ...]):
                 np.testing.assert_allclose(out[b], ref[b], rtol=1e-3, atol=1e-3, err_msg=f"batch row {b} at seq_len {s}")
 
 
+@requires_cuda
 def test_qwen_batched_dynamic_matches_eager_b2():
     """Batched symbolic-seq accuracy matrix (WS1.1 exit): the masked-tile kernels
     must be batch-correct — batch {2, 4, 32} × seq {17, 32, 512} on the dynamic-seq
@@ -474,6 +481,7 @@ def test_qwen_batched_dynamic_matches_eager_b2():
     _batched_dynamic_case(2, (32, 17, 512))
 
 
+@requires_cuda
 def test_qwen_batched_dynamic_matches_eager_b4():
     _batched_dynamic_case(4, (32, 512))
 
@@ -483,10 +491,12 @@ def test_qwen_batched_dynamic_matches_eager_b4():
     reason="fails on pristine origin/main on this box (cudaErrorIllegalAddress in the cold deploy pick; "
     "empty tune DB, clean worktree) — main-inherited, tracked with the #438 pick-instability investigation",
 )
+@requires_cuda
 def test_qwen_batched_dynamic_matches_eager_b32():
     _batched_dynamic_case(32, (32, 512))
 
 
+@requires_cuda
 def test_qwen_layer_dynamic_compiles_and_matches_eager():
     """Single decoder layer (random-weight Qwen3 trunk) traced through
     ``build_layer_wrapper`` with dynamic seq_len — the per-layer
@@ -607,6 +617,7 @@ def test_qwen_whole_model_dynamic_traces():
 # ---------------------------------------------------------------------------
 
 
+@requires_cuda
 def test_capture_replay_cache_rmsnorm_over_capacity_buffers():
     """RMSNorm built once at capacity 64; serve S ∈ {5,12,33,64,12} through the
     per-seq_len graph cache — capture lazily, replay at each S, slice the output
@@ -645,6 +656,7 @@ def test_capture_replay_cache_rmsnorm_over_capacity_buffers():
         assert set(k[0][1] for k in prog._graph_cache) == {5, 12, 33, 64}, "expected one cached graph per distinct seq_len"
 
 
+@requires_cuda
 def test_capture_replay_device_io_matches_eager():
     """Serving zero-copy device I/O: feed cupy inputs through ``upload_prefix_device``
     and read the output buffer's prefix back as a torch tensor via ``output_prefix_device``
@@ -684,6 +696,7 @@ def test_capture_replay_device_io_matches_eager():
             np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
 
 
+@requires_cuda
 def test_qwen_whole_model_capture_replay_cache_matches_eager():
     """1-layer random-weight Qwen3 trunk through the captured-graph serving path:
     build once at capacity, serve several seq_lens via the per-S graph cache

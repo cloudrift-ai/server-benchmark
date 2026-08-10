@@ -33,6 +33,29 @@ if [ -n "${SERVE_GPU:-}" ] && [ -z "${SKIP_GPU_CHECK:-}" ]; then
 fi
 
 : "${IMAGE:?set IMAGE to the baked serving image to verify}"
+
+# The pinned checkpoint revision is baked into the image ENV, so every boot below already
+# serves the right rung — but only if this tag was built from THIS config. A tag built
+# before the pin landed (or from another rung) serves different weights and still passes
+# every check in this script: the cubin set is closed, the pack hits, the completion reads
+# fine. Compare the two, once, off the image metadata.
+baked_env=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE")
+baked_value() { printf '%s\n' "$baked_env" | sed -n "s/^$1=//p" | head -1; }
+check_baked() {
+    local key="$1" expected="$2" actual
+    actual=$(baked_value "$key")
+    if [ "${actual:-}" != "$expected" ]; then
+        echo "[verify] FAIL — $IMAGE bakes $key='${actual:-<default>}', the config pins '${expected:-<default>}'." >&2
+        echo "  The image was built from a different config; re-bake with 'make serve-image MODEL=$MODEL'." >&2
+        exit 1
+    fi
+}
+check_baked SERVE_REVISION "${SERVE_REVISION:-}"
+check_baked EMMY_GEN_EMBED_HOST "${SERVE_EMBED_HOST:-}"
+check_baked EMMY_GEN_PREFILL_CAPACITY "${SERVE_PREFILL_CAPACITY:-}"
+check_baked EMMY_GEN_PREFILL_BUCKET "${SERVE_PREFILL_BUCKET:-}"
+check_baked EMMY_GEN_M1_TIER "${SERVE_M1_TIER:-}"
+
 PORT="${PORT:-8000}"
 GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
 NAME="emmy-verify-$SLUG"

@@ -58,7 +58,7 @@ def assemble_source(op, sources: dict[str, np.ndarray]) -> np.ndarray | None:
     """Assemble a constant's raw pre-chain source array from ``sources``: the single
     ``source_path`` lookup, or the axis-0 concat of its ``source_parts`` (the
     ``merge_sibling_linears`` weight concat). ``None`` when any source is missing.
-    Duck-typed over ``ConstantOp`` — anything with ``source_path`` / ``source_parts``.
+    Duck-typed over ``ConstantOp`` and ``backend.plan.WeightSpec`` alike.
     ``source_graph`` bind records are the loaders' own business (:func:`evaluate_source_graph`)
     — this helper answers ``None`` for them (``sources`` holds per-path arrays, and a record
     has no single path)."""

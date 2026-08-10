@@ -14,7 +14,7 @@ from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
-from emmy.compiler.pipeline.search.working_golden import load_working_targets, write_trace_inventory
+from emmy.compiler.pipeline.search.working_golden import load_working_targets, write_trace_inventories, write_trace_inventory
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,6 +36,68 @@ def test_trace_parser_shares_model_adapter_and_dynamic_inputs() -> None:
         ["trace", "some/model", "--adapter", "causal-lm", "--layer", "2", "--dynamic", "seq_len@x:1", "--target", "sm_90"]
     )
     assert (args.input, args.layer, args.dynamic, args.target) == ("some/model", 2, ["seq_len@x:1"], "sm_90")
+
+
+def test_trace_serving_twins_requires_a_model_input() -> None:
+    args = _parser().parse_args(["trace", "--serving-twins", "-o", "work.yaml"])
+    with pytest.raises(SystemExit) as exc:
+        handle_trace(args)
+    assert exc.value.code == 2
+
+
+def test_trace_serving_twins_rejects_invalid_release_width() -> None:
+    args = _parser().parse_args(["trace", "org/model", "--serving-twins", "--serving-width", "0"])
+    with pytest.raises(SystemExit) as exc:
+        handle_trace(args)
+    assert exc.value.code == 2
+
+
+def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance(monkeypatch, tmp_path) -> None:
+    import emmy.serving.twins as twins
+
+    graphs = {
+        "pre1@b2": trace_inline_code("torch.relu(torch.randn(8))")["graph"],
+        "expert512@b2": trace_inline_code("torch.neg(torch.randn(16))")["graph"],
+    }
+    captured = {}
+
+    def fake_capture(model, **kwargs):
+        captured.update(model=model, **kwargs)
+        return graphs
+
+    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    output = tmp_path / "serving.yaml"
+    handle_trace(
+        _parser().parse_args(
+            [
+                "trace",
+                str(tmp_path / "local-checkpoint"),
+                "--serving-twins",
+                "--decode-bucket",
+                "64",
+                "--prefill-bucket",
+                "512",
+                "--serving-width",
+                "1024",
+                "--model-provenance",
+                "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567",
+                "-o",
+                str(output),
+            ]
+        )
+    )
+
+    document = load_golden_file(output)
+    records = load_golden_records(document)
+    assert captured == {
+        "model": str(tmp_path / "local-checkpoint"),
+        "decode_bucket": 64,
+        "prefill_bucket": 512,
+        "extra_widths": (1024,),
+    }
+    assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
+    assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
+    assert all(record.loop_wire is not None and not record.origins for record in records)
 
 
 def test_trace_command_writes_only_golden_yaml(monkeypatch, tmp_path) -> None:
@@ -149,7 +211,7 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
     document = load_golden_file(path)
     (record,) = load_golden_records(document)
 
-    assert set(document) == {"compute_cap", "programs", "loops", "configs"}
+    assert set(document) - {"gpu_name"} == {"compute_cap", "programs", "loops", "configs"}
     assert document["configs"][0]["target"] == {"loop": 0}
     assert record.origins == ()
     assert isinstance(record.target_program.nodes["y"].op, LoopOp)
@@ -157,6 +219,33 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
     _document, targets = load_working_targets(path)
     assert len(targets) == 1
     assert isinstance(targets[0].program.nodes["y"].op, LoopOp)
+
+
+def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path, force_loop_targets=True)
+    (record,) = load_golden_records(load_golden_file(path))
+
+    assert record.origins == ()
+    assert record.loop_wire is not None
+
+
+def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) -> None:
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    path = tmp_path / "combined.yaml"
+    result = write_trace_inventories({"pre1": graph, "pre8": graph.copy()}, path, model="org/model@revision")
+    document = load_golden_file(path)
+    records = load_golden_records(document)
+
+    assert result.target_count == 1
+    assert len(document["loops"]) == len(records) == 1
+    assert records[0].name.startswith("pre1.")
+    assert document["model"] == "org/model@revision"
 
 
 def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -> None:

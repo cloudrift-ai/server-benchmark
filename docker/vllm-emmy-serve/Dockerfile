@@ -55,6 +55,28 @@ ENV SERVE_MODEL=${MODEL} \
     SERVE_GPU_MEM_UTIL=${GPU_MEM_UTIL} \
     EMMY_GEN_DECODE_BUCKET=${DECODE_BUCKET}
 
+# The per-checkpoint half of the same config (serve.sh documents each; empty = its default,
+# which reproduces the pre-existing invocation exactly). REVISION is the one whose absence is
+# silent rather than loud — an unpinned multi-rung repo bakes whichever rung its default
+# branch points at — so verify.sh compares this baked value against the config it was built
+# from. The values are quoted because CAPTURE_SIZES and EXTRA_ARGS carry spaces.
+ARG REVISION=
+ARG QUANT=
+ARG CAPTURE_SIZES=
+ARG EXTRA_ARGS=
+ARG EMBED_HOST=
+ARG PREFILL_CAPACITY=
+ARG PREFILL_BUCKET=
+ARG M1_TIER=
+ENV SERVE_REVISION="${REVISION}" \
+    SERVE_QUANT="${QUANT}" \
+    SERVE_CAPTURE_SIZES="${CAPTURE_SIZES}" \
+    SERVE_EXTRA_ARGS="${EXTRA_ARGS}" \
+    EMMY_GEN_EMBED_HOST="${EMBED_HOST}" \
+    EMMY_GEN_PREFILL_CAPACITY="${PREFILL_CAPACITY}" \
+    EMMY_GEN_PREFILL_BUCKET="${PREFILL_BUCKET}" \
+    EMMY_GEN_M1_TIER="${M1_TIER}"
+
 COPY serve.sh /opt/emmy/serve.sh
 RUN chmod +x /opt/emmy/serve.sh
 

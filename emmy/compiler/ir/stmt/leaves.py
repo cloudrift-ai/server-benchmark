@@ -377,8 +377,9 @@ class Assign(Stmt):
         pad = _pad(ctx.indent)
         op_name = self.op.name
         arg_dtypes = [ctx.ssa_dtypes.get(a, "f32") for a in self.args]
-        # Default rule: result matches the input dtype when all inputs
-        # agree; any fp32 input promotes the whole expression to fp32.
+        # Default rule: f16 stays narrow only when all inputs agree; generic
+        # integer arithmetic/bit operations likewise retain one common integer
+        # dtype. Other cases promote to f32.
         # Explicit ``self.dtype`` overrides — the demote pass uses this
         # to force a narrower dtype on the result.
         if self.dtype is not None:
@@ -398,7 +399,7 @@ class Assign(Stmt):
             # below — computing in fp32 and converting once preserves
             # precision better than converting each arg to fp16 first.
             args = _args_at_dtype(ctx.target, self.args, arg_dtypes, result_dt)
-            expr = op_to_expr(op_name, args)
+            expr = op_to_expr(op_name, args, dtype=result_dt)
             saved_intr = ctx.intrinsics
             saved_lit = ctx.literal_default_dtype
             ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
@@ -414,7 +415,7 @@ class Assign(Stmt):
         # f32 / no-native path: promote args to f32, render in f32, then
         # convert the result back to ``result_dt`` when narrower.
         promoted = _args_at_dtype(ctx.target, self.args, arg_dtypes, "f32")
-        expr = op_to_expr(op_name, promoted)
+        expr = op_to_expr(op_name, promoted, dtype="f32")
         body_str = expr.render(ctx)
         if result_dt != "f32":
             body_str = ctx.target.convert(body_str, "f32", result_dt)

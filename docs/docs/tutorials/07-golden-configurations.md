@@ -62,6 +62,16 @@ A golden is recorded from a side-by-side comparison run:
 emmy run --golden matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE=d2/cp"
 ```
 
+To verify a target still living in a working YAML—including an exact Loop IR fallback—select both the file and row:
+
+```bash
+emmy compile --golden-file _tune/model/working.yaml --golden target.name --ir cuda
+emmy run --golden-file _tune/model/working.yaml --golden target.name --bench --ab "WORK=w2x2,TILE=f2x8"
+```
+
+The working row supplies the graph regardless of state. Only rows with verified paired timings are auto-pinned;
+inventory and proposal knobs run only when supplied explicitly through `--ab`.
+
 That compiles the shape the way the compiler would on its own, then compiles it again with the given knob values
 pinned, and prints both. Two rules about which number to copy:
 

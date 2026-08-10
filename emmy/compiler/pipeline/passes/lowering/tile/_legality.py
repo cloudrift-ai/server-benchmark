@@ -38,7 +38,7 @@ from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -188,6 +188,27 @@ def warp_atom_edges(node: Fold, atom) -> str | None:
     if not isinstance(node.a, Load) or any(not isinstance(ch.b, Load) for ch in node.channels):
         return f"warp TILE: atom {atom.name} accepts only materialized A and B edges"
     return None
+
+
+def warp_a_columns(node: Fold, tile: TilePlan, inputs) -> str | None:
+    """Whether a materialized A edge has the contiguous K columns an mma fragment loader reads.
+
+    A gmem fragment load always advances one element at a time within an ``atom_k``-wide row.  A
+    blocked index is still representable when every fragment stays inside one of its contiguous
+    runs; an unknown or strided index is not.  Computed A is exempt because its sync fill writes a
+    dense shared-memory slab rather than asking a gmem loader to interpret the source index.
+    """
+    if not isinstance(node.a, Load):
+        return None
+    step = gmem_axis_step(node.a, node.axis.name, inputs)
+    width = tile.atom.atom_k
+    if step is not None and step[0] == 1 and (step[1] == 0 or step[1] % width == 0):
+        return None
+    motion = "unknown" if step is None else f"{step[0]} elements per column"
+    return (
+        f"warp TILE: A fragment loaders read {width} contraction columns CONTIGUOUSLY, but this "
+        f"operand's gmem index moves {motion}; drop the atom token to use the scalar tier."
+    )
 
 
 def stage_target(stage: Stage, ctx) -> str | None:
@@ -718,5 +739,6 @@ __all__ = [
     "warp_atom_edges",
     "warp_atom_stage",
     "warp_atom_target",
+    "warp_a_columns",
     "warp_operand_dtype",
 ]

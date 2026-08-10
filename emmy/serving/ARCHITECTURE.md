@@ -66,11 +66,28 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   batches (index 0 always opens a span; overlong spans are chopped).
 - `roofline.py` — **boot roofline audit**. `EmmyGenRunner.from_model` event-times each STATIC twin (one layer per
   attention class; symbolic programs skipped — they sit at capacity shape at boot) against its **weight-streaming
-  floor** (`const_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy — no per-card table) and logs a loud
-  WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction (the weight
-  floor is a true lower bound and copy bw undershoots peak), advisory only (never raises, never blocks boot). Born
+  floor** (`weight_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy — no per-card table). `weight_bytes`
+  counts bound constants PLUS the weight INPUTS a program takes per launch: a MoE expert program binds no weights
+  at all (its per-expert slices arrive as inputs), so a constants-only floor would be zero and audit nothing. A
+  floor under `MIN_FLOOR_US` is still skipped as timer noise, which at low bit rates an expert launch can be — a
+  2.25 bpw GLM expert streams ~4 MB — so read the expert tiers' silence as "below the noise floor", not "clean".
+  Logs a loud WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction
+  (the weight floor is a true lower bound and copy bw undershoots peak), advisory only (never raises, never
+  blocks boot). Born
   from the 2026-07-29 TinyLlama/4080 incident: a cold deploy served a fused-norm kernel ~150x off the floor (54x
   TPOT gap) with zero boot-time signal.
+  **Two structural blind spots, and a compressed model lands in both.** The audit times ONE layer per attention
+  class, and `MIN_FLOOR_US` drops anything whose weights stream in under 20 µs — so on GLM-4.5-Air at 2.25 bpw it
+  reports on layer 0 alone, and layer 0 is the model's only DENSE layer (it clears the floor only because the
+  quantizer left its `o_proj` uncoded at fp16, 100 MB). Every one of the 45 MoE layers, and the expert programs,
+  sit under the floor and are silent. In the 2026-08-08 golden sweep the one flagged program was 18x over and the
+  UNREPORTED representative MoE layer was 77x — so on a low-bit model treat a quiet audit as no information, and
+  measure the twins directly (`_Program.program.iter_once()` gives the per-kernel split).
+  **A LOUD audit is also no information about where the time is**, which the 2026-08-09 prefill round settled: the
+  ratio ranks a program by how far it sits above its own floor, and the biggest floor belongs to the least
+  representative program. GLM-4.5-Air's one boot flag, `L0.post.chunk.m512` at 46x, is **0.15 % of a 512-token
+  prefill step**; 85 % of that step's GPU time is in the routed-expert programs, which the audit cannot even build a
+  twin for. Rank by measured cost, not by ratio-over-floor, when deciding what to tune.
 - `sampling.py` — **no vLLM, no CUDA**. Pure-numpy token sampling (`Sampler`: greedy / temperature / top-k / top-p) +
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA
@@ -80,6 +97,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
   golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
+  For EXL3 checkpoints the loader-only allocation inventory supplies exact sibling shapes and
+  provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
+  Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific
+  operation or search key survives decomposition.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
@@ -100,12 +121,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   per-token-independent; since A3 both halves copy once into slices of one persistent shared joint destination
   (`_rider_dest`, cached per column width for gemma-4's heterogeneous layers) instead of clone + `torch.cat`,
   halving the rider seam bytes and removing the per-layer allocation churn — the caller must consume rider
-  outputs before its next rider call (attention does, within the layer) — which is what lets `--max-num-batched-tokens` default to `DYNAMIC_DIM_MAX + bucket`: a full
+  outputs before its next rider call (attention does, within the layer) — which is what lets
+  `--max-num-batched-tokens` default to `capacity + bucket`: a full
   chunk step keeps carrying its decode riders and the previous prompt's 1-token BOS tail instead of freezing every
   decoding request for the whole chunk and deferring first-token sampling (the measured c=4/c=8 TTFT structure), and
   every other width rides the SYMBOLIC programs' `run_device_sym`
-  (`num_tokens ≤ prefill_capacity`, capacity = `min(max_num_batched_tokens, DYNAMIC_DIM_MAX)`, passed as `max_tokens`
-  at runner build) — grids sized per step via
+  (`num_tokens ≤ prefill_capacity`, capacity = `DYNAMIC_DIM_MAX` unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower,
+  passed as `max_tokens` at runner build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
   (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
   `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its
@@ -150,7 +172,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
   `h`. The expert layout (orientation / interleave / bias — gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
-  named inputs. Program count is 2/layer + ONE expert program total — not `E`/layer. MoE layers are
+  named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
+  layers are
   device-resident only (`forward_layer_post` raises on the host path) and are excluded from post→pre chaining (two
   outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`),
   which a whole-step decode capture cannot record — but single-token decode is capture-legal through the fixed-slot
@@ -176,11 +199,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
   **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI
   change is invisible to the schedule search, see the plan section of `emmy/compiler/backend/ARCHITECTURE.md`).
-  Each kernel resolves its weight base pointer in-kernel as `table[sel[slot]]`: `_ensure_device` builds one flat
-  `[n_moe_layers · E]` int64 pointer table per weight kind (entry = the device address of one expert's slice of a
-  layer's 3-D tensor) plus a persistent `[k]` int32 selector and a `[k, H]` partials tensor; slot `j`'s plan
-  stamps `slot=j` (`_plan_with_slot`), and its table/selector/output arrays bind once at boot. The table is
-  layer-invariant — the layer offset rides in the selector VALUES — so per-slot cached graphs and the whole-step
+  Each kernel resolves its weight base pointer in-kernel as `table[sel[slot]]`: `_ensure_device` builds, PER SHAPE
+  GROUP, one flat `[group layers · E]` int64 pointer table per weight kind (entry = the device address of one
+  expert's slice of a layer's 3-D tensor); the `[k]` int32 selector and the `[k, H]` partials tensor are SHARED
+  across groups, since one layer runs at a time. Slot `j`'s plan
+  stamps `slot=j` (`_plan_with_slot`), and its table/selector/output arrays bind once at boot. A table is
+  layer-invariant within its group — the layer offset rides in the selector VALUES — so per-slot cached graphs and
+  the whole-step
   capture both bake fixed pointers. `_moe_combine_slots` then runs the router, writes `indices + sel_off` into
   the selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging;
   the kernels read the E-tensors directly), replays the k slots on the row, and combines the partials with one
@@ -207,6 +232,29 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
   T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
   card, the rest is vLLM's KV budget.
+  **EXL3 experts.** The loader stacks each per-expert checkpoint module into E-leading
+  codes and padded channel-vector tensors. Gate and up remain separate program inputs.
+  `spell_trellis_inputs` replaces each logical weight input with the generic reconstruction
+  algebra from `loader/trellis.py`; all per-expert sources remain table-resolved inputs.
+
+  **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
+  `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
+  `from_model` interns it into a group index, compiles that group's whole tier set on first sight
+  (`_build_expert_group`), and stamps the index on the layer's `moe` entry, which is what `_launch_expert` and
+  `_moe_combine_slots` route through. Homogeneous MoEs (gpt-oss, OLMoE) have exactly one group and group 0 keeps
+  the original pack names (`moe.expert.sym` …), so their packs and plans are unchanged; later groups take a `g<N>`
+  infix. The live driver is EXL3's MIXED bit allocation: bits are spent by Hessian sensitivity, so K varies per
+  layer, so the codes shape does — the pinned GLM-4.5-Air 2.25bpw checkpoint has FOUR distinct expert signatures
+  across its 45 MoE layers (`K(gate,up,down)` = 2/2/2 on 38, 3/3/3 on 4, 2/2/3 on 2, 4/4/4 on 1). Per-tier failure
+  stays per-group (a group's failed twin falls back to that group's symbolic program), but the fixed-slot tier is
+  ALL-OR-NOTHING across groups (`_slots_ok`): a whole-step capture records one launch set for every layer, so a
+  group left on the routed eager path would make the captured step wrong for its layers.
+
+  **EXL3 trunk.** The correctness lane materializes logical trunk values through
+  `load_quantized_split` before tracing. This deliberately avoids a checkpoint-specific
+  post-decomposition kernel path. A future compressed lane must optimize the generic reconstruction
+  graph while preserving the compiler's dialect boundary.
+
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
   `sinks=` into each `Attention`, which makes vLLM's backend selection sinks-aware (sm_120 lands on TRITON_ATTN;
@@ -255,11 +303,23 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
   generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
   decode to empty output). The trunk compute (embed + per-layer
-  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head` (`load_weights` claims `lm_head.weight`, or the
-  tied embed alias). On a tied checkpoint `load_weights` then hands the loaded head to the runner
+  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head`, and `load_weights` sources it from one of
+  three places: `lm_head.weight` in the stream, the tied embed alias, or — on an **EXL3 checkpoint, which has no
+  `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint and decoded in
+  out-feature blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
+  Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
+  expert codes this model owns none of. **An unsourced head raises**: vLLM's own strict weight-tracking check waives
+  any parameter whose quant method defines `process_weights_after_loading`, which `ParallelLMHead`'s does, so nothing
+  downstream would notice a head left at its construction garbage and the server would answer with noise while
+  looking healthy.
+  On a tied checkpoint `load_weights` then hands the loaded head to the runner
   (`adopt_embed_table`) so the runner drops its own ~2 GiB folded device copy and gathers from the SHARED raw table
-  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled), and releases the freed
-  torch/cupy blocks to the driver **before vLLM's KV-cache profiling** — the reclaimed memory becomes KV blocks
+  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled). An **untied**
+  checkpoint has no table to share, and `EMMY_GEN_EMBED_HOST` is the reclaim for that case — see "The vocab table"
+  under the device-footprint section. Either way it ends by
+  releasing both allocators' free blocks to the driver (`reclaim_device_memory` — torch's `empty_cache` plus cupy's
+  `free_all_blocks`) **before vLLM's KV-cache profiling**: vLLM budgets `util × total − currently-used` off the
+  driver's accounting and cannot see that a cached block is free. The reclaimed memory becomes KV blocks
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
@@ -394,6 +454,22 @@ Recorded follow-ups, in impact order:
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
   a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
+  The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
+  the warm boot uses the hub id) and adds `quant_sha`, the loader's digest of the checkpoint's compression
+  declaration. That entry is load-bearing, not defensive: the twin is built from a config **stripped** of its
+  compression scheme, so two rungs of one coded conversion — same architecture, different per-tensor rates and
+  therefore different coded extents — hash identically on `config_sha` alone and would share one pack, each warm
+  overwriting the other's plans.
+- **`--revision` reaches the runner, as a tagged id.** vLLM keeps the repo id and the revision in two fields and only
+  the id ever reached emmy, so the runner re-resolved the checkpoint off the repo's DEFAULT branch while vLLM's config
+  came from the pinned one. Both shims now compose `<repo>@<revision>` (`pinned_model_id`) and hand the runners that
+  one string; every resolver splits it (`loader.safetensors.split_revision`), so detection, the snapshot, the coded
+  allocation sidecar, the `lm_head` siblings and the pack key all land on the same commit. It matters for a repo that
+  publishes one rung of a conversion per branch — the rungs differ in exactly the per-tensor bit allocation the shape
+  keys, the goldens and the coded twins carry. An unpinned load of such a repo warns loudly and names the branches
+  (`warn_if_unpinned`, the library half of `warm.sh`'s hard refusal); a local checkpoint path is revision-free and
+  passes through untouched. The boot logs the RESOLVED snapshot directory, the scheme summary and the digest, which is
+  how a running server can be checked against the rung it was asked for.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower
   `--max-model-len` for bigger models / smaller cards.
@@ -404,6 +480,38 @@ Recorded follow-ups, in impact order:
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
+
+## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
+
+emmy owns no KV cache. The generative carve runs vLLM's paged `Attention` (and its cache) between the `pre` and
+`post` programs, so the cache dtype is entirely vLLM's: `--kv-cache-dtype fp8_e4m3` is an ordinary passthrough flag
+on both arms of `emmy serve --generate` (nothing in `commands/serve.py` reads it), and it **doubles the KV token
+capacity** out of the same byte budget — the emmy arm's `--gpu-memory-utilization 0.97` needs no adjustment, since
+fp8 halves the bytes per token rather than changing what the budget is. Measured on `Qwen/Qwen3-0.6B` at
+`--max-model-len 4096`, 32 GB RTX 5090: 264 048 tokens out of 28.2 GiB (fp16) → 518 224 out of 27.68 GiB (fp8), i.e.
+exactly 2x per byte. Decode cost is unchanged (TPOT 2.85 → 2.70 ms median at concurrency 4).
+
+The one emmy-side piece of glue is in `EmmyGenModel._attn_aliased` (the A4 alias tail, which reimplements
+`Attention.forward` minus its output allocation). vLLM's own `forward` has two quantization steps around the
+backend call, and the alias tail must agree with it or fall back:
+
+- **query quantization** (`attn.query_quant`, built when `kv_cache_dtype` starts with `fp8` **and** the selected
+  backend advertises `supports_quant_query_input`). Whether it fires is a BACKEND property, not an fp8 property:
+  FlashAttention and Triton say yes on any CUDA device, while FlashInfer — what vLLM auto-selects for fp8 KV on
+  sm_120, FlashAttention having dropped out of the candidate list — additionally requires TRTLLM attention, i.e.
+  SM100. So a 5090 deployment never reaches this, and an SM100 or `VLLM_ATTENTION_BACKEND=TRITON_ATTN` one reaches
+  it on every layer of every step. The tail replicates the quantization rather than bailing (bailing would cost the
+  alias entirely on those backends). The attention OUTPUT keeps the PRE-quant query dtype, which is what the post
+  twin's `attn_out` backing already is — so the backing's dtype check runs against `q` before the quantization, not
+  after.
+- **`calculate_kv_scales`** (`--calculate-kv-scales`, deprecated in vLLM 0.23 and off by default) stays a bail: the
+  flag is one-shot and self-clearing, so the fallback module call computes the scales, clears it, and the alias
+  resumes from the next step. Without it — and without scales in the checkpoint — q/k/v scales are simply **1.0**,
+  i.e. the cache stores fp8 values of k/v directly.
+
+One operational note the A/B surfaced: `--gpu-memory-utilization 0.97` demands ~30.4 of the 5090's 31.3 GiB free at
+startup, so *any* other process on the card (a sibling kernel A/B holding 0.5 GiB was enough) fails the boot on
+vLLM's free-memory check. Nothing to do with fp8 — but an fp8-KV deployment sized against a full card inherits it.
 
 ## Device footprint sets admission capacity (generative)
 
@@ -435,6 +543,52 @@ intermediate is already hundreds of MB. **A lane that only ever schedules `prefi
 still pays for `max_tokens`-row buffers** — so the first place to look when reclaiming footprint is
 `BufferArena` occupancy measured against the widths a deployment can actually reach.
 
+`capacity` defaults to the dynamic-dim cap and is deliberately NOT derived from
+`max_num_batched_tokens` — the pack key carries it, so tying it to a scheduler knob recompiles the whole
+program set every time a lane is retuned. **`EMMY_GEN_PREFILL_CAPACITY` pins it instead**, and
+`emmy serve --generate` moves its `--max-num-batched-tokens` default (`capacity + decode_bucket`, the
+rider headroom) to match. Reach for it when the arena is competing with the KV cache rather than with
+nothing: a model that fills the card with weights pays for every token of capacity it never serves.
+
+### The vocab table, and `EMMY_GEN_EMBED_HOST`
+
+The runner's other large resident is the token-embedding table, and it does not scale with the serving
+shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a modern vocab (GLM-4.5-Air:
+151552 x 4096 fp16 = **1.156 GiB**). On a **tied** checkpoint it costs nothing beyond the head, because
+`adopt_embed_table` shares the one tensor. An **untied** checkpoint has no such route: the table is a
+second full-size resident, and on a card the weights already fill it is competing directly with the KV
+cache.
+
+**`EMMY_GEN_EMBED_HOST=1` moves it off the card entirely.** The table is allocated with
+`cudaHostAlloc`-mapped host memory, whose address is a valid *device* address under unified virtual
+addressing, so `embed_device` stays a plain device-side gather that reads the rows over PCIe. That is
+the whole reason to prefer it to a host gather: no host round trip, so whole-step decode capture still
+records the lookup. Host memory does not double either — the numpy table the oracle and the prefill
+fallback read is rebound to a view of the same buffer.
+
+The price is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with a step's
+width and with the link. Measured on a 5090 sitting on a **gen5 x1** link (3.6 GB/s — a slot-limited
+box, not the format's fault): 22.6 us for an 8-token decode step and 1.25 ms for a 512-token prefill
+chunk, against a device-resident gather's 3.4 us flat. On that model those are 0.02 % of TPOT and 0.1 %
+of TTFT; a x16 link would divide them again. It is still strictly a *reclaim* knob — leave it off
+wherever the card has room, because the device gather is two orders of magnitude faster and free.
+
+### The attention workspace is invisible to the KV budget
+
+One more resident does not appear in vLLM's KV sizing at all, and on a card with no slack it decides whether the
+server survives its first concurrent step. FlashInfer's `float_workspace_buffer`
+(`VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE`, default **394 MiB**) is allocated **lazily, on the first attention
+plan** — after the profiling pass, so vLLM
+budgets the KV cache as if it did not exist and then the allocation comes out of whatever is physically left.
+
+Two failure modes follow, both measured on GLM-4.5-Air. Sized too small, the boot succeeds and the *engine dies
+mid-benchmark*: at 16 MiB the batch-1 lane serves normally and the first `c >= 4` step raises
+`Buffer overflow ... batch_prefill_tmp_v` and kills the EngineCore. Sized at the default with the KV pool already
+claiming the free memory, the OOM lands on the workspace itself. So on a weight-saturated card the workspace has to
+be budgeted **by hand** — pick a size the deployment's widest step actually needs, then lower
+`--gpu-memory-utilization` until the physical leftover covers it. It is a serving-shape constant like the arena
+width, and a baked image must pin it.
+
 ### Reclaiming footprint re-opens the capture-ladder question
 
 These two knobs are coupled, and the coupling is a trap for whoever does the footprint work.
@@ -451,6 +605,11 @@ the widths it newly makes reachable**, and raise the decode bucket (to a width w
 the ladder in the same change. Otherwise the reward for fixing the memory problem is silently losing the
 static decode twin.
 
+Re-check it, but do not assume it is the dominant cost once found. On GLM-4.5-Air a 1.156 GiB reclaim
+took admission from 1 stream to 14 and duly opened this hole (bucket 8, steps of 9–32 rows); rebuilding
+at bucket 32 closed it and bought **6 %** of c=16 TPOT, while the step cost stayed proportional to the
+number of DISTINCT experts the step routes to — the per-expert launch chain, not the tier.
+
 This applies with particular force to **baked serving images**, which may ship a hand-written
 `cudagraph_capture_sizes` list in their entrypoint rather than going through `_gen_graph_args`. Such a
 list does not get the flooring treatment described above, so it can violate the invariant while
@@ -462,6 +621,9 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/serving/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
   contract vLLM's MTP drafter shares off the target, that it gathers RAW rows from the shared tied weight, and that an
   untied target raises. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
+- `tests/serving/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the three sources
+  (`lm_head.weight`, the tied embed alias, an EXL3-coded head decoded off a synthetic checkpoint) and the loud failure
+  when none applies. Also pins that the coded path does NOT walk vLLM's weight stream.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.

@@ -15,6 +15,7 @@ seen on Llama / Qwen / TinyLlama.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from pathlib import Path
@@ -28,18 +29,75 @@ from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES, decode_f8
 logger = logging.getLogger(__name__)
 
 
-def _resolve_model_dir(model_id_or_path: str) -> Path:
+def split_revision(model_id_or_path: str) -> tuple[str, str | None]:
+    """``"repo@revision"`` → ``("repo", "revision")``; anything else (including a local path,
+    which is checked first so a directory whose name contains ``@`` still resolves) →
+    ``(model_id_or_path, None)``.
+
+    The ``<repo>@<revision>`` spelling is how a pinned checkpoint travels as ONE string through
+    the resolvers, the serving runners, the pack key and a golden's ``model:`` provenance. It
+    matters for a repo that publishes several rungs of the same weights on branches (an EXL3
+    conversion): the rungs differ in the per-tensor bit allocation the kernels carry, so the
+    default branch is a different model.
+    """
+    if Path(model_id_or_path).is_dir() or "@" not in model_id_or_path:
+        return model_id_or_path, None
+    repo, _, rev = model_id_or_path.rpartition("@")
+    return repo, rev
+
+
+@functools.cache
+def warn_if_unpinned(model_id_or_path: str) -> None:
+    """Warn when the id names a repo that publishes more than one branch and pins no revision.
+
+    Same guard ``docker/vllm-emmy-serve/warm.sh`` applies before a warm (it refuses outright):
+    a multi-branch repo silently resolves to its default branch, so an unpinned load of an EXL3
+    conversion takes whichever rung the author made default. Best-effort — an unreachable or
+    offline hub, or a repo with one branch, says nothing. Cached per repo: one boot resolves the
+    same checkpoint from several bands, and neither the warning nor the refs call should repeat.
+
+    A local path or an already-pinned id says nothing, so callers may hand this whatever model id
+    they were given — the serving runners call it once at boot, covering the plain
+    ``from_pretrained`` lane that never reaches :func:`_resolve_model_dir`.
+    """
+    repo, revision = split_revision(model_id_or_path)
+    if revision is not None or Path(repo).is_dir():
+        return
+    try:
+        from huggingface_hub import list_repo_refs  # noqa: PLC0415
+
+        branches = [b.name for b in list_repo_refs(repo).branches]
+    except Exception as e:  # noqa: BLE001 — the refs API is advisory; never fail a load over it
+        logger.debug("branch check skipped for %s: %s", repo, e)
+        return
+    if len(branches) > 1:
+        logger.warning(
+            "%s publishes %d branches (%s) and no revision was pinned — resolving the DEFAULT branch. "
+            "Pin the one you mean as '%s@<branch-or-commit>' (serving: --revision).",
+            repo,
+            len(branches),
+            ", ".join(sorted(branches)),
+            repo,
+        )
+
+
+def _resolve_model_dir(model_id_or_path: str, revision: str | None = None) -> Path:
     """Return a local directory containing the model's safetensors files.
 
-    If the argument is an existing directory, use it as-is. Otherwise
-    treat it as an HF repo id and snapshot-download it (cached).
+    If the argument is an existing directory, use it as-is. Otherwise treat it as an HF repo id
+    and snapshot-download it (cached). The id may carry its revision as ``<repo>@<revision>``
+    (:func:`split_revision`); an explicit ``revision`` argument wins over the tagged one.
     """
     p = Path(model_id_or_path)
     if p.is_dir():
         return p
+    repo, tagged = split_revision(model_id_or_path)
+    revision = revision or tagged
+    if revision is None:
+        warn_if_unpinned(repo)
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(model_id_or_path))
+    return Path(snapshot_download(repo, revision=revision))
 
 
 def _build_index(model_dir: Path) -> dict[str, Path]:
@@ -82,8 +140,18 @@ def _candidate_keys(source_path: str) -> list[str]:
         s = s[len("model.") :]
         cands.append(s)
     cands.append("model." + source_path)
+    # Laguna's original checkpoint code spells its always-on MLP singular while the built-in
+    # Transformers architecture spells the same module plural. Keep the model-native name in
+    # traced IR and offer the on-disk alias only at this checkpoint boundary.
+    aliased = []
+    for candidate in cands:
+        aliased.append(candidate)
+        if ".shared_experts." in candidate:
+            aliased.append(candidate.replace(".shared_experts.", ".shared_expert."))
+        elif ".shared_expert." in candidate:
+            aliased.append(candidate.replace(".shared_expert.", ".shared_experts."))
     seen: set[str] = set()
-    return [c for c in cands if not (c in seen or seen.add(c))]
+    return [c for c in aliased if not (c in seen or seen.add(c))]
 
 
 def _read_shard(
@@ -134,6 +202,32 @@ def _read_shard(
             for k in bf16:
                 sources[k] = ft.get_tensor(k).float().numpy()
     return fp8
+
+
+def load_sources_by_path(model_id_or_path: str, paths) -> dict[str, np.ndarray]:
+    """Read the checkpoint tensors ``paths`` names, keyed by the REQUESTED path.
+
+    The path-keyed sibling of :func:`load_constants_from_safetensors`, for callers that hold a
+    plan rather than a graph — the serving trunk binds an ``ExecutionPlan``'s ``WeightSpec``
+    source paths (``serving/gen_runner.py``), and a plan carries no node dtypes to key the
+    raw-bits rule on. Every key reads at its STORED value dtype (fp8 decodes to f32, BF16 reads
+    as f32 — the loader convention; int carriers such as EXL3's ``.trellis`` codes keep their
+    stored words). A path with no matching key is simply absent from the result, so the caller
+    can fall back to a live module for it."""
+    model_dir = _resolve_model_dir(model_id_or_path)
+    index = _build_index(model_dir)
+    by_shard: dict[str, list[str]] = {}
+    resolved: dict[str, str] = {}
+    for path in paths:
+        key = next((c for c in _candidate_keys(path) if c in index), None)
+        if key is None:
+            continue
+        resolved[path] = key
+        by_shard.setdefault(str(index[key]), []).append(key)
+    sources: dict[str, np.ndarray] = {}
+    for shard_path, keys in by_shard.items():
+        _read_shard(shard_path, keys, sources)
+    return {path: sources[key] for path, key in resolved.items() if key in sources}
 
 
 def _record_leaves(record: Graph):

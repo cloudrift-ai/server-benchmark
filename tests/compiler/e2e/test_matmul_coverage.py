@@ -1934,6 +1934,7 @@ def test_raster_fork_offers_both_orders(monkeypatch):
     assert vals == {"", "gm8"}, f"every contraction row must spell RASTER, flat first: {vals}"
 
 
+@requires_cuda
 @requires_sm90
 def test_raster_ragged_group_matches_torch(monkeypatch):
     """Accuracy through a ragged tail group (``Em = 20``, groups of 8 → 8/8/4): every output
@@ -1952,6 +1953,7 @@ def test_raster_ragged_group_matches_torch(monkeypatch):
     assert diff < 5e-2, f"grouped-raster matmul mismatch (max abs err {diff})"
 
 
+@requires_cuda
 @requires_sm90
 def test_raster_gn_matches_torch(monkeypatch):
     """The transposed grouping (``gn4``) — same exactly-once contract."""
@@ -2019,3 +2021,123 @@ def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
     out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
     ref = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(out.astype(np.float32), ref, rtol=3e-2, atol=3e-2)
+
+
+# =========================================================================== #
+# Operand INDEX MAPS — a layout op reaching a matmul's A or B operand.
+# =========================================================================== #
+# A reshape / transpose / slice between an activation and its matmul is absorbed into the
+# operand's ``Load.index``, so the operand is no longer a plain window of its buffer. Every
+# TILED operand loader reads one anyway: the gmem-direct mma fragment loader steps rows by a
+# scalar ``ldm``, the cp.async fill copies a multi-element chunk per row, the TMA box deposits a
+# dense rectangle in the DESCRIPTOR's coordinates. Taking the operand's DECLARED trailing extent
+# as that row stride was the miscompile — a reshape that re-strides the rows read a rectangle of
+# the wrong buffer, silently, on plain f16 with no quantization in sight.
+#
+# The contract now: the row stride is DERIVED from the index (``_addr.gmem_row_stride``, which
+# recovers the flat coordinate a delinearizing reshape splits across components), the columns must
+# be gmem-CONTIGUOUS, and TMA additionally needs the axes on the descriptor's own two trailing
+# dims. What no loader can read is left unmapped and falls back — a transposed operand to the
+# per-cell scalar tier, a re-strided one off TMA onto cp.async / gmem-direct.
+
+_IMAP_N = 64  # output columns, shared by every case below
+
+
+def _imap_graph(form: str) -> tuple[Graph, object]:
+    """A matmul with a layout op on one operand, plus its numpy reference. ``reshape_a`` re-strides
+    A's rows (128 vs the declared 256), ``transpose_a`` strides A's columns, ``slice_a`` is the
+    canonical form an index map leaves alone (trailing slice from 0 — still ``(m, k)``), and
+    ``reshape_b`` is the B-side twin of ``reshape_a``."""
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp, TransposeOp  # noqa: PLC0415
+
+    g = Graph()
+    if form == "reshape_a":
+        g.add_node(InputOp(), [], Tensor("x", (128, 256), F16), node_id="x")
+        g.add_node(ReshapeOp(shape=(256, 128)), ["x"], Tensor("xr", (256, 128), F16), node_id="xr")
+        g.add_node(InputOp(), [], Tensor("w", (128, _IMAP_N), F16), node_id="w")
+        g.add_node(MatmulOp(), ["xr", "w"], Tensor("o", (256, _IMAP_N), F16), node_id="o")
+        ref = lambda i: i["x"].reshape(256, 128).astype(np.float32) @ i["w"].astype(np.float32)  # noqa: E731
+    elif form == "transpose_a":
+        g.add_node(InputOp(), [], Tensor("x", (256, 128), F16), node_id="x")
+        g.add_node(TransposeOp(axes=(1, 0)), ["x"], Tensor("xr", (128, 256), F16), node_id="xr")
+        g.add_node(InputOp(), [], Tensor("w", (256, _IMAP_N), F16), node_id="w")
+        g.add_node(MatmulOp(), ["xr", "w"], Tensor("o", (128, _IMAP_N), F16), node_id="o")
+        ref = lambda i: i["x"].T.astype(np.float32) @ i["w"].astype(np.float32)  # noqa: E731
+    elif form == "slice_a":
+        g.add_node(InputOp(), [], Tensor("x", (128, 256), F16), node_id="x")
+        g.add_node(SliceOp(shape=(128, 128), dim=-1, start=0), ["x"], Tensor("xr", (128, 128), F16), node_id="xr")
+        g.add_node(InputOp(), [], Tensor("w", (128, _IMAP_N), F16), node_id="w")
+        g.add_node(MatmulOp(), ["xr", "w"], Tensor("o", (128, _IMAP_N), F16), node_id="o")
+        ref = lambda i: i["x"][:, :128].astype(np.float32) @ i["w"].astype(np.float32)  # noqa: E731
+    elif form == "reshape_b":
+        g.add_node(InputOp(), [], Tensor("x", (64, 128), F16), node_id="x")
+        g.add_node(InputOp(), [], Tensor("w", (256, 64), F16), node_id="w")
+        g.add_node(ReshapeOp(shape=(128, 128)), ["w"], Tensor("wr", (128, 128), F16), node_id="wr")
+        g.add_node(MatmulOp(), ["x", "wr"], Tensor("o", (64, 128), F16), node_id="o")
+        ref = lambda i: i["x"].astype(np.float32) @ i["w"].reshape(128, 128).astype(np.float32)  # noqa: E731
+    else:
+        raise ValueError(form)
+    g.inputs, g.outputs = [n for n in ("x", "w") if n in g.nodes], ["o"]
+    return g, ref
+
+
+def _imap_run(g: Graph) -> tuple[np.ndarray, str]:
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    be = CudaBackend()
+    compiled = be.compile(g)
+    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
+    rng = np.random.default_rng(0)
+    ins = {nid: (rng.standard_normal(tuple(d.as_static() for d in g.nodes[nid].output.shape)) * 0.3).astype(np.float16) for nid in g.inputs}
+    got = np.asarray(list(be.run(compiled, input_data=ins)[0].outputs.values())[0], dtype=np.float32)
+    return got, src, ins
+
+
+@requires_cuda
+@pytest.mark.parametrize("form", ["reshape_a", "transpose_a", "slice_a", "reshape_b"])
+@pytest.mark.parametrize("stage", ["", "d2/cp", "d2/tma"])
+def test_operand_index_map_accuracy(form, stage, monkeypatch):
+    """A layout op on either operand computes the SAME answer as numpy on every transport. The
+    re-strided (``reshape_*``) and transposed cells were the miscompile: wrong on TMA and
+    gmem-direct (``reshape_*``) and on all three (``transpose_a``) at up to 100% relative error,
+    while ``slice_a`` — the one map that leaves the index canonical — was always right."""
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    g, ref = _imap_graph(form)
+    got, _, ins = _imap_run(g)
+    want = ref(ins)
+    diff = np.abs(got - want).max()
+    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"{form}/{stage or 'gmem'}: max abs err {diff}"
+
+
+@requires_cuda
+def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
+    """The gmem-direct mma fragment loader steps the reshaped A's rows at the DERIVED 128, not the
+    buffer's declared trailing extent 256 — the ``ldm`` argument IS the bug, visible in the source."""
+    monkeypatch.setenv("EMMY_STAGE", "")
+    _, src, _ = _imap_run(_imap_graph("reshape_a")[0])
+    calls = [ln.strip() for ln in src.splitlines() if "emmy_mma_load_a_gmem" in ln and "(_a" in ln]
+    assert calls, "the gmem-direct pin must reach the mma fragment loader"
+    assert all(ln.endswith(", 128);") for ln in calls), f"A fragments must take ldm=128, got {calls}"
+
+
+@requires_cuda
+def test_reshaped_a_declines_tma_and_falls_back(monkeypatch):
+    """TMA's box is a rectangle in the DESCRIPTOR's coordinates, so a re-strided A has no
+    descriptor — the pin DECLINES and the row falls back to a correct transport rather than
+    copying the declared row pitch. The unmapped-falls-back half of the guardrail contract."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
+    _, imap_src, _ = _imap_run(_imap_graph("reshape_a")[0])
+    assert "cp.async.bulk.tensor" not in imap_src, "a re-strided A must not reach a TMA box copy"
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
+    _, plain_src, _ = _imap_run(_imap_graph("slice_a")[0])
+    assert "cp.async.bulk.tensor" in plain_src, "the canonical (sliced) A still stages via TMA — the pin is not dead"
+
+
+def test_transposed_a_warp_pin_raises(monkeypatch) -> None:
+    """A WARP pin on a transposed A RAISES the layout reason instead of lowering a kernel that
+    reads columns at the wrong stride — the other half of the contract: an unschedulable form is
+    refused loudly under a pin, and dropped silently (onto the scalar tier) without one."""
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    with pytest.raises(ValueError, match="columns CONTIGUOUSLY"):
+        _run_tile_pass(_imap_graph("transpose_a")[0])

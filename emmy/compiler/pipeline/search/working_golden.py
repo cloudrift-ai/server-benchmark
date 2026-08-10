@@ -57,10 +57,81 @@ def write_trace_inventory(
     *,
     model: str | None = None,
     ctx=None,
+    force_loop_targets: bool = False,
 ) -> TraceInventoryResult:
     """Lower a trace through fusion and write a self-contained target inventory."""
-    from emmy.compiler import provenance  # noqa: PLC0415
+    destination = preflight_trace_inventory(path)
     from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = ctx or Context.probe()
+    programs: list[dict] = []
+    loops: list[dict] = []
+    entries: list[dict] = []
+    _append_trace_inventory(
+        graph,
+        ctx=ctx,
+        programs=programs,
+        loops=loops,
+        entries=entries,
+        force_loop_targets=force_loop_targets,
+    )
+    _dump_trace_inventory(destination, ctx=ctx, model=model, programs=programs, loops=loops, entries=entries)
+    return TraceInventoryResult(path=destination, target_count=len(entries))
+
+
+def write_trace_inventories(
+    graphs: dict[str, object],
+    path: str | Path,
+    *,
+    model: str | None = None,
+    ctx=None,
+) -> TraceInventoryResult:
+    """Combine named traces into one exact-Loop-IR working inventory.
+
+    Serving capture emits many independent pre/post/expert graphs.  A directory of
+    one-file-per-graph inventories is awkward to tune and, more importantly, easy to
+    promote only partially.  This writer interns all of their programs and Loop IR
+    targets into one self-contained artifact.  Identical Loop programs are recorded
+    once: they are the same tuning target even when several serving twins consult it.
+    """
+    destination = preflight_trace_inventory(path)
+    if not graphs:
+        raise ValueError("cannot write an empty trace inventory")
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = ctx or Context.probe()
+    programs: list[dict] = []
+    loops: list[dict] = []
+    entries: list[dict] = []
+    seen_loops: set[int] = set()
+    for name in sorted(graphs):
+        _append_trace_inventory(
+            graphs[name],
+            ctx=ctx,
+            programs=programs,
+            loops=loops,
+            entries=entries,
+            force_loop_targets=True,
+            name_prefix=name,
+            seen_loops=seen_loops,
+        )
+    _dump_trace_inventory(destination, ctx=ctx, model=model, programs=programs, loops=loops, entries=entries)
+    return TraceInventoryResult(path=destination, target_count=len(entries))
+
+
+def _append_trace_inventory(
+    graph,
+    *,
+    ctx,
+    programs: list[dict],
+    loops: list[dict],
+    entries: list[dict],
+    force_loop_targets: bool,
+    name_prefix: str | None = None,
+    seen_loops: set[int] | None = None,
+) -> None:
+    """Append one lowered graph to shared trace-inventory pools."""
+    from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
@@ -68,10 +139,16 @@ def write_trace_inventory(
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
-    destination = preflight_trace_inventory(path)
+    # Torch tracing and checkpoint spelling may hand us a graph that has already crossed one
+    # compiler pipeline and therefore carries implementation-piece provenance. The stable wire
+    # deliberately does not persist provenance hints, so retaining those here would write
+    # selectors from one provenance universe and replay them after a fresh per-node seed — they
+    # cannot match.
+    # Re-seed the pristine frontend graph exactly as the wire decoder will.
+    for traced_node in graph.nodes.values():
+        traced_node.hints.remove(provenance.PROV)
     provenance.seed(graph)
     input_graph = graph.copy()
-    ctx = ctx or Context.probe()
     fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
 
     # Match two-level tuning's fold-aware target set. A flash score producer is
@@ -91,14 +168,11 @@ def write_trace_inventory(
             continue
         targets.append((node_id, node))
 
-    programs: list[dict] = []
     # Persist the pristine program once.  Per-target frontend slices are useful
     # ephemeral tuning views, but they can change fusion when independently
     # lowered (especially sibling linears and computed-A cones).  Provenance
     # selectors must therefore resolve against the original trace context.
-    program_ref = intern_program(programs, input_graph)
-    loops: list[dict] = []
-    entries: list[dict] = []
+    program_ref: int | None = None
     inventory = []
     for node_id, node in targets:
         folded = [fused.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
@@ -111,11 +185,20 @@ def write_trace_inventory(
         key = node.op.cache_key()
         suffix = key[:12] if key is not None else node_id
         name = f"{node.op.name or node_id}.{suffix}"
-        if origins and origin_counts[origins] == 1:
+        if name_prefix:
+            name = f"{name_prefix}.{name}"
+        if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:
             loop_graph = single_node_graph(fused, node_id, absorb=frozenset(item.id for item in folded))
-            target = {"loop": intern_loop_program(loops, loop_graph)}
+            loop_ref = intern_loop_program(loops, loop_graph)
+            if seen_loops is not None and loop_ref in seen_loops:
+                continue
+            if seen_loops is not None:
+                seen_loops.add(loop_ref)
+            target = {"loop": loop_ref}
+        if program_ref is None:
+            program_ref = intern_program(programs, input_graph)
         entry = {
             "name": name,
             "program": program_ref,
@@ -123,6 +206,17 @@ def write_trace_inventory(
         }
         entries.append(entry)
 
+
+def _dump_trace_inventory(
+    destination: Path,
+    *,
+    ctx,
+    model: str | None,
+    programs: list[dict],
+    loops: list[dict],
+    entries: list[dict],
+) -> None:
+    """Write shared trace-inventory pools with their card and model provenance."""
     document: dict = {
         "compute_cap": list(ctx.compute_capability),
         "programs": programs,
@@ -136,7 +230,6 @@ def write_trace_inventory(
         document["model"] = model
 
     dump_golden_file(document, destination)
-    return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
 def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tuple[dict, list[WorkingGoldenTarget]]:

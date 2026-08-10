@@ -124,6 +124,14 @@ Loop IR slice in `loops` and selects that fallback by index. Flash score produce
 stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
 refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
 
+`emmy trace LOCAL_CHECKPOINT --serving-twins --model-provenance REPO@REVISION -o PATH` is the release inventory
+variant. It calls the same config/allocation-metadata-only `serving.twins.capture_twin_graphs` path as the in-model
+audit, combines every distinct pre/post/expert and coded rate-profile kernel into one document, and forces exact Loop
+IR targets. `--decode-bucket`, `--prefill-bucket`, and repeatable `--serving-width` add the deployed shape matrix.
+The explicit provenance lets a local pre-upload checkpoint produce rows that can later be promoted under the exact
+HF snapshot identity; the resulting file is consumed directly by `tune --golden-file` and verified by explicit
+`run --golden-file --golden NAME` calls.
+
 `emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance or Loop IR target are grouped as candidate knob
 sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
@@ -138,6 +146,11 @@ event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace ent
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
 rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+
+`emmy compile/run --golden-file PATH --golden NAME` is the verification counterpart: it resolves the name only in
+that explicit working YAML and compiles its exact provenance or Loop IR target, without canonical-corpus or live-card
+filtering. Inventory and proposal rows select the graph but are not trusted as automatic A/B pins; only verified rows
+with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
@@ -296,7 +309,11 @@ Serves an embedding model (or a generative chat model via `EmmyGenModel` with `-
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
-applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. Generative serving
+applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
+vLLM *and* reaches the emmy runner** — the plugin composes `<repo>@<revision>` and every checkpoint read inside emmy
+resolves that commit (see `serving/ARCHITECTURE.md`); without it a repo publishing several branches warns loudly and
+takes its default. `emmy pull` and `emmy compile` / `emmy run` accept the same `<repo>@<revision>` spelling directly,
+so a served rung can be reproduced off the CLI. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
@@ -309,11 +326,17 @@ round-up to that multiple cannot push a step's padded width past the decode buck
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
 `--gpu-memory-utilization` to **0.97** (its
 cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
-model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the dynamic-dim cap + the decode bucket** — the
-bucket-sized rider headroom is covered by the chunk+decode twin row split (`serving/ARCHITECTURE.md`), so full
-chunk steps keep carrying their decode riders; an explicit value past that cap is rejected. `EMMY_SERVING_BATCHED=1`
+model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
+bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
+(`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap
+is rejected. Capacity is the dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
+lever for a card the weights nearly fill), and the default follows it down. `EMMY_SERVING_BATCHED=1`
 embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
-the batch.
+the batch. A checkpoint whose compressed weights emmy's loader owns end to end (today: **EXL3**, trellis-coded) is
+additionally presented to vLLM as **unquantized** through the `--hf-overrides` — vLLM carries no method for the
+scheme and refuses the boot outright, while nothing in the engine needs one, since the runner owns every coded
+weight and the one vLLM-owned parameter (`lm_head`) decodes to fp16 at load. Which schemes those are is the loader
+band's call (`compiler/loader/quant.py::engine_config_overrides`), not the command layer's.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)

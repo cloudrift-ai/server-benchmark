@@ -223,6 +223,76 @@ def test_weight_spec_source_parts_projection_and_round_trip():
     np.testing.assert_array_equal(assemble_source(g.nodes["w_cat"].op, sources), expected)
 
 
+def _one_weight_plan(op, nid="w"):
+    """A minimal plan over one loadable constant ``op``, so a weight spec can be inspected."""
+    g = Graph()
+    g.add_node(op=op, inputs=[], output=Tensor(nid, (4, 4)), node_id=nid)
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_t() {}",
+            kernel_name="k_t",
+            arg_order=(nid, "y"),
+            grid=((1,), (1,), (1,)),
+            block=((32,), (1,), (1,)),
+            smem_bytes=0,
+        ),
+        inputs=[nid],
+        output=Tensor("y", (4, 4)),
+        node_id="y",
+    )
+    g.outputs = ["y"]
+    return plan_from_graph(g)
+
+
+def _slice_index_map(out_shape, spans):
+    """A single-source ``IndexMapOp`` reading ``spans`` (per-axis ``(start, step)``)."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+
+    coords = tuple(
+        BinaryExpr("+", BinaryExpr("*", Var(f"out_coord_{i}"), Literal(step, "int")), Literal(start, "int"))
+        for i, (start, step) in enumerate(spans)
+    )
+    return IndexMapOp(out_shape=out_shape, sources=(IndexSource(input_idx=0, coord_map=coords),))
+
+
+@pytest.mark.parametrize(("shape", "spans"), [((3,), ((0, 1),)), ((2, 3), ((1, 1), (0, 2))), ((4,), ((2, 1),))])
+def test_slice_index_map_encodes_and_matches_the_binder(shape, spans):
+    """A folded ``SliceOp`` reaches the plan as an ``IndexMapOp``; the pack vocabulary encodes
+    the affine per-axis form as a plain numpy slice."""
+    op = _slice_index_map(shape, spans)
+    encoded = _encode_load_ops((op,))
+    assert encoded is not None and encoded[0][0] == "slice"
+    src = np.arange(8 * 9, dtype=np.float32).reshape(8, 9)
+    src = src if len(shape) == 2 else src[0]
+    np.testing.assert_array_equal(apply_weight_loads(src, encoded), apply_load_ops(src, (op,)))
+
+
+def test_non_affine_index_map_stays_outside_the_vocabulary():
+    """A transposing index map is NOT a slice — it must encode as ``None`` rather than as a
+    silently wrong per-axis read."""
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+
+    swap = IndexMapOp(out_shape=(3, 2), sources=(IndexSource(input_idx=0, coord_map=(Var("out_coord_1"), Var("out_coord_0"))),))
+    assert _encode_load_ops((swap,)) is None
+
+
+def test_unreproducible_bind_record_marks_the_weight_unbindable(caplog):
+    """A record the plan cannot reproduce (leaves it would have to read from the checkpoint)
+    must mark the weight ``load_ops=None`` — the pack save then refuses, rather than writing a
+    pack whose boot silently drops the weight."""
+    import logging
+
+    record = Graph()
+    record.add_node(op=InputOp(), inputs=[], output=Tensor("leaf", (4, 4)), node_id="leaf")
+    record.outputs = ["leaf"]
+    with caplog.at_level(logging.WARNING, logger="emmy.compiler.backend.plan"):
+        plan = _one_weight_plan(ConstantOp(name="h", source_graph=record, source_shape=(4, 4)))
+    assert plan.weights["w"].load_ops is None
+    assert "bind record" in caplog.text
+
+
 def test_plan_mimo_node_mints_per_buffer_specs_and_writes():
     """A multi-output CudaOp node yields one BufferSpec per BUFFER (aux buffer
     scratch-roled) and a launch whose ``writes`` lists every produced buffer."""

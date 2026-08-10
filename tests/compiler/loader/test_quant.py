@@ -591,6 +591,56 @@ def test_quantized_checkpoint_dir_detection(tmp_path):
     assert quantized_checkpoint_dir(str(plain)) is None
 
 
+def _rung(dirpath, bits, allocation=None):
+    """A checkpoint declaring an EXL3 rung: ``config.json`` plus, optionally, the allocation
+    sidecar. Architecture fields are identical across rungs — only the rate differs."""
+    dirpath.mkdir()
+    (dirpath / "config.json").write_text(
+        json.dumps(
+            {"model_type": "llama", "hidden_size": 64, "quantization_config": {"quant_method": "exl3", "bits": bits, "head_bits": 6}}
+        )
+    )
+    if allocation is not None:
+        (dirpath / "quantization_config.json").write_text(json.dumps({"tensor_storage": allocation}))
+    return dirpath
+
+
+def test_checkpoint_quant_digest_separates_rungs_a_config_hash_cannot(tmp_path):
+    """The serving pack key hashes the twin's config, and the twin is built with
+    ``quantization_config`` STRIPPED — so two EXL3 rungs of one repo hash identically and shared a
+    pack, whose stored plans carry the other rung's coded extents. The digest is what separates
+    them, and it prefers the per-module allocation over the declared average rate."""
+    from emmy.compiler.loader.quant import checkpoint_quant_digest
+
+    a = _rung(tmp_path / "r200", 2.0)
+    b = _rung(tmp_path / "r225", 2.26)
+    # Precondition: strip quantization_config (what ``load_quantized_split`` does) and the two
+    # configs are byte-identical — the aliasing this key entry exists to break.
+    stripped = [{k: v for k, v in json.loads((d / "config.json").read_text()).items() if k != "quantization_config"} for d in (a, b)]
+    assert stripped[0] == stripped[1]
+    assert checkpoint_quant_digest(a) != checkpoint_quant_digest(b)
+
+    # The sidecar wins when present: same declared rate, different per-module allocation.
+    c = _rung(tmp_path / "s1", 2.26, {"model.layers.0.self_attn.q_proj": {"bits_per_weight": 4.0}})
+    d = _rung(tmp_path / "s2", 2.26, {"model.layers.0.self_attn.q_proj": {"bits_per_weight": 3.0}})
+    assert checkpoint_quant_digest(c) != checkpoint_quant_digest(d)
+
+    # An unquantized checkpoint contributes nothing, so its pack key is unchanged.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "config.json").write_text(json.dumps({"model_type": "llama", "hidden_size": 64}))
+    assert checkpoint_quant_digest(plain) is None
+    assert checkpoint_quant_digest(tmp_path / "absent") is None
+
+    # The boot log's summary carries the rate, so which rung a running server opened is readable
+    # from the log alone — the observable both revision controls are checked against.
+    from emmy.compiler.loader.quant import checkpoint_quant_summary
+
+    assert checkpoint_quant_summary(a) == "exl3 2.0 bpw (head 6)"
+    assert checkpoint_quant_summary(b) == "exl3 2.26 bpw (head 6)"
+    assert checkpoint_quant_summary(plain) == "unquantized"
+
+
 # ===================================================================
 # emmy compile / run wiring: whole-model trace of a quantized checkpoint
 # (the ``_trace_model`` seam both commands share via ``load_or_trace``)
@@ -765,6 +815,7 @@ _QUANT_CONCEPT_PATTERN = r"QuantSpec|quantization_config|quant_method|weight_sca
 
 _FRONTEND_BAND_ALLOWLIST = {
     "emmy/commands/compile.py",  # the post-trace spelling call site (twin trace + speller)
+    "emmy/compiler/loader/exl3.py",  # EXL3 format reader: the trellis decode + the weight-free allocation sidecar
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection

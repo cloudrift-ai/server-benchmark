@@ -69,6 +69,24 @@ def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> N
     con.close()
 
 
+def test_strict_serving_golden_flags_are_in_model_only_and_validate_widths(run_cli):
+    rc, stdout, stderr = run_cli("eval", "golden", "--strict-major-gaps")
+    assert rc == 2
+    assert "require --in-model" in stdout + stderr
+
+    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--serving-width", "0")
+    assert rc == 2
+    assert "must be positive" in stdout + stderr
+
+    rc, stdout, stderr = run_cli("eval", "golden", "--checkpoint", "/local/checkpoint")
+    assert rc == 2
+    assert "require --in-model" in stdout + stderr
+
+    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--checkpoint", "/local/checkpoint")
+    assert rc == 2
+    assert "requires --model" in stdout + stderr
+
+
 def test_knobs_missing_db(run_cli, tmp_path):
     """A non-existent DB path is not an error: the registry schema still prints and
     the regret analysis is skipped cleanly (exit 0, no traceback)."""

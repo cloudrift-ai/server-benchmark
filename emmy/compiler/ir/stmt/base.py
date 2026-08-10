@@ -145,19 +145,41 @@ def _canonical_dtype_name(dtype) -> str:
     return dtype.name
 
 
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_ELEMENTWISE_OPS = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "floor_divide",
+        "remainder",
+        "mod",
+        "left_shift",
+        "right_shift",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+    }
+)
+
+
 def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     """Promote an elementwise op's arg dtypes to a single result dtype.
 
     Mirrors the inline rule in ``Assign.render``: the result is the
     common dtype iff every arg agrees; any disagreement promotes to f32.
-    Today's IR only meaningfully encounters f16/f32 mixes; the rule is
-    "all f16 → f16, otherwise f32." ``op_name`` is accepted for future
-    op-specific overrides (e.g. ``relu`` would still emit f16 even with
-    no f16 args), but is unused today.
+    Floating point keeps the historical "all f16 → f16, otherwise f32"
+    rule. Integer arithmetic/bit manipulation must instead retain a common
+    integer dtype: promoting packed words to f32 loses bits before the CUDA
+    renderer sees the operation. Comparisons and logical masks deliberately
+    stay on the floating-point rule.
 
     Lifted out of ``Assign.render`` so the ``030_stamp_types`` pass can
     reuse the same rule when stamping ``Assign.dtype`` on the IR.
     """
+    if arg_dtypes and op_name in _INTEGER_ELEMENTWISE_OPS and arg_dtypes[0] in _INTEGER_DTYPES:
+        if all(d == arg_dtypes[0] for d in arg_dtypes):
+            return arg_dtypes[0]
     if arg_dtypes and all(d == "f16" for d in arg_dtypes):
         return "f16"
     return "f32"
@@ -200,14 +222,30 @@ _BINARY_OP: dict[str, str] = {
     "bitwise_and": "&&",
 }
 
+_INTEGER_BINARY_OP: dict[str, str] = {
+    "floor_divide": "//",
+    "remainder": "%",
+    "mod": "%",
+    "left_shift": "<<",
+    "right_shift": ">>",
+    "bitwise_or": "|",
+    "bitwise_and": "&",
+    "bitwise_xor": "^",
+}
 
-def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
+
+def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr:
     """Translate an elementwise op name to an ``Expr`` tree.
 
     Emits abstract intrinsic names (``"exp"``, ``"fmax"``, ``"fabs"``, ...)
     that targets translate to libm / CUDA spellings via
-    ``RenderCtx.intrinsics`` at ``FuncCallExpr.render`` time.
+    ``RenderCtx.intrinsics`` at ``FuncCallExpr.render`` time. ``dtype``
+    distinguishes integer bit manipulation from the traced mask convention:
+    integer ``bitwise_and``/``bitwise_or`` render as ``&``/``|``, while the
+    historical f32 mask path remains logical ``&&``/``||``.
     """
+    if dtype in _INTEGER_DTYPES and fn in _INTEGER_BINARY_OP:
+        return BinaryExpr(_INTEGER_BINARY_OP[fn], inputs[0], inputs[1])
     if fn in _BINARY_OP:
         return BinaryExpr(_BINARY_OP[fn], inputs[0], inputs[1])
     if fn == "maximum":
@@ -286,7 +324,7 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
         # ``__half`` value loaded into the partial, as in fp16 flash's ``p · v``) so
         # the operator isn't ambiguous. The cast is a no-op for matching args.
         arg_exprs = [Var(x) if ctx.ssa_dtypes.get(x, dt) == dt else CastExpr(ty, Var(x)) for x in a.args]
-        rhs = op_to_expr(a.op.name, arg_exprs).render(ctx)
+        rhs = op_to_expr(a.op.name, arg_exprs, dtype=dt).render(ctx)
         if a.name in sset:
             out.append(f"{pad}{a.name} = {rhs};")  # reassign carried state
         else:
@@ -639,7 +677,11 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             names = frozenset(nm for a in s.args for nm in bases.get(a, (a,)))
             if any(nm in st.defines() for st in stmts[di + 1 : ri] for nm in names):
                 continue
-            expr = op_to_expr(s.op.name, [Var(a) for a in s.args])
+            expr = op_to_expr(
+                s.op.name,
+                [Var(a) for a in s.args],
+                dtype=s.dtype.name if s.dtype is not None else None,
+            )
             rendered = expr.render(replace(ctx, inline_exprs=inline))
             inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
             bases[s.name] = names

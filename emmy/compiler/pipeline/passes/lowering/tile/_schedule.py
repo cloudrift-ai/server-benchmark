@@ -665,6 +665,8 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
         return False
     if not legal.enforce(legal.warp_atom_edges(node, plan.atom), pinned=False):
         return False
+    if not legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=False):
+        return False
     if not legal.enforce(legal.warp_k_step(node, plan), pinned=False):
         return False
     if isinstance(node.a, Load):
@@ -1091,6 +1093,7 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
                 # the unpinned catalog above drops on, one home each.
                 legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=True)
                 legal.enforce(legal.warp_atom_edges(node, plan.atom), pinned=True)
+                legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=True)
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
                 if not isinstance(node.a, Load):

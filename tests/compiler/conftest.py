@@ -28,9 +28,18 @@ def has_cuda_gpu() -> bool:
         return False
 
 
+def has_cuda_toolchain() -> bool:
+    """Check that Emmy can both see a GPU and compile CUDA kernels."""
+    if not has_cuda_gpu():
+        return False
+    from emmy.compiler.backend.cuda.nvcc import nvcc_path
+
+    return nvcc_path() is not None
+
+
 requires_cuda = pytest.mark.skipif(
-    not has_cuda_gpu(),
-    reason="CUDA not available (need cupy + GPU)",
+    not has_cuda_toolchain(),
+    reason="CUDA not available (need cupy + GPU + nvcc)",
 )
 
 
@@ -95,8 +104,8 @@ def dtype_input_scale(dtype) -> float:
 
 
 def _skip_if_no_cuda() -> None:
-    if not has_cuda_gpu():
-        pytest.skip("CUDA not available (need cupy + GPU)")
+    if not has_cuda_toolchain():
+        pytest.skip("CUDA not available (need cupy + GPU + nvcc)")
 
 
 def matmul_graph(m: int, k: int, n: int) -> Graph:  # noqa: F821

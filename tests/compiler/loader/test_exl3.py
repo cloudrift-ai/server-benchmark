@@ -14,6 +14,7 @@ import pytest
 from emmy.compiler.loader.exl3 import (
     CODEBOOK_SCALE,
     codebook_values,
+    decode_exl3_blocks,
     decode_exl3_linear,
     decode_trellis,
     fold_hadamard,
@@ -247,6 +248,43 @@ def test_decode_exl3_linear_rejects_both_markers():
         decode_exl3_linear(tr, ones, ones, mcg=np.array(1, np.int32), mul1=np.array(1, np.int32))
 
 
+@pytest.mark.parametrize("cols", [128, 256, 300, 4096])
+def test_decode_exl3_blocks_tile_the_whole_decode(cols):
+    """Blocked reconstruction matches the whole-tensor path at every complete 128-column tile."""
+    tr = _random_trellis(8, 40, 3)
+    suh = (rng.choice([-1.0, 1.0], 128) * 0.01).astype(np.float16)
+    svh = (rng.choice([-1.0, 1.0], 640) * 0.5).astype(np.float16)
+    ref, ref_hat = decode_exl3_linear(tr, suh, svh), decode_trellis(tr)
+    seen = 0
+    for lo, hi, block in decode_exl3_blocks(tr, suh, svh, cols=cols):
+        assert lo == seen and block.shape == (128, hi - lo)
+        np.testing.assert_array_equal(
+            decode_trellis(tr[:, lo // 16 : hi // 16]).view(np.uint16),
+            ref_hat[:, lo:hi].view(np.uint16),
+        )
+        np.testing.assert_allclose(block.astype(np.float32), ref[:, lo:hi].astype(np.float32), rtol=1e-3, atol=0)
+        seen = hi
+    assert seen == 640
+
+
+def test_decode_exl3_blocks_honors_the_codebook_markers():
+    tr = _random_trellis(8, 16, 2)
+    suh, svh = np.ones(128, dtype=np.float16), np.ones(256, dtype=np.float16)
+    ref = decode_exl3_linear(tr, suh, svh, mul1=np.array(0, np.int32))
+    got = np.concatenate(
+        [block for _, _, block in decode_exl3_blocks(tr, suh, svh, mul1=np.array(0, np.int32), cols=128)],
+        axis=1,
+    )
+    np.testing.assert_allclose(got.astype(np.float32), ref.astype(np.float32), rtol=1e-3, atol=0)
+    assert not np.allclose(
+        got.astype(np.float32),
+        decode_exl3_linear(tr, suh, svh).astype(np.float32),
+        rtol=1e-3,
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        next(decode_exl3_blocks(tr, suh, svh, mcg=np.array(1, np.int32), mul1=np.array(1, np.int32)))
+
+
 # ===================================================================
 # Real checkpoint invariants (skips cleanly when the pinned snapshot is not cached)
 # ===================================================================
@@ -421,6 +459,57 @@ def test_spell_trellis_builds_generic_cone(tmp_path):
     out = g.nodes[g.outputs[0]].output
     assert out.dtype.name == "f32" and tuple(d.as_static() for d in out.shape) == (256, 128)
     assert g.outputs == ["p_w"]
+
+
+def test_input_spelling_is_generic_and_matches_reference():
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    tensors, ref = _exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
+    graph.inputs = graph.outputs = ["w"]
+
+    spell_trellis_inputs(graph, {"w": (0, tuple(tensors["layer.trellis"].shape))})
+    result, _ = NumpyBackend().run(
+        graph,
+        input_data={
+            "w": tensors["layer.trellis"].numpy(),
+            "w_suh": tensors["layer.suh"].numpy(),
+            "w_svh": tensors["layer.svh"].numpy(),
+        },
+    )
+    np.testing.assert_array_equal(result.outputs[graph.outputs[0]], ref)
+
+
+def test_input_spelling_reaches_cuda_source_without_format_ir():
+    """A runtime-coded dense contraction lowers entirely through generic integer IR."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (1, 128), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    spell_trellis_inputs(graph, {"w": (0, (8, 8, 32))})
+
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert cuda
+    source = "\n".join(op.kernel_source for op in cuda)
+    for spelling in (" % ", " << ", " >> ", " & ", " | ", " ^ "):
+        assert spelling in source
+    assert "unsigned int" in source and "unsigned long long" in source
+    active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
+    assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
 
 
 @pytest.mark.parametrize("cb", [1, 2])
@@ -654,6 +743,7 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
 
     from emmy.commands.compile import _trace_model
     from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.loader.binder import bind_constants_from_module
 
     _config, ref_sd = _tiny_exl3_checkpoint(tmp_path)
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
@@ -665,6 +755,19 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
     for name, ref in ref_sd.items():
         got = params["model." + name]  # the trace wrapper nests the CausalLM under .model
         torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    # Wrapper-owned rotary buffers are absent from safetensors. Their trace paths must remain
+    # wrapper-relative so the CUDA runtime binds the live module values rather than zeros.
+    bound = bind_constants_from_module(graph, wrapper)
+    wrapper_state = wrapper.state_dict()
+    rotary = [(nid, op) for nid, op in graph.loadable_constants() if op.source_path and ".rotary_emb." in op.source_path]
+    assert {op.source_path for _nid, op in rotary} == {
+        "model.model.rotary_emb.cos",
+        "model.model.rotary_emb.sin",
+    }
+    for nid, op in rotary:
+        assert nid in bound
+        np.testing.assert_array_equal(bound[nid], wrapper_state[op.source_path].detach().float().numpy())
 
 
 @requires_cuda
@@ -680,3 +783,54 @@ def test_exl3_checkpoint_e2e_cuda(tmp_path):
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
     assert not any(isinstance(nn.op, (BitcastOp, RangeOp)) for nn in compiled.nodes.values())
     _assert_e2e_gate(emmy_logits, ref_logits, "generic reconstruction fold")
+
+
+# ===================================================================
+# Weight-free allocation metadata
+# ===================================================================
+
+
+def _sidecar(tmp_path: Path, storage: dict, *, method: str = "exl3") -> Path:
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": method, "bits": 2.26}}))
+    (tmp_path / "quantization_config.json").write_text(json.dumps({"quant_method": method, "tensor_storage": storage}))
+    return tmp_path
+
+
+def _coded(base: str, bits: int, *, leaves=("trellis", "suh", "svh")) -> dict:
+    return {
+        "quant_format": "exl3",
+        "bits_per_weight": bits,
+        "stored_tensors": {f"{base}.{leaf}": {"shape": [8]} for leaf in leaves},
+    }
+
+
+def test_coded_tensor_storage_reads_the_allocation_weight_free(tmp_path):
+    """The architecture twin can read rate and sibling shapes without loading a shard."""
+    from emmy.compiler.loader.exl3 import coded_tensor_storage
+
+    root = _sidecar(
+        tmp_path,
+        {
+            "model.layers.0.self_attn.q_proj": _coded("model.layers.0.self_attn.q_proj", 4),
+            "model.layers.0.mlp.gate_proj": _coded("model.layers.0.mlp.gate_proj", 2),
+            "model.embed_tokens": {"stored_tensors": {"model.embed_tokens.weight": {"shape": [32, 8]}}},
+        },
+    )
+    got = coded_tensor_storage(str(root))
+    assert sorted(got) == ["model.layers.0.mlp.gate_proj", "model.layers.0.self_attn.q_proj"]
+    assert got["model.layers.0.mlp.gate_proj"]["bits_per_weight"] == 2
+
+
+def test_coded_tensor_storage_skips_incomplete_siblings(tmp_path):
+    from emmy.compiler.loader.exl3 import coded_tensor_storage
+
+    root = _sidecar(tmp_path, {"m.proj": _coded("m.proj", 2, leaves=("trellis", "su", "sv"))})
+    assert coded_tensor_storage(str(root)) == {}
+
+
+def test_coded_tensor_storage_is_empty_off_an_exl3_checkpoint(tmp_path):
+    from emmy.compiler.loader.exl3 import coded_tensor_storage
+
+    root = _sidecar(tmp_path, {"m.proj": _coded("m.proj", 2)}, method="fp8")
+    assert coded_tensor_storage(str(root)) == {}
+    assert coded_tensor_storage(str(tmp_path / "nonexistent")) == {}

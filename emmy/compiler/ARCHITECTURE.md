@@ -154,23 +154,23 @@ protection (the down projection sum-contracts the exp-bearing SwiGLU activation,
 softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
-**Trellis-coded checkpoints (EXL3).** `loader/exl3.py` holds the pure numpy decode for the EXL3 (QTIP-class
-trellis-coded) weight format: per-16x16-tile bit-window extraction from the tail-biting code stream, the 3INST
-computed codebook (bit-exact against exllamav3's CUDA kernels), the mma-fragment tile ordering, and the
-128-block Hadamard/sign fold that restores the original basis from the `suh`/`svh` sibling vectors.
-`decode_exl3_linear` reconstructs one linear's fp16 weight from its sibling tensors. Ingestion follows the fp8
-design exactly: `config.json` declares `quant_method: "exl3"` (detected by `quantized_checkpoint_dir` alongside
-fp8), the twin carries decoded real weights (`load_dequantized_state_dict` decodes trellis siblings to `.weight`
-values; per-expert checkpoint modules pack into the v5 3-D expert params, encode padding — both dims rounded up
-to 128, e.g. GLM-4.5-Air's `intermediate_size` 10944 → 11008 — trimmed back to the declared shapes), and
-`spell_trellis_constants` (the sibling of `spell_quantized_constants`) rewrites each coded `<module>.weight`
-constant at birth into three leaf constants (int16 codes on the `i16` carrier + the f16 channel vectors) and
-format-neutral tensor operations: static ranges, numeric casts and same-width bitcasts, elementwise integer
-arithmetic, gathers/index maps, layouts, and matmuls. Marker presence selects which generic codebook algebra is
-emitted; no format-specific op exists. `032_fold_constant_subgraphs` treats this like any other static computation
-and collapses it into a bind-time `source_graph` record, bit-exact against the direct decode. Not every linear is
-coded — the quantizer keeps sensitivity-selected ones at plain fp16 (GLM-4.5-Air layer 0 `o_proj`), and those load
-as ordinary tensors.
+**Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
+packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.
+Checkpoint discovery, sibling pairing, codebook markers, and allocation metadata remain in
+`loader/quant.py` and `loader/safetensors.py`.
+
+At graph birth, `spell_trellis_constants` replaces each logical weight with the format-neutral
+reconstruction built by `loader/trellis.py`: ordinary ranges, casts/bitcasts, elementwise integer
+arithmetic, gathers/index maps, layout operations, and matmuls. The static cone folds through the
+normal constant policy before Loop IR. `spell_trellis_inputs` applies the same generic builder to
+expert weight inputs, declaring packed codes plus their padded channel-vector inputs; it introduces
+no format-specific IR class. Marker presence selects which generic codebook algebra is emitted.
+
+The eager and serving reference lanes use `load_dequantized_state_dict` /
+`load_quantized_split` to materialize logical values with the same NumPy decode. A future
+compressed execution lane must optimize the resulting generic primitive graph; it must not recover
+a checkpoint-specific op or statement after decomposition. `coded_tensor_storage` remains a
+loader-only, weight-free inventory for tracing and release coverage.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), generic elementwise ops, and graph algebra. They may NEVER contain a

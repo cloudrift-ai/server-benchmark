@@ -113,7 +113,7 @@ def _traceable_ple_block():
     return TraceablePleBlock()
 
 
-def _fake_causal_lm(block, rotary=_fake_rotary):
+def _fake_causal_lm(block, rotary=_fake_rotary, *, config=None):
     """Minimal AutoModelForCausalLM stand-in for ``_trace_model``: a decoder module
     exposing ``layers`` / ``rotary_emb`` / ``config`` (what ``_find_text_decoder``
     matches) under ``.model``."""
@@ -125,7 +125,7 @@ def _fake_causal_lm(block, rotary=_fake_rotary):
         def __init__(self):
             super().__init__()
             self.layers = nn.ModuleList([block])
-            self.config = SimpleNamespace(hidden_size=HIDDEN)
+            self.config = config or SimpleNamespace(hidden_size=HIDDEN)
             self.rotary_emb = rotary
 
     class FakeModel(nn.Module):
@@ -201,6 +201,45 @@ def test_static_layer_trace_builds_multi_rope_mapping(monkeypatch):
     graph, (_mod, _args, kwargs) = _trace_model("fake/multi-rope-model", 0, 8)
     assert graph.nodes
     assert set(kwargs["position_embeddings"]) == {"main", "compress"}
+
+
+def test_static_layer_trace_selects_laguna_rope_tuple_from_config(monkeypatch):
+    """Laguna's configured attention type selects one RoPE tuple, not the whole
+    multi-RoPE mapping used by DeepSeek-style decoder blocks."""
+    from types import SimpleNamespace
+
+    import torch
+    import torch.nn as nn
+
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.commands.compile import _trace_model
+
+    class LagunaRotary(nn.Module):
+        layer_types = ("full_attention", "sliding_attention")
+
+        def forward(self, x, position_ids, layer_type=None):
+            assert layer_type in self.layer_types
+            value = 1.0 if layer_type == "full_attention" else 2.0
+            shape = (x.shape[0], x.shape[1], x.shape[-1] // 2)
+            return torch.full(shape, value, dtype=x.dtype), torch.zeros(shape, dtype=x.dtype)
+
+    class LagunaBlock(nn.Module):
+        def forward(self, x, position_embeddings=None):
+            assert isinstance(position_embeddings, tuple)
+            return x + position_embeddings[0].mean()
+
+    config = SimpleNamespace(hidden_size=HIDDEN, layer_types=["sliding_attention"])
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda model_id, **kw: _fake_causal_lm(LagunaBlock(), LagunaRotary(), config=config),
+    )
+
+    graph, (_mod, _args, kwargs) = _trace_model("fake/laguna-model", 0, 8)
+    assert graph.nodes
+    assert isinstance(kwargs["position_embeddings"], tuple)
+    assert kwargs["position_embeddings"][0].mean().item() == 2.0
 
 
 def test_static_layer_trace_preserves_hyper_connection_lanes(monkeypatch):
@@ -310,11 +349,16 @@ def test_trace_inventory_replaces_router_with_representative_expert():
 
     expert_module = Experts()
     shared = Shared()
-    original_mlp = SimpleNamespace(gate=nn.Linear(hidden, experts_count), experts=expert_module, shared_experts=shared)
+    original_mlp = SimpleNamespace(
+        gate=nn.Linear(hidden, experts_count),
+        experts=expert_module,
+        shared_experts=shared,
+        routed_scaling_factor=2.5,
+    )
     block = SimpleNamespace(mlp=original_mlp)
     x = torch.randn(2, hidden)
     gate, up = F.linear(x, expert_module.gate_up_proj[0]).chunk(2, dim=-1)
-    expected = F.linear(F.silu(gate) * up, expert_module.down_proj[0]) + shared(x)
+    expected = F.linear(F.silu(gate) * up, expert_module.down_proj[0]) * 2.5 + shared(x)
 
     assert replace_moe_with_traceable_expert(block)
     torch.testing.assert_close(block.mlp(x, input_ids=torch.zeros(2, dtype=torch.long)), expected)
@@ -402,6 +446,72 @@ def test_quantized_trace_twin_materializes_only_requested_layer(tmp_path):
     assert next(decoder.layers[0].parameters()).device.type == "meta"
     assert next(decoder.layers[2].parameters()).device.type == "meta"
     assert next(decoder.rotary_emb.buffers()).device.type == "cpu"
+
+
+def test_architecture_trace_twin_replaces_laguna_experts_before_materialization(tmp_path):
+    """A selected sparse Laguna layer retains one expert, its routed scale, and
+    shared-expert compute; the packed all-expert tensor never reaches CPU."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_architecture_trace_twin
+
+    config = transformers.LagunaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        vocab_size=32,
+        max_position_embeddings=32,
+        sliding_window=8,
+        moe_intermediate_size=6,
+        shared_expert_intermediate_size=8,
+        num_experts_per_tok=2,
+        num_experts=4,
+        layer_types=["full_attention", "sliding_attention"],
+        num_attention_heads_per_layer=[4, 4],
+        mlp_layer_types=["dense", "sparse"],
+        moe_routed_scaling_factor=2.5,
+    )
+    config.save_pretrained(tmp_path)
+
+    model = load_architecture_trace_twin(tmp_path, torch.float16, 1)
+    decoder = model.model
+    mlp = decoder.layers[1].mlp
+    assert mlp._emmy_traceable_expert
+    assert mlp.routed_scaling_factor == 2.5
+    assert tuple(mlp.w_gate_up.shape) == (12, 16)
+    assert tuple(mlp.w_down.shape) == (16, 6)
+    assert mlp.w_gate_up.device.type == "cpu"
+    assert next(decoder.layers[0].parameters()).device.type == "meta"
+    assert not hasattr(mlp, "experts")
+
+
+def test_architecture_only_trace_does_not_load_checkpoint_weights(monkeypatch, tmp_path):
+    """Unquantized inventory tracing goes through AutoConfig/from_config and must
+    never call ``from_pretrained``, which would download the source weights."""
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.commands.compile import _trace_model
+
+    config = transformers.LlamaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        vocab_size=32,
+    )
+    config.save_pretrained(tmp_path)
+
+    def reject_weight_load(*_args, **_kwargs):
+        raise AssertionError("architecture-only trace attempted to load checkpoint weights")
+
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", reject_weight_load)
+    graph, _bundle = _trace_model(str(tmp_path), 0, 4, architecture_only=True)
+    assert graph.nodes
 
 
 class _FakeStateModel:

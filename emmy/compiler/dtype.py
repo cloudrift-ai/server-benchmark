@@ -83,9 +83,13 @@ F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 
 
-# Integer types appear on ``input_ids`` placeholders and in generic static
-# construction algebra. Runtime kernels do not yet lower the unsigned forms;
-# the generic constant folder removes their current uses before Loop IR.
+# Integer types — they appear on ``input_ids`` placeholders from HF whole-model
+# traces and inside generic static construction algebra. The compiler doesn't
+# generate kernels that compute on the signed forms (LM-head gather + embedding
+# lookup is index math) and does not lower the unsigned ones at all; the generic
+# constant folder removes their current uses before Loop IR.
+# I16 also appears as a raw carrier in generic checkpoint reconstruction algebra.
+# Static uses fold before Loop IR, like I32/I64.
 I16 = DataType("i16", np.dtype(np.int16), 2)
 I32 = DataType("i32", np.dtype(np.int32), 4)
 I64 = DataType("i64", np.dtype(np.int64), 8)

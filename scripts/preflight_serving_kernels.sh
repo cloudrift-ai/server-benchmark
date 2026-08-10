@@ -9,6 +9,7 @@
 #
 #   MODEL=google/gemma-4-12B-it scripts/preflight_serving_kernels.sh [out_dir]
 #   MODEL=<id> ARCH=sm_90 scripts/preflight_serving_kernels.sh
+#   MODEL=<id> REVISION=<sha> scripts/preflight_serving_kernels.sh   # a revision-tagged golden set
 #
 # The golden set IS the enumeration: goldens are the fork-resolution evidence the warm run
 # will deploy from, so preflighting exactly them is preflighting what the image will ship.
@@ -27,6 +28,9 @@ set -u
 cd "$(dirname "$0")/.." 2>/dev/null || true
 MODEL="${MODEL:?set MODEL to the HF model id being preflighted}"
 ARCH="${ARCH:-sm_120}"
+# The release config's SERVE_REVISION. Load-bearing only when this model's goldens are
+# revision-tagged (`<repo>@<rev>`); the enumeration below then refuses to guess.
+REVISION="${REVISION:-}"
 if [ -x ./venv/bin/emmy ]; then
   PY=./venv/bin/python; EMMY=./venv/bin/emmy
 else
@@ -37,14 +41,23 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 
 # Select by the golden's recorded `model:` provenance, not by a name prefix: the prefix is a
 # naming convention that drifts per model, while the provenance is the field that actually
-# says which checkpoint a shape came from. Same matcher as the release gate.
-if ! names=$(CUDA_VISIBLE_DEVICES= MODEL="$MODEL" "$PY" -c "
+# says which checkpoint a shape came from. Same matcher as the release gate, revision half
+# included — a repo's revisions do not share kernel shapes, so preflighting another rung's
+# shapes would gate the rental on the wrong set.
+if ! names=$(CUDA_VISIBLE_DEVICES= MODEL="$MODEL" REVISION="$REVISION" "$PY" -c "
 import os, sys
 sys.path.insert(0, 'scripts')
-from check_serving_goldens import covers, model_slug
+from check_serving_goldens import model_slug, select_goldens, split_revision, _revisions
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
-target = model_slug(os.environ['MODEL'])
-print('\n'.join(sorted({g.name for g in GOLDEN_RECORDS if covers(g.model, target)})))
+repo, tagged = split_revision(os.environ['MODEL'])
+revision = os.environ['REVISION'].strip() or tagged
+matched, wrong_rev = select_goldens(GOLDEN_RECORDS, model_slug(repo), revision)
+if not matched and wrong_rev:
+    sys.exit(
+        f'FAIL: {len(wrong_rev)} golden(s) for {repo!r} are recorded against {_revisions(wrong_rev)}, '
+        f'not {revision!r} — set REVISION to the config SERVE_REVISION (see scripts/check_serving_goldens.py)'
+    )
+print('\n'.join(sorted({g.name for g in matched})))
 "); then
   # A non-zero enumeration may still have printed a PARTIAL list on stdout. Preflighting a
   # silent subset is worse than not preflighting: it gates a rental on a green summary that

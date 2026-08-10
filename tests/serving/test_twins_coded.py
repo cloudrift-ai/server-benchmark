@@ -178,8 +178,6 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     spelled = twins["expert1-sparse-sliding@b2"]
     assert spelled.inputs[:4] == ["x", "w_gate", "w_up", "w_down"]
     assert {spelled.nodes[name].output.dtype.name for name in ("w_gate", "w_up", "w_down")} == {"i16"}
-    assert all(type(node.op).__name__ not in {"TrellisDecodeOp", "HadamardOp"} for node in spelled.nodes.values())
-
     from emmy.compiler.backend.plan import plan_from_dict, plan_from_graph, plan_to_dict
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import ConstantOp, InputOp

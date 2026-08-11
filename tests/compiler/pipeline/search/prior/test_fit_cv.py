@@ -10,7 +10,16 @@ import numpy as np
 import pytest
 
 from emmy.commands.fit import register_fit_command
-from emmy.compiler.pipeline.search.prior.fit import DEFAULT_FEATURES, Group, TwoStageFit, dual_rank, feature_view, fit_two_stage, op_family
+from emmy.compiler.pipeline.search.prior.fit import (
+    DEFAULT_FEATURES,
+    MATMUL_FEATURES,
+    Group,
+    TwoStageFit,
+    dual_rank,
+    feature_view,
+    fit_two_stage,
+    op_family,
+)
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 
@@ -38,12 +47,31 @@ def test_op_family_strips_variant_segments(name, family):
 # --- feature view ------------------------------------------------------------------
 
 
-def test_default_feature_view_reproduces_inline_filter():
-    """The default spec keeps exactly what the case builder's historical inline filter
-    kept: ``D_``-prefixed features plus the literal ``MMA_tier``."""
+def test_default_feature_view_keeps_the_geometry_and_atom_features():
+    """The default spec keeps the ``D_``-prefixed geometry features plus the two atom features
+    that vary within a candidate pool — ``MMA_tier`` and ``MMA_acc_bits``, the f16-vs-f32
+    accumulate discriminator whose absence made every fast-math candidate a feature twin of its
+    f32 sibling. Everything else (the shape/hardware pass-throughs) is constant within a pool."""
     keep = feature_view(DEFAULT_FEATURES)
-    sample = {"D_waves": 1.0, "D_bk_gap": 2.0, "MMA_tier": 3.0, "MMA_acc_bits": 4.0, "S_ext_free_prod": 5.0, "H_sm_count": 6.0, "D_": 7.0}
-    assert {k for k in sample if keep(k)} == {k for k in sample if k.startswith("D_") or k == "MMA_tier"}
+    sample = {"D_waves": 1.0, "D_bk_gap": 2.0, "MMA_tier": 3.0, "MMA_acc_bits": 4.0, "MMA_atom_m": 5.0, "S_ext_free_prod": 6.0, "D_": 7.0}
+    assert {k for k in sample if keep(k)} == {"D_waves", "D_bk_gap", "D_", "MMA_tier", "MMA_acc_bits"}
+
+
+def test_matmul_view_is_exact_names_through_the_one_parser():
+    """The matmul view is an ordinary :func:`feature_view` spec — no separate filtering path — and it
+    is spelled in EXACT names, which is what lets it exclude a feature whose name extends a kept one.
+    Its exclusions are the two provably-free classes: features constant within every matmul pool (a
+    term that cancels out of a within-pool ranking) and globally affine duplicates of a kept feature
+    (a scaled copy that only splits one weight in two)."""
+    names = MATMUL_FEATURES.split(",")
+    assert len(names) == len(set(names)) and names == sorted(names)
+    keep = feature_view(MATMUL_FEATURES)
+    assert keep("D_cells") and not keep("D_cells_cap")  # exact, not prefix: the reason globs won't do
+    for dropped in ("D_pow2_threads", "D_raster_gn", "D_stage_split", "S_ext_free_prod"):
+        assert not keep(dropped), f"{dropped} cannot move a matmul ranking and must stay out"
+    for dupe in ("D_bn_band", "D_bn_ge_bm", "D_cells_cap", "MMA_tier", "MMA_atom_m"):
+        assert not keep(dupe), f"{dupe} is an affine copy of a kept feature"
+    assert keep("MMA_acc_bits") and keep("MMA_a_bits")  # the atom's only non-redundant levels
 
 
 def test_feature_view_globs_and_names():
@@ -92,11 +120,13 @@ def _cases():
 
 
 NAMES = ["D_a", "D_b"]
+# The fitted scalar params seed OFF at the shipped threshold (the atomic-free interaction).
+SEED_PARAMS = {"atomic_free_weight": 0.0, "atomic_free_split_threshold": 4.0}
 
 
 def _fit_model(groups, rng):
     """The zero-seeded fold trainer the command layer wires up, at samples=0."""
-    return fit_two_stage(groups, NAMES, seed_weights={}, rng=rng, samples=0)
+    return fit_two_stage(groups, NAMES, seed_weights={}, seed_params=SEED_PARAMS, rng=rng, samples=0)
 
 
 # --- fold partitioning + pooling ---------------------------------------------------
@@ -151,7 +181,7 @@ def test_fittability_guard_excludes_fold_loudly():
 
 def _metrics():
     cases = _cases()
-    model = TwoStageFit({"D_a": -1.0, "D_b": 0.25}, [0], {"D_a": -0.5}, [0])
+    model = TwoStageFit({"D_a": -1.0, "D_b": 0.25}, [0], {"D_a": -0.5}, [0], SEED_PARAMS)
     cv = {"gpu": fit_cv.run_axis(cases, "gpu", fit_model=_fit_model, seed=0)}
     skipped = [
         ("gpuA", "attention.hd128", fit_cv.OUT_OF_SCOPE),

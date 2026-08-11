@@ -34,11 +34,12 @@
     "D_raster_group": -6.000000006597178,
     "D_reduce_transposed": -50.97494830546299,
     "D_reuse": 0.034601720793312286,
-    "D_scalar_on_warp_eligible": -3.282728238631261,
+    "D_scalar_on_warp_eligible": -43.282728238631265,
     "D_splitk": 0.0035752264173855514,
     "D_splitk_deficit": -1.7144818760278215,
     "D_splitk_excess": -11.742470565883663,
     "D_splitk_le2": 4.097641506523412,
+    "D_splitk_roundtrip": -0.25,
     "D_square": 3.3330423597309795,
     "D_stage_async": 28.98775971674104,
     "D_stage_depth": -7.773866728004411,
@@ -94,11 +95,12 @@
     "D_raster_group": -7.500000006597178,
     "D_reduce_transposed": 4.718709774773698,
     "D_reuse": 0.07780118253997077,
-    "D_scalar_on_warp_eligible": 0.030166071445468772,
+    "D_scalar_on_warp_eligible": -39.96983392855453,
     "D_splitk": -0.38083531041007207,
     "D_splitk_deficit": 0.028913457176287957,
     "D_splitk_excess": -11.742470565883664,
     "D_splitk_le2": 2.0910664225791957,
+    "D_splitk_roundtrip": -0.25,
     "D_square": 2.4774697135060735,
     "D_stage_async": 20.48734027694898,
     "D_stage_depth": -11.66216633847187,
@@ -125,9 +127,7 @@
   "params": {
     "scale": 0.1,
     "atomic_free_split_threshold": 4.0,
-    "atomic_free_weight": 0.0,
-    "scalar_on_warp_weight": 40.0,
-    "splitk_roundtrip_weight": 0.25
+    "atomic_free_weight": 0.0
   },
   "provenance": {
     "fitted": "2026-07-30",
@@ -142,6 +142,6 @@
       "static": 443,
       "dynamic": 79
     },
-    "notes": "static top1=57/443  top5=152/443  top10=169/443  top25=176/443  top50=185/443  top100=250/443   median=62  mean_log2=5.72; dynamic top1=1/79  top5=25/79  top10=25/79  top25=43/79  top50=49/79  top100=57/79   median=19  mean_log2=5.06"
+    "notes": "static top1=57/443  top5=152/443  top10=169/443  top25=176/443  top50=185/443  top100=250/443   median=62  mean_log2=5.72; dynamic top1=1/79  top5=25/79  top10=25/79  top25=43/79  top50=49/79  top100=57/79   median=19  mean_log2=5.06; 2026-08-05 migration: the retired scalar_on_warp / splitk_roundtrip gate params folded into the weights on their own features (deployed quality unchanged), so the next refit starts from the function that was deploying"
   }
 }

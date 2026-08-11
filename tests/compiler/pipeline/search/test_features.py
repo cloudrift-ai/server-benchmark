@@ -227,7 +227,7 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
         "D_ctas_ge_sm": 1.0, "D_splitk_excess": 0.0, "D_splitk_deficit": math.log2(needed / 2.0),
         "D_splitk_roundtrip": 21.0, "D_l2_cells_occ": 2.0,
         "D_w_grid_m": 2.0, "D_w_grid_n": 1.0, "D_w_grid_aspect": 1.0,
-        "D_stage_depth": 3.0, "D_stage_async": 1.0, "D_stage_tma": 1.0,
+        "D_stage_depth": 3.0, "D_stage_prefetch": 1.0, "D_stage_async": 1.0, "D_stage_tma": 1.0,
         "D_stage_reg_depth": 2.0, "D_stage_split": 0.0,
         "D_tma_aspect": 2.0, "D_tma_log2_area": 12.0, "D_tma_grid_m": 2.0, "D_tma_grid_n": 1.0,
         "D_tma_l2_splitk": 1.0,

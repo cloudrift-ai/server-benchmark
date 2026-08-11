@@ -129,6 +129,18 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         return {}
     return {
         "D_stage_depth": float(st.depth),
+        # Does the gmem→smem pipeline prefetch at all — depth 1 is a single buffer, ≥ 2 is a ring.
+        # A STEP, deliberately, on a feature the linear model otherwise only holds linearly: a weight
+        # on ``D_stage_depth`` is monotone in depth and cannot express "prefetching is on", so without
+        # this the whole single-buffer-vs-ring distinction is inexpressible to the offline prior. The
+        # retired ``D_stage_ring`` flag was carrying exactly this step (measured: identical to
+        # ``depth >= 2`` over 2 033 344 candidate rows, zero disagreements) and its removal cost the
+        # RTX 5090 matmul fit its top-1 entirely — 54 of 242 goldens ranked first, then 4. Restoring
+        # the step recovers it; restoring the retired FLAG would not, since the flag named a rotation
+        # discipline the staged K-loop no longer has (it compiled byte-identically either way).
+        # Additive: an artifact fit before this key simply has no weight for it and scores it 0.0, so
+        # no ``FEATURIZER_VERSION`` bump is owed for the addition itself.
+        "D_stage_prefetch": 1.0 if st.depth >= 2 else 0.0,
         "D_stage_async": 1.0 if st.is_async else 0.0,
         "D_stage_tma": 1.0 if st.transport == "tma" else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)

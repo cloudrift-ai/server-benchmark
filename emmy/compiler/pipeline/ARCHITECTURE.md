@@ -327,10 +327,22 @@ writes it (`search/prior/fit/`, driven by `emmy fit`). Building the training cas
 `emmy/commands/fit.py`, because reconstructing the set of candidates a golden competed against needs the command
 layer's tracer for the golden's little PyTorch snippet, which `pipeline/` never imports.
 
+`offline_weights.json` is the one artifact anything loads by default. A sibling file in that directory is a **scoped
+experiment**, not a second default: `offline_weights_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
+is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Each such file says so in its
+`provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
+the shipped weights outside the slice it was fit on.
+
 What a newcomer needs to know about the fit:
 
+- **The fit optimizes the deployed score itself, not a linear stand-in for it.** `OfflinePrior.quality` and the
+  fitter's `quality_rows` are the same function over one shared definition of the non-linear term, and that term's
+  weight and threshold are fitted alongside the feature weights — the optimizer is derivative-free, so a threshold
+  costs it nothing. A scoring constant the fit cannot see is a constant the fit optimizes *around*: while two hand-set
+  gates sat outside the objective, the reported golden ranks were not the deployed ones (on the RTX 5090 matmul
+  goldens, median rank 228 reported against 367 deployed).
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
-  with the case categories (`thread` / `warp` / `dyn` / …) weighted so no category dominates — plus an L2 penalty in
+  each case counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
   the weights**. The rank objective barely moves when you scale a feature that hardly varies across the golden
   candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
@@ -345,10 +357,12 @@ What a newcomer needs to know about the fit:
   simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
   the stamped `S_ext_n_symbolic_axis`.
-- Two hard-coded feature interactions sit outside the linear weights: the atomic-free split-K term, and the pair
-  `D_scalar_on_warp_eligible` / `D_splitk_roundtrip`, which express a preference for the tensor-core path. The pair is
-  driven by the per-kernel `S_warp_eligible` value the scheduler stamps, and it stops a contraction that could use the
-  tensor cores from deploying an f16 scalar split tile instead.
+- One feature interaction sits outside the linear weights, because it cannot be written as one: the atomic-free
+  split-K term, which rewards the deferred combine kernel above a split-count threshold and penalizes it below.
+  Its weight and its threshold are both fitted. `D_scalar_on_warp_eligible` and `D_splitk_roundtrip` — which express
+  a preference for the tensor-core path, driven by the per-kernel `S_warp_eligible` value the scheduler stamps — used
+  to carry hand-set coefficients here as well. They are plain linear terms on features the weight vector already
+  holds, so they were double-counting constants the fit could not see, and the fitted weights now carry them alone.
 - **The linear quality score is turned into a positive stand-in for latency by an exponential**
   (`exp(-scale·quality)`), whose argument is clipped only at the point where floats stop being safe (~±700). **That
   exponential must never flatten out over the range of quality scores that actually occur.** A clip inside the live

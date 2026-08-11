@@ -65,13 +65,7 @@ def _artifact(**over) -> dict:
         "kind": "linear",
         "weights": {"D_square": 3.0},
         "weights_dynamic": {"D_square": -3.0},
-        "params": {
-            "scale": 0.1,
-            "atomic_free_split_threshold": 4.0,
-            "atomic_free_weight": 0.0,
-            "scalar_on_warp_weight": 40.0,
-            "splitk_roundtrip_weight": 0.25,
-        },
+        "params": {"scale": 0.1, "atomic_free_split_threshold": 4.0, "atomic_free_weight": 0.0},
     }
     base.update(over)
     return base
@@ -90,13 +84,13 @@ def test_env_override_scores_through_the_file(tmp_path, monkeypatch):
 def test_params_come_from_the_file(tmp_path, monkeypatch):
     art = _artifact()
     art["params"]["scale"] = 0.5
-    art["params"]["scalar_on_warp_weight"] = 7.0
+    art["params"]["atomic_free_weight"] = 7.0
     path = tmp_path / "candidate.json"
     path.write_text(json.dumps(art))
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     p = OfflinePrior()
     assert p._scale == 0.5
-    assert p._scalar_on_warp_weight == 7.0
+    assert p._atomic_free_weight == 7.0
 
 
 def test_explicit_kwargs_win_over_the_file(tmp_path, monkeypatch):
@@ -137,12 +131,7 @@ def test_incomplete_artifact_is_a_hard_error(tmp_path, monkeypatch):
 # Proxy desaturation + the golden rank
 # ---------------------------------------------------------------------------
 
-_GATES_OFF = {
-    "atomic_free_split_threshold": 0.0,
-    "atomic_free_weight": 0.0,
-    "scalar_on_warp_weight": 0.0,
-    "splitk_roundtrip_weight": 0.0,
-}
+_GATES_OFF = {"atomic_free_split_threshold": 0.0, "atomic_free_weight": 0.0}
 
 
 def _prior(scale: float = 0.1) -> OfflinePrior:

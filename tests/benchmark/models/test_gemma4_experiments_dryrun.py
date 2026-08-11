@@ -34,6 +34,7 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
 
     for t in tasks:
         b = t.recipe.benchmark
+        assert t.recipe.model.revision == "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
         assert b.seed == 0 and b.temperature == 0 and b.ignore_eos is True
         assert t.recipe.engine.llm.context_length == CONTEXT_LEN
 
@@ -80,6 +81,20 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
             assert "EMMY_GEN_PREFILL_BUCKET" not in env
     fm = [t for t in emmy if "EMMY_FAST_MATH=1" in (t.recipe.engine.llm.vllm.extra_env or "")]
     assert len(fm) == 6
+
+
+def test_base_serving_experiment_is_the_exact_checkpoint_smoke(project_root):
+    tasks = enumerate_tasks([_exp(project_root, "serving_base_rtx5090")])
+    assert len(tasks) == 1
+
+    recipe = tasks[0].recipe
+    assert recipe.model.huggingface == "google/gemma-4-12B"
+    assert recipe.model.smoke_test == "completion"
+    assert recipe.engine.llm.context_length == 16384
+    assert recipe.engine.llm.gpu_memory_utilization == 0.95
+    assert recipe.benchmark.random_input_len == 256
+    assert recipe.benchmark.random_output_len == 128
+    assert recipe.benchmark.max_concurrency == 1
 
 
 def test_mtp_smoke_test_expands_to_32_lane_points(project_root):

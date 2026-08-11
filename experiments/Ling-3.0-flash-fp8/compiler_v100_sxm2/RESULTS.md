@@ -1,14 +1,14 @@
 # Ling 3.0 Flash FP8 compiler qualification on 8× V100 SXM2 16 GB
 
-Status: **partial compiler coverage with partial tuning; no repository golden**. The exact model-level MTP
-token-roll seam is unsupported by the current frontend. The successful diagnostic inventory is preserved in
-[`partial_traced_working.yaml`](partial_traced_working.yaml), but it is not deploy evidence and must not be copied
-into the repository golden directory.
+Status: **exact trace and SM70 CUDA lowering complete; deployable O3 qualification partial; no repository
+golden**. The exact model inventory is preserved as
+[`exact_traced_working.yaml`](exact_traced_working.yaml). It is a non-canonical continuation artifact, not deploy
+evidence.
 
 ## Scope
 
-- Date: 2026-08-09
-- Repository revision: `9daede61bab735aca99b1f4afc4b0f4af905fa74`, plus the compiler changes under review
+- Date: 2026-08-11
+- Repository revision: `09a26def732dc19df8be525e3d0a0876b5847a9e`, plus the compiler changes under review
 - Model: `inclusionAI/Ling-3.0-flash-fp8`
 - Immutable model revision: `a5d248fcca98b9d9a0c225cc22372f2fd1b3540b`
 - Hardware: 8× `Tesla V100-SXM2-16GB`, compute capability 7.0, driver 580.159.03
@@ -18,12 +18,13 @@ into the repository golden directory.
 
 The checkpoint contains 128,443,021,752 tensor bytes (119.62 GiB). Perfectly balanced over eight 16 GiB cards,
 weights alone consume about 14.95 GiB per GPU and leave about 1.05 GiB before CUDA contexts, collectives,
-workspaces, attention state, and KV cache. The exact checkpoint therefore failed the serving fit gate independently
-of compiler eligibility. No V100 serving recipe or image is published.
+workspaces, attention state, and KV cache. This fails the serving fit gate. Independently, the official Ling vLLM
+fork's FP8 path requires compute capability 7.5 or newer, while this host is 7.0. No serving deployment, recipe,
+image build, or publication was attempted.
 
-## Coverage manifest
+## Architecture coverage
 
-The immutable configuration defines 42 decoder layers and one MTP layer. The full machine-readable mapping is in
+The immutable configuration defines 42 decoder layers and one MTP layer. The machine-readable mapping is in
 [`coverage.json`](coverage.json).
 
 | Architecture path | Layer indices | Traced representative |
@@ -33,120 +34,104 @@ The immutable configuration defines 42 decoder layers and one MTP layer. The ful
 | Sparse MoE + MLA | 5, 11, 17, 23, 29, 35, 41 | Layer 41 |
 | MTP + MLA + sparse MoE | 42 | Layer 42 |
 
-The model-level inventory also covers token embedding, rotary generation, final RMSNorm, the main output head,
+The model inventory also covers token embedding, rotary generation, final RMSNorm, the main output head,
 shifted-token embedding, the MTP transition, and the MTP output head. The representative sparse block contains one
 exact routed expert and the always-on shared expert. Routing, top-k, sort, and weighted combination remain host
 orchestration under Emmy's representative-MoE trace contract.
 
-The diagnostic whole-architecture artifact records checkpoint-compatible source paths for
-`model.word_embeddings.weight`, `model.rotary_emb.inv_freq`, `model.norm.weight`, `lm_head.weight`, and layers 0,
-2, 41, and 42. It spells 38 checkpoint weights as FP8 E4M3 constants from immutable safetensors metadata while
-preserving the checkpoint's dynamic-activation, 128×128 weight-block layout.
+The artifact records checkpoint-compatible source paths for `model.word_embeddings.weight`,
+`model.rotary_emb.inv_freq`, `model.norm.weight`, `lm_head.weight`, and layers 0, 2, 41, and 42. It spells 38
+checkpoint weights as FP8 E4M3 constants from immutable safetensors metadata while preserving the checkpoint's
+dynamic-activation, 128×128 weight-block layout.
 
-## Successful diagnostic trace
+## Exact frontend support and safety bounds
 
-Three library-only surfaces use semantically equivalent Torch algebra in the diagnostic artifact:
+The exact MTP token shift exports `aten.roll -> aten.select -> aten.fill_`. The frontend now represents this path
+without a model-specific replacement:
 
-- FLA short depthwise causal convolution uses explicit causal slices, concatenation, and a weighted sum.
-- FLA KDA and fused gated RMSNorm use the exact no-cache recurrence, safe lower-bound gate, L2 normalization,
-  beta update, and RMSNorm/gate equations.
-- The rotary autocast wrapper uses the exact configuration-specific matrix product, concatenate, cosine/sine, and
-  scale algebra.
+- Static one-dimension `roll` is two bounded affine `IndexMapOp` regions.
+- Static rank-reducing `select` fixes one source coordinate in an `IndexMapOp`.
+- `fill_` returns a functional filled value. When a later live read observes the base, a static unit-step
+  slice/select view rooted at locally produced storage reassembles the base with a two-source `IndexMapOp`.
+- Static integer `arange` uses the zero-input `RangeOp`; bind-time constant replay no longer calls NumPy `arange`
+  elementwise over a broadcast stop tensor.
 
-On the target GPU, original FLA KDA and its replacement are finite and agree with maximum absolute error
-0.00390625, mean absolute error 0.00015323, and maximum error divided by reference peak 0.0007788. The comparison
-passes FP16 `rtol=5e-3, atol=5e-3`. Original rotary and its replacement agree bit-for-bit: both cosine and sine have
-maximum absolute error 0.0.
+The alias gate requires the base to be a locally produced call-function value with its own storage, the mutation
+return to be unused when the base must be rebound, and every observable pre-write alias to be absent. Later aliases
+created from the rebound root see the new version. Multidimensional roll, dynamic shifts/dimensions/ranges,
+non-integer ranges, dynamic or non-unit slices, input/parameter roots, used mutation returns, and stale aliases fail
+closed. `copy_` retains its stricter pre-existing constructor-root and slice-only restrictions.
+
+Focused tests cover positive and negative roll shifts, shift normalization, select parity, exact Ling MTP parity
+through the NumPy and Loop pipelines, input/stale-alias rejection, static range replay, and non-integer range
+rejection. The complete trace suite reports 98 passed and one existing XPASS.
+
+## Exact current-head inventory and lowering
+
+The exact whole-architecture trace completed in 8 minutes 2 seconds on the supplied host. The inventory SHA256 is
+`9c1d8a53bf657b7747ef7c284c554af6acfb42b1978366b99a571061c00953de`.
 
 | Artifact | Frontend nodes | FP8 constants | Targets | SM70 CUDA lowering |
 | --- | ---: | ---: | ---: | ---: |
-| Whole architecture with diagnostic token-roll replacement | 1,978 | 38 | 341 | 341 / 341 |
-| Model seams + MTP representative | 314 | 9 | 54 | 54 / 54 |
-| MTP representative alone | 256 | 9 | 43 | 43 / 43 |
+| Exact whole architecture on current HEAD | 1,968 | 38 | 48 | 48 / 48 |
 
-The seam wrapper contributes 11 post-fusion targets relative to the MTP representative alone. The preserved
-whole-architecture artifact has 231 provenance-selected targets and 110 Loop IR fallbacks. All 341 targets
-reconstruct and lower to at least one CUDA kernel on exact SM70.
+Every exact target reconstructs and lowers on compute capability 7.0. The lowering replay took 48.75 seconds and
+recorded no failures; see [`exact_lowering_summary.json`](exact_lowering_summary.json).
 
-## Unsupported exact path
+## Deployable O3 qualification
 
-The exact MTP source calls `roll_tensor`, exporting this live mutation sequence:
+`emmy tune --golden-file` used all eight GPUs, seed 0, one candidate per target, the O1 ranking lane, and a fresh DB
+and online prior. `--bench` then rebuilt each winning or fallback target at nvcc default O3 with five warmups and 20
+iterations. Full-model comparison is unavailable because the embedded inventory has no runnable eager module;
+correctness is therefore recorded per provenance reproducer when its frontend slice can build an eager reference.
 
-```text
-aten.roll -> aten.select -> aten.fill_
-```
+| O3 result | Count |
+| --- | ---: |
+| Exact targets attempted | 48 |
+| Targets with at least one positive timing | 47 |
+| Targets without a positive timing | 1 |
+| Provenance reproducers attempted | 69 |
+| Reproducers with positive Emmy timing | 68 |
+| Eager-reference correctness passes | 30 |
+| Eager-reference correctness failures | 0 |
+| Timing-only reproducers without an eager reference | 38 |
 
-The returned value aliases the mutated roll result. Alias-aware output liveness correctly retains the mutation, and
-three focused trace regressions pass. The exact trace then stops at:
+The exact timing distribution and failure records are in [`exact_o3_summary.json`](exact_o3_summary.json). A null
+accuracy error is considered a pass only when `reference_available=true`; reference-free Loop slices are timing
+evidence, not correctness evidence.
 
-```text
-ValueError: cannot map fallback aten.select as elementwise for output shape (1,)
-```
+All 68 successful rows used CUDA-graph-captured timing. Emmy latencies range from 1.456 µs to 1.305 seconds, with a
+498.18 µs median. Of the 30 eager-backed rows, Emmy is faster on 10 and slower on 20; every row passed its random-input
+reference comparison. The five prior bind-time truth-value failures are gone after static `arange` became `RangeOp`.
 
-Without the alias-aware liveness fix, the select/write was incorrectly pruned and CUDA lowering instead stopped at
-`render: elementwise fn='roll' not supported`. A durable fix needs a semantic decomposition of the static
-`roll/select/fill` sequence, or general `aten.roll` plus select/write support.
+The sole timing gap is target 36, `k_linear_mean_reduce_e0ee1d.a08b04cc6fc6`. It fuses the exact MTP
+embedding/roll/fill path, two norms, the FP8 `eh_proj`, and two means. O3 first iterations took 2.58 and 2.28 seconds;
+iteration 1 then exceeded the 2-second watchdog. Bounded scoped `PLACE@a=cut` and bare `PLACE=cut` evaluations both
+retained the original single launch, so the exact multi-use cone has no legal cut under the captured-value safety
+gate. Their O1 first iterations took 4.47/4.16 and 4.48/4.21 seconds respectively; there is no cut O3 timing.
 
-For diagnostic coverage only, the trace replaces the shift with equivalent slice/concatenate algebra. For the probe
-input `[1,2,3,4,5,6,7,8]`, both paths produce `[2,3,4,5,6,7,8,0]` exactly. This replacement demonstrates that every
-other inventoried path lowers; it does not satisfy the exact-path coverage gate.
+The one-candidate ranking pass persisted 23 explicit O1 winners. The remaining 25 targets still reached deployable
+O3 through their assembled fallback, but have no explicit searched winner. This is a second reason the continuation
+artifact cannot become a repository golden.
 
-## Partial tuning
+## Historical diagnostic evidence
 
-The final-code comparison used all eight GPUs and matched cold starting state, compiler revision, O1 compile lane,
-seed 0, patience 1, and a one-candidate budget per target. Both arms started without a tuning DB, online prior, or
-cubin cache. The cold arm had no proposals; the hybrid arm had one explicit greedily realized proposal per target.
-Pins are process-global, so hybrid proposal measurements ran serially while rotating over the eight GPU workers.
-The full machine-readable comparison is in [`tuning_summary.json`](tuning_summary.json).
+The retained [`partial_traced_working.yaml`](partial_traced_working.yaml), [`lowering_summary.json`](lowering_summary.json),
+[`tuning_summary.json`](tuning_summary.json), and [`o3_summary.json`](o3_summary.json) come from the earlier
+`9daede61bab735aca99b1f4afc4b0f4af905fa74` compiler revision. That diagnostic replacement inventory had 1,978
+frontend nodes and 341 post-fusion targets, all of which lowered on SM70; 300 had positive O1 rankings and three
+representatives were measured at O3. Compiler fusion and inventory semantics subsequently changed: a same-revision
+control before the final static-range fix produced 48 targets, and the final exact current-head inventory is the
+48-target artifact above. The 341-target files remain historical diagnostics and are not current coverage counts.
 
-| O1 ranking result | Cold MCTS | Hybrid |
-| --- | ---: | ---: |
-| Working-golden targets visited | 341 / 341 | 341 / 341 |
-| Targets with `ok` ranking | 237 | 300 |
-| Ambiguous multi-kernel ranking | Not persisted as a winner | 39 |
-| Target-level ranking watchdog failure | Not persisted as a winner | 2 |
-| Unique DB performance rows | 582 | 463 |
-| Successful DB rows | 579 | 457 |
-| DB watchdog rows | 3 | 6 |
-| Wall time | 312 s | 2,423 s |
-
-There are 237 targets with a positive O1 latency in both arms. Hybrid is faster on 22, cold MCTS is faster on 215,
-and 201 realize the same knobs. Across that paired set, the geometric mean hybrid/MCTS latency ratio is 1.115.
-These are `-Xcicc -O1` ranking signals, not deployable performance.
-
-The durable partial YAML chooses the lower positive O1 row where both arms succeeded: 215 rows come from cold MCTS
-and 126 from hybrid, including hybrid-only and unsuccessful diagnostic rows. Its final status is 300 `ok`, 39
-`ambiguous_multi_kernel`, and 2 `bench_fail`. Every one of its 341 targets reconstructs and lowers again on SM70;
-see [`lowering_summary.json`](lowering_summary.json). Rankings remain in the working YAML intentionally. It has no
-canonical measurement blocks.
-
-The first attempt exposed `nvcc` outside the non-login PATH and was reset before the final cold run. The standard
-CLI also rewrites the large working YAML once per target; a task-local batch-persistence wrapper retained identical
-search and ranking logic while writing the final document once. Neither issue changed candidate budgets.
-
-## Representative O3 accuracy and timing
-
-Three representative finalists were pinned with their exact realized knobs and measured twice at nvcc default O3,
-using five warmups and 20 iterations. All 10 pinned rows report `status=ok`, exact pin realization, and no integrity
-flags. The complete sanitized measurements are in [`o3_summary.json`](o3_summary.json).
-
-| Representative target | Eager PyTorch, two runs | Cold-MCTS pin, two runs | Hybrid pin, two runs |
-| --- | ---: | ---: | ---: |
-| Largest hybrid O1 improvement, `k_linear_7c6322` | 44.03 / 45.06 µs | 508.42 / 535.04 µs | 4.21 / 4.43 µs |
-| Hybrid O1 regression, reshape/slice/reduce | 109.07 / 106.83 µs | 9.01 / 9.06 µs | 19.54 / 19.48 µs |
-| Same-pin Loop control | Reference unavailable | 1.741 / 1.743 µs | Same realized pin |
-
-The two Torch-runnable representatives passed the live eager comparison without a wrong-answer flag. The Loop
-fallback control has no runnable eager reconstruction, so it establishes only repeated O3 compile, pin realization,
-and execution. Full-model generation accuracy was not run because the exact checkpoint failed the serving fit gate.
-Replacement-level accuracy remains: KDA passes FP16 tolerance, and rotary and token shift are exact.
+The library-only FLA and rotary replacements used by both traces retain their prior numerical checks. Original FLA
+KDA and its replacement agreed at maximum absolute error 0.00390625 and passed FP16 `rtol=5e-3, atol=5e-3`;
+original rotary and its replacement agreed bit-for-bit. The exact token shift now uses frontend support rather than
+diagnostic slice/concatenate substitution.
 
 ## Promotion decision
 
-Coverage is partial, so no file was added under `emmy/compiler/pipeline/search/goldens/`. Emmy is ineligible on this
-platform: the first serving gate is memory fit, and the independent compiler gate fails at the exact MTP token-roll
-seam. The partial YAML's O1 rankings and representative O3 rows must not be presented as complete deploy evidence.
-
-After the exact seam is implemented, retrace this immutable revision, require every target to lower on SM70, then
-repeat complete tuning. Promote only after every retained target has explicit realized knobs, repeated deployable
-O3 accuracy, positive Emmy/reference timings, and a measured correct greedy fallback for every search miss.
+No file was added under `emmy/compiler/pipeline/search/goldens/`. Exact trace and lowering are complete, but a
+canonical golden requires every target to have a valid realization, positive O3 timing, and explicit correctness
+evidence where an eager reconstruction is available. The remaining O3 and serving gaps fail that gate. The working
+YAML must not be presented as complete deploy evidence.

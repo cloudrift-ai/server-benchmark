@@ -139,3 +139,23 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
     assert args.golden_configs[0].pins == {"FAST_MATH": False}
     assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": False, "WORK": "w1x1"}
+
+
+def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.commands.run import _passes_after_stage, _replay_stage_and_passes
+    from emmy.compiler.pipeline import CUDA_PASSES
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path)
+    args = _args(path)
+    resolve_golden_arg(args)
+
+    stage, passes = _replay_stage_and_passes(args._golden_graph, embedded_golden=True)
+    assert stage == "golden Loop"
+    assert passes == CUDA_PASSES
+
+    stage, passes = _replay_stage_and_passes(args._golden_graph, embedded_golden=False)
+    assert stage == "loop"
+    assert passes == _passes_after_stage("loop")
+    assert passes != CUDA_PASSES

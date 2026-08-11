@@ -161,7 +161,8 @@ repeats, the spread measures run-to-run noise, not workload variation.
 
 Users must not duplicate named fields in `extra_args`. The `validate_extra_args()` function enforces this by:
 
-1. Building a banned set from the active engine's flag map (`VLLM_FLAG_MAP` or `SGLANG_FLAG_MAP`) plus hardcoded flags (`--trust-remote-code`, `--host`, `--port`, `--model`, `--model-path`, `--served-model-name`).
+1. Building a banned set from the active engine's flag map (`VLLM_FLAG_MAP` or `SGLANG_FLAG_MAP`) plus hardcoded flags
+   (`--trust-remote-code`, `--host`, `--port`, `--model`, `--model-path`, `--served-model-name`, `--revision`).
 2. Tokenizing the `extra_args` string and checking each token (handling both `--flag value` and `--flag=value` forms).
 3. Raising `ValueError` listing all offending flags if any are found.
 
@@ -175,7 +176,10 @@ This validation runs inside `_validate_and_build()` before returning the `Recipe
 - vLLM: `--model {name}`
 - SGLang: `--model-path {name}`
 
-Both `--model` and `--model-path` are in the hardcoded banned set, so they cannot appear in `extra_args` regardless of which engine is active.
+Both `--model` and `--model-path` are in the hardcoded banned set, so they cannot appear in `extra_args` regardless of
+which engine is active. Immutable checkpoints use `model.revision`; `build_engine_args()` emits `--revision` for both
+engines, and deployment passes the same value to `hf download`. `--revision` is therefore also banned from
+`extra_args`, preventing the prefetch and server revisions from drifting apart.
 
 ### Engine-Specific Nesting
 
@@ -211,6 +215,10 @@ model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
   task: embed
 ```
+
+Generative recipes use the semantic chat smoke test by default. A base checkpoint that is not instruction-tuned sets
+`model.smoke_test: completion`; deployment then sends `2 + 2 =` to `/v1/completions` and still requires the correct
+answer. The choice changes only the post-health correctness gate, not the benchmark endpoint or serving task.
 
 ### Command Recipes (Generic Workload)
 
@@ -327,7 +335,7 @@ _load_raw_config(recipe_dir) -> raw dict
 Recipe dataclass
     |
     v
-build_engine_args(recipe.engine.llm, model_name) -> ["--flag value", ...]
+build_engine_args(recipe.engine.llm, model_name, model_revision=recipe.model.revision) -> ["--flag value", ...]
     |
     v
 generate_compose() -> docker-compose.yaml string

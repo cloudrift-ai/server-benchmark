@@ -488,6 +488,9 @@ consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal
 roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries through the full deploy hierarchy —
 recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic
 out, yielding the cascade statistic + scale + plain matmul, every piece joining an EXISTING golden kind's evidence.
+Computed-A routing uses the fused-key convention on both sides: the live tree supplies the computed-A fact before a
+schedule offer exists, while a persisted `PLACE@a` supplies it for a stat-free activation cone with no second reduce
+axis. Keeping one key prevents the routing entry from recursively matching its own materialized producer.
 **Fuse is the default by ABSENCE** — no routing entry and no pin leaves recognition byte-untouched (digest-verified),
 and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`_captured_values`
 in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate

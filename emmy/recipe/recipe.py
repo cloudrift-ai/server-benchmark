@@ -1,6 +1,7 @@
 """Recipe loading and deep merge."""
 
 import os
+import re
 
 import yaml
 
@@ -87,6 +88,14 @@ def _validate_and_build(config: dict) -> Recipe:
     task = config.get("model", {}).get("task", "generate")
     if task not in ("generate", "embed"):
         raise ValueError(f"model.task must be 'generate' or 'embed', got {task!r}")
+    smoke_test = config.get("model", {}).get("smoke_test", "chat")
+    if smoke_test not in ("chat", "completion"):
+        raise ValueError(f"model.smoke_test must be 'chat' or 'completion', got {smoke_test!r}")
+    if task == "embed" and smoke_test != "chat":
+        raise ValueError("model.smoke_test is only configurable for model.task: generate")
+    revision = config.get("model", {}).get("revision")
+    if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", revision)):
+        raise ValueError(f"model.revision must be a non-empty Hugging Face revision, got {revision!r}")
 
     if has_command:
         # Command recipes don't go through engine extra_args validation.

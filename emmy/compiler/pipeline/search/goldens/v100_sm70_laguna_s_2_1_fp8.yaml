@@ -2,7 +2,7 @@ gpu_name: NVIDIA Tesla V100 SXM3 32GB
 compute_cap:
 - 7
 - 0
-model: poolside/Laguna-S-2.1-FP8
+model: poolside/Laguna-S-2.1-FP8@9e0b8ba630080b0e6f20a7b43294a9f2232fd247
 programs:
 - inputs: [hidden_states, position_embeddings_0, position_embeddings_1]
   outputs: [add_7]
@@ -7579,6 +7579,16 @@ configs:
       emmy_us: 119876.60789489746
       reference_backend: emmy-greedy
       reference_us: 119877.37655639648
+  - name: k_linear_mean_reduce_a2b51c.routing
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@a: cut
+    measurements:
+      emmy_us: 27665.663548745215
+      reference_backend: emmy-greedy
+      reference_us: 119735.29815673828
 - program: 0
   target:
     loop: 1
@@ -7826,6 +7836,16 @@ configs:
       emmy_us: 358027.5192260742
       reference_backend: emmy-greedy
       reference_us: 357847.54943847656
+  - name: k_linear_mean_reduce_4425bf.routing
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@a: cut
+    measurements:
+      emmy_us: 82162.23280462954
+      reference_backend: emmy-greedy
+      reference_us: 357429.26025390625
 - program: 0
   target:
     loop: 14
@@ -7845,6 +7865,16 @@ configs:
       emmy_us: 55763.19980621338
       reference_backend: emmy-greedy
       reference_us: 55764.99080657959
+  - name: k_linear_reduce_093b9a.routing
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@a: cut
+    measurements:
+      emmy_us: 18325.783940878784
+      reference_backend: emmy-greedy
+      reference_us: 55863.29650878906
 - program: 1
   target:
     loop: 15
@@ -7883,6 +7913,16 @@ configs:
       emmy_us: 164320.5108642578
       reference_backend: emmy-greedy
       reference_us: 164318.46618652344
+  - name: k_linear_mean_reduce_6f21a4.routing
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@a: cut
+    measurements:
+      emmy_us: 15320.063865847058
+      reference_backend: emmy-greedy
+      reference_us: 164395.00427246094
 - program: 1
   target:
     loop: 17
@@ -8168,6 +8208,16 @@ configs:
       emmy_us: 59529.7269821167
       reference_backend: emmy-greedy
       reference_us: 59520.76721191406
+  - name: k_linear_mean_reduce_01ee55.routing
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@a: cut
+    measurements:
+      emmy_us: 13840.384143240311
+      reference_backend: emmy-greedy
+      reference_us: 59510.78414916992
 - program: 1
   target:
     loop: 32

@@ -39,6 +39,21 @@ passed PROMOTION and REPOSITORY validation, unpinned offer replay for 279/279 en
 pinned offline in-model audit at revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062`: 255 matches, zero drift, zero
 compile failures, and zero major gaps. `canonical_qualification.json` records the full contract and evidence hashes.
 
+### Post-#483 schema replay
+
+The hash above identifies the historically qualified, pre-migration file. After the golden schema migration in
+#483, the current file's full SHA-256 is `a8e2852e4066ac6a68eed60f9890fb766dcff587e4d393a0f0c2ba1000f76cf5`.
+A fresh 2026-08-11 replay on the same 16-GPU host verified all 279 stored realizations and realized all 279 offers with
+no fall-through. It also retraced all four architecture profiles, retaining 516, 626, 598, and 626 FX nodes and
+producing 945, 1,157, 1,089, and 1,157 Graph IR nodes. The offer audit reported 47 own-snippet `NO-FORK` cases caused
+by ShapeKey drift; those rows require the deploy-side serving-matrix authority identified by the audit.
+
+The final cold-deploy in-model compile had not emitted a verdict after about 106 minutes, so it was stopped at the
+02:25 PDT decision point to preserve time for serving revalidation and teardown. The migrated hash is therefore not
+claimed as freshly full-replay-qualified. The complete historical qualification remains valid evidence for the
+pre-migration hash, while `post483_replay.json` records the completed gates, current hash, partial-log hash, and the
+unresolved final gate without fabricating a pass.
+
 ## Architecture inventory and semantic boundary
 
 The inventory covered every config-derived decoder path and model seam:
@@ -151,6 +166,7 @@ have no fabricated timing or knob record.
 - `tuning-closure-summary.json`: equal-budget focused search plus two-repeat O3 evidence for all 19 distinct winners
 - `canonical_qualification.json`: canonical inventory, bounded closure contracts, fused-gap measurements, gate counts,
   source hashes, and remote artifact hashes
+- `post483_replay.json`: bounded post-#483 replay gates, the historical and schema-migrated hashes, and cutoff status
 - `emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml`: canonical static-sequence-512 V100
   deployment evidence
 

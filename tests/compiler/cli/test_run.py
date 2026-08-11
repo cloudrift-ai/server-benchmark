@@ -68,6 +68,25 @@ def test_pinned_knobs_sets_and_restores_env(monkeypatch):
     assert "EMMY_WARP_SPECIALIZE" not in os.environ
 
 
+def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch):
+    """Axis-scoped programmatic pins preserve the raw aggregate that placement routing reads."""
+    import os
+
+    from emmy.compiler.pipeline.knob import parse_knob_spec
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
+    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
+    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_PLACE@A"] == "cut"
+        assert os.environ["EMMY_TILE@DD"] == "f2x2"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
+    assert os.environ["EMMY_PLACE@A"] == "fuse"
+    assert "EMMY_TILE@DD" not in os.environ
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
+
+
 def _symbolic_input_graph():
     """Frontend-ish graph with one symbolic input (``x``, seq axis 1) and one
     static input (``w``) — enough for ``_hint_sized_inputs``' input pairing."""

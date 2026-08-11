@@ -1,0 +1,83 @@
+{
+  "inventory": "exact_traced_working.yaml",
+  "inventory_sha256": "9c1d8a53bf657b7747ef7c284c554af6acfb42b1978366b99a571061c00953de",
+  "gpu": "NVIDIA Tesla V100 SXM2 16GB",
+  "gpu_count": 8,
+  "compute_capability": [7, 0],
+  "seed": 0,
+  "ranking": {
+    "compile_lane": "-Xcicc -O1",
+    "max_candidates_per_target": 1,
+    "targets_visited": 48,
+    "explicit_ok_winners": 23,
+    "targets_without_an_explicit_winner": 25,
+    "missing_winner_indices": [
+      8, 9, 11, 12, 14, 15, 16, 18, 21, 22, 23, 24, 25, 30, 31, 35, 36, 38, 39, 40,
+      41, 44, 45, 46, 47
+    ],
+    "db_rows": {
+      "ok": 79,
+      "bench_fail": 12
+    }
+  },
+  "deployable": {
+    "compile_lane": "nvcc default -O3",
+    "warmup": 5,
+    "iterations": 20,
+    "targets_attempted": 48,
+    "targets_with_positive_timing": 47,
+    "targets_without_positive_timing": 1,
+    "reproducers_attempted": 69,
+    "reproducers_timed": 68,
+    "reference_available": 30,
+    "reference_correctness_passes": 30,
+    "reference_correctness_failures": 0,
+    "reference_unavailable": 38,
+    "captured_timing_rows": 68,
+    "emmy_us": {
+      "min": 1.4561882790397194,
+      "median": 498.1760084629059,
+      "max": 1305161.1938476562
+    },
+    "eager_reference_speedup": {
+      "emmy_faster_rows": 10,
+      "emmy_slower_rows": 20,
+      "min": 0.0031224186397483616,
+      "median": 0.25782585472973296,
+      "max": 45.585567332372285
+    }
+  },
+  "remaining_target": {
+    "index": 36,
+    "name": "k_linear_mean_reduce_e0ee1d.a08b04cc6fc6",
+    "origins": [
+      "embedding_1",
+      "roll",
+      "fill__base",
+      "p_model_layers_42_enorm_weight_bc",
+      "p_model_layers_42_hnorm_weight_bc",
+      "p_model_layers_42_eh_proj_weight",
+      "linear_35",
+      "mean_10",
+      "mean_11"
+    ],
+    "error": "HungKernelError: iter 1 did not complete within 2000 ms",
+    "o3_first_iteration_wait_s": [2.58, 2.28],
+    "computed_a_cut": {
+      "scoped_place_a_cut_realized": false,
+      "bare_place_cut_realized": false,
+      "o1_first_iteration_wait_s_scoped": [4.47, 4.16],
+      "o1_first_iteration_wait_s_bare": [4.48, 4.21],
+      "o3_timing_us": null,
+      "reason": "The exact multi-use MTP cone has no legal cut under the current captured-value safety gate."
+    }
+  },
+  "resolved_failure": {
+    "class": "constant-source arange replay",
+    "root_cause": "Static aten.arange was represented as elementwise NumPy arange over a broadcast stop tensor.",
+    "fix": "Static integer aten.arange now lowers to zero-input RangeOp.",
+    "previous_truth_value_failures": 5,
+    "current_truth_value_failures": 0
+  },
+  "canonical_golden_created": false
+}

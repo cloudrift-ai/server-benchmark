@@ -97,6 +97,25 @@ generally lower at higher concurrency. vLLM selected `FULL_AND_PIECEWISE`, captu
 1, 2, 4, 8, and 16, and bounded SM70 attention graphs to a 2048-token context bucket. The graph pool used about
 0.60 GiB per PP0 rank and 0.58 GiB per PP1 rank. Removing `--enforce-eager` is therefore qualified.
 
+### 2026-08-11 representative replay
+
+The current revision-aware recipe was replayed through Emmy on the same exact host. Hugging Face prefetch hit the
+cached immutable snapshot, and the engine received the same revision. The 1024/64, concurrency-8 workload ran three
+identical repeats against one deployment; all 24 requests succeeded with no length mismatch or request failure.
+
+| Metric | Three-repeat mean | Sample standard deviation | Repeat 2 | Repeat 3 |
+| --- | ---: | ---: | ---: | ---: |
+| TPOT (ms) | 198.74 | 10.48 | 194.58 | 190.98 |
+| Output tokens/s | 31.71 | 5.13 | 34.18 | 35.14 |
+| Total tokens/s | 539.05 | 87.23 | 581.03 | 597.36 |
+| TTFT (ms) | 3,857.82 | 2,220.67 | 2,667.86 | 2,485.73 |
+
+The first client repeat was visibly colder than repeats two and three, so the retained experiment now uses three
+repeats rather than treating one warmup-sensitive sample as a performance verdict. The full mean TPOT is 10.6%
+lower and output throughput is 9.0% higher than the earlier 1024/64 concurrency-8 qualification cell. The successful
+raw result is under `2026-08-11_02-35-06_f8e924ce/`; the superseded one-sample diagnostic was removed. Emmy teardown
+then removed the container and network, and a final GPU-process query was empty.
+
 ## Profile and pipeline split
 
 An eager Torch trace used 1024-token prompts, 16 output tokens, and request concurrency 1, 2, 4, and 8. The table

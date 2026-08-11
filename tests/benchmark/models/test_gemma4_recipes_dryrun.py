@@ -15,6 +15,7 @@ import os
 from emmy.benchmark.tasks import enumerate_tasks
 
 RECIPE = "gemma-4-12B-it"
+BASE_RECIPE = "gemma-4-12B"
 
 # The shape docker/vllm-emmy-serve/models/gemma-4-12b-it.env pins, and therefore the shape
 # the published image's execution-plan pack is keyed on.
@@ -38,6 +39,7 @@ def test_recipe_is_a_single_serving_variant(recipes_dir):
     directory — `experiments/gemma-4-12B/` is where workload grids belong."""
     tasks = enumerate_tasks([os.path.join(recipes_dir, RECIPE)])
     assert len(tasks) == 1, f"serving recipe expanded to {len(tasks)} variants"
+    assert tasks[0].recipe.model.revision == "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
 
 
 def test_recipe_carries_no_benchmark_grid(recipes_dir):
@@ -83,3 +85,22 @@ def test_recipe_shape_agrees_with_the_release_config(project_root, recipes_dir):
     assert int(values["SERVE_MAX_MODEL_LEN"]) == llm.context_length
     assert f"--max-num-batched-tokens {values['SERVE_MAX_NUM_BATCHED_TOKENS']}" in llm.vllm.extra_args
     assert values["SERVE_DECODE_BUCKET"] == llm.vllm.extra_env["EMMY_GEN_DECODE_BUCKET"]
+
+
+def test_base_recipe_is_one_pinned_completion_server(recipes_dir):
+    """The separately requested base checkpoint has no chat contract or benchmark grid."""
+    directory = os.path.join(recipes_dir, BASE_RECIPE)
+    tasks = enumerate_tasks([directory])
+    assert len(tasks) == 1
+
+    recipe = tasks[0].recipe
+    assert recipe.model.huggingface == "google/gemma-4-12B"
+    assert recipe.model.revision == "023679ed352de9bb66cc873c9009ce3482585c08"
+    assert recipe.model.smoke_test == "completion"
+    assert recipe.engine.llm.context_length == 16384
+    assert recipe.engine.llm.gpu_memory_utilization == 0.95
+    assert "vllm/vllm-openai@sha256:" in recipe.engine.llm.vllm.image
+
+    raw = open(os.path.join(directory, "recipe.yaml")).read()
+    body = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+    assert "benchmark:" not in body

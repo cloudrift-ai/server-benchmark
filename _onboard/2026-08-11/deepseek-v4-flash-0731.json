@@ -1,0 +1,68 @@
+{
+  "status": "failed",
+  "model_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "target": {
+    "gpu": "NVIDIA Tesla V100 SXM3 32GB",
+    "gpu_count": 16,
+    "ssh": "riftuser@185.165.50.61"
+  },
+  "recipe": "recipes/DeepSeek-V4-Flash-0731/recipe.yaml",
+  "experiment": "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/recipe.yaml",
+  "artifacts": [
+    "recipes/DeepSeek-V4-Flash-0731/recipe.yaml",
+    "recipes/DeepSeek-V4-Flash-0731/RESULTS.md",
+    "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/RESULTS.md",
+    "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/post483_replay.json",
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/recipe.yaml",
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/RESULTS.md",
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/2026-08-11_02-35-06_f8e924ce/v100x16_vllm_benchmark.json",
+    "_onboard/2026-08-11/deepseek-v4-flash-0731.json"
+  ],
+  "compiler_artifacts": [
+    "emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml",
+    "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/RESULTS.md",
+    "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/canonical_qualification.json",
+    "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/post483_replay.json"
+  ],
+  "experiment_artifacts": [
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/recipe.yaml",
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/qualification.json",
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/cache-index.json",
+    "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/2026-08-11_02-35-06_f8e924ce/v100x16_vllm_benchmark.json"
+  ],
+  "report": "recipes/DeepSeek-V4-Flash-0731/RESULTS.md",
+  "compiler": {
+    "coverage": "complete",
+    "golden": "emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml",
+    "report": "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/RESULTS.md",
+    "traced_targets": 279,
+    "tuned_targets": 279,
+    "blocked_paths": [],
+    "historical_qualification_sha256": "99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309",
+    "current_schema_migrated_sha256": "a8e2852e4066ac6a68eed60f9890fb766dcff587e4d393a0f0c2ba1000f76cf5",
+    "post483_replay": "partial"
+  },
+  "emmy": {
+    "eligible": false,
+    "reason": "DeepSeek V4 has an audit-only full-layer compiler provider but no executable Emmy serving path",
+    "image": null
+  },
+  "serving": {
+    "status": "success",
+    "raw_result": "experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/2026-08-11_02-35-06_f8e924ce/v100x16_vllm_benchmark.json",
+    "successful_requests": 24,
+    "failed_requests": 0,
+    "mean_tpot_ms": 198.7433,
+    "output_token_throughput": 31.71,
+    "total_token_throughput": 539.0533,
+    "mean_ttft_ms": 3857.82
+  },
+  "cleanup": {
+    "workloads": "complete",
+    "docker_logout": true
+  },
+  "failure": {
+    "gate": "compiler_post483_replay",
+    "message": "The fresh post-#483 replay completed stored-realization, offer, and four-profile trace gates, but the final cold-deploy in-model compile had not emitted a verdict after about 106 minutes and was stopped at the 02:25 PDT decision point. Serving revalidation succeeded and all workloads were torn down."
+  }
+}

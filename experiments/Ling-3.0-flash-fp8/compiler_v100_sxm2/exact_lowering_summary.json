@@ -1,0 +1,12 @@
+{
+  "golden": "exact_traced_working.yaml",
+  "golden_sha256": "9c1d8a53bf657b7747ef7c284c554af6acfb42b1978366b99a571061c00953de",
+  "compute_capability": [
+    7,
+    0
+  ],
+  "targets": 48,
+  "lowered": 48,
+  "failures": [],
+  "elapsed_s": 48.75283072300954
+}

@@ -57,3 +57,25 @@ used concurrency one.
 
 Raw results are in
 `experiments/Laguna-S-2.1-FP8/serving_v100_sxm3/2026-08-09_15-31-12_1614afd1/v100x8_vllm_benchmark.json`.
+
+## 2026-08-11 revalidation
+
+The exact recipe and checkpoint revision were redeployed with `emmy bench` on the same supplied 8× V100 host. The
+registry tag was still unavailable, so the deployment inspected and used the host's cached image with the exact digest
+above; publication was not authorized or attempted in this run. Weight loading took 30.5 seconds, engine warmup took
+13.2 seconds, the service became healthy, and the standard chat smoke test passed. The workload was torn down with the
+existing SSH deploy teardown command after benchmarking.
+
+| Metric | Result |
+| --- | ---: |
+| Successful / failed requests | 1 / 0 |
+| Benchmark duration | 3.39 s |
+| Request throughput | 0.30 requests/s |
+| Output throughput | 4.72 tokens/s |
+| Total token throughput | 14.17 tokens/s |
+| Mean time to first token | 969.49 ms |
+| Mean time per output token | 161.05 ms |
+| Mean inter-token latency | 161.05 ms |
+
+The fresh raw result is
+`experiments/Laguna-S-2.1-FP8/serving_v100_sxm3/2026-08-11_01-24-12_e3aef767/v100x8_vllm_benchmark.json`.

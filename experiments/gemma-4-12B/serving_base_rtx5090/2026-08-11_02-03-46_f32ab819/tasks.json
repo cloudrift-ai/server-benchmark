@@ -1,0 +1,14 @@
+[
+  {
+    "task_id": "serving_base_rtx5090/rtx5090x1",
+    "recipe_dir": "experiments/gemma-4-12B/serving_base_rtx5090",
+    "variant": "rtx5090x1",
+    "recipe_name": "serving_base_rtx5090",
+    "gpu_name": "NVIDIA GeForce RTX 5090",
+    "gpu_short": "rtx5090",
+    "gpu_count": 1,
+    "model_name": "google/gemma-4-12B",
+    "result_file": "rtx5090x1_vllm_benchmark.txt",
+    "json_result_file": "rtx5090x1_vllm_benchmark.json"
+  }
+]

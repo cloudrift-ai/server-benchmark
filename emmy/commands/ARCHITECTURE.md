@@ -51,11 +51,14 @@ transports, and the scale-out strategies (`DataParallelismScaleOutStrategy`, `Re
 `DeployParams` carries the `recipe`, `gpu_device_ids`, etc. `run_deploy()` / `deploy()` accept an optional
 `timer: PhaseTimer` that records per-step durations (see [Timing metrics](#timing-metrics)).
 
-The post-health **smoke test** branches on `recipe.is_embedding` (`model.task: embed`): chat models POST
-`/v1/chat/completions` ("What is 2+2?" must contain "4"); embedding models POST `/v1/embeddings` and require a non-empty
-finite vector with L2 norm in [0.9, 1.1] (the pooler normalizes — garbage/NaN models fail). Same retry/timeout/log-dump
-loop either way. `parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container
-logs.
+The post-health **smoke test** branches on the recipe model config. Embedding models (`model.task: embed`) POST
+`/v1/embeddings` and require a non-empty finite vector with L2 norm in [0.9, 1.1]. Generative models use the chat
+endpoint by default ("What is 2+2?" must contain "4"); base checkpoints set `model.smoke_test: completion` to test the
+same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop.
+`parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container logs.
+
+`model.revision` is the one immutable Hugging Face revision for a deployment. The model-download phase passes it to
+`hf download`, and Compose passes the same revision to vLLM or SGLang; recipes must not duplicate it in `extra_args`.
 
 **GPU visibility:** `generate_compose()` accepts a `gpu_device_ids` parameter to restrict GPU visibility via
 `device_ids: [...]` instead of `count: all`. Used by bench when a task needs fewer GPUs than the VM has.
@@ -164,11 +167,16 @@ event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace ent
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
 rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
+non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
+reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
 
 `emmy compile/run --golden-file PATH --golden NAME` is the verification counterpart: it resolves the name only in
 that explicit working YAML and compiles its exact provenance or Loop IR target, without canonical-corpus or live-card
 filtering. Inventory and proposal rows select the graph but are not trusted as automatic A/B pins; only verified rows
-with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`.
+with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded
+Loop IR stores stable algebra rather than derived structural stamps, so `run --golden` replays it through the full
+compiler pipeline. A direct `run --ir` input remains a stage-complete artifact and runs only the later passes.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

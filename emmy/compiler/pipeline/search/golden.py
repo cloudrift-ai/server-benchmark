@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -149,6 +149,11 @@ def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
 
     base = dict(structural_features)
     key = _fork_shape_key([{**base, **knobs}], base=base)
+    # ``PLACE@a`` names the computed-A subtree of a contraction. A statistic-bearing cone's
+    # histogram already classifies as fused, but a stat-free activation cone otherwise persists
+    # a plain key that cannot join the live tree's structural computed-A convention.
+    if key.kind == "" and "PLACE@a" in knobs:
+        key = replace(key, kind="fused", is_warp=True)
     # Legacy dynamic-flash rows predate axis-keyed ``TILE@dd`` / ``TILE@pj`` knobs. Main's
     # old fusion boundary left enough exp-family histogram on the consumer for ShapeKey's
     # fallback classifier; gate-free fusion moves that histogram into the probability producer.

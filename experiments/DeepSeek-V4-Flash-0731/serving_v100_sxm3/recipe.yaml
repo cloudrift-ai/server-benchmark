@@ -2,6 +2,7 @@
 # The tag was validated locally; image publication requires approval and cloudriftai namespace access.
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
+  revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 
 engine:
@@ -14,7 +15,6 @@ engine:
     vllm:
       image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
       extra_args: >-
-        --revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062
         --dtype half
         --distributed-executor-backend mp
         --kv-cache-dtype fp8
@@ -41,6 +41,7 @@ benchmark:
   seed: 731
   temperature: 0.0
   ignore_eos: true
+  repeats: 3
 
 matrices:
   deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"

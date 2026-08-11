@@ -55,6 +55,33 @@ def test_ssh_deploy_command_sequence(run_cli, recipes_dir):
     assert any("docker compose up" in line for line in dry_run_lines)
 
 
+def test_ssh_deploy_completion_smoke_keeps_download_and_prints_completion_example(run_cli, tmp_path):
+    config = {
+        "model": {"huggingface": "org/base-model", "revision": "0123456789abcdef", "smoke_test": "completion"},
+        "engine": {"llm": {"vllm": {"image": "vllm/vllm-openai:v0.23.0"}}},
+        "deploy": {"gpu": "NVIDIA GeForce RTX 5090", "gpu_count": 1},
+    }
+    (tmp_path / "recipe.yaml").write_text(yaml.dump(config))
+
+    rc, stdout, _ = run_cli(
+        "deploy",
+        "ssh",
+        "--recipe",
+        str(tmp_path),
+        "--ssh",
+        "user@host",
+        "--gpu",
+        "NVIDIA GeForce RTX 5090",
+        "--gpu-count",
+        "1",
+        "--dry-run",
+    )
+
+    assert rc == 0
+    assert "hf download org/base-model --revision 0123456789abcdef" in stdout
+    assert "http://host:8000/v1/completions" in stdout
+
+
 def test_ssh_teardown(run_cli, recipes_dir):
     rc, stdout, _ = run_cli(
         "deploy",

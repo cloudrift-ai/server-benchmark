@@ -61,7 +61,7 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
     entrypoint = llm.entrypoint
     gpus_per_instance = llm.gpus_per_instance
 
-    engine_args = build_engine_args(llm, model_name)
+    engine_args = build_engine_args(llm, model_name, recipe.model.revision)
     command_str = "\n      ".join(engine_args)
     extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
     needs_extra_model = any("--speculative-config" in a for a in engine_args)

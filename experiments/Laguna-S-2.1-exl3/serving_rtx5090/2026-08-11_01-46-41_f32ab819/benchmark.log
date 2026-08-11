@@ -1,0 +1,166 @@
+[2026-08-11 01:46:41] [root] Run directory: /Users/dikobraz/Projects/emmy/experiments/Laguna-S-2.1-exl3/serving_rtx5090/2026-08-11_01-46-41_f32ab819
+[2026-08-11 01:46:41] [root]
+[2026-08-11 01:46:41] [root] Running 1 benchmark task(s) in 1 execution group(s)
+[2026-08-11 01:46:41] [root] Parallel mode (max workers: 1)
+[2026-08-11 01:46:41] [root]
+[2026-08-11 01:46:42] [emmy.benchmark.fixed_hosts] --ssh dikobraz@kenshin: detected NVIDIA GeForce RTX 5090 x1
+[2026-08-11 01:46:42] [root] Fixed-host mode: 1 host(s), running 1 group(s)
+[2026-08-11 01:46:42] [rtx5090_x_1] Starting group: NVIDIA GeForce RTX 5090 x1 (1 tasks)
+[2026-08-11 01:46:42] [rtx5090_x_1] Using pre-allocated host: dikobraz@kenshin:22
+[2026-08-11 01:46:42] [emmy.timing] [timing] remote_provision: 0.8s
+[2026-08-11 01:46:43] [rtx5090_x_1.Laguna-S-2.1-exl3] Recipe: experiments/Laguna-S-2.1-exl3/serving_rtx5090 (variant: rtx5090x1)
+[2026-08-11 01:46:43] [rtx5090_x_1.Laguna-S-2.1-exl3] Deploying model...
+[2026-08-11 01:46:43] [emmy.deploy.orchestrate] Pulling images...
+[2026-08-11 01:46:43] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:46:43] [emmy.provisioning.ssh_transport]  Image emmy-onboard-vllm-emmy:0.23.0-gatefix Pulling
+[2026-08-11 01:46:44] [emmy.provisioning.ssh_transport]  Image emmy-onboard-vllm-emmy:0.23.0-gatefix Error pull access denied for emmy-onboard-vllm-emmy, repository does not exist or may require 'docker login': denied: requested access to the resource is denied
+[2026-08-11 01:46:44] [emmy.timing] [timing] image_pull: 0.9s
+[2026-08-11 01:46:45] [emmy.deploy.orchestrate] Downloading model riftstack/Laguna-S-2.1-exl3...
+[2026-08-11 01:46:45] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:46:45] [emmy.provisioning.ssh_transport] /usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:298: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+[2026-08-11 01:46:45] [emmy.provisioning.ssh_transport]   warnings.warn(
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport] [32m✓ Downloaded[0m
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport]   path: /hf_models/hub/models--riftstack--Laguna-S-2.1-exl3/snapshots/45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport] Fetching 20 files:   0%|          | 0/20 [00:00<?, ?it/s]Fetching 20 files: 100%|██████████| 20/20 [00:00<00:00, 62601.55it/s]
+[2026-08-11 01:46:46] [emmy.timing] [timing] model_download: 1.1s
+[2026-08-11 01:46:46] [emmy.deploy.orchestrate] Cleaning up old containers...
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:46:46] [emmy.deploy.orchestrate] Starting services...
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport]  Network emmy_default Creating
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport]  Network emmy_default Created
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport]  Container vllm_0 Creating
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport]  Container vllm_0 Created
+[2026-08-11 01:46:46] [emmy.provisioning.ssh_transport]  Container vllm_0 Starting
+[2026-08-11 01:46:47] [emmy.provisioning.ssh_transport]  Container vllm_0 Started
+[2026-08-11 01:46:47] [emmy.provisioning.ssh_transport]  Container vllm_0 Waiting
+[2026-08-11 01:50:04] [emmy.provisioning.ssh_transport]  Container vllm_0 Healthy
+[2026-08-11 01:50:04] [emmy.timing] [timing] model_load_and_warmup: 197.5s
+[2026-08-11 01:50:04] [emmy.timing] [timing] weights_load: 164.2s
+[2026-08-11 01:50:04] [emmy.timing] [timing] engine_warmup: 2.3s
+[2026-08-11 01:50:04] [emmy.timing] [timing] startup: 30.9s
+[2026-08-11 01:50:04] [emmy.deploy.orchestrate] Waiting for health check...
+[2026-08-11 01:50:04] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:50:04] [emmy.deploy.orchestrate]
+Endpoint: http://kenshin:8000/v1
+[2026-08-11 01:50:04] [emmy.deploy.orchestrate] Model: riftstack/Laguna-S-2.1-exl3
+[2026-08-11 01:50:04] [emmy.deploy.orchestrate] Instances: 1
+[2026-08-11 01:50:04] [emmy.deploy.orchestrate] Status: deployed
+[2026-08-11 01:50:04] [emmy.deploy.orchestrate]
+Running smoke test...
+[2026-08-11 01:51:23] [emmy.deploy.orchestrate] Smoke test failed: model returned wrong answer: ' 发表 interconnectedoreal life conversations autosbasede: ; ) ) & . </ :: = ); ; ; . ; . . ; . , ; . & . . > ) ); ; . </ ; ; . ; . </ ; ]. ; . turnmathbb languageConversians ; . } ) > ) Conversations ; ) ) Conversations ; } Conversations ; ) Conversations ; } ) Conversations ; } ; } </ turnngine ) Conversations ) . & </ ; . turnComputerConversians ; ) ) ; </ :: . </ ; ; </ inappropriate.al - ; & \\ . ] etc ; ) } } nearatural conversationaries in.  = } of'
+[2026-08-11 01:51:23] [emmy.deploy.orchestrate] Container logs:
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:21,058 emmy.compiler.trace.torch: torch.export.export() starting...
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:21,081 emmy.compiler.trace.torch: torch.export.export() done in 0.0s (41 retained FX nodes, pruned 6 dead)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:21,082 emmy.compiler.trace.torch: FX→Graph IR walk done in 0.0s (58 IR nodes)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:21,541 emmy.compiler.loader.quant: spelled 3 coded weight constant(s) from /hf_models/hub/models--riftstack--Laguna-S-2.1-exl3/snapshots/45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:22,056 emmy.compiler.backend.cuda.program: [cuda] CompiledProgram.build: 10 launch(es) compile+alloc=0.00s kernels=[0:k_mean_e36245, 1:k_matmul_reduce_001a56, 2:k_matmul_reduce_001a56, 3:k_matmul_reduce_0f6576, 4:k_matmul_bitcast_reduce_e2316e, 5:k_matmul_bitcast_reduce_e2316e, 6:k_matmul_bitcast_reduce_522919, 7:k_matmul_mean_reduce_3d0824, 8:k_matmul_reduce_8893d0, 9:k_matmul_mean_reduce_643d9b]
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:22,056 emmy.compiler.backend.cuda.program: [cuda] buffer-reuse: scratch slab=0.07 GB (0.07 GB naive, 1.0x) over 7 scratch buf(s)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:22,057 emmy.compiler.trace.torch: torch.export.export() starting...
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:22,080 emmy.compiler.trace.torch: torch.export.export() done in 0.0s (42 retained FX nodes, pruned 6 dead)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:22,081 emmy.compiler.trace.torch: FX→Graph IR walk done in 0.0s (55 IR nodes)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:22,547 emmy.compiler.loader.quant: spelled 4 coded weight constant(s) from /hf_models/hub/models--riftstack--Laguna-S-2.1-exl3/snapshots/45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,075 emmy.compiler.backend.cuda.program: [cuda] CompiledProgram.build: 13 launch(es) compile+alloc=0.00s kernels=[0:k_linear_mean_reduce_1b582b, 1:k_matmul_d06d97, 2:k_matmul_bitcast_reduce_68292c, 3:k_matmul_reduce_261fe7, 4:k_mean_e36245, 5:k_matmul_reduce_001a56, 6:k_matmul_reduce_001a56, 7:k_matmul_bitcast_reduce_e2316e, 8:k_matmul_bitcast_reduce_e2316e, 9:k_matmul_reduce_f4ccd4, 10:k_matmul_reduce_0885e8, 11:k_matmul_bitcast_reduce_0f9038, 12:k_matmul_reduce_261fe7]
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,075 emmy.compiler.backend.cuda.program: [cuda] buffer-reuse: scratch slab=0.01 GB (0.02 GB naive, 1.5x) over 11 scratch buf(s)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,076 emmy.serving.gen_runner: [gen_runner] compiling layer 48/48 (pre + post + decode)...
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,078 emmy.compiler.trace.torch: torch.export.export() starting...
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,100 emmy.compiler.trace.torch: torch.export.export() done in 0.0s (41 retained FX nodes, pruned 6 dead)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,101 emmy.compiler.trace.torch: FX→Graph IR walk done in 0.0s (58 IR nodes)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:23,578 emmy.compiler.loader.quant: spelled 3 coded weight constant(s) from /hf_models/hub/models--riftstack--Laguna-S-2.1-exl3/snapshots/45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,036 emmy.compiler.backend.cuda.program: [cuda] CompiledProgram.build: 10 launch(es) compile+alloc=0.00s kernels=[0:k_mean_e36245, 1:k_matmul_reduce_001a56, 2:k_matmul_reduce_001a56, 3:k_matmul_reduce_0f6576, 4:k_matmul_bitcast_reduce_e2316e, 5:k_matmul_bitcast_reduce_e2316e, 6:k_matmul_bitcast_reduce_522919, 7:k_matmul_mean_reduce_3d0824, 8:k_matmul_reduce_8893d0, 9:k_matmul_mean_reduce_643d9b]
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,036 emmy.compiler.backend.cuda.program: [cuda] buffer-reuse: scratch slab=0.07 GB (0.07 GB naive, 1.0x) over 7 scratch buf(s)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,037 emmy.compiler.trace.torch: torch.export.export() starting...
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,059 emmy.compiler.trace.torch: torch.export.export() done in 0.0s (42 retained FX nodes, pruned 6 dead)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,060 emmy.compiler.trace.torch: FX→Graph IR walk done in 0.0s (55 IR nodes)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,196 emmy.compiler.loader.quant: spelled 4 coded weight constant(s) from /hf_models/hub/models--riftstack--Laguna-S-2.1-exl3/snapshots/45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,697 emmy.compiler.backend.cuda.program: [cuda] CompiledProgram.build: 13 launch(es) compile+alloc=0.00s kernels=[0:k_linear_mean_reduce_1b582b, 1:k_matmul_d06d97, 2:k_matmul_bitcast_reduce_68292c, 3:k_matmul_reduce_261fe7, 4:k_mean_e36245, 5:k_matmul_reduce_001a56, 6:k_matmul_reduce_001a56, 7:k_matmul_bitcast_reduce_e2316e, 8:k_matmul_bitcast_reduce_e2316e, 9:k_matmul_reduce_f4ccd4, 10:k_matmul_reduce_0885e8, 11:k_matmul_bitcast_reduce_0f9038, 12:k_matmul_reduce_261fe7]
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:24,697 emmy.compiler.backend.cuda.program: [cuda] buffer-reuse: scratch slab=0.01 GB (0.02 GB naive, 1.5x) over 11 scratch buf(s)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:26,201 emmy.serving.gen_runner: [gen_runner] structural plan cache: 92 hit(s), 7 miss(es), 7 template(s)
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:26,380 emmy.serving.gen_runner: [gen_runner] pre-expert allocator reclaim: 0.000 GiB released; 27.943 of 31.324 GiB free
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:36,975 emmy.serving.roofline: [roofline] boot audit clean: 6 static program(s) within 10x of the weight floor
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:38 [cuda.py:378] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:38 [flash_attn.py:636] Using FlashAttention version 2
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) Fetching 20 files:   0%|          | 0/20 [00:00<?, ?it/s]Fetching 20 files: 100%|██████████| 20/20 [00:00<00:00, 30908.65it/s]
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:52,239 emmy.serving.vllm_model_gen: [EmmyGenModel] decoded the EXL3 lm_head (100352 x 3072) from the checkpoint
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 2026-08-11 08:49:52,239 emmy.serving.vllm_model_gen: [EmmyGenModel] reclaimed 0.127 GiB of allocator free blocks; 0.590 of 31.324 GiB now free for the KV cache
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:52 [default_loader.py:397] Loading weights took 481804.45 seconds
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:53 [gpu_model_runner.py:5187] Model loading took 27.93 GiB memory and 164.218503 seconds
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:54 [gpu_worker.py:480] Available KV cache memory: 0.24 GiB
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:54 [kv_cache_utils.py:1744] GPU KV cache size: 1,285 tokens
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:54 [kv_cache_utils.py:1745] Maximum concurrency for 512 tokens per request: 2.51x
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) 2026-08-11 08:49:54,772 - INFO - autotuner.py:622 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) 2026-08-11 08:49:54,877 - INFO - autotuner.py:641 - flashinfer.jit: [Autotuner]: Autotuning process ends
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:55 [jit_monitor.py:54] Kernel JIT monitor activated — Triton JIT compilations during inference will be logged as warnings.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:55 [core.py:313] init engine (profile, create kv cache, warmup model) took 2.34 s
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:56 [vllm.py:999] Asynchronous scheduling is enabled.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) WARNING 08-11 08:49:56 [vllm.py:1055] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) WARNING 08-11 08:49:56 [vllm.py:1097] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:56 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:56 [vllm.py:1273] Cudagraph is disabled under eager mode
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) INFO 08-11 08:49:56 [compilation.py:321] Enabled custom fusions: norm_quant, act_quant
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:56 [api_server.py:579] Supported tasks: ['generate']
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [hf.py:548] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [api_server.py:583] Starting vLLM server on http://0.0.0.0:8000
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:37] Available routes are:
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /openapi.json, Methods: GET, HEAD
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /docs, Methods: GET, HEAD
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /redoc, Methods: GET, HEAD
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /load, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /version, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /health, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /metrics, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /tokenize, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /detokenize, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/models, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /ping, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /ping, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /invocations, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/chat/completions/batch, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/responses, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/completions, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/messages, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/messages/count_tokens, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /generative_scoring, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:49:59 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     Started server process [1]
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     Waiting for application startup.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     Application startup complete.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:49778 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     172.20.0.1:47626 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (EngineCore pid=278) WARNING 08-11 08:50:05 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:53396 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:42524 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:33182 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:56154 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:33866 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:56514 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:51:10 [loggers.py:271] Engine 000: Avg prompt throughput: 5.4 tokens/s, Avg generation throughput: 5.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 8.5%, Prefix cache hit rate: 0.0%
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     127.0.0.1:58360 - "GET /health HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:51:20 [loggers.py:271] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 5.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 13.4%, Prefix cache hit rate: 0.0%
+[2026-08-11 01:51:23] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO:     172.20.0.1:47638 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-08-11 01:51:23] [emmy.timing] [timing] smoke_test: 79.1s
+[2026-08-11 01:51:23] [rtx5090_x_1.Laguna-S-2.1-exl3] Deploy failed, skipping benchmark
+[2026-08-11 01:51:23] [rtx5090_x_1] Leaving pre-allocated host in place: dikobraz@kenshin
+[2026-08-11 01:51:23] [rtx5090_x_1] Completed group: rtx5090_x_1
+[2026-08-11 01:51:23] [root]
+[2026-08-11 01:51:23] [root] SUMMARY
+[2026-08-11 01:51:23] [root] Successful: 0/1
+[2026-08-11 01:51:23] [root]
+[2026-08-11 01:51:23] [root] Failed: 1/1
+[2026-08-11 01:51:23] [root]    - serving_rtx5090/rtx5090x1
+[2026-08-11 01:51:23] [root]
+[2026-08-11 01:51:23] [root] All done!
+[2026-08-11 01:51:23] [root] Full logs saved to: /Users/dikobraz/Projects/emmy/experiments/Laguna-S-2.1-exl3/serving_rtx5090/2026-08-11_01-46-41_f32ab819/benchmark.log

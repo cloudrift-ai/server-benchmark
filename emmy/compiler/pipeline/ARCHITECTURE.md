@@ -182,6 +182,8 @@ Multi-node patterns only fire when each intermediate node has exactly one consum
 rewriter exits after the first successful rewrite per iteration, so overlap is just candidate enumeration.
 `Match.nodes` maps each pattern entry's name to the matched `Node`. `Match.consumed` and `Match.output` are
 overridable by the rewrite function, to control which nodes the splicer removes and which node's edges get rewired.
+Matches retain the watched node objects themselves, so `Match.is_alive()` rejects removal followed by a different
+node at the same graph id even when the Python allocator would otherwise recycle an integer object address.
 
 ### Writing a rule
 

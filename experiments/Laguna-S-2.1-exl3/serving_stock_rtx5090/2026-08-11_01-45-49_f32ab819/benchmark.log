@@ -1,0 +1,121 @@
+[2026-08-11 01:45:49] [root] Run directory: /Users/dikobraz/Projects/emmy/experiments/Laguna-S-2.1-exl3/serving_stock_rtx5090/2026-08-11_01-45-49_f32ab819
+[2026-08-11 01:45:49] [root]
+[2026-08-11 01:45:49] [root] Running 1 benchmark task(s) in 1 execution group(s)
+[2026-08-11 01:45:49] [root] Parallel mode (max workers: 1)
+[2026-08-11 01:45:49] [root]
+[2026-08-11 01:45:49] [emmy.benchmark.fixed_hosts] --ssh dikobraz@kenshin: detected NVIDIA GeForce RTX 5090 x1
+[2026-08-11 01:45:49] [root] Fixed-host mode: 1 host(s), running 1 group(s)
+[2026-08-11 01:45:49] [rtx5090_x_1] Starting group: NVIDIA GeForce RTX 5090 x1 (1 tasks)
+[2026-08-11 01:45:49] [rtx5090_x_1] Using pre-allocated host: dikobraz@kenshin:22
+[2026-08-11 01:45:50] [emmy.timing] [timing] remote_provision: 0.8s
+[2026-08-11 01:45:50] [rtx5090_x_1.Laguna-S-2.1-exl3] Recipe: experiments/Laguna-S-2.1-exl3/serving_stock_rtx5090 (variant: rtx5090x1)
+[2026-08-11 01:45:50] [rtx5090_x_1.Laguna-S-2.1-exl3] Deploying model...
+[2026-08-11 01:45:51] [emmy.deploy.orchestrate] Pulling images...
+[2026-08-11 01:45:51] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:45:51] [emmy.provisioning.ssh_transport]  Image vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f Pulling
+[2026-08-11 01:45:51] [emmy.provisioning.ssh_transport]  Image vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f Pulled
+[2026-08-11 01:45:51] [emmy.timing] [timing] image_pull: 0.5s
+[2026-08-11 01:45:52] [emmy.deploy.orchestrate] Downloading model riftstack/Laguna-S-2.1-exl3...
+[2026-08-11 01:45:52] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:45:52] [emmy.provisioning.ssh_transport] /usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:298: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+[2026-08-11 01:45:52] [emmy.provisioning.ssh_transport]   warnings.warn(
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport] Fetching 20 files:   0%|          | 0/20 [00:00<?, ?it/s]Fetching 20 files: 100%|██████████| 20/20 [00:00<00:00, 35084.10it/s]
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport] [32m✓ Downloaded[0m
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport]   path: /hf_models/hub/models--riftstack--Laguna-S-2.1-exl3/snapshots/45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+[2026-08-11 01:45:53] [emmy.timing] [timing] model_download: 1.1s
+[2026-08-11 01:45:53] [emmy.deploy.orchestrate] Cleaning up old containers...
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:45:53] [emmy.deploy.orchestrate] Starting services...
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport]  Network emmy_default Creating
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport]  Network emmy_default Created
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport]  Container vllm_0 Creating
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport]  Container vllm_0 Created
+[2026-08-11 01:45:53] [emmy.provisioning.ssh_transport]  Container vllm_0 Starting
+[2026-08-11 01:45:54] [emmy.provisioning.ssh_transport]  Container vllm_0 Started
+[2026-08-11 01:45:54] [emmy.provisioning.ssh_transport]  Container vllm_0 Waiting
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] container vllm_0 is unhealthy
+[2026-08-11 01:46:10] [emmy.timing] [timing] model_load_and_warmup: 17.1s
+[2026-08-11 01:46:10] [emmy.deploy.orchestrate] Failed to start services
+[2026-08-11 01:46:10] [emmy.deploy.orchestrate] Container logs:
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] Warning: Permanently added 'kenshin' (ED25519) to the list of known hosts.
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | WARNING 08-11 08:46:01 [argparse_utils.py:257] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:339]
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:339]        █     █     █▄   ▄█
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:339]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.23.0
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:339]   █▄█▀ █     █     █     █  model   riftstack/Laguna-S-2.1-exl3
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:339]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:339]
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:01 [api_utils.py:273] non-default args: {'model_tag': 'riftstack/Laguna-S-2.1-exl3', 'host': '0.0.0.0', 'model': 'riftstack/Laguna-S-2.1-exl3', 'trust_remote_code': True, 'dtype': 'float16', 'revision': '45c1f34a8c3ae3025a8bce2b1decea4991a6a239', 'max_model_len': 128, 'enforce_eager': True, 'served_model_name': ['riftstack/Laguna-S-2.1-exl3'], 'generation_config': 'vllm', 'gpu_memory_utilization': 0.95, 'enable_prefix_caching': False, 'max_num_batched_tokens': 128, 'max_num_seqs': 1}
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) WARNING 08-11 08:46:01 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_BUILD_COMMIT
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) WARNING 08-11 08:46:01 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_BUILD_PIPELINE
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) WARNING 08-11 08:46:01 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_BUILD_URL
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) WARNING 08-11 08:46:01 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_IMAGE_TAG
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'full_attention', 'sliding_attention'}
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:08 [model.py:611] Resolved architecture: LagunaForCausalLM
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) WARNING 08-11 08:46:08 [model.py:2083] Casting torch.bfloat16 to torch.float16.
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) INFO 08-11 08:46:08 [model.py:1745] Using max model len 128
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) Traceback (most recent call last):
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/bin/vllm", line 10, in <module>
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     sys.exit(main())
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)              ^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/main.py", line 95, in main
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     args.dispatch_function(args)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/serve.py", line 148, in cmd
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     uvloop.run(run_server(args))
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 96, in run
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return __asyncio.run(
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 195, in run
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return runner.run(main)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return self._loop.run_until_complete(task)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 48, in wrapper
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return await main
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py", line 665, in run_server
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py", line 679, in run_server_worker
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     async with build_async_engine_client(
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return await anext(self.gen)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py", line 99, in build_async_engine_client
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     async with build_async_engine_client_from_engine_args(
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return await anext(self.gen)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py", line 123, in build_async_engine_client_from_engine_args
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py", line 1735, in create_engine_config
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     model_config = self.create_model_config()
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py", line 1565, in create_model_config
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     return ModelConfig(
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)            ^^^^^^^^^^^^
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/pydantic/_internal/_dataclasses.py", line 121, in __init__
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1) pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)   Value error, Unknown quantization method: exl3. Must be one of ['awq', 'fp8', 'fbgemm_fp8', 'fp_quant', 'modelopt', 'modelopt_fp4', 'modelopt_mxfp8', 'modelopt_mixed', 'gguf', 'auto_gptq', 'gptq', 'gptq_marlin', 'awq_marlin', 'humming', 'compressed-tensors', 'bitsandbytes', 'experts_int8', 'quark', 'moe_wna16', 'torchao', 'inc', 'mxfp4', 'gpt_oss_mxfp4', 'deepseek_v4_fp8', 'online', 'fp8_per_tensor', 'fp8_per_block', 'int8_per_channel_weight_only', 'mxfp8']. [type=value_error, input_value=ArgsKwargs((), {'model': ...nderer_num_workers': 1}), input_type=ArgsKwargs]
+[2026-08-11 01:46:10] [emmy.provisioning.ssh_transport] vllm_0  | (APIServer pid=1)     For further information visit https://errors.pydantic.dev/2.13/v/value_error
+[2026-08-11 01:46:10] [rtx5090_x_1.Laguna-S-2.1-exl3] Deploy failed, skipping benchmark
+[2026-08-11 01:46:10] [rtx5090_x_1] Leaving pre-allocated host in place: dikobraz@kenshin
+[2026-08-11 01:46:10] [rtx5090_x_1] Completed group: rtx5090_x_1
+[2026-08-11 01:46:10] [root]
+[2026-08-11 01:46:10] [root] SUMMARY
+[2026-08-11 01:46:10] [root] Successful: 0/1
+[2026-08-11 01:46:10] [root]
+[2026-08-11 01:46:10] [root] Failed: 1/1
+[2026-08-11 01:46:10] [root]    - serving_stock_rtx5090/rtx5090x1
+[2026-08-11 01:46:10] [root]
+[2026-08-11 01:46:10] [root] All done!
+[2026-08-11 01:46:10] [root] Full logs saved to: /Users/dikobraz/Projects/emmy/experiments/Laguna-S-2.1-exl3/serving_stock_rtx5090/2026-08-11_01-45-49_f32ab819/benchmark.log

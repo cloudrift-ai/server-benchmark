@@ -531,6 +531,33 @@ def _build_pre_wrapper(block):
     return Pre()
 
 
+def _attention_gate_layout(attn):
+    """Return ``(projection, per_head, head_dim)`` for an optional attention gate.
+
+    Transformers 5.12's built-in Laguna module omits ``gate_per_head`` even though
+    its projection has one output per head.  Infer that older layout from the
+    projection widths; newer modules keep their explicit declaration authoritative.
+    """
+    g_proj = getattr(attn, "g_proj", None)
+    if g_proj is None:
+        return None, False, 0
+    head_dim = int(getattr(attn, "head_dim", 0) or 0)
+    declared = getattr(attn, "gate_per_head", None)
+    if declared is not None:
+        return g_proj, bool(declared), head_dim
+    gate_width = int(getattr(g_proj, "out_features", 0) or 0)
+    q_width = int(getattr(getattr(attn, "q_proj", None), "out_features", 0) or 0)
+    if gate_width <= 0 or q_width <= 0:
+        raise ValueError("attention gate inference requires positive gate and query projection widths")
+    if head_dim > 0 and gate_width * head_dim == q_width:
+        return g_proj, True, head_dim
+    if gate_width == q_width:
+        return g_proj, False, head_dim
+    raise ValueError(
+        f"unsupported attention gate width {gate_width}: expected one channel per head or one per projected query channel ({q_width})"
+    )
+
+
 def build_attention_split_wrapper(block):
     """Carve SDPA out of one HF decoder layer (Phase 1). Returns ``(pre, post)`` ``nn.Module``s over
     the flattened **``[num_tokens, H]``** per-token layout:
@@ -572,10 +599,8 @@ def build_attention_split_wrapper(block):
             # normalized layer input that produced q/k/v.  The split ABI carries the original
             # residual into post, so recompute that inexpensive norm here rather than dropping
             # the gate or widening the vLLM-owned attention seam.
-            self.g_proj = getattr(attn, "g_proj", None)
+            self.g_proj, self.gate_per_head, self.gate_head_dim = _attention_gate_layout(attn)
             self.gate_input_layernorm = block.input_layernorm if self.g_proj is not None else None
-            self.gate_per_head = bool(getattr(attn, "gate_per_head", False))
-            self.gate_head_dim = int(getattr(attn, "head_dim", 0) or 0)
             self.post_attention_layernorm = block.post_attention_layernorm
             self.mlp = block.mlp
             # Gemma-3/4 is a 4-norm layer: these two extra norms wrap the attention output and the
@@ -806,10 +831,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
         def __init__(self) -> None:
             super().__init__()
             self.o_proj = attn.o_proj
-            self.g_proj = getattr(attn, "g_proj", None)
+            self.g_proj, self.gate_per_head, self.gate_head_dim = _attention_gate_layout(attn)
             self.gate_input_layernorm = block.input_layernorm if self.g_proj is not None else None
-            self.gate_per_head = bool(getattr(attn, "gate_per_head", False))
-            self.gate_head_dim = int(getattr(attn, "head_dim", 0) or 0)
             self.post_attention_layernorm = block.post_attention_layernorm
             # DeepSeek/GLM lineage: an always-on dense MLP beside the routed experts,
             # consuming the same normed xn. Folding it into h keeps the runner's

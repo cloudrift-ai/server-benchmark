@@ -1,7 +1,8 @@
 {
-  "status": "partial_exact_mtp_roll_unsupported",
+  "status": "exact_trace_lowered_o3_partial",
   "model": "inclusionAI/Ling-3.0-flash-fp8",
   "revision": "a5d248fcca98b9d9a0c225cc22372f2fd1b3540b",
+  "source_revision": "09a26def732dc19df8be525e3d0a0876b5847a9e plus compiler changes under review",
   "hardware": {
     "gpu": "Tesla V100-SXM2-16GB",
     "gpu_count": 8,
@@ -38,50 +39,48 @@
     "mtp_transition": "MTP layer 42 eh_proj",
     "mtp_output_head": "MTP layer 42 output"
   },
-  "exact_blocked_path": {
+  "exact_mtp_path": {
     "path": "MTP shifted-token roll",
     "operations": ["aten.roll", "aten.select", "aten.fill_"],
-    "first_error": "cannot map fallback aten.select as elementwise for output shape (1,)"
+    "supported": true,
+    "alias_bounds": [
+      "static one-dimension roll",
+      "static rank-reducing select",
+      "static unit-step slice/select destination",
+      "locally produced storage root",
+      "no observable stale pre-write alias",
+      "unused mutation return when the base is rebound"
+    ]
   },
-  "diagnostic_whole_architecture": {
-    "frontend_nodes": 1978,
+  "exact_current_head": {
+    "frontend_nodes": 1968,
     "spelled_fp8_constants": 38,
-    "targets": 341,
+    "targets": 48,
+    "lowered_sm70": 48,
+    "inventory_sha256": "9c1d8a53bf657b7747ef7c284c554af6acfb42b1978366b99a571061c00953de",
+    "trace_elapsed_s": 481.61,
+    "lowering_elapsed_s": 48.75283072300954
+  },
+  "deployable_o3": {
+    "targets_attempted": 48,
+    "targets_with_positive_timing": 47,
+    "targets_without_positive_timing": 1,
+    "reproducers_attempted": 69,
+    "reproducers_timed": 68,
+    "reference_correctness_passes": 30,
+    "reference_correctness_failures": 0,
+    "reference_unavailable": 38,
+    "compile_lane": "nvcc default -O3",
+    "warmup": 5,
+    "iterations": 20
+  },
+  "historical_prior_revision": {
+    "source_revision": "9daede61bab735aca99b1f4afc4b0f4af905fa74 plus compiler changes under review",
+    "diagnostic_frontend_nodes": 1978,
+    "diagnostic_targets": 341,
     "lowered_sm70": 341,
-    "provenance_targets": 231,
-    "loop_fallback_targets": 110,
-    "untuned_sha256": "b9b8f34a17ebec854585641bfa044a0599d2667c31b524694020848986770632",
-    "ranked_partial_sha256": "b160bc9206b3945e3ef3e9bed08a4b5682ba2d766dacd4dc30b265a51af5eb7e"
+    "merged_o1_ok_targets": 300,
+    "representative_o3_targets": 3
   },
-  "model_seams": {
-    "frontend_nodes": 314,
-    "spelled_fp8_constants": 9,
-    "targets": 54,
-    "lowered_sm70": 54
-  },
-  "mtp_only": {
-    "frontend_nodes": 256,
-    "spelled_fp8_constants": 9,
-    "targets": 43,
-    "lowered_sm70": 43
-  },
-  "partial_tuning": {
-    "targets_visited_per_arm": 341,
-    "cold_mcts_ok_targets": 237,
-    "hybrid_ok_targets": 300,
-    "hybrid_ambiguous_multi_kernel_targets": 39,
-    "hybrid_bench_fail_targets": 2,
-    "merged_ok_targets": 300,
-    "merged_cold_mcts_rows": 215,
-    "merged_hybrid_rows": 126,
-    "compile_lane": "-Xcicc -O1"
-  },
-  "representative_o3": {
-    "targets": 3,
-    "pinned_measurements": 10,
-    "all_status_ok_and_flags_empty": true,
-    "complete_target_coverage": false
-  },
-  "lowered_after_ranking_merge_sm70": 341,
   "canonical_golden_created": false
 }

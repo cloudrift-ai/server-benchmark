@@ -1,0 +1,48 @@
+{
+  "status": "failed",
+  "model_id": "riftstack/Laguna-S-2.1-exl3",
+  "revision": "45c1f34a8c3ae3025a8bce2b1decea4991a6a239",
+  "revision_name": "2.00bpw",
+  "target": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "gpu_count": 1,
+    "gpu_memory_gib": 32,
+    "compute_capability": "12.0",
+    "driver": "580.173.02",
+    "ssh": "dikobraz@kenshin"
+  },
+  "recipe": null,
+  "experiment": "experiments/Laguna-S-2.1-exl3/serving_rtx5090/recipe.yaml",
+  "report": "experiments/Laguna-S-2.1-exl3/serving_rtx5090/RESULTS.md",
+  "implementation_fixes": [
+    "The named model revision now drives both checkpoint prefetch and the serving engine.",
+    "Attention gate layout is inferred from projection geometry when Transformers omits gate_per_head."
+  ],
+  "serving": {
+    "emmy_boot": "passed",
+    "layers_loaded": 48,
+    "weights_gib": 27.93,
+    "semantic_smoke": "failed",
+    "observed_output_throughput_tok_s": "5.2-5.7",
+    "benchmark": "not_qualified_due_to_incorrect_output",
+    "stock_vllm": "unsupported_quantization_method_exl3"
+  },
+  "emmy": {
+    "eligible": false,
+    "reason": "The exact checkpoint boots, but completion and chat probes produce incoherent text."
+  },
+  "publication": {
+    "authorized": false,
+    "attempted": false
+  },
+  "cleanup": {
+    "workloads": "complete",
+    "task_image": "removed",
+    "remote_task_scratch": "removed",
+    "host_left_running": true
+  },
+  "failure": {
+    "gate": "semantic_smoke",
+    "message": "No production recipe or image was promoted because the EXL3 serving path did not produce coherent text."
+  }
+}

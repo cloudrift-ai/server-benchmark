@@ -1893,9 +1893,10 @@ async def benchmark_compare_isolated_async(
     - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer; ``None``
       benches emmy-only when the graph isn't torch-runnable).
 
-    Returns ``(results, bench, torch_available, captured)`` — the shape ``bench_lowered_vs_torch``
-    returns (``captured``: all backends were timed under CUDA graph capture; False means the
-    all-or-nothing fallback ran and the timings include host dispatch)."""
+    Returns ``(results, bench, torch_available, captured, accuracy_error)`` — the shape
+    ``bench_lowered_vs_torch`` returns (``captured``: all backends were timed under CUDA graph
+    capture; False means the all-or-nothing fallback ran and the timings include host dispatch).
+    ``accuracy_error`` is the non-fatal eager-reference verdict for a frontend reproducer."""
     resp = await _run_job_oneshot(
         {
             "graph": lowered,
@@ -1909,4 +1910,4 @@ async def benchmark_compare_isolated_async(
         wall_timeout_s=wall_timeout_s,
         device_id=device_id,
     )
-    return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False)
+    return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False), resp.get("accuracy_error")

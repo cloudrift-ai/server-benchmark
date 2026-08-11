@@ -1,0 +1,53 @@
+{
+  "status": "partial",
+  "date": "2026-08-11",
+  "model_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "model_revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+  "target": {
+    "gpu": "NVIDIA Tesla V100 SXM3 32GB",
+    "gpu_count": 16,
+    "compute_capability": "7.0"
+  },
+  "command": "emmy eval golden emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml --serving-config _tune/deepseek-v4-post483/replay.env",
+  "golden": "emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml",
+  "historical_qualification_sha256": "99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309",
+  "current_schema_migrated_sha256": "a8e2852e4066ac6a68eed60f9890fb766dcff587e4d393a0f0c2ba1000f76cf5",
+  "checkout_manifest_sha256": "3def65338ee1369e00e1b89193da87ee249cd41952ba8b2e8f25a00e73d4b703",
+  "partial_log_sha256": "febe92f1fb879932ff2ae771cd34772da90896a954d88a4a9a3accbdfc8064ef",
+  "elapsed_seconds_approx": 6350,
+  "completed_gates": {
+    "verified_realizations": 279,
+    "expected_realizations": 279,
+    "offer_audit_realized": 279,
+    "offer_audit_expected": 279,
+    "fall_through": 0,
+    "own_snippet_no_fork": 47,
+    "traced_profiles": [
+      {
+        "retained_fx_nodes": 516,
+        "pruned_fx_nodes": 35,
+        "graph_ir_nodes": 945
+      },
+      {
+        "retained_fx_nodes": 626,
+        "pruned_fx_nodes": 227,
+        "graph_ir_nodes": 1157
+      },
+      {
+        "retained_fx_nodes": 598,
+        "pruned_fx_nodes": 49,
+        "graph_ir_nodes": 1089
+      },
+      {
+        "retained_fx_nodes": 626,
+        "pruned_fx_nodes": 227,
+        "graph_ir_nodes": 1157
+      }
+    ]
+  },
+  "in_model_audit": {
+    "status": "not_completed",
+    "reason": "The final cold-deploy compile had not emitted a verdict when the task was stopped at the 02:25 PDT decision point."
+  },
+  "qualification_effect": "The historical pre-migration qualification remains the complete evidence. This partial replay does not freshly qualify the schema-migrated golden."
+}

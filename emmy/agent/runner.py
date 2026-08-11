@@ -466,6 +466,14 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
             messages.append(message)
             if not tool_calls:
                 final = message.get("content") or ""
+                if not final.strip():
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "Your previous response was empty. Provide the final response requested by the task.",
+                        }
+                    )
+                    continue
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(final.rstrip() + "\n")
                 return final

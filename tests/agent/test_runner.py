@@ -63,6 +63,45 @@ async def test_run_executes_tracked_skill_and_writes_final(monkeypatch, tmp_path
     assert seen["payload"]["tools"] == runner.tool_definitions()
 
 
+async def test_run_retries_an_empty_final_response(monkeypatch, tmp_path):
+    skill = tmp_path / "SKILL.md"
+    prompt = tmp_path / "prompt.md"
+    output = tmp_path / "result.txt"
+    key = tmp_path / "key"
+    skill.write_text("# Test skill\n")
+    prompt.write_text("Return JSON.\n")
+    key.write_text("secret\n")
+    key.chmod(0o600)
+    responses = iter(
+        [
+            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": '{"result": "complete"}'},
+        ]
+    )
+    payloads = []
+
+    async def complete(_client, _endpoint, _api_key, payload):
+        payloads.append(list(payload["messages"]))
+        return next(responses)
+
+    monkeypatch.setattr(runner, "_completion", complete)
+
+    final = await runner.run(
+        runner.AgentRun(
+            skill=skill,
+            prompt=prompt,
+            model="test-model",
+            output=output,
+            workspace=tmp_path,
+            api_key_file=key,
+        )
+    )
+
+    assert final == '{"result": "complete"}'
+    assert output.read_text() == '{"result": "complete"}\n'
+    assert payloads[1][-1]["content"].startswith("Your previous response was empty")
+
+
 def test_tool_environment_removes_cloud_and_github_credentials(monkeypatch):
     monkeypatch.setenv("CLOUDRIFT_API_KEY", "cloud-secret")
     monkeypatch.setenv("GH_TOKEN", "github-secret")

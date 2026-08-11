@@ -17,8 +17,9 @@ point for a human, never as something to proceed through quietly.
     ./venv/bin/python scripts/check_serving_goldens.py --model <id> --gpu "NVIDIA GeForce RTX 5090"
     ./venv/bin/python scripts/check_serving_goldens.py --model <id> --revision <sha>   # a tagged golden set
 
-With ``--strict-major-gaps`` the gate also captures the release checkpoint's serving twins
-weight-free and fails on drift, compile failure, or any uncovered warp-contraction fork.
+With ``--strict-major-gaps`` the gate also captures the release checkpoint's in-model graphs
+weight-free and fails on drift, compile failure, or any uncovered warp-contraction fork. Models
+whose architecture does not fit the serving split ABI use their exact representative-layer provider.
 ``--release-config`` adds every decode/prefill width named by the pinned config and its warm
 shape matrix to that audit.
 ``--static-only-release`` instead audits only M=1, but is accepted only when that release
@@ -259,22 +260,26 @@ def audit_release_twins(
 ) -> bool:
     """Return whether a release model has no drift, compile failure, or major gap."""
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize
-    from emmy.serving.twins import capture_twin_graphs
+    from emmy.serving.twins import capture_in_model_graphs, capture_twin_graphs
 
     release = provenance or capture_model
     source = f" from local checkpoint {capture_model!r}" if provenance and provenance != capture_model else ""
     scope = "static-only M=1" if static_only else f"standard plus extra widths {list(widths) or 'none'}"
-    print(f"STRICT: tracing serving twins for {release!r}{source} (weight-free; {scope}).")
-    if static_only:
-        graphs = capture_twin_graphs(
-            capture_model,
-            decode_bucket=1,
-            prefill_bucket=0,
-            extra_widths=(),
-            static_only=True,
-        )
-    else:
-        graphs = capture_twin_graphs(capture_model, extra_widths=widths)
+    print(f"STRICT: tracing in-model graphs for {release!r}{source} (weight-free; {scope}).")
+    try:
+        if static_only:
+            graphs = capture_twin_graphs(
+                capture_model,
+                decode_bucket=1,
+                prefill_bucket=0,
+                extra_widths=(),
+                static_only=True,
+            )
+        else:
+            graphs = capture_in_model_graphs(capture_model, extra_widths=widths)
+    except (NotImplementedError, ValueError) as exc:
+        print(f"FAIL: strict in-model coverage cannot represent this release: {exc}")
+        return False
     passed = True
     for cap in caps:
         results = audit_card(graphs, gpu_name, cap)

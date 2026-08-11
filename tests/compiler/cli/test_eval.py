@@ -108,6 +108,23 @@ def test_strict_serving_golden_flags_are_in_model_only_and_validate_widths(run_c
     assert "cannot include additional" in stdout + stderr
 
 
+def test_in_model_audit_fails_cleanly_when_provider_rejects_shape(monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    import pytest
+
+    import emmy.compiler.pipeline.search.golden as golden
+    import emmy.serving.twins as twins
+    from emmy.commands.eval import _in_model_audit
+
+    model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    monkeypatch.setattr(golden, "GOLDEN_RECORDS", [SimpleNamespace(model=model, gpu_name="Tesla V100-SXM3-32GB", compute_cap=(7, 0))])
+    monkeypatch.setattr(twins, "capture_in_model_graphs", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("fixed width")))
+    with pytest.raises(SystemExit, match="1"):
+        _in_model_audit(model, extra_widths=(64,))
+    assert f"in-model audit cannot represent {model}: fixed width" in caplog.text
+
+
 def test_knobs_missing_db(run_cli, tmp_path):
     """A non-existent DB path is not an error: the registry schema still prints and
     the regret analysis is skipped cleanly (exit 0, no traceback)."""

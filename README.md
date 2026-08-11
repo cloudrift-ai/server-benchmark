@@ -176,6 +176,20 @@ emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gp
 which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
 its run directories. A path that exists always wins, so an edited working copy is never overwritten.
 
+## Publish a serving image
+
+The serving recipe pins the canonical immutable image reference. Validate the local image, its provenance labels,
+and the registry collision before requesting publication approval; only then log in and perform the push:
+
+```bash
+emmy publish recipes/DeepSeek-V4-Flash-0731 --dry-run
+emmy publish recipes/DeepSeek-V4-Flash-0731 --source-image local-baked-image --yes
+```
+
+Published references use
+`cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>`; see the
+[prebuilt-serving-image architecture](docker/vllm-emmy-serve/ARCHITECTURE.md) for the release gates and labels.
+
 ## Serve (compiled embeddings via vLLM)
 
 ```bash
@@ -324,7 +338,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
-  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned CloudRift 1Cat-vLLM runtime for Volta Qwen3.5)
+  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs
 - [kernels/](kernels/) — Standalone CUDA kernel sources

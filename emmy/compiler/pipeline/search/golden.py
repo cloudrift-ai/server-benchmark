@@ -129,6 +129,21 @@ def fast_math_knobs(knobs: Mapping) -> bool:
     return False
 
 
+def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
+    """Derive a record key through the same offer-aware classifier as deployment.
+
+    Most targets classify completely from their stamped ``S_*`` histogram. Flash and
+    pre-split computed-A forks are the exceptions: deployment recognizes them from an
+    unmistakable schedule offer. A reviewed record stores the selected schedule prefix,
+    so an axis pair or ``d*/sync`` compute-fill carries that same signal without
+    serializing a derived ShapeKey.
+    """
+    from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key  # noqa: PLC0415
+
+    base = dict(structural_features)
+    return _fork_shape_key([{**base, **knobs}], base=base)
+
+
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
     has_measurements = "measurements" in entry
@@ -199,7 +214,7 @@ class GoldenRecord:
     @cached_property
     def shape_key(self) -> ShapeKey:
         """Deployment join key derived by lowering the stable frontend target."""
-        return ShapeKey.from_s_features(self.structural_features)
+        return _golden_shape_key(self.structural_features, self.knobs)
 
     @cached_property
     def structural_features(self) -> dict[str, float]:
@@ -360,6 +375,14 @@ def validate_golden_file(
             families = {str(key).split("@", 1)[0] for key in entry["knobs"]}
             if "PLACE" in families and families != {"PLACE"}:
                 raise ValueError(f"{where} mixes PLACE routing knobs with schedule knobs")
+            if strict:
+                for family in families:
+                    scoped = [str(key) for key in entry["knobs"] if str(key).split("@", 1)[0] == family]
+                    if family in scoped and any("@" in key for key in scoped):
+                        raise ValueError(
+                            f"{where}.knobs mixes bare and axis-scoped {family} keys; "
+                            "repository goldens must store one schedule spelling per family"
+                        )
         if "ranking" in entry and not isinstance(entry["ranking"], Mapping):
             raise ValueError(f"{where}.ranking must be a mapping")
         if strict and "ranking" in entry:

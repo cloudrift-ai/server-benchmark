@@ -10,6 +10,7 @@ commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
 commands/agent ─► agent (tracked skill runner and tool schemas)
+commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
@@ -17,6 +18,8 @@ commands/agent ─► agent (tracked skill runner and tool schemas)
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
 - `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
+- `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
+  runner
 - `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
   INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
@@ -138,6 +141,13 @@ The explicit provenance lets a local pre-upload checkpoint produce rows that can
 HF snapshot identity; the resulting file is consumed directly by `tune --golden-file` and verified by explicit
 `run --golden-file --golden NAME` calls.
 
+The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
+dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
+per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
+This provider is audit-only; `emmy trace --serving-twins` does not claim a DeepSeek serving split it cannot execute,
+and strict audits reject additional `--serving-width` values because the fixed full-layer provider cannot claim those
+serving shapes.
+
 `emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance or Loop IR target are grouped as candidate knob
 sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
@@ -258,6 +268,7 @@ emmy
 +-- bench        -- deploy + benchmark + teardown on cloud VMs
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
++-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- vm
     +-- create
     |   +-- gpu        -- name a GPU from the hardware table (orchestrator: retries + fallback)
@@ -380,6 +391,28 @@ emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host poo
 ```
 
 Results are stored in `{recipe_dir}/{timestamp}_{hash}/` — each recipe directory holds its own run directories alongside `recipe.yaml`.
+
+### `emmy publish`
+
+Publishes the local serving image named by one concrete inference recipe. The recipe image is the destination and
+must match `cloudriftai/(vllm-emmy|1cat-vllm)-<model-slug>:<runtime-version>-<source-sha>`, where the source SHA is
+7–12 lowercase hexadecimal characters. The model slug comes from the same `emmy.publish.model_slug()` implementation
+used by `docker/vllm-emmy-serve/model_slug.sh`; `latest`, hardware tags, and qualification suffixes are rejected.
+
+The local source must carry `ai.emmy.publish.family`, `ai.emmy.model.id`, `org.opencontainers.image.version`, and
+`org.opencontainers.image.revision` labels matching the recipe destination. `--source-image` retags a local build
+whose temporary name differs from that destination. A matrix is accepted only when it expands to one concrete
+variant.
+
+Before any mutation, the command checks the registry destination. An existing destination is accepted only when its
+digest is already among the local image's `RepoDigests`; a different or unprovable digest is never overwritten. After
+a push, the registry digest must appear on the local destination image. `--dry-run` performs every read-only gate and
+prints the pending Docker commands; an actual push requires the explicit noninteractive `--yes` confirmation.
+
+```bash
+emmy publish recipes/MyModel --source-image local/my-model:baked --dry-run
+emmy publish recipes/MyModel --source-image local/my-model:baked --yes
+```
 
 **`--local` note:** runs the workload over SSH to `127.0.0.1` (same code path as remote hosts). Requires a running SSH server on localhost and that `--ssh-key` (default `~/.ssh/id_ed25519`) is in `~/.ssh/authorized_keys`. Quick check: `ssh -i ~/.ssh/id_ed25519 $USER@127.0.0.1 echo ok`.
 

@@ -4,29 +4,46 @@ The release pipeline for **one model on one GPU**, served by `EmmyGenModel`, wit
 (**cubins**), the **HF model snapshot**, and the **execution-plan pack** (`emmy/compiler/backend/pack.py`) baked in.
 Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a pack hit — none of the compiler frontend either
 (no trace / pass pipeline / fork resolution / codegen; boot collapses from ~25 min to ~weight-load time), so
-`docker run --gpus all --ipc=host -p 8000:8000 cloudriftai/vllm-emmy-<slug>:TAG` serves with no `HF_TOKEN` and no
-network dependency on HuggingFace (`HF_HUB_OFFLINE=1` is baked). The plain [`vllm-emmy`](../vllm-emmy/) image stays
-the general-purpose base (any model, compile-on-boot); a baked image trades a large pull (the weights on top of the
-~10 GB base) for a deterministic, tokenless boot.
+`docker run --gpus all --ipc=host -p 8000:8000
+cloudriftai/vllm-emmy-<slug>:<runtime-version>-<source-sha>` serves with no `HF_TOKEN` and no network dependency on
+HuggingFace (`HF_HUB_OFFLINE=1` is baked). The plain [`vllm-emmy`](../vllm-emmy/) image stays the general-purpose
+base (any model, compile-on-boot); a baked image trades a large pull (the weights on top of the ~10 GB base) for a
+deterministic, tokenless boot.
 
-**One (model, GPU, config) triple per image, and the naming schema says which.** `model_slug.sh` maps an HF id to a
-docker-safe slug — org dropped, lowercased, junk collapsed to `-` — and that one slug names **both** the published
-image and the pinned config:
+**The serving recipe owns the immutable publication reference.** The convention is:
 
-| HF model id | slug | config | image |
+```text
+cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>
+```
+
+The supported runtime families are `vllm-emmy` and `1cat-vllm`. The tag records the runtime release and its source
+revision; the target GPU, zero-recompile result, cache manifests, serving shape, and checkpoint revision belong in
+labels and qualification evidence, not mutable or hardware-specific tag suffixes. The model slug names the pinned
+config as well as the image repository:
+
+| HF model id | slug | config | image repository |
 | --- | --- | --- | --- |
 | `google/gemma-4-12B-it` | `gemma-4-12b-it` | `models/gemma-4-12b-it.env` | `cloudriftai/vllm-emmy-gemma-4-12b-it` |
 | `Qwen/Qwen3-Embedding-0.6B` | `qwen3-embedding-0.6b` | `models/qwen3-embedding-0.6b.env` | `cloudriftai/vllm-emmy-qwen3-embedding-0.6b` |
 
-One implementation of that mapping on purpose (a shell script both `make` and the container scripts call): a slug
-that disagreed between the warm and the bake would silently load two different configs, which is exactly the
-cache-key parity failure the rest of this document exists to prevent. Onboarding a model is therefore one new
-`models/<slug>.env` — no new Makefile targets, no new Dockerfile, no new scripts.
+`emmy.publish.model_slug` is the one implementation of the HF-id mapping — organization dropped, lowercased,
+and junk collapsed to `-`. `model_slug.sh` is only a compatibility wrapper for Make and container scripts. A slug
+that disagreed between warm, bake, and publication would silently select different configs or repositories, which
+is exactly the cache-key parity failure the rest of this document prevents. Onboarding a model is therefore one new
+`models/<slug>.env` — no new Makefile target or Dockerfile.
 
-**The slug does not encode the revision.** An HF id that publishes several variants under one repo — an EXL3
-checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every one
-of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and
-it separates them only inside the config: two rungs of one repo cannot be released side by side without distinct
+`emmy publish <recipe>` is the only supported registry path. It resolves the recipe's one concrete model and image,
+checks the slug and the source image's model/runtime provenance labels, and refuses a mutable or noncanonical
+destination. `--dry-run` performs the validation and collision check without tagging or pushing. After a separate
+human approval, `--yes` may tag a `--source-image` and push; a different digest already at the destination is a hard
+failure, while the same digest is idempotent success. Direct `make serve-push` is disabled so naming and collision
+rules cannot drift between release paths.
+
+**The slug does not encode the checkpoint revision.** An HF id that publishes several variants under one repo — an
+EXL3 checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every
+one of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and
+one of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them,
+and it separates them only inside the config: two rungs of one repo cannot be released side by side without distinct
 image names. Pin it by **commit sha**, never a branch name — a branch can be re-cut under the same name (which
 would move the weights under a config that claims to be sealed), and an offline boot resolves `snapshots/<sha>`
 directly. A config that pins nothing warms whatever the default branch points at, so `warm.sh` refuses an unpinned
@@ -163,8 +180,8 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
 
 ## Workflow
 
-Only the highlighted steps need the physical target card; the bake and push are GPU-free (but see the note below on
-where to run them):
+Only the highlighted steps need the physical target card; the bake and publication are GPU-free (but see the note
+below on where to run them):
 
 ```mermaid
 flowchart LR
@@ -173,8 +190,8 @@ flowchart LR
     warm["make serve-warm<br/><b>target GPU</b>"]
     bake["make serve-image<br/><i>anywhere</i>"]
     verify["make serve-verify<br/><b>target GPU</b>"]
-    push["make serve-push<br/><i>anywhere</i>"]
-    gold -- "coverage OK" --> base --> warm -- "warm/ (hf + cubin)" --> bake --> verify -- PASS --> push
+    publish["emmy publish &lt;recipe&gt;<br/><i>anywhere, after approval</i>"]
+    gold -- "coverage OK" --> base --> warm -- "warm/ (hf + cubin)" --> bake --> verify -- PASS --> publish
     classDef gpu fill:#76b900,color:#fff,stroke:#4e7a00
     class warm,verify gpu
 ```
@@ -260,13 +277,15 @@ The full release session on a rented card (each step from the repo checkout; hos
    ```
 
 5. `HF_TOKEN=… make serve-warm MODEL=<id>` — fills `warm/` (first boot downloads the model + compiles all layers; minutes).
-6. `make serve-image MODEL=<id>` → `make serve-verify MODEL=<id>` (expect `PASS — served offline with zero new cubins`) →
-   `make serve-push MODEL=<id>`.
-7. Point the recipes that should use it at the new tag; tear down the rental.
+6. Point the serving recipe at the canonical immutable reference, then `make serve-image MODEL=<id>` →
+   `make serve-verify MODEL=<id>` (expect `PASS — served offline with zero new cubins`) →
+   `emmy publish <recipe> --dry-run`.
+7. Show the exact source image, destination, labels, and collision result. After a distinct human approval and
+   registry login, run `emmy publish <recipe> --yes`, confirm the registry digest, log out, and tear down the rental.
 
-**Where to run bake/push:** although `serve-image` and `serve-push` are GPU-free, run them on the rental anyway —
+**Where to run bake/publish:** although `serve-image` and `emmy publish` are GPU-free, run them on the rental anyway —
 moving `warm/` off-datacenter means a ~24 GB download plus a ~35 GB Docker Hub upload from a home link, and the
-verify step needs the card between bake and push regardless. Never "top up" the cache on a
+verify step needs the card between bake and publication regardless. Never "top up" the cache on a
 different card: any kernel compiled elsewhere is a dead cache entry the real card never hits, which is why
 `warm.sh` and `verify.sh` check the live GPU against the config's `SERVE_GPU` and refuse a mismatch.
 
@@ -295,7 +314,8 @@ rental/teardown. The local-only deltas:
   `warm/` (~24 GB) + the baked weight layer (~24 GB) + BuildKit's transient context copy of `warm/` during the bake
   (another ~24 GB) + the host venv/HF cache if present. Freeing the venv before the bake is safe — nothing after
   the warm needs it.
-- **The push is the slow part.** `make serve-push` uploads ~35 GB over your uplink — hours on a residential
+- **The push is the slow part.** `emmy publish <recipe> --yes` uploads ~35 GB over your uplink — hours on a
+  residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
 - **The snapshot ships re-sharded, as four image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
   503s forever), and gemma-4-12B ships ONE consolidated 23 GB `model.safetensors` — a single file cannot be split

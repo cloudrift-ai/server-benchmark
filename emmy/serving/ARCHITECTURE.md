@@ -97,6 +97,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
   golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
+  Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
+  `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
+  The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
+  attention/MLP pairing at sequence length 512. Its HCA/CSA compressors and hyper-connection residual streams cannot
+  be represented by the classic `(q, k, v)` serving seam, so claiming split twins would omit deployed operations.
+  Additional serving widths are rejected rather than ignored: the fixed full-layer provider cannot claim those shapes
+  were audited. The provider also requires confirmed representative routed-expert replacement, carries DeepSeek's
+  clamp-10 SwiGLU, and supplies the static sliding causal mask so HCA/CSA compressor bias remains in the graph.
   For EXL3 checkpoints the loader-only allocation inventory supplies exact sibling shapes and
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific

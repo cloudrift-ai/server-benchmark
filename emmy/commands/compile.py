@@ -690,81 +690,10 @@ def _trace_model(
         if already_replaced or replace_moe_with_traceable_expert(block):
             logger.info("Tracing representative MoE expert compute (router/sort/combine remain host orchestration)")
 
-    hidden_size = decoder.config.hidden_size
-    hc_mult = int(getattr(getattr(block, "attn_hc", None), "hc_mult", 0) or 0)
-    x_shape = (1, seq_len, hc_mult, hidden_size) if hc_mult else (1, seq_len, hidden_size)
-    x = torch.randn(*x_shape, dtype=dtype)
-    # Some architectures (e.g. Gemma's sliding/global split) key RoPE on the
-    # layer's attention type; pass it when the rotary module / layer expose it.
-    layer_type = _selected_layer_type(decoder, block, layer)
-    rotary_emb = decoder.rotary_emb
-    if layer_type == "sliding_attention" and getattr(decoder, "swa_rotary_emb", None) is not None:
-        # Compatibility with the original remote Laguna implementation. Newer
-        # transformers exposes one multi-RoPE module keyed by ``layer_type``.
-        rotary_emb = decoder.swa_rotary_emb
+    from emmy.compiler.trace.huggingface import trace_selected_layer
 
-    if dynamic_shapes:
-        # Dynamic mode: concrete (cos, sin) kwargs would specialise rotary to
-        # the trace seq_len, so wrap the block with in-graph sliced rotary
-        # instead. The wrapper's input is ``x`` → spec ``--dynamic seq_len@x:1``.
-        from emmy.compiler.trace.huggingface import build_layer_wrapper, stamp_sliding_windows
-
-        wrapper = build_layer_wrapper(block, rotary_emb, hidden_size, dtype, layer_type=layer_type)
-        graph = _stamp(trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes), wrapper)
-        stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
-        return graph, (wrapper, (x,), {})
-
-    position_ids = torch.arange(seq_len).unsqueeze(0)
-    rotary_layer_types = tuple(getattr(rotary_emb, "layer_types", ()) or ())
-    if rotary_layer_types and layer_type in rotary_layer_types:
-        # Laguna's block consumes the one ``(cos, sin)`` tuple selected by its
-        # configured full/sliding attention type. Passing the whole mapping
-        # makes its attention treat a string key as a tensor.
-        position_embeddings = rotary_emb(x, position_ids, layer_type)
-    elif rotary_layer_types:
-        # Multi-RoPE models (DeepSeek V4) pass a mapping into every decoder
-        # block; the attention module selects its own ``main`` / ``compress``
-        # entry.  Its attention labels (for example ``sliding_attention``) are
-        # deliberately not rotary-table keys.
-        position_embeddings = {rotary_type: rotary_emb(x, position_ids, rotary_type) for rotary_type in rotary_layer_types}
-    else:
-        try:
-            position_embeddings = rotary_emb(x, position_ids, layer_type)
-        except (KeyError, TypeError):
-            position_embeddings = rotary_emb(x, position_ids)
-
-    from emmy.compiler.trace.huggingface import build_synthetic_ple, stamp_sliding_windows
-
-    kwargs = {"position_embeddings": position_embeddings}
-    # Decoder blocks normally receive these through their model-level wrapper.
-    # Most attention implementations make them optional once concrete rotary
-    # embeddings are supplied, but some built-in architectures (DeepSeek V4)
-    # retain required parameters in the attention signature.  Supply only the
-    # names that the nested attention actually declares so existing blocks do
-    # not gain unexpected kwargs.
-    import inspect
-
-    block_parameters = inspect.signature(block.forward).parameters
-    if "input_ids" in block_parameters:
-        # Some MoE routers (DeepSeek V4) use token IDs to select a token-specific
-        # expert table.  A deterministic synthetic prompt is sufficient for the
-        # fixed-shape operation inventory.
-        kwargs["input_ids"] = torch.zeros((1, seq_len), dtype=torch.long)
-    self_attn = getattr(block, "self_attn", None)
-    if self_attn is not None:
-        attention_parameters = inspect.signature(self_attn.forward).parameters
-        if "position_ids" in attention_parameters:
-            kwargs["position_ids"] = position_ids
-        if "attention_mask" in attention_parameters:
-            kwargs["attention_mask"] = None
-    # Gemma-nano PLE blocks multiply by ``per_layer_input``; without it the trace hits
-    # ``FakeTensor * None``. Same seeded synthetic buffer as the dynamic layer wrapper.
-    ple = build_synthetic_ple(block, seq_len, dtype)
-    if ple is not None:
-        kwargs["per_layer_input"] = ple
-    graph = _stamp(trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes), block)
-    stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
-    return graph, (block, (x,), kwargs)
+    graph, bundle = trace_selected_layer(model, layer, seq_len, dtype, dynamic_shapes=dynamic_shapes)
+    return _stamp(graph, bundle[0]), bundle
 
 
 def _find_text_decoder(model):
@@ -773,29 +702,10 @@ def _find_text_decoder(model):
     ``model.model`` layout (Llama / Qwen) and nested multimodal layouts where
     the language model sits under e.g. ``model.model.language_model`` (Gemma's
     unified vision/audio/text models). Returns the deepest matching module."""
-    import torch.nn as nn
+    from emmy.compiler.trace.huggingface import find_text_decoder
 
-    best = None
-    for _name, mod in model.named_modules():
-        if isinstance(getattr(mod, "layers", None), nn.ModuleList) and hasattr(mod, "rotary_emb") and hasattr(mod, "config"):
-            best = mod  # deepest wins (named_modules yields parents before children)
-    if best is None:
-        logger.error("Could not locate a text decoder (a module with `.layers` + `.rotary_emb`) in %s", type(model).__name__)
+    try:
+        return find_text_decoder(model)
+    except ValueError as exc:
+        logger.error("%s", exc)
         sys.exit(1)
-    return best
-
-
-def _selected_layer_type(decoder, block, layer: int):
-    """Return the attention type for a selected decoder layer.
-
-    Laguna stores the authoritative full/sliding schedule on
-    ``decoder.config.layer_types`` rather than on ``self_attn.layer_type``.
-    Keep the module attributes as fallbacks for older/custom architectures.
-    """
-    configured = getattr(decoder.config, "layer_types", None)
-    if configured is not None and 0 <= layer < len(configured):
-        return configured[layer]
-    block_type = getattr(block, "attention_type", None)
-    if block_type is not None:
-        return block_type
-    return getattr(getattr(block, "self_attn", None), "layer_type", None)

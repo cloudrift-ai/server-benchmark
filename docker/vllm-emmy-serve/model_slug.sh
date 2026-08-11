@@ -5,11 +5,9 @@
 #
 #   docker/vllm-emmy-serve/model_slug.sh google/gemma-4-12B-it   # -> gemma-4-12b-it
 #
-# ONE implementation on purpose: the Makefile expands it to build the tag, warm.sh and
-# verify.sh use it to find the config, and tests exercise it through this script. A second
-# copy in Python would drift, and a drifted slug means the warm and the bake disagree about
-# which config they read — the exact class of bug the cache-key parity contract exists to
-# prevent (see ARCHITECTURE.md).
+# ONE implementation on purpose: the Python library owns the rule so `emmy publish` and this
+# Make/shell adapter cannot drift. A drifted slug means the warm and bake disagree about which
+# config they read — the exact class of bug the cache-key parity contract exists to prevent.
 #
 # The rules, in order:
 #   1. drop the HF org  — `google/gemma-4-12B-it` and `unsloth/gemma-4-12B-it` share a slug.
@@ -21,15 +19,10 @@
 #   4. trim leading / trailing separators, which docker also rejects.
 set -euo pipefail
 
-model="${1:-}"
-[ -n "$model" ] || { echo "usage: model_slug.sh <hf-model-id>" >&2; exit 2; }
+[ "$#" -eq 1 ] || { echo "usage: model_slug.sh <hf-model-id>" >&2; exit 2; }
 
-slug=$(printf '%s' "${model##*/}" \
-    | tr '[:upper:]' '[:lower:]' \
-    | sed -e 's/[^a-z0-9._-]\{1,\}/-/g' -e 's/^[._-]\{1,\}//' -e 's/[._-]\{1,\}$//')
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+python=${PYTHON:-python3}
 
-# An id that sanitizes to nothing (or to a lone separator) would silently produce the tag
-# `cloudriftai/vllm-emmy-:0.23.0-abc1234`, which docker rejects far downstream. Fail here.
-[ -n "$slug" ] || { echo "model_slug.sh: '$model' sanitizes to an empty slug" >&2; exit 1; }
-
-printf '%s\n' "$slug"
+PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" exec "$python" -m emmy.publish "$1"

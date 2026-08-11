@@ -23,6 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.publish import model_slug as library_model_slug
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SERVE_DIR = PROJECT_ROOT / "docker" / "vllm-emmy-serve"
 SLUG_SCRIPT = SERVE_DIR / "model_slug.sh"
@@ -67,8 +69,9 @@ def test_slug_rejects_empty_and_missing_args():
 
 
 def test_python_slug_matches_the_shell_schema():
-    """The gate shells out to the one implementation — assert it really agrees."""
+    """The library owns the rule; the gate and shell adapters must agree with it."""
     for model in ("google/gemma-4-12B-it", "Qwen/Qwen3-Embedding-0.6B", "org/Weird Model!!Name"):
+        assert library_model_slug(model) == slug(model)
         assert csg.model_slug(model) == slug(model)
 
 
@@ -426,6 +429,31 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
         assert serve in verify and emmy in verify
 
 
+def test_serving_images_carry_canonical_publication_labels():
+    make = (PROJECT_ROOT / "Makefile").read_text()
+    emmy_dockerfile = (SERVE_DIR / "Dockerfile").read_text()
+    onecat_dockerfile = (PROJECT_ROOT / "docker" / "1cat-vllm-sm70" / "Dockerfile.triton-cache").read_text()
+    for build_arg in ("PUBLISH_FAMILY", "PUBLISH_VERSION", "PUBLISH_REVISION", "MODEL"):
+        assert f"ARG {build_arg}" in emmy_dockerfile
+        assert f"ARG {build_arg}" in onecat_dockerfile
+    for label in (
+        "ai.emmy.publish.family",
+        "ai.emmy.model.id",
+        "ai.emmy.model.revision",
+        "ai.emmy.target.gpu",
+        "org.opencontainers.image.version",
+        "org.opencontainers.image.revision",
+    ):
+        assert label in emmy_dockerfile
+        assert label in onecat_dockerfile
+    assert "--build-arg PUBLISH_FAMILY=vllm-emmy" in make
+    assert "--build-arg PUBLISH_VERSION=" in make
+    assert "--build-arg PUBLISH_REVISION=" in make
+    push_body = make.split("serve-push:", 1)[1].split("\nbench:", 1)[0]
+    assert "emmy publish <recipe>" in push_body
+    assert "docker push" not in push_body
+
+
 def test_release_scripts_are_syntactically_valid():
     """`serve.sh` runs under the image's /bin/sh; warm.sh and verify.sh use bash arrays. A
     syntax error surfaces mid-release otherwise — warm.sh's first failure mode is hours in."""
@@ -613,7 +641,7 @@ def test_strict_release_twin_audit_fails_major_gaps(monkeypatch):
         seen.update(model=model, **kwargs)
         return {"pre1": object()}
 
-    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(twins, "capture_in_model_graphs", fake_capture)
     monkeypatch.setattr(
         audit,
         "audit_card",
@@ -660,6 +688,18 @@ def test_static_only_release_twin_audit_captures_only_m1(monkeypatch):
         "extra_widths": (),
         "static_only": True,
     }
+
+
+def test_strict_release_twin_audit_fails_when_provider_rejects_widths(monkeypatch, capsys):
+    import emmy.serving.twins as twins
+
+    monkeypatch.setattr(
+        twins,
+        "capture_in_model_graphs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("fixed architecture width")),
+    )
+    assert not csg.audit_release_twins("org/deepseek", "Tesla V100-SXM3-32GB", [(7, 0)], (64,))
+    assert "FAIL: strict in-model coverage cannot represent this release: fixed architecture width" in capsys.readouterr().out
 
 
 def test_preflight_enumeration_applies_the_same_revision_rule():

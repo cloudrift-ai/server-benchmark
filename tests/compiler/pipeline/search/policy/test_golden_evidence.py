@@ -34,7 +34,7 @@ from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import golden as golden_mod
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
-from emmy.compiler.pipeline.search.golden import fast_math_knobs
+from emmy.compiler.pipeline.search.golden import _golden_shape_key, fast_math_knobs
 from emmy.compiler.pipeline.search.policy.greedy import (
     _fork_shape_key,
     _golden_evidence_index,
@@ -383,7 +383,10 @@ def test_attention_fm_pv_plan_golden_self_excludes_gate_off(monkeypatch):
 def test_rms_norm_golden_decides_its_op(monkeypatch):
     gold = _record("rms_norm.k3840", ShapeKey(512 * 3840, 3840, False, kind="rms_norm"), {"REDUCE": "coop", "WORK": "t256"}, 6.3)
     index = _index(monkeypatch, [gold])
-    rows = [{**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t32"}, {**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t256"}]
+    rows = [
+        {**_RMS_SIG, "REDUCE@r0": "coop", "REDUCE": "", "WORK": "t32"},
+        {**_RMS_SIG, "REDUCE@r0": "coop", "REDUCE": "", "WORK": "t256"},
+    ]
     assert _golden_pick(index, rows, "n0") == (1, 6.3)
 
 
@@ -432,6 +435,20 @@ def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
     # And ``cp.async``'s substring never false-positives the segment match.
     plain_cp = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp.async"}])
     assert plain_cp.kind == ""
+
+
+def test_golden_shape_key_replays_offer_signals_without_serializing_kind():
+    fused = _golden_shape_key(_CONE_SIG, {"STAGE": "d1/sync", "TILE": _STD_TILE, "WORK": "w16x1"})
+    assert fused == ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096)
+
+    plain = _golden_shape_key(_CONE_SIG, {"STAGE": "", "TILE": _STD_TILE, "WORK": "w16x1"})
+    assert plain == ShapeKey.from_s_features(_CONE_SIG)
+
+    flash = _golden_shape_key(
+        _FLASH_SIG,
+        {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "STAGE@kv": "d2/cp", "WORK": "w4x1"},
+    )
+    assert flash.kind == "flash"
 
 
 def test_fused_key_separates_aspect_equal_free_prod_cones():

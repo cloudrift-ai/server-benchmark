@@ -1,5 +1,5 @@
 {
-  "status": "partial",
+  "status": "historical-partial-superseded",
   "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
   "scope": "architecture/static-shape FP16 representative constants",
   "checkpoint_representation_qualified": false,
@@ -23,7 +23,37 @@
     "name": "k_softmax_mean_reduce_342131.4dea1e03816a",
     "path": "layer 2 compressor new_kv/new_gate window merge",
     "boundary": "observable copy_ through a destination view requires base reassembly",
-    "fail_closed_error": "aten.copy_ observable alias mutation is unsupported: later live node 'slice_15' reads original destination alias 'new_zeros'"
+    "fail_closed_error": "aten.copy_ observable alias mutation is unsupported: later live node 'slice_15' reads original destination alias 'new_zeros'",
+    "historical_partial_artifact": true,
+    "resolved_in_current_tracer": true
+  },
+  "trace_gap_closure": {
+    "scope": "exact layer 2, static sequence length 512, sm_70",
+    "retained_fx_nodes": 612,
+    "graph_ir_nodes": 1120,
+    "exact_loop_targets": 89,
+    "unmeasured_targets": 89,
+    "focused_remote_tests_passed": 58,
+    "working_golden_sha256": "80874440193fcac40afcced0255608473ab087bc0529629beb4c02d8e71ac018",
+    "architecture_wide_retrace_complete": false,
+    "superseded_by_canonical_qualification": true
+  },
+  "canonical_qualification": {
+    "status": "promotion-qualified",
+    "path": "emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml",
+    "sha256": "99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309",
+    "programs": 13,
+    "configs": 279,
+    "promotion_schema": "pass",
+    "repository_schema": "pass",
+    "offer_entries_realized": 279,
+    "in_model_match": 255,
+    "in_model_drift": 0,
+    "in_model_gap": 0,
+    "in_model_compile_fail": 0,
+    "scope": "architecture/static-sequence-512 FP16 representative constants",
+    "checkpoint_representation_qualified": false,
+    "serving_eligibility_from_this_compiler_artifact": false
   },
   "decoder_architecture_inventory": {
     "layers_0_1": "sliding HCA + hash MoE",

@@ -300,6 +300,18 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         # np.where(cond, a, b) — the mask-apply tail of the explicit-mask
         # subgraph. The f32-promoted cond is C-truthy (nonzero) in ``?:``.
         return TernaryExpr(inputs[0], inputs[1], inputs[2])
+    if fn == "bitwise_not":
+        # Torch spells ``~mask`` as bitwise_not even when ``mask`` is bool. Loop
+        # IR historically promotes boolean mask SSA values to f32, so both the
+        # implicit f32 convention and an explicitly bool-stamped value mean
+        # logical-not. Never infer integer complement here: that requires a
+        # separately typed and tested ``~`` path.
+        if dtype not in (None, "f32", "bool"):
+            raise NotImplementedError(f"render: bitwise_not supports boolean masks only, got dtype={dtype!r}")
+        if len(inputs) != 1:
+            raise ValueError(f"render: bitwise_not requires one input, got {len(inputs)}")
+        zero = Literal(0.0, "float") if dtype in (None, "f32") else Literal(0, "int")
+        return BinaryExpr("==", inputs[0], zero)
     raise NotImplementedError(f"render: elementwise fn={fn!r} not supported")
 
 

@@ -14,7 +14,14 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.loader.safetensors import split_revision
-from emmy.serving.twins import _profile_layers, _spell_coded_twins, _spell_expert_twins
+from emmy.serving.twins import (
+    _attention_query_layout,
+    _capture_deepseek_v4_architecture_graphs,
+    _deepseek_v4_profiles,
+    _profile_layers,
+    _spell_coded_twins,
+    _spell_expert_twins,
+)
 
 
 def _entry(base: str, n: int, k: int, bits: int) -> dict:
@@ -144,6 +151,230 @@ def test_laguna_selects_dense_full_sparse_sliding_and_sparse_full_profiles():
         (1, "-sparse-sliding"),
         (2, "-sparse-full"),
     ]
+
+
+def test_attention_query_layout_accepts_validated_deepseek_low_rank_signature():
+    from types import SimpleNamespace
+
+    def proj(width):
+        return SimpleNamespace(out_features=width)
+
+    attention = SimpleNamespace(
+        head_dim=8,
+        num_heads=4,
+        q_a_proj=proj(16),
+        q_a_norm=object(),
+        q_b_proj=proj(32),
+        q_b_norm=object(),
+        kv_proj=proj(8),
+        kv_norm=object(),
+        o_a_proj=proj(16),
+        o_b_proj=proj(32),
+    )
+    assert _attention_query_layout(attention) == (4, 32)
+
+
+def test_attention_query_layout_rejects_partial_or_inconsistent_signature():
+    from types import SimpleNamespace
+
+    with pytest.raises(NotImplementedError, match="neither q_proj nor the complete DeepSeek"):
+        _attention_query_layout(SimpleNamespace(head_dim=8, num_heads=4, kv_proj=SimpleNamespace(out_features=8)))
+
+    attention = SimpleNamespace(
+        head_dim=8,
+        num_heads=4,
+        q_a_proj=object(),
+        q_a_norm=object(),
+        q_b_proj=SimpleNamespace(out_features=24),
+        q_b_norm=object(),
+        kv_proj=SimpleNamespace(out_features=8),
+        kv_norm=object(),
+        o_a_proj=object(),
+        o_b_proj=object(),
+    )
+    with pytest.raises(ValueError, match="DeepSeek attention shape mismatch"):
+        _attention_query_layout(attention)
+
+
+def test_deepseek_profiles_are_distinct_attention_mlp_pairs():
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        num_hidden_layers=6,
+        layer_types=[
+            "heavily_compressed_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+            "sliding_attention",
+        ],
+        mlp_layer_types=["hash_moe", "hash_moe", "hash_moe", "moe", "moe", "moe"],
+    )
+    assert _deepseek_v4_profiles(config) == [
+        (0, "heavily_compressed_attention", "hash_moe"),
+        (2, "compressed_sparse_attention", "hash_moe"),
+        (3, "heavily_compressed_attention", "moe"),
+        (4, "compressed_sparse_attention", "moe"),
+        (5, "sliding_attention", "moe"),
+    ]
+
+
+def test_deepseek_provider_pins_four_profiles_and_propagates_revision(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+    import torch.nn as nn
+
+    import emmy.compiler.trace.huggingface as huggingface
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = nn.Identity()
+            self.mlp._emmy_traceable_expert = True
+
+    class Decoder(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.layers = nn.ModuleList(Block() for _ in range(config.num_hidden_layers))
+            self.rotary_emb = nn.Identity()
+            self.config = config
+
+    class Twin(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.decoder = Decoder(config)
+
+    config = SimpleNamespace(
+        model_type="deepseek_v4",
+        num_hidden_layers=6,
+        layer_types=[
+            "sliding_attention",
+            "sliding_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+        ],
+        mlp_layer_types=["hash_moe", "hash_moe", "hash_moe", "moe", "moe", "moe"],
+    )
+    loads = []
+
+    def fake_load(repo, dtype, layer, *, revision=None):
+        loads.append((repo, dtype, layer, revision))
+        return Twin(config)
+
+    monkeypatch.setattr(huggingface, "load_architecture_trace_twin", fake_load)
+    monkeypatch.setattr(huggingface, "trace_selected_layer", lambda *_args, **_kwargs: (object(), None))
+    graphs = _capture_deepseek_v4_architecture_graphs("deepseek-ai/model@0123456789abcdef", config)
+    assert list(graphs) == [
+        "layer512-sliding-hash-moe",
+        "layer512-compressed-sparse-hash-moe",
+        "layer512-heavily-compressed-moe",
+        "layer512-compressed-sparse-moe",
+    ]
+    assert loads == [
+        ("deepseek-ai/model", torch.float16, 0, "0123456789abcdef"),
+        ("deepseek-ai/model", torch.float16, 2, "0123456789abcdef"),
+        ("deepseek-ai/model", torch.float16, 3, "0123456789abcdef"),
+        ("deepseek-ai/model", torch.float16, 4, "0123456789abcdef"),
+    ]
+
+
+def test_deepseek_provider_rejects_unconfirmed_representative_expert(monkeypatch):
+    from types import SimpleNamespace
+
+    import emmy.compiler.trace.huggingface as huggingface
+
+    config = SimpleNamespace(
+        num_hidden_layers=1,
+        layer_types=["heavily_compressed_attention"],
+        mlp_layer_types=["moe"],
+    )
+    monkeypatch.setattr(huggingface, "load_architecture_trace_twin", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        huggingface,
+        "find_text_decoder",
+        lambda _twin: SimpleNamespace(layers=[SimpleNamespace(mlp=SimpleNamespace())]),
+    )
+    monkeypatch.setattr(
+        huggingface,
+        "trace_selected_layer",
+        lambda *_args, **_kwargs: pytest.fail("unconfirmed representative expert reached trace"),
+    )
+    with pytest.raises(NotImplementedError, match="lacks confirmed representative routed-expert replacement"):
+        _capture_deepseek_v4_architecture_graphs("deepseek-ai/model@revision", config, seq_len=8)
+
+
+def test_in_model_capture_dispatches_deepseek_to_architecture_provider(monkeypatch):
+    from types import SimpleNamespace
+
+    import transformers
+
+    import emmy.serving.twins as twins
+
+    config = SimpleNamespace(model_type="deepseek_v4")
+    sentinel = {"layer512-hca-moe": object()}
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda repo, revision=None: config)
+    monkeypatch.setattr(twins, "_capture_deepseek_v4_architecture_graphs", lambda model, text: sentinel)
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda *_args, **_kwargs: pytest.fail("classic twins selected"))
+    assert twins.capture_in_model_graphs("org/deepseek@revision") is sentinel
+    with pytest.raises(ValueError, match="additional serving-twin widths"):
+        twins.capture_in_model_graphs("org/deepseek@revision", extra_widths=(64,))
+
+
+def test_classic_twin_capture_rejects_deepseek_split(monkeypatch):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: SimpleNamespace(model_type="deepseek_v4"))
+    with pytest.raises(NotImplementedError, match="HCA/CSA compressors and hyper-connection"):
+        capture_twin_graphs("org/deepseek")
+
+
+def test_deepseek_in_model_provider_traces_full_layers_weight_free(tmp_path):
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    config = transformers.DeepseekV4Config(
+        vocab_size=64,
+        hidden_size=32,
+        moe_intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        head_dim=8,
+        q_lora_rank=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        n_shared_experts=1,
+        o_groups=1,
+        o_lora_rank=16,
+        index_n_heads=2,
+        index_head_dim=4,
+        index_topk=2,
+        hc_mult=2,
+        hc_sinkhorn_iters=2,
+        layer_types=["heavily_compressed_attention", "compressed_sparse_attention"],
+        mlp_layer_types=["hash_moe", "moe"],
+        compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
+        sliding_window=4,
+        swiglu_limit=10.0,
+        max_position_embeddings=64,
+    )
+    config.save_pretrained(tmp_path)
+    graphs = _capture_deepseek_v4_architecture_graphs(str(tmp_path), config, seq_len=8)
+    assert set(graphs) == {"layer8-heavily-compressed-hash-moe", "layer8-compressed-sparse-moe"}
+    assert all(graph.nodes and graph.outputs for graph in graphs.values())
+    assert all(tuple(graph.nodes[graph.inputs[0]].output.shape) == (1, 8, 2, 32) for graph in graphs.values())
+    assert all(tuple(graph.nodes["attention_mask"].output.shape) == (1, 1, 8, 8) for graph in graphs.values())
+    assert all(
+        any(type(node.op).__name__ == "CatOp" and tuple(node.output.shape) == (1, 1, 8, 10) for node in graph.nodes.values())
+        for graph in graphs.values()
+    )
 
 
 def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():

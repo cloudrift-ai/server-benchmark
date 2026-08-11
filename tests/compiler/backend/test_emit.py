@@ -10,10 +10,13 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
+from emmy.compiler.dtype import BOOL
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.loop import Assign, LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: F401
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
 from ..conftest import matmul_graph, requires_cuda
 
@@ -36,6 +39,15 @@ def _reduce_sum_graph() -> Graph:
     g.add_node(op=ReduceOp(op="sum", axis=-1), inputs=["x"], output=Tensor("y", (4, 1)), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
+    return g
+
+
+def _boolean_not_graph() -> Graph:
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("mask", (8,), BOOL), node_id="mask")
+    g.add_node(op=ElementwiseOp("bitwise_not"), inputs=["mask"], output=Tensor("inverted", (8,), BOOL), node_id="inverted")
+    g.inputs = ["mask"]
+    g.outputs = ["inverted"]
     return g
 
 
@@ -77,6 +89,17 @@ def test_pointwise_emits_correct_source():
     source = nodes[0].op.kernel_source
     assert "blockIdx.x" in source
     assert "x[" in source and "y[" in source
+
+
+def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
+    loop_graph = Pipeline.build(LOOP_PASSES).run(_boolean_not_graph())
+    loops = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(loops) == 1
+    next(stmt for stmt in loops[0] if isinstance(stmt, Assign) and stmt.op.name == "bitwise_not")
+
+    compiled = CudaBackend().compile(loop_graph)
+    source = _cuda_nodes(compiled)[0].op.kernel_source
+    assert "== 0.0f" in source
 
 
 def test_reduce_emits_k_loop():

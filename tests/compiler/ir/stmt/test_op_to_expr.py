@@ -63,6 +63,18 @@ def test_mask_ops_render():
     assert isinstance(w, TernaryExpr) and w.cond is a
 
 
+def test_boolean_bitwise_not_is_logical_zero_test_and_integer_fails_closed():
+    a = Literal(1.0, "float")
+    for dtype in (None, "f32", "bool"):
+        expr = op_to_expr("bitwise_not", [a], dtype=dtype)
+        assert isinstance(expr, BinaryExpr) and expr.op == "=="
+
+    import pytest
+
+    with pytest.raises(NotImplementedError, match="boolean masks only"):
+        op_to_expr("bitwise_not", [a], dtype="u32")
+
+
 def test_integer_ops_keep_integer_spelling_without_changing_mask_semantics():
     """Integer bit manipulation uses C integer operators; f32 masks stay logical."""
     a, b = Literal(7, "int"), Literal(3, "int")

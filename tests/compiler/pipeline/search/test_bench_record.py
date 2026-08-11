@@ -22,7 +22,7 @@ from emmy.compiler.pipeline.search.bench_record import (
 )
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
 from emmy.compiler.pipeline.search.db import SearchDB
-from tests.compiler.pipeline.search.conftest import node_row
+from tests.compiler.pipeline.search.helpers import node_row
 
 _GPU = "NVIDIA GeForce RTX 5090"
 

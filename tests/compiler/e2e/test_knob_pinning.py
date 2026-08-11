@@ -37,7 +37,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ..conftest import dyn_M, requires_cuda, requires_sm90
+from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
 
 
 def _build_norm_linear_graph(dims: dict, mode: str = "static"):

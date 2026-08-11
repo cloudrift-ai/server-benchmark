@@ -35,8 +35,7 @@ from emmy.compiler.ir.loop.ir import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.trace.torch import trace_module
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 # --------------------------------------------------------------------------- #
 # Shared harness: code → graph → compiled kernel, plus a torch reference.

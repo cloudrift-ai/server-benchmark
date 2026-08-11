@@ -13,8 +13,7 @@ from emmy.compiler.ir.frontend.ir import ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 torch = pytest.importorskip("torch")
 
@@ -326,9 +325,8 @@ def test_spell_honors_regex_ignore(tmp_path):
 
 
 def test_spell_pairs_non_weight_leaf_scale(tmp_path):
-    """The general ``<key>_scale`` pairing on a non-``.weight`` leaf — the gpt-oss 3-D expert
-    param convention (``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``): the
-    constant is spelled with the scale constant reading the ``_scale`` key."""
+    """A 3-D expert parameter can pair with a sibling ``<key>_scale`` tensor even though the
+    parameter name does not end in ``.weight``."""
     qc = {
         "quant_method": "compressed-tensors",
         "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 8, "strategy": "channel"}}},
@@ -541,9 +539,8 @@ def test_load_dequantized_state_dict(tmp_path):
 
 
 def test_load_dequantized_state_dict_expert_param_pairing(tmp_path):
-    """The general pairing on gpt-oss's 3-D expert params: ``…experts.gate_up_proj`` (fp8,
-    (E, in, out)) + ``…experts.gate_up_proj_scale`` (bf16, (E, 1, out)) dequantizes and the
-    scale is consumed; the sibling ``_bias`` passes through as values."""
+    """A 3-D expert parameter and per-output-channel scale dequantize together, consume the
+    scale entry, and leave the sibling bias as ordinary values."""
     from emmy.compiler.loader.quant import load_dequantized_state_dict
 
     qc = {

@@ -96,7 +96,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
-  golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
+  serving-image release gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
   Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
   `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
   The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
@@ -167,7 +167,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   out of the backing before post overwrites it, rider steps (all tiers alias one backing base) are eager by
   construction with the chunk head CLONED before the decode tail runs, and the host `rebind` path — which
   re-takes arena views and unwinds the rewire — is never mixed with the device path on one runner (the oracle
-  and the device server are separate runners; `tests/serving/test_gen_prefill_device_gpu.py` pins both the
+  and the device server are separate runners; `tests/serving/generation/test_gen_prefill_device_gpu.py` pins both the
   pointers and the two-phase discipline).
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
@@ -289,8 +289,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   projections are different shapes with different optimal configs. Re-capture whenever a tracer/recognizer change
   alters the graphs: the DB's evidence is keyed to structural signatures, and stale evidence applied to new graphs
   serves worse than either coherent state. Whether the *recorded goldens* still deploy against the current twins is
-  checked continuously: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and audits per fork
-  (MATCH / DRIFT / GAP), and `tests/compiler/test_golden_drift_gate.py` runs the same audit in CI.
+  checked before a serving-image release: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and
+  audits per fork (MATCH / DRIFT / GAP); `make serve-goldens` runs the strict release gate for the pinned model,
+  revision, card, and serving widths.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:
@@ -418,7 +419,7 @@ miscomputed batch>1, which is why only the static mode existed; the root cause w
 **TMA descriptors baking allocation-shaped strides** (a batch axis above the symbolic seq axis has a `seq_len`-dependent
 global stride, so batch row 0 was right and every higher row read shifted garbage — invisible at `batch_cap = 1`).
 Fixed in `backend/cuda/program.py`: symbolic-src descriptors re-encode at the RESOLVED shape per sym key, cached
-beside the per-S graph cache (`_descs_now`); `tests/serving/test_runner_batched_gpu.py` pins both modes per row
+beside the per-S graph cache (`_descs_now`); `tests/serving/generation/test_runner_batched_gpu.py` pins both modes per row
 against eager, and the batch {2, 4, 32} × seq matrix in `tests/compiler/ir/test_dynamic_shapes.py` pins the kernels.
 
 ## Execution model (v2: captured graphs) and its known costs
@@ -638,10 +639,10 @@ list does not get the flooring treatment described above, so it can violate the 
 ## Testing
 
 - `tests/serving/test_packed.py` — pure span-split logic, runs everywhere.
-- `tests/serving/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
+- `tests/serving/generation/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
   contract vLLM's MTP drafter shares off the target, that it gathers RAW rows from the shared tied weight, and that an
   untied target raises. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
-- `tests/serving/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the three sources
+- `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the three sources
   (`lm_head.weight`, the tied embed alias, an EXL3-coded head decoded off a synthetic checkpoint) and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
@@ -652,7 +653,8 @@ list does not get the flooring treatment described above, so it can violate the 
   `outputs(sym_values)`); run under `compute-sanitizer` in dev to confirm zero illegal accesses. Plus
   `test_capture_replay_device_io_matches_eager` — the zero-copy device path (`upload_prefix_device` + cupy-in,
   `output_prefix_device` + `torch.from_dlpack`-out) matches eager, the primitive behind the runner's torch I/O.
-- `tests/serving/test_runner_batched_gpu.py` — `perf`-marked: a 1-layer static `(batch, S)` trunk wrapped in a runner;
+- `tests/serving/generation/test_runner_batched_gpu.py` — `perf`-marked: a 1-layer static `(batch, S)` trunk wrapped
+  in a runner;
   `forward_hidden_states_batched` runs several different-length sequences in one padded batched forward and matches
   eager per row (the causal-independence-under-padding gate for `EMMY_SERVING_STATIC`).
 - `scripts/compare_embeddings.py` — the accuracy gate against a *server*: embeds a fixed text set through two

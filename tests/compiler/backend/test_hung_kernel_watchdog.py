@@ -17,7 +17,7 @@ import subprocess
 import sys
 import textwrap
 
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 

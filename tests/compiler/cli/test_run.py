@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def _randn(shape: str, dtype, scale: float | None = None) -> str:
@@ -105,8 +105,7 @@ def test_hint_sized_inputs_tiles_symbolic_axes():
 
 def test_hint_sized_inputs_static_graph_is_noop():
     from emmy.commands.run import _hint_sized_inputs
-
-    from ..conftest import matmul_graph
+    from tests.compiler.helpers import matmul_graph
 
     a, b = torch.randn(4, 8), torch.randn(8, 4)
     args, kwargs, sym_env = _hint_sized_inputs(matmul_graph(4, 8, 4), (a, b), {})

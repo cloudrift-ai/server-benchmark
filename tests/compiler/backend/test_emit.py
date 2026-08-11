@@ -17,8 +17,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Assign, LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: F401
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-
-from ..conftest import matmul_graph, requires_cuda
+from tests.compiler.helpers import matmul_graph, requires_cuda
 
 
 def _pointwise_add_graph() -> Graph:

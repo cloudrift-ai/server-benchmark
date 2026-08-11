@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
@@ -25,6 +25,7 @@ from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 class _FlowSequence(list):
@@ -409,7 +410,7 @@ def load_golden_file(
 ) -> dict:
     source = Path(path)
     try:
-        document = yaml.safe_load(source.read_text())
+        document = yaml.load(source.read_text(), Loader=_SAFE_LOADER)
         validate_golden_file(document, validation=validation)
     except (OSError, yaml.YAMLError, ValueError) as exc:
         raise ValueError(f"invalid golden file {source}: {exc}") from exc
@@ -572,7 +573,27 @@ def _load_goldens() -> list[GoldenRecord]:
     return records
 
 
-GOLDEN_RECORDS: list[GoldenRecord] = _load_goldens()
+class _LazyGoldenRecords(Sequence[GoldenRecord]):
+    """Load the repository corpus only when a consumer asks for evidence."""
+
+    def __init__(self, loader: Callable[[], list[GoldenRecord]]) -> None:
+        self._loader = loader
+
+    @cached_property
+    def _records(self) -> tuple[GoldenRecord, ...]:
+        return tuple(self._loader())
+
+    def __getitem__(self, index: int | slice) -> GoldenRecord | tuple[GoldenRecord, ...]:
+        return self._records[index]
+
+    def __iter__(self) -> Iterator[GoldenRecord]:
+        return iter(self._records)
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+
+GOLDEN_RECORDS: Sequence[GoldenRecord] = _LazyGoldenRecords(_load_goldens)
 
 
 def goldens_by_name(name: str) -> list[GoldenRecord]:

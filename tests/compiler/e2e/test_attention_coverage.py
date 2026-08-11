@@ -29,7 +29,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from ..conftest import from_pretrained_or_skip, requires_cuda, requires_sm90
+from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda, requires_sm90
 
 
 class _Sdpa(torch.nn.Module):

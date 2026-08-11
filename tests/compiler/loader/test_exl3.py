@@ -21,8 +21,8 @@ from emmy.compiler.loader.exl3 import (
     pack_trellis,
     trellis_windows,
 )
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
+from tests.support.checkpoints import exl3_linear_tensors
 
 rng = np.random.default_rng(7)
 
@@ -369,31 +369,6 @@ def test_real_tensor_decode_statistics():
 _FOLD_RULE = "032_fold_constant_subgraphs"
 
 
-def _exl3_linear_tensors(base: str, n: int, k: int, K: int = 2, cb: int = 0):
-    """Mint one EXL3-coded linear: random windows packed into real trellis words, fp16
-    ``suh``/``svh`` at the encoder's padded extents (roundup to 128), plus the marker sibling
-    for ``cb``. Returns ``(tensors, ref)`` with ``ref`` the LOGICAL ``(n, k)`` fp16 weight
-    (decode → transpose → slice — the reference math for encode padding)."""
-    torch = pytest.importorskip("torch")
-
-    n_pad, k_pad = -(-n // 128) * 128, -(-k // 128) * 128
-    wins = rng.integers(0, 1 << 16, (k_pad // 16, n_pad // 16, 256)).astype(np.uint16)
-    tr = pack_trellis(wins, K)
-    suh = (rng.standard_normal(k_pad) * 0.01).astype(np.float16)
-    svh = rng.choice([-1.0, 1.0], n_pad).astype(np.float16)
-    tensors = {
-        f"{base}.trellis": torch.from_numpy(tr),
-        f"{base}.suh": torch.from_numpy(suh),
-        f"{base}.svh": torch.from_numpy(svh),
-    }
-    if cb == 1:
-        tensors[f"{base}.mcg"] = torch.tensor(0x7BAC1FED, dtype=torch.int32)  # value never read
-    elif cb == 2:
-        tensors[f"{base}.mul1"] = torch.tensor(0, dtype=torch.int32)
-    ref = fold_hadamard(decode_trellis(tr, cb), suh, svh).T[:n, :k]
-    return tensors, ref
-
-
 _EXL3_QC = {"quant_method": "exl3", "version": "0.0.5", "bits": 2.0, "head_bits": 6}
 
 
@@ -447,7 +422,7 @@ def _linear_input(graph):
 def _spelled_exl3(tmp_path, *, n=256, k=128, K=2, cb=0, dtype="f32"):
     from emmy.compiler.loader.quant import spell_trellis_constants
 
-    tensors, ref = _exl3_linear_tensors("layer", n, k, K=K, cb=cb)
+    tensors, ref = exl3_linear_tensors("layer", n, k, K=K, cb=cb)
     _write_exl3_checkpoint(tmp_path, tensors)
     g = _linear_graph((n, k), dtype=dtype)
     assert spell_trellis_constants(g, str(tmp_path)) == 1
@@ -518,7 +493,7 @@ def test_input_spelling_is_generic_and_matches_reference():
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import spell_trellis_inputs
 
-    tensors, ref = _exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    tensors, ref = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (3, 128), "f16"), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
@@ -648,7 +623,7 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     from emmy.compiler.pipeline.fork import flatten_leaves
     from emmy.compiler.pipeline.pipeline import Run
 
-    tensors, decoded = _exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
@@ -724,7 +699,7 @@ def test_spell_trellis_is_idempotent(tmp_path):
 def test_spell_trellis_noop_without_exl3_config(tmp_path):
     from emmy.compiler.loader.quant import spell_trellis_constants
 
-    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    tensors, _ref = exl3_linear_tensors("layer", 256, 128)
     _write_exl3_checkpoint(tmp_path, tensors, quant_config=None)
     g = _weight_graph((256, 128))
     assert spell_trellis_constants(g, str(tmp_path)) == 0
@@ -738,7 +713,7 @@ def test_spell_trellis_leaves_plain_weight_alone(tmp_path):
 
     from emmy.compiler.loader.quant import spell_trellis_constants
 
-    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    tensors, _ref = exl3_linear_tensors("layer", 256, 128)
     tensors["other.weight"] = torch.ones(8, 16, dtype=torch.float16)
     _write_exl3_checkpoint(tmp_path, tensors)
     g = _weight_graph((8, 16), source_path="other.weight")
@@ -749,7 +724,7 @@ def test_spell_trellis_leaves_plain_weight_alone(tmp_path):
 def test_spell_trellis_rejects_legacy_packed_signs(tmp_path):
     """Old checkpoints store packed ``su``/``sv`` sign words instead of ``suh``/``svh`` —
     unsupported; direct coded execution fails closed instead of materializing a weight."""
-    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    tensors, _ref = exl3_linear_tensors("layer", 256, 128)
     del tensors["layer.suh"], tensors["layer.svh"]
     _write_exl3_checkpoint(tmp_path, tensors)
     g = _linear_graph((256, 128))
@@ -763,7 +738,7 @@ def test_spell_trellis_shape_mismatch_fails_closed(tmp_path):
     """Sibling extents must be exactly the traced dims' roundups to 128."""
     from emmy.compiler.loader.quant import spell_trellis_constants
 
-    tensors, _ref = _exl3_linear_tensors("layer", 256, 128)
+    tensors, _ref = exl3_linear_tensors("layer", 256, 128)
     _write_exl3_checkpoint(tmp_path, tensors)
     g = _linear_graph((512, 128))  # traced n does not round up to the stored 256
     with pytest.raises(ValueError, match="storage geometry"):
@@ -809,7 +784,7 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources
 
-    tensors, _ref = _exl3_linear_tensors("layer", 128, 128, K=2, cb=2)
+    tensors, _ref = exl3_linear_tensors("layer", 128, 128, K=2, cb=2)
     _write_exl3_checkpoint(tmp_path, tensors)
     graph = _weight_graph((128, 128), dtype="f16")
     graph.add_node(InputOp(), [], Tensor("x", (1, 128), "f16"), node_id="x")
@@ -878,7 +853,7 @@ def test_load_dequantized_state_dict_exl3(tmp_path):
 
     from emmy.compiler.loader.quant import load_dequantized_state_dict
 
-    tensors, ref = _exl3_linear_tensors("layer", 192, 128)  # padded to (256, 128)
+    tensors, ref = exl3_linear_tensors("layer", 192, 128)  # padded to (256, 128)
     tensors["norm.weight"] = torch.ones(16, dtype=torch.float16) * 2
     _write_exl3_checkpoint(tmp_path, tensors)
     sd = load_dequantized_state_dict(tmp_path)
@@ -890,7 +865,7 @@ def test_load_dequantized_state_dict_exl3(tmp_path):
 def test_quantized_checkpoint_dir_detects_exl3(tmp_path):
     from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
 
-    tensors, _ref = _exl3_linear_tensors("layer", 128, 128)
+    tensors, _ref = exl3_linear_tensors("layer", 128, 128)
     quantized = tmp_path / "exl3"
     plain = tmp_path / "plain"
     quantized.mkdir()
@@ -947,7 +922,7 @@ def _tiny_exl3_checkpoint(dirpath):
         if name.endswith(".weight") and t.ndim == 2 and ".layers." in name:  # the linear projections
             base = name[: -len(".weight")]
             n, k = t.shape
-            coded, ref = _exl3_linear_tensors(base, n, k)
+            coded, ref = exl3_linear_tensors(base, n, k)
             tensors.update(coded)
             ref_sd[name] = torch.from_numpy(ref.astype(np.float32))
         else:

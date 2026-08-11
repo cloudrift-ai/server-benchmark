@@ -15,8 +15,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 

@@ -29,9 +29,9 @@ from emmy.compiler.pipeline.search.data.freeze import (
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-from tests.compiler.pipeline.search.conftest import GPU_5090 as _GPU
-from tests.compiler.pipeline.search.conftest import impossible_staged_feats
-from tests.compiler.pipeline.search.conftest import node_row as _row
+from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
+from tests.compiler.pipeline.search.helpers import impossible_staged_feats
+from tests.compiler.pipeline.search.helpers import node_row as _row
 
 _GPU2 = "NVIDIA GeForce RTX 4090"
 
@@ -65,7 +65,7 @@ def _feats(*, opt: float = 3.0, cc: float = 120.0, **knobs) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_reason_keeps_ok_leaf() -> None:
+def test_reason_keeps_ordinary_leaf() -> None:
     assert freeze_reason(_row("k", value_us=500.0, features=_feats())) is None
 
 
@@ -73,10 +73,6 @@ def test_reason_keeps_bench_fail_leaf_as_negative() -> None:
     # A fail's value_us is the watchdog sentinel — absurd as a latency, but the row is
     # a durable "doesn't build/launch here" negative and must freeze.
     assert freeze_reason(_row("k", value_us=9.17, features=_feats(), status="bench_fail")) is None
-
-
-def test_reason_keeps_ordinary_tune_rows() -> None:
-    assert freeze_reason(_row("k", value_us=500.0, features=_feats())) is None
 
 
 def test_reason_drops_rows_without_regime_stamps() -> None:
@@ -97,8 +93,8 @@ def test_reason_drops_stale_feat_ver() -> None:
 
 
 def test_reason_drops_implausible_value() -> None:
-    # The conftest f16 mlp_down extents at 9.17 µs imply ~6500 TFLOP/s.
-    from tests.compiler.pipeline.search.conftest import F16_MATMUL_FEATS
+    # The shared f16 mlp_down extents at 9.17 µs imply ~6500 TFLOP/s.
+    from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS
 
     feats = {"H_cc": 120.0, "H_opt": 3.0, **F16_MATMUL_FEATS}
     assert "implausible value" in freeze_reason(_row("k", value_us=9.17, features=feats))

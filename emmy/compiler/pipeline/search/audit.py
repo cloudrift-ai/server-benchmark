@@ -18,7 +18,7 @@ consultation would silently never fire) and targets the golden file's own card v
 
 Consumers: ``emmy eval golden --in-model`` (re-traces a model's serving twins weight-free
 via ``emmy.serving.twins`` and audits every card whose goldens are tagged with that
-model), the checked-in-fixture CI gate under ``tests/compiler``, and
+model), the serving-image release gate (``scripts/check_serving_goldens.py``), and
 ``scripts/diagnostics/audit_golden_match.py`` (explicit graph JSONs).
 """
 

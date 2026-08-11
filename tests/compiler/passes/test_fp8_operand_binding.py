@@ -30,8 +30,7 @@ from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
 from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
 from emmy.compiler.pipeline.pipeline import LoweringError
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 # ===================================================================
 # The decode trait — the registration a new storage format extends

@@ -20,8 +20,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import Pipeline
-
-from ..conftest import from_pretrained_or_skip, requires_cuda
+from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda
 
 
 def _seq_len_dim(*, min: int = 5, max: int = 4096):
@@ -475,7 +474,7 @@ def test_qwen_batched_dynamic_matches_eager_b2():
     """Batched symbolic-seq accuracy matrix (WS1.1 exit): the masked-tile kernels
     must be batch-correct — batch {2, 4, 32} × seq {17, 32, 512} on the dynamic-seq
     trace (the serving symbolic path at ``batch_cap > 1``). The static-batch side of
-    the matrix lives in ``tests/serving/test_runner_batched_gpu.py``. Historically
+    the matrix lives in ``tests/serving/generation/test_runner_batched_gpu.py``. Historically
     the symbolic-seq kernels miscomputed batch>1 (every row wrong — the reason the
     serving runner was hard-wired to batch 1); these pin the fixed behavior."""
     _batched_dynamic_case(2, (32, 17, 512))

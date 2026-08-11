@@ -33,8 +33,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-
-from ..conftest import dyn_M, requires_cuda, requires_sm90
+from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
 
 
 def _has_cuda() -> bool:
@@ -901,26 +900,27 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
 
 
 def test_f16acc_enumeration_gate(monkeypatch):
-    """The precision-gated enumeration (no GPU): unset, no f16acc forks anywhere; ``FAST_MATH``
-    offers them on the consumer dies (sm_120) but NOT the datacenter parts (sm_90, full-rate
-    f32-accumulate); the precise ``F16_MMA_F32_ACC`` pin is authoritative both ways."""
+    """The precision gate is target-aware and one enabled enumeration offers f16acc rows."""
     from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _f16acc_allowed  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
 
-    def offers(cc, **env) -> bool:
+    def allowed(cc, **env) -> bool:
         for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
             monkeypatch.delenv(var, raising=False)
         for var, val in env.items():
             monkeypatch.setenv(var, val)
-        # A fresh graph per gate state — enumeration caches rows per graph object.
-        rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target(cc))
-        return any("mma_m16n8k16_f16_f16/" in str(v) for r in rows for kk, v in r.items() if kk.startswith("TILE"))
+        return _f16acc_allowed(Context.from_target(cc))
 
-    assert not offers((12, 0)), "gate unset: no f16acc forks"
-    assert offers((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH on a consumer die must offer the forks"
-    assert not offers((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH must not offer them on a full-rate f32-acc target"
-    assert offers((9, 0), EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
-    assert not offers((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
+    assert not allowed((12, 0)), "gate unset: no f16acc forks"
+    assert allowed((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH on a consumer die must offer the forks"
+    assert not allowed((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH must not offer them on a full-rate f32-acc target"
+    assert allowed((9, 0), EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
+    assert not allowed((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
+
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
+    rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target((12, 0)))
+    assert any("mma_m16n8k16_f16_f16/" in str(value) for row in rows for key, value in row.items() if key.startswith("TILE"))
 
 
 def _mma_qk_graph(B: int, H: int, M: int, N: int, D: int):

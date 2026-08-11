@@ -148,7 +148,21 @@ def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
     from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key  # noqa: PLC0415
 
     base = dict(structural_features)
-    return _fork_shape_key([{**base, **knobs}], base=base)
+    key = _fork_shape_key([{**base, **knobs}], base=base)
+    # Legacy dynamic-flash rows predate axis-keyed ``TILE@dd`` / ``TILE@pj`` knobs. Main's
+    # old fusion boundary left enough exp-family histogram on the consumer for ShapeKey's
+    # fallback classifier; gate-free fusion moves that histogram into the probability producer.
+    # The flash recognizer is the stronger fact, so target derivation stamps this marker when it
+    # certifies the consumer+producer unit. Keep those persisted rows on their stable flash key.
+    if structural_features.get("S_flash_certified"):
+        key = ShapeKey(
+            free_prod=key.free_prod,
+            reduce_max=0 if key.is_dyn else key.reduce_max,
+            is_warp=key.is_warp,
+            is_dyn=key.is_dyn,
+            kind="flash",
+        )
+    return key
 
 
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
@@ -565,13 +579,17 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
             node = lowered.nodes[node_id]
             if not isinstance(node.op, LoopOp) or node_id in absorbed_ids:
                 continue
-            absorbed = [lowered.nodes[producer] for producer in fused_producer_ids(lowered, node) if producer in lowered.nodes]
+            fused = fused_producer_ids(lowered, node)
+            absorbed = [lowered.nodes[producer] for producer in fused if producer in lowered.nodes]
             origins = frozenset(origin for item in (node, *absorbed) for origin in provenance.get(item) if origin in record.program.nodes)
-            features = tuple(
-                sorted(
-                    (name, float(value)) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
-                )
-            )
+            feature_map = {
+                name: float(value)
+                for name, value in (getattr(node.op, "knobs", {}) or {}).items()
+                if name.startswith(STRUCT_PREFIX)
+            }
+            if fused:
+                feature_map["S_flash_certified"] = 1.0
+            features = tuple(sorted(feature_map.items()))
             if origins and features:
                 target_index.setdefault(origins, set()).add(features)
         _PROGRAM_TARGET_CACHE[program_key] = target_index

@@ -87,6 +87,15 @@ def test_repository_index_loads_once_on_first_access() -> None:
     assert calls == 1
 
 
+def test_legacy_dynamic_attention_record_stays_flash_keyed() -> None:
+    """Gate-free fusion moves exp histograms off the P×V consumer, but recognition still
+    certifies the unit; old bare-TILE dynamic records must retain their stable flash key."""
+    document = load_golden_file(_GOLDENS / "rtx5090_sm120.yaml", validation=GoldenFileValidation.REPOSITORY)
+    record = next(r for r in load_golden_records(document) if r.name == "attention.hd64.dynM" and "TILE" in r.knobs)
+    assert not any(key.startswith("TILE@") for key in record.knobs)
+    assert record.shape_key.kind == "flash"
+
+
 def test_working_states_and_repository_requires_measurements() -> None:
     document = load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY)
     inventory = copy.deepcopy(document)

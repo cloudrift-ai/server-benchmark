@@ -3,9 +3,10 @@
 The ``010_recognize`` pass calls :func:`try_flash`; everything flash lives here. Two
 halves:
 
-- **Recognition** — :func:`try_flash` matches a softmax-then-P@V kernel (+ its clean
-  scaled-QK producer) via ``_recognize`` / ``_extract_qk`` / ``_classify_rowmax``, and
-  emits the fused fragment.
+- **Recognition** — :func:`try_flash` matches the SDPA unit across either loop-fusion
+  boundary: the original softmax-then-P@V kernel + scaled-QK producer, or gate-free fusion's
+  P@V root + softmax producer containing repeated QK contractions. ``_recognize`` feeds both
+  forms through the same extraction, eligibility, and fragment construction path.
 - **Construction** — the ``flash_shape_eligible`` / ``gqa_group`` predicates and the fragment
   builder ``build_flash_frag``. It doesn't hand-assemble a kernel body — it builds the high-level
   **λ-spelled structural-node tree** (``ir/tile/ir``): flash is ``Fold.projection(body=[O/l projection],
@@ -27,9 +28,8 @@ halves:
   ``_factor`` contraction path as any other mma matmul. Until that lands the whole way through the one
   emitter, flash lowers **only** on the scalar tier below — there is no divergent flash codegen path.
 
-``is_flash_score_producer`` lets ``010_recognize`` defer the general lift of a scaled-QK
-score producer until its softmax-then-P@V consumer has fused (the fusion reads the
-producer's Q/K as plain ``Load``\\ s, so it must stay a ``LoopOp`` until then).
+``is_flash_score_producer`` lets ``010_recognize`` defer the general lift of a standalone
+scaled-QK score producer until its softmax-then-P@V consumer has fused.
 
 Layout-agnostic on BOTH sides. The input loads permute the canonical ``(batch…, seq, last)`` index
 back into each operand's own traced slot order (``_permute_idx`` — HF's per-layer Q/K/V arrive
@@ -40,10 +40,12 @@ grid-order store mis-strides a non-canonical output (all elements alias, the res
 
 (Online softmax — flash's softmax-stats half without the P@V — lives in ``_softmax``.)
 
-Scope is the **clean** scaled-QK producer (Q/K recoverable as plain ``Load``\\ s). A
-fused score producer whose Q/K are computed SSA — RoPE'd QK — is NOT recognized as
-flash (it falls back to its un-fused tiers); a producer-splicing builder for that case
-was removed rather than kept half-converted to the op tree.
+Q/K may be plain loads, packed affine views, or closed computed operand edges with one
+λ-representable statistic reduce (the existing computed-contraction spelling, covering fused
+RMSNorm). An arbitrary score program — for example an unclosed or non-map RoPE cone — still
+declines rather than being approximated. A pure V map cone is factored back into a canonical
+workspace by the same fragment so the expectation contraction retains its materialized,
+stageable B operand.
 
 The fragment fuses scaled-dot-product attention into ONE kernel that tiles the KV
 (reduce) axis and never materializes the ``[S_q, S_k]`` score matrix. The scalar tier
@@ -78,6 +80,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim
@@ -87,9 +90,12 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.carrier import exp_combine_states
 from emmy.compiler.ir.tile import Channel, Fold, Placement, Store, TileOp
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Node
@@ -214,6 +220,9 @@ def build_flash_frag(
     raw_shapes: tuple | None = None,
     out_index: tuple | None = None,
     scale: float | None = None,
+    operand_edges: tuple[Load | Fold | None, Load | Fold | None] = (None, None),
+    input_tensors: dict[str, Tensor] | None = None,
+    materialized_v: Fold | None = None,
 ) -> Graph | None:
     """Build the fragment graph holding the fused flash ``TileOp`` (+ its scale /
     -inf constants), or ``None`` when the root's output layout can't be reproduced on the grid
@@ -236,7 +245,13 @@ def build_flash_frag(
     they take precedence over ``layouts``. ``raw_shapes`` are the operands' traced shapes for
     the fragment's input declarations.
     ``scale`` is the score producer's actual scale (an SDPA's captured ``scale=`` kwarg
-    survives decomposition as the producer's scale constant); ``None`` = ``1/sqrt(head_dim)``."""
+    survives decomposition as the producer's scale constant); ``None`` = ``1/sqrt(head_dim)``.
+    ``operand_edges`` optionally supplies already-canonical Q/K operand nodes recovered
+    from inlined producers. A plain edge is a ``Load``; a computed edge is the existing
+    structural ``Fold`` spelling (for example an RMSNorm statistic + per-element projection).
+    ``input_tensors`` declares every original graph buffer those edges read. ``materialized_v``
+    is an inlined pure V cone that the fragment factors into a canonical feeder workspace before
+    flash, preserving the expectation contraction's materialized/stageable operand."""
     batch = [_static(d) for d in q_shape[:-2]]
     head_dim, d_v = _static(q_shape[-1]), _static(v_shape[-1])
     s_q_dim, s_k_dim = q_shape[-2], k_shape[-2]  # Dim instances — static int or symbolic seq_len
@@ -275,6 +290,7 @@ def build_flash_frag(
         mask_shape=mask_shape,
         layouts=layouts,
         access_indices=access_indices,
+        operand_edges=operand_edges,
         out_store=out_store,
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
@@ -286,11 +302,26 @@ def build_flash_frag(
 
     frag = Graph()
     in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
-    for nid, shp in zip((q_id, k_id, v_id), in_shapes, strict=True):
+    declared = {nid: Tensor(nid, shp, out.dtype) for nid, shp in zip((q_id, k_id, v_id), in_shapes, strict=True)}
+    if mask_buf is not None:
+        declared[mask_buf] = Tensor(mask_buf, mask_shape, out.dtype)
+    declared.update(input_tensors or {})
+    external_reads = tuple(n for n in flash_op.external_reads() if n not in {"_flash_scale", "_flash_ninf"})
+    materialized_reads = (
+        tuple(dict.fromkeys(stmt.input for stmt in Body(tuple(materialized_v.lower())).iter() if isinstance(stmt, Load)))
+        if materialized_v is not None
+        else ()
+    )
+    boundary_reads = tuple(dict.fromkeys((*external_reads, *materialized_reads)))
+    for nid in boundary_reads:
+        if materialized_v is not None and nid == v_id:
+            continue
+        tensor = declared.get(nid)
+        if tensor is None:
+            return None
         if nid not in frag.nodes:
-            frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, shp, out.dtype), node_id=nid)
-    inputs = list(dict.fromkeys((q_id, k_id, v_id)))
-    inputs.append("_flash_scale")
+            frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, tensor.shape, tensor.dtype), node_id=nid)
+    inputs = list(external_reads)
     frag.add_node(
         # fp32 constant: the score scale accumulates into the fp32 carrier, so a half-precision
         # ``_flash_scale`` would only add an ``__half2float`` at every use (and round ``1/√d`` to fp16).
@@ -299,9 +330,7 @@ def build_flash_frag(
         output=Tensor("_flash_scale", (1,), F32),
         node_id="_flash_scale",
     )
-    if mask_buf is not None:
-        frag.add_node(op=InputOp(), inputs=[], output=Tensor(mask_buf, mask_shape, out.dtype), node_id=mask_buf)
-        inputs.append(mask_buf)
+    inputs.append("_flash_scale")
     if causal or window is not None:
         # -inf bias for masked (key-after-query / outside-the-band) positions: exp(-inf)=0, so a
         # masked score contributes nothing to the streaming softmax / output.
@@ -309,6 +338,23 @@ def build_flash_frag(
             op=ConstantOp(name="_flash_ninf", value=-1e30), inputs=[], output=Tensor("_flash_ninf", (1,), out.dtype), node_id="_flash_ninf"
         )
         inputs.append("_flash_ninf")
+    if materialized_v is not None:
+        v_batch = [_static(d) for d in v_shape[:-2]]
+        if any(d is None for d in v_batch) or _static(v_shape[-1]) is None:
+            return None
+        v_grid = (
+            *(Axis(name=f"b{i}", extent=Dim(d)) for i, d in enumerate(v_batch)),
+            Axis(name="kv", extent=v_shape[-2]),
+            Axis(name="d", extent=v_shape[-1]),
+        )
+        v_store = Store(write=Write(output=v_id, index=tuple(Var(axis.name) for axis in v_grid), value=materialized_v.out))
+        v_tile = TileOp(op=materialized_v, name=v_id, place=Placement(free=v_grid), stores=(v_store,))
+        frag.add_node(
+            op=v_tile,
+            inputs=list(materialized_reads),
+            output=Tensor(v_id, v_shape, out.dtype),
+            node_id=v_id,
+        )
     frag.add_node(op=tile, inputs=inputs, output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag
@@ -341,6 +387,7 @@ def _flash_op(
     mask_shape: tuple | None = None,
     layouts: tuple = (None, None, None),
     access_indices: tuple[tuple, tuple, tuple] | None = None,
+    operand_edges: tuple[Load | Fold | None, Load | Fold | None] = (None, None),
     out_store: tuple[str, tuple] | None = None,
 ) -> Fold:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
@@ -375,10 +422,11 @@ def _flash_op(
     # ``source`` of the streaming kv :class:`Fold`. Per-cell scalar (``TilePlan()``): the
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.
+    q_edge, k_edge = operand_edges
     score_contraction = Fold.contraction(
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
-        a=Load(name="q_e", input=q_buf, index=q_idx),
-        channels=(Channel(b=Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),
+        a=q_edge if q_edge is not None else Load(name="q_e", input=q_buf, index=q_idx),
+        channels=(Channel(b=k_edge if k_edge is not None else Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),
     )
     score_post = [
         Load(name="scale_c", input="_flash_scale", index=()),
@@ -850,40 +898,458 @@ def _classify_rowmax(graph: Graph, lp: Loop) -> tuple[str, bool, int | None, str
     return None
 
 
-def _recognize(graph: Graph, node: Node) -> tuple[str, str, bool, int | None, str | None] | None:
-    """If ``node`` is a softmax-then-P@V kernel, return ``(x_buf, v_buf, causal, window,
-    mask_buf)`` — the score buffer the rowmax reduces, the P@V's V operand, and the
-    softmax-side masks (if any). Q/K recovery is left to the caller."""
+@dataclass(frozen=True)
+class _FlashMatch:
+    """The one flash recognition result, independent of where fusion left its boundary.
+
+    ``inline`` is ``None`` for the original score-buffer → softmax/P×V form. When the generic
+    loop merger has instead folded the repeated score reads into the softmax producer, it is
+    ``(m_var, kv_var, rowmax_loop)`` and ``score`` names that probability producer itself.
+    Both forms continue through the same Q/K extraction, eligibility, and fragment builder.
+    """
+
+    score: Node
+    v_id: str
+    causal: bool
+    window: int | None
+    mask_buf: str | None
+    inline: tuple[str, str, Loop] | None = None
+    v_inline: tuple[Loop, tuple[Stmt, ...], str, Load] | None = None
+
+
+def _pv_loads(graph: Graph, node: Node) -> tuple[Load, Load, Loop, tuple[Stmt, ...], str] | None:
+    """Return the probability load and V cone for a bare P×V root.
+
+    The probability side is identified by provenance, not operand order: its producer is a
+    ``LoopOp`` containing ``exp``. Its product argument may include the consumer-side reciprocal
+    normalization (the sliding-window split leaves ``Σexp`` beside P×V). The V side may be a
+    direct load or a closed pure-map cone; :func:`try_flash` factors the latter into a canonical
+    feeder workspace so the expectation operand stays materialized and stageable.
+    """
+    if not isinstance(node.op, LoopOp):
+        return None
+    writes = [s for s in node.op.body.iter() if isinstance(s, Write)]
+    if len(writes) != 1:
+        return None
+    d_var = _var_at(writes[0].index, -1)
+    if d_var is None:
+        return None
+    for lp in _accum_loops(node.op):
+        acc = next(
+            (s for s in lp.body if isinstance(s, Accum) and s.name == writes[0].value and _is_sum(s)),
+            None,
+        )
+        if acc is None:
+            continue
+        product = _def(lp.body, acc.value)
+        if not isinstance(product, Assign) or not product.op.semiring_product or len(product.args) != 2:
+            continue
+        sides = [(arg, map_cone(list(lp.body), arg)) for arg in product.args]
+        if any(not cone for _arg, cone in sides):
+            continue
+        probs = [
+            (arg, cone, ld)
+            for arg, cone in sides
+            for ld in cone
+            if isinstance(ld, Load)
+            and (p := graph.producer(ld.input)) is not None
+            and isinstance(p.op, LoopOp)
+            and any(isinstance(s, Assign) and s.op.name == "exp" for s in p.op.body.iter())
+        ]
+        if len(probs) != 1:
+            continue
+        prob_arg, _prob_cone, prob = probs[0]
+        value_side = next((side for side in sides if side[0] != prob_arg), None)
+        if value_side is None:
+            continue
+        value_arg, value_cone = value_side
+        value_loads = [
+            ld
+            for ld in value_cone
+            if isinstance(ld, Load) and _slot_of(ld.index, lp.axis.name) is not None and _slot_of(ld.index, d_var) is not None
+        ]
+        if len(value_loads) != 1:
+            continue
+        return prob, value_loads[0], lp, tuple(value_cone), value_arg
+    return None
+
+
+def _classify_inline_rowmax(lp: Loop, m_var: str) -> tuple[bool, int | None, str | None] | None:
+    """Classify the score/mask chain when Q×K is nested directly under rowmax.
+
+    Unlike :func:`_classify_rowmax`, the chain bottoms out at ``scale * <sum-Accum>`` rather
+    than a score-buffer ``Load``. The returned masks have the same meaning; Q/K recovery is a
+    separate structural check over the nested contraction.
+    """
+    max_accs = [s for s in lp.body if isinstance(s, Accum) and _is_rowmax(s)]
+    if len(max_accs) != 1:
+        return None
+    causal, window, mask_buf = False, None, None
+    coord_selects: list[Select] = []
+    cur = _def(lp.body, max_accs[0].value)
+    while isinstance(cur, Assign) and cur.op.name == "add" and len(cur.args) == 2:
+        a, b = cur.args
+        adef, bdef = _def(lp.body, a), _def(lp.body, b)
+        nxt = None
+        for sdef, mdef in ((adef, bdef), (bdef, adef)):
+            if isinstance(mdef, Select):
+                coord_selects.append(mdef)
+                nxt = sdef
+                break
+            if isinstance(mdef, Load):
+                if mask_buf is not None:
+                    return None
+                mask_buf = mdef.input
+                nxt = sdef
+                break
+        if nxt is None:
+            return None
+        cur = nxt
+
+    sum_names = {s.name for s in lp.body.iter() if isinstance(s, Accum) and _is_sum(s)}
+    if not (
+        isinstance(cur, Assign)
+        and cur.op.name == "multiply"
+        and len(cur.args) == 2
+        and sum(a in sum_names for a in cur.args) == 1
+    ):
+        return None
+    for select in coord_selects:
+        kind = _coord_select_kind(select, lp.axis.name, m_var)
+        if kind is None:
+            return None
+        if kind[0]:
+            causal = True
+        else:
+            window = kind[1]
+    return causal, window, mask_buf
+
+
+def _recognize(graph: Graph, node: Node) -> _FlashMatch | None:
+    """Recognize the supported loop-fusion spellings of the existing flash unit.
+
+    The original spelling has rowmax/softmax and P×V in ``node`` and reads a materialized
+    scaled-QK score buffer. Gate-free loop fusion produces the other spelling: ``node`` is the
+    bare P×V contraction and its probability input contains rowmax, softmax, and three repeated
+    inlined Q×K contractions. Small problems may fuse that producer into the root as well. This
+    function extends the same recognizer across those moved boundaries; it does not create a
+    second flash path.
+    """
     op = node.op
     if not isinstance(op, LoopOp):
         return None
     body = op.body
-    if not any(isinstance(s, Assign) and s.op.name == "exp" for s in body.iter()):
-        return None
     writes = [s for s in body.iter() if isinstance(s, Write)]
     if len(writes) != 1:
         return None
     out_write = writes[0]
-    x_buf: str | None = None
-    causal, window = False, None
-    mask_buf: str | None = None
-    for lp in _accum_loops(op):
-        cls = _classify_rowmax(graph, lp)
-        if cls is not None:
-            x_buf, causal, window, mask_buf = cls
-            break
-    if x_buf is None:
+    if any(isinstance(s, Assign) and s.op.name == "exp" for s in body.iter()):
+        x_buf: str | None = None
+        causal, window = False, None
+        mask_buf: str | None = None
+        for lp in _accum_loops(op):
+            cls = _classify_rowmax(graph, lp)
+            if cls is not None:
+                x_buf, causal, window, mask_buf = cls
+                break
+        if x_buf is not None:
+            v_buf: str | None = None
+            for lp in _accum_loops(op):
+                if not any(isinstance(s, Accum) and s.name == out_write.value and _is_sum(s) for s in lp.body):
+                    continue
+                others = {s.input for s in lp.body if isinstance(s, Load)} - {x_buf, mask_buf}
+                if len(others) == 1:
+                    v_buf = next(iter(others))
+            score = graph.producer(x_buf)
+            if v_buf is not None and score is not None:
+                return _FlashMatch(score, v_buf, causal, window, mask_buf)
+
+        # A small enough SDPA can cross the final boundary too: the root then contains all
+        # three repeated QK contractions, softmax, and P×V. Recover the direct V side of the
+        # output contraction and use the rowmax copy as the canonical score spelling.
+        m_var, d_var = _var_at(out_write.index, -2), _var_at(out_write.index, -1)
+        if m_var is not None and d_var is not None:
+            inline_pv: list[tuple[str, Loop]] = []
+            for lp in _accum_loops(op):
+                acc = next(
+                    (s for s in lp.body if isinstance(s, Accum) and s.name == out_write.value and _is_sum(s)),
+                    None,
+                )
+                if acc is None:
+                    continue
+                product = _def(lp.body, acc.value)
+                if not isinstance(product, Assign) or not product.op.semiring_product or len(product.args) != 2:
+                    continue
+                direct = [_def(lp.body, arg) for arg in product.args]
+                values = [
+                    ld
+                    for ld in direct
+                    if isinstance(ld, Load)
+                    and _slot_of(ld.index, lp.axis.name) is not None
+                    and _slot_of(ld.index, d_var) is not None
+                ]
+                if len(values) == 1:
+                    inline_pv.append((values[0].input, lp))
+            if len(inline_pv) == 1:
+                v_buf, pv_loop = inline_pv[0]
+                matches = []
+                for rowmax in _accum_loops(op):
+                    if rowmax.axis.extent != pv_loop.axis.extent:
+                        continue
+                    masks = _classify_inline_rowmax(rowmax, m_var)
+                    if masks is not None:
+                        matches.append((rowmax, masks))
+                if len(matches) == 1:
+                    rowmax, (causal, window, mask_buf) = matches[0]
+                    return _FlashMatch(node, v_buf, causal, window, mask_buf, (m_var, rowmax.axis.name, rowmax))
+
+    pv = _pv_loads(graph, node)
+    if pv is None:
         return None
-    v_buf: str | None = None
-    for lp in _accum_loops(op):
-        if not any(isinstance(s, Accum) and s.name == out_write.value and _is_sum(s) for s in lp.body):
+    prob, value, kv_loop, value_cone, value_arg = pv
+    score = graph.producer(prob.input)
+    if score is None or not isinstance(score.op, LoopOp):
+        return None
+    kv_pos = _slot_of(prob.index, kv_loop.axis.name)
+    if kv_pos is None or kv_pos == 0:
+        return None
+    m_var = _var_at(prob.index, kv_pos - 1)
+    if m_var is None or _slot_of(out_write.index, m_var) is None:
+        return None
+    matches = []
+    for rowmax in _accum_loops(score.op):
+        if rowmax.axis.extent != kv_loop.axis.extent:
             continue
-        others = {s.input for s in lp.body if isinstance(s, Load)} - {x_buf, mask_buf}
-        if len(others) == 1:
-            v_buf = next(iter(others))
-    if v_buf is None:
+        masks = _classify_inline_rowmax(rowmax, m_var)
+        if masks is not None:
+            matches.append((rowmax, masks))
+    if len(matches) != 1:
         return None
-    return x_buf, v_buf, causal, window, mask_buf
+    rowmax, (causal, window, mask_buf) = matches[0]
+    v_inline = (kv_loop, value_cone, value_arg, value) if len(value_cone) > 1 else None
+    return _FlashMatch(score, value.input, causal, window, mask_buf, (m_var, rowmax.axis.name, rowmax), v_inline)
+
+
+def _path_to_loop(body: Body, target: Loop) -> tuple[tuple[Body, Stmt], ...] | None:
+    """The enclosing ``(body, child)`` chain down to ``target`` (identity-based)."""
+    for stmt in body:
+        if stmt is target:
+            return ((body, stmt),)
+        for nested in stmt.nested():
+            suffix = _path_to_loop(nested, target)
+            if suffix is not None:
+                return ((body, stmt), *suffix)
+    return None
+
+
+def _qk_cell(rowmax: Loop, m_var: str, kv_var: str) -> tuple[Loop, list[Stmt], str, Load, list[Stmt], str, Load] | None:
+    """Recover one Q×K contraction cell nested under ``rowmax``.
+
+    Returns the contraction loop plus each product argument's pure backward cone, value name,
+    and sequence-bearing leaf load. A K-normalization statistic is not mistaken for Q×K because
+    it has no query-indexed side.
+    """
+
+    def index_vars(stmts: list[Stmt]) -> set[str]:
+        return {v for st in stmts if isinstance(st, Load) for expr in st.index for v in expr.free_vars()}
+
+    found = []
+    for lp in rowmax.body.iter_of_type(Loop):
+        accs = [s for s in lp.body if isinstance(s, Accum) and _is_sum(s)]
+        if len(accs) != 1:
+            continue
+        product = _def(lp.body, accs[0].value)
+        if not isinstance(product, Assign) or not product.op.semiring_product or len(product.args) != 2:
+            continue
+        sides = []
+        for value in product.args:
+            cone = map_cone(list(lp.body), value)
+            if not cone:
+                break
+            vars_ = index_vars(cone)
+            leaves = [
+                s
+                for s in cone
+                if isinstance(s, Load)
+                and _slot_of(s.index, lp.axis.name) is not None
+                and ((m_var in vars_) or (kv_var in vars_))
+            ]
+            if len(leaves) != 1:
+                break
+            sides.append((cone, value, leaves[0], m_var in vars_, kv_var in vars_))
+        if len(sides) != 2:
+            continue
+        q = next((s for s in sides if s[3] and not s[4]), None)
+        k = next((s for s in sides if s[4] and not s[3]), None)
+        if q is not None and k is not None:
+            found.append((lp, q[0], q[1], q[2], k[0], k[1], k[2]))
+    return found[0] if len(found) == 1 else None
+
+
+def _rewrite_members(
+    members: list[Stmt],
+    *,
+    prefix: str,
+    sigma: Sigma,
+    axis_name: str | None = None,
+    old_axis: str | None = None,
+    defined_names: set[str] | None = None,
+) -> list[Stmt]:
+    """Canonicalize axes and uniquify SSA names for one inline operand edge."""
+    defs = defined_names or {name for stmt in members for name in Body((stmt,)).definitions}
+
+    def rename(name: str) -> str:
+        return f"{prefix}_{name}" if name in defs else name
+
+    def axis_fn(axis: Axis) -> Axis:
+        if old_axis is not None and axis.name == old_axis:
+            return Axis(axis_name, axis.extent, window=axis.window)
+        return axis
+
+    return [stmt.rewrite(rename, sigma, axis_fn) for stmt in members]
+
+
+def _inline_operand_edge(
+    op: LoopOp,
+    qk_loop: Loop,
+    path: tuple[tuple[Body, Stmt], ...],
+    cone: list[Stmt],
+    value: str,
+    *,
+    prefix: str,
+    outer_sigma: dict[str, Var],
+) -> Load | Fold | None:
+    """Turn one inlined Q/K value into its existing materialized/computed operand edge.
+
+    A direct load stays a load. A pure map becomes a zero-axis computed edge. If the cell reads
+    one enclosing statistic, its dependence cone must contain exactly one λ-representable reduce;
+    that reduce and projection are stored with :func:`make_cone`, the same representation used by
+    the general contraction recognizer for RMSNorm→linear.
+    """
+    cell_defs = {name for stmt in cone for name in stmt.defines()}
+    pending = {name for stmt in cone for name in stmt.deps() if name not in cell_defs}
+    axes = set(op.body.axis_names)
+    pending -= axes
+    groups: list[tuple[Stmt, ...]] = []
+    for body, child in reversed(path):
+        if not pending:
+            break
+        prefix_body = body[: body.index(child)]
+        resolved = prefix_body.backward_cone(pending)
+        if resolved.members:
+            groups.append(resolved.members)
+        pending = set(resolved.external_reads) - axes
+    if pending:
+        return None
+    members = [stmt for group in reversed(groups) for stmt in group]
+    loops = [stmt for stmt in members if isinstance(stmt, Loop)]
+    if any(not isinstance(stmt, (Load, Assign, Loop)) for stmt in members):
+        return None
+    if len(loops) > 1:
+        return None
+
+    cell_sigma = Sigma({**outer_sigma, qk_loop.axis.name: Var("dd")})
+    all_defs = {name for stmt in (*members, *cone) for name in Body((stmt,)).definitions}
+    rewritten_cell = _rewrite_members(cone, prefix=prefix, sigma=cell_sigma, defined_names=all_defs)
+    renamed_value = f"{prefix}_{value}"
+    if not loops:
+        if len(rewritten_cell) == 1 and isinstance(rewritten_cell[0], Load) and renamed_value in rewritten_cell[0].names:
+            return rewritten_cell[0]
+        return Fold.projection(body=Body(tuple(rewritten_cell)))
+
+    stat_loop = loops[0]
+    stat_name = f"{prefix}_stat"
+    stat_sigma = Sigma({**outer_sigma, stat_loop.axis.name: Var(stat_name)})
+    rewritten_stat = _rewrite_members(
+        [stat_loop],
+        prefix=prefix,
+        sigma=stat_sigma,
+        axis_name=stat_name,
+        old_axis=stat_loop.axis.name,
+        defined_names=all_defs,
+    )[0]
+    assert isinstance(rewritten_stat, Loop)
+    stat = fold_from_loop(rewritten_stat)
+    if stat is None:
+        return None
+    sweep_src = [stmt for stmt in members if stmt is not stat_loop]
+    sweep = _rewrite_members(sweep_src, prefix=prefix, sigma=Sigma(outer_sigma), defined_names=all_defs)
+    return make_cone(rewritten_cell, "dd", stat=stat, sweep=tuple(sweep))
+
+
+def _extract_inline_qk(
+    score: Node,
+    m_var: str,
+    kv_var: str,
+    rowmax: Loop,
+) -> tuple[tuple[str, tuple[int, int], Load | Fold], tuple[str, tuple[int, int], Load | Fold], object] | None:
+    """Recover canonical Q/K operand edges from an inlined softmax producer."""
+    found = _qk_cell(rowmax, m_var, kv_var)
+    if found is None:
+        return None
+    qk_loop, q_cone, q_value, q_load, k_cone, k_value, k_load = found
+    q_layout = (_slot_of(q_load.index, m_var), _slot_of(q_load.index, qk_loop.axis.name))
+    k_layout = (_slot_of(k_load.index, kv_var), _slot_of(k_load.index, qk_loop.axis.name))
+    if None in (*q_layout, *k_layout):
+        return None
+    q_layout = (q_layout[0], q_layout[1])
+    k_layout = (k_layout[0], k_layout[1])
+
+    # Canonical batch variables are learned from Q's non-(seq,last) slots. K may carry the
+    # same head variable through an affine GQA ``head // group`` access, which substitution
+    # then preserves exactly on its computed edge.
+    outer_sigma: dict[str, Var] = {m_var: Var("m"), kv_var: Var("kv")}
+    batch_pos = [i for i in range(len(q_load.index)) if i not in q_layout]
+    for i, pos in enumerate(batch_pos):
+        expr = q_load.index[pos]
+        if isinstance(expr, Var):
+            outer_sigma[expr.name] = Var(f"b{i}")
+        elif expr.free_vars():
+            return None
+
+    path = _path_to_loop(score.op.body, qk_loop)
+    if path is None:
+        return None
+    q_edge = _inline_operand_edge(score.op, qk_loop, path, q_cone, q_value, prefix="flash_q", outer_sigma=outer_sigma)
+    k_edge = _inline_operand_edge(score.op, qk_loop, path, k_cone, k_value, prefix="flash_k", outer_sigma=outer_sigma)
+    if q_edge is None or k_edge is None:
+        return None
+    allowed = {*(f"b{i}" for i in range(len(batch_pos))), "m", "kv", "dd"}
+    for edge in (q_edge, k_edge):
+        for stmt in Body(tuple(edge.lower() if isinstance(edge, Fold) else (edge,))).iter():
+            if isinstance(stmt, Load) and any(expr.free_vars() - allowed - {"flash_q_stat", "flash_k_stat"} for expr in stmt.index):
+                return None
+    return (q_load.input, q_layout, q_edge), (k_load.input, k_layout, k_edge), qk_loop.axis.extent
+
+
+def _extract_inline_v(root: Node, found: tuple[Loop, tuple[Stmt, ...], str, Load]) -> tuple[tuple[int, int], Fold] | None:
+    """Canonicalize a closed pure-map V cone fused into the P×V root."""
+    pv_loop, cone, value, v_load = found
+    writes = [s for s in root.op.body.iter() if isinstance(s, Write)]
+    if len(writes) != 1:
+        return None
+    d_var = _var_at(writes[0].index, -1)
+    if d_var is None:
+        return None
+    layout = (_slot_of(v_load.index, pv_loop.axis.name), _slot_of(v_load.index, d_var))
+    if None in layout:
+        return None
+    layout = (layout[0], layout[1])
+    outer_sigma: dict[str, Var] = {pv_loop.axis.name: Var("kv"), d_var: Var("d")}
+    batch_pos = [i for i in range(len(v_load.index)) if i not in layout]
+    for i, pos in enumerate(batch_pos):
+        expr = v_load.index[pos]
+        if isinstance(expr, Var):
+            outer_sigma[expr.name] = Var(f"b{i}")
+        elif expr.free_vars():
+            return None
+    defs = {name for stmt in cone for name in stmt.defines()}
+    if {name for stmt in cone for name in stmt.deps() if name not in defs} - set(root.op.body.axis_names):
+        return None
+    rewritten = _rewrite_members(list(cone), prefix="flash_v", sigma=Sigma(outer_sigma), defined_names=defs)
+    if f"flash_v_{value}" not in {name for stmt in rewritten for name in Body((stmt,)).definitions}:
+        return None
+    return layout, Fold.projection(body=Body(tuple(rewritten)))
 
 
 def _fuse_degraded(root: Node, reason: str) -> None:
@@ -922,54 +1388,78 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     found = _recognize(graph, root)
     if found is None:
         return None
-    x_buf, v_id, causal, window, mask_buf = found
-    operands = (x_buf, v_id, *((mask_buf,) if mask_buf is not None else ()))
+    score_producer = found.score
+    v_id, causal, window, mask_buf = found.v_id, found.causal, found.window, found.mask_buf
+    operands = (score_producer.id, v_id, *((mask_buf,) if mask_buf is not None else ()))
     if any(graph.buffer(nid) is None for nid in operands):
         return None
 
-    # A clean scaled-QK producer (Q/K recoverable as plain Loads). A fused score
-    # producer (RoPE / GQA index inline) whose Q/K aren't plain loads is not handled —
-    # flash isn't recognized, and the softmax-then-P@V falls back to its un-fused tiers.
-    score_producer = graph.producer(x_buf)
-    qk = _extract_qk(score_producer)
-    packed = _extract_packed_qkv(score_producer, root, v_id) if qk is None else None
-    if qk is None and packed is None:
-        _fuse_degraded(root, "score producer's Q/K are not plain or packed affine loads (e.g. RoPE'd QK)")
+    # The same Q/K extraction follows either accepted boundary. The original score-buffer
+    # spelling uses plain/packed affine loads; the gate-free spelling recovers exact materialized
+    # or computed operand edges from the QK contraction nested in the softmax producer.
+    inline_qk = None
+    if found.inline is not None:
+        m_var, kv_var, rowmax = found.inline
+        inline_qk = _extract_inline_qk(score_producer, m_var, kv_var, rowmax)
+        qk = None
+    else:
+        qk = _extract_qk(score_producer)
+    packed = _extract_packed_qkv(score_producer, root, v_id) if qk is None and inline_qk is None else None
+    if qk is None and inline_qk is None and packed is None:
+        _fuse_degraded(root, "score producer's Q/K are not certifiable operand edges")
         return None
     # A mask stranded on the score producer (a coord Select / an additive bias add) would be
     # silently DROPPED by the canonical re-synthesis below — the fused kernel would attend
     # outside the mask. The fusion boundary keeps masks on the consumer (010_merge_loop_ops);
     # if one lands here anyway, decline the fuse rather than mis-attend.
-    if any(isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in graph.producer(x_buf).op.body.iter()):
+    if found.inline is None and any(
+        isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in score_producer.op.body.iter()
+    ):
         _fuse_degraded(root, "score producer carries mask stmts the flash re-synthesis cannot keep")
         return None
     access_indices = None
+    q_edge = k_edge = None
+    materialized_v = None
     if packed is not None:
         q_id, q_idx, k_idx, v_idx, q_shape, k_shape, v_shape = packed
         k_id = v_id = q_id
         q_layout = k_layout = v_layout = None
         access_indices = (q_idx, k_idx, v_idx)
+    elif inline_qk is not None:
+        (q_id, q_layout, q_edge), (k_id, k_layout, k_edge), _head_dim = inline_qk
+        if graph.buffer(q_id) is None or graph.buffer(k_id) is None:
+            return None
     else:
         (q_id, q_layout), (k_id, k_layout), _head_dim = qk
         if graph.buffer(q_id) is None or graph.buffer(k_id) is None:
             return None
     # The producer's actual scale — the flash re-synthesis re-applies it; assuming
     # 1/sqrt(d) here mis-scaled every explicit-``scale=`` SDPA (Gemma-nano's scale=1.0).
-    scale = _extract_scale(graph, graph.producer(x_buf))
+    scale = _extract_scale(graph, score_producer)
     if scale is None:
         _fuse_degraded(root, "score producer's scale constant is ambiguous")
         return None
     if packed is None:
-        v_layout = _extract_v_layout(root, v_id)
-        if v_layout is None:
-            _fuse_degraded(root, "P@V's V load is not plainly indexed")
-            return None
+        if found.v_inline is not None:
+            inline_v = _extract_inline_v(root, found.v_inline)
+            if inline_v is None:
+                _fuse_degraded(root, "P@V's computed V cone is not closed or plainly indexed")
+                return None
+            v_layout, materialized_v = inline_v
+        else:
+            v_layout = _extract_v_layout(root, v_id)
+            if v_layout is None:
+                _fuse_degraded(root, "P@V's V load is not plainly indexed")
+                return None
         # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
         # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
         # indices permute back to each operand's own slot order (``_permute_idx``).
         q_shape = _canon_shape(graph.buffer(q_id).shape, q_layout)
         k_shape = _canon_shape(graph.buffer(k_id).shape, k_layout)
         v_shape = _canon_shape(graph.buffer(v_id).shape, v_layout)
+        if materialized_v is not None:
+            v_id = f"{root.output.name}__flash_v"
+            v_layout = None  # the recognizer-minted workspace is canonical by construction
     group = gqa_group(q_shape, k_shape)
     if group is None:
         _fuse_degraded(root, "head axis not statically GQA-divisible")
@@ -1001,10 +1491,17 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         raw_shapes=(
             tuple(graph.buffer(q_id).shape),
             tuple(graph.buffer(k_id).shape),
-            tuple(graph.buffer(v_id).shape),
+            tuple(v_shape) if materialized_v is not None else tuple(graph.buffer(v_id).shape),
         ),
         out_index=out_index,
         scale=scale[0],
+        operand_edges=(q_edge, k_edge),
+        input_tensors={
+            nid: tensor
+            for nid in (*score_producer.inputs, *root.inputs, q_id, k_id, v_id, *((mask_buf,) if mask_buf is not None else ()))
+            if (tensor := graph.buffer(nid)) is not None
+        },
+        materialized_v=materialized_v,
     )
     if frag is None:
         _fuse_degraded(root, "output layout not reproducible on the flash grid")

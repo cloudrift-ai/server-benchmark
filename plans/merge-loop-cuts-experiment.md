@@ -2,7 +2,11 @@
 
 Date: 2026-08-10
 
-Base: `origin/main` at `9db3f1aa` (`Optimize DeepSeek V4 serving on V100 (#480)`)
+Base: `origin/main` at `2856a8e6` (`Prune model tests and speed up test infrastructure (#481)`)
+
+The initial baseline artifacts were captured on its parent `9db3f1aa`. #481 only
+changes golden loading and test infrastructure; after rebasing, structural
+replay still has zero errors and exactly matches that 1,196-entry baseline.
 
 Branch: `experiment/merge-loop-cuts`
 
@@ -47,7 +51,7 @@ Overall, 4 of 520 baseline entries are pin-only: that row,
 `gemma4_12b.mlp_down.m4096` pair. The latter three retain an offered deploy
 floor.
 
-## Gate-free result
+## Initial gate-free result
 
 The change is isolated to attention at the standalone-target level:
 
@@ -117,14 +121,47 @@ returns all 1,196 records to structural resolution and restores
 branch intentionally remains compute-cap-only. This is the smallest observed
 non-placement exception if the branch is hardened later.
 
+## Flash recognizer follow-up
+
+The existing `try_flash` / `_recognize` path was extended across the boundaries
+created by gate-free loop fusion. No second recognizer or pass was added. The
+same flash fragment builder now accepts:
+
+- the original materialized-score boundary;
+- a bare P×V root whose probability producer contains rowmax, softmax, and
+  repeated inlined Q×K contractions;
+- a fully fused small SDPA root, plus the split normalization boundary used by
+  banded attention;
+- exact computed Q/K operand edges, including fused RMSNorm cones. A closed
+  pure-map V cone is factored into a canonical feeder workspace so the flash
+  expectation operand remains materialized and stageable.
+
+That recovers all 59 initially broken SDPA entries without restoring a merge
+gate or adding a YAML pin. All 1,196 checked-in entries now resolve, and all
+1,158 target regimes derive exactly the same `ShapeKey` as the main baseline.
+Legacy dynamic flash records use a structural certification marker because
+their older bare `TILE` rows depended on an exp histogram that gate-free fusion
+moves from the consumer into its producer.
+
+The reduce-heavy-producer counterfactual above is therefore no longer needed
+for flash. The remaining observed gate-removal failures are outside attention:
+transcendental duplication across contraction columns and the tiny two-linear
+runtime miscompile.
+
 ## Verification
 
 - `ruff check` and `git diff --check`: pass.
-- Fusion, recognition-boundary, and placement-routing tests: 77 pass, 2 fail.
-  The expected experiment failures are transcendental duplication across a
-  contraction and loss of normed-GQA flash certification.
-- Golden config/drift tests: 25 pass, 2 reverse-ratchet failures. They report
-  newly closed expected gaps, not forward degradation.
+- The combined fusion, recognition-boundary, placement-routing, golden-config,
+  and golden-policy suite: 127 pass, 1 skip, and 1 expected experiment failure
+  (transcendental duplication across a contraction).
+- Attention coverage: all 123 attention cases pass. The sole failure in that
+  file is the unrelated tiny two-linear runtime miscompile.
+- All-card structural replay: 1,196/1,196 entries resolve; 1,158/1,158 regime
+  keys exactly match the baseline.
+- Serving-twin drift still reports the known gate-free Gemma MLP offer drift;
+  it is not caused by flash recognition.
+- #481's duration guard also reports slow tests absent from the newly pruned
+  `tests/durations.json`; those bookkeeping errors are independent of results.
 
 Raw, ignored artifacts are under `_tune/merge-loop-cuts/`, including
 `baseline.log`, the before/after all-card key maps, structural summaries, the

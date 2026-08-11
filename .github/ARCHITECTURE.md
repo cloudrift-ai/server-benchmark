@@ -59,7 +59,9 @@ detector constructs the supported Emmy command from validated experiment paths a
 All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
 recipes for the maintained set and up to three open-weight Hugging Face models without recipes for one exact GPU name
 and count. Discovery remains read-only: the workflow checks that the agent did not modify the checkout, then
-`.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest.
+`.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
+reasoning wrapper around the JSON object, but requires exactly the two expected top-level fields before validating
+their contents.
 
 The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
 public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,

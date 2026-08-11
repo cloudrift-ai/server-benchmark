@@ -23,9 +23,25 @@ def _extract_object(text: str) -> dict:
     if stripped.startswith("```"):
         lines = stripped.splitlines()
         stripped = "\n".join(lines[1:-1])
-    value = json.loads(stripped)
-    if not isinstance(value, dict):
-        raise ValueError("Discovery output must be one JSON object")
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        candidates = []
+        for start, character in enumerate(stripped):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(stripped, start)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and set(candidate) == {"maintained_models", "onboarding_models"}:
+                candidates.append(candidate)
+        if len(candidates) != 1:
+            raise ValueError("Discovery output must contain exactly one lifecycle JSON object") from None
+        value = candidates[0]
+    if not isinstance(value, dict) or set(value) != {"maintained_models", "onboarding_models"}:
+        raise ValueError("Discovery lifecycle object must contain exactly maintained_models and onboarding_models")
     return value
 
 

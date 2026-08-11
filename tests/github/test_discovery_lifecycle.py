@@ -60,6 +60,26 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     assert "`org/new-model`" in (tmp_path / "summary.md").read_text()
 
 
+def test_extracts_one_lifecycle_object_from_reasoning_text():
+    text = """Analysis before the requested result.
+```json
+{"maintained_models": ["org/ready"], "onboarding_models": []}
+```
+"""
+
+    assert discovery_lifecycle._extract_object(text) == {
+        "maintained_models": ["org/ready"],
+        "onboarding_models": [],
+    }
+
+
+def test_rejects_extra_top_level_manifest_fields():
+    text = json.dumps({"maintained_models": [], "onboarding_models": [], "notes": "not allowed"})
+
+    with pytest.raises(ValueError, match="contain exactly"):
+        discovery_lifecycle._extract_object(text)
+
+
 def test_obsolete_recipe_can_become_maintained_again(tmp_path):
     recipe = _recipe(tmp_path, "old", "org/old", tags=["obsolete"])
     selection = tmp_path / "selection.json"

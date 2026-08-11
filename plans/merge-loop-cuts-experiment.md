@@ -2,11 +2,10 @@
 
 Date: 2026-08-10
 
-Base: `origin/main` at `2856a8e6` (`Prune model tests and speed up test infrastructure (#481)`)
+Base: `origin/main` at `fcbc880f` (`Unify serving golden realizations (#483)`)
 
-The initial baseline artifacts were captured on its parent `9db3f1aa`. #481 only
-changes golden loading and test infrastructure; after rebasing, structural
-replay still has zero errors and exactly matches that 1,196-entry baseline.
+The historical all-card comparison below was captured before #483. The rebased branch's
+RTX 5090 inventory remains 520 recorded realizations, now unified into 472 tune regimes.
 
 Branch: `experiment/merge-loop-cuts`
 
@@ -147,6 +146,25 @@ The reduce-heavy-producer counterfactual above is therefore no longer needed
 for flash. The remaining observed gate-removal failures are outside attention:
 transcendental duplication across contraction columns and the tiny two-linear
 runtime miscompile.
+
+## RTX 5090 retune and cleanup
+
+After rebasing on #483, all 472 regimes in the four canonical RTX 5090 files were swept
+(52 generic, 397 Gemma 4, 10 Laguna, 13 OLMoE) with four O1 candidates each. Repeated O3
+A/B replay promoted two Gemma pointwise schedules: `cut_combine.m8` and
+`cut_cone_scale.m32` both switch from `TILE=f4` to untiled, measuring about 0.795 us versus
+0.858 us. Flash replay remains healthy: `attention.hd64` measures 9.6 us standard / 8.3 us
+fast-math and normalized `gemma4_12b.attention.hd256` measures 36.5 us / 34.1 us.
+
+Future perf work is captured in `_tune/merge-loop-cuts-5090-20260810/findings.md`. Eleven
+large Gemma regimes had no successful O1 candidate, including LM-head m32/m64 and nine cut
+twins; LM-head m64's isolated O3 compile did not finish before wrap-up. The sweep also confirms
+that schedule pins cannot repair gate-free normalized-linear/MLP compute multiplication.
+
+The final cleanup removes 500 lines from the working tree (net 427): `merge_loop_ops` now
+contains only region splicing, the decided-cut fence, and aggregate work-blowout calculation.
+All removed gate helpers/tests and stale references are gone, and the flash Q/K extractors no
+longer return an unused head-dimension value.
 
 ## Verification
 

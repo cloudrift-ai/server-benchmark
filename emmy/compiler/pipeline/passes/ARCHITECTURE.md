@@ -605,10 +605,10 @@ for `split`'s staged Q, the A) BUFFER dtypes to match the atom's operand dtypes 
 convert, so a wide traced intermediate feeding the stream would deposit garbage; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,
 traced dtype CASTS are first-class: a dtype-changing view splits into a source-shaped elementwise `copy` + a pure
-map at the frontend (`optimization/005_split_cast_from_indexmap`), and loop fusion's plumbing exemption admits only
-dtype-PRESERVING copies (`merge_loop_ops._is_castfree_indexmap`), so the cast stays a materialized buffer at flash
-offer sites and the stream sees an atom-dtype operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the
-layer-0 findings' biggest lockout). That the cast is *usually free* — a fan-out-1 pointwise producer absorbing it and
+map at the frontend (`optimization/005_split_cast_from_indexmap`). When gate-free loop fusion inlines a closed V map
+cone, flash recognition factors it back into a canonical feeder workspace, so the stream still sees an atom-dtype
+operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the layer-0 findings' biggest lockout). That the
+cast is *usually free* — a fan-out-1 pointwise producer absorbing it and
 simply writing the narrow dtype — is not something loop fusion can be relied on to arrange: fusion may merge either
 way, and on gemma-4 it consistently spliced the cheap cast into its CONSUMERS instead, leaving the wide producer
 buffer alive. `optimization/007_sink_narrowing_cast` makes it deterministic, retyping the producer's OUTPUT and
@@ -634,10 +634,8 @@ lowering (the gemma-4 layer-0 `seq 512 < window 1024` trace deployed a grid-1 ke
 reads the whole mask CHAIN off the rowmax feed (coord Selects and the explicit additive bias compose; the bias stays
 loaded, it may mask more, e.g. padding), re-synthesizes each canonically, and the realizer derives the stream START
 off the band predicate exactly as it derives the causal end (`kv_start = ⌊max(0, first_row − W + 1)/bn⌋·bn`, the
-kloops' `k_first`). Fusion keeps every mask add ON the softmax consumer (mask epilogues are exempt from the
-score-producer deferral, the QK contraction is barred from chasing them, and `_reduce_heavy` discounts mask adds in
-rowmax-bearing bodies so a multi-mask softmax still assembles onto its P@V offer site); a mask that lands on the
-score producer anyway declines the fuse rather than being silently dropped. At seq ≫ W the sliding layers' stream is
+kloops' `k_first`). The flash recognizer follows the complete mask chain across the gate-free fusion boundary; a mask
+spelling it cannot certify declines the fuse rather than being silently dropped. At seq ≫ W the sliding layers' stream is
 O(seq·W), not O(seq²) — 40 of gemma-4's 48 layers at real context lengths.
 Two catalog invariants hold: every recorded golden's `WORK`/`TILE`/`STAGE`/`REDUCE` stays a **member** of the
 enumerated grids (the permanence test in `tests/compiler/test_golden_configs.py`, site-aware since the step-7

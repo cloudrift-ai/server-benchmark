@@ -599,14 +599,14 @@ def _out_store_index(out_index: tuple, out_shape: tuple, grid: tuple) -> tuple |
     return tuple(idx)
 
 
-def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tuple[int, int]], object] | None:
+def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tuple[int, int]]] | None:
     """From the scaled-QK^T producer of the score buffer, return
-    ``((q_id, q_layout), (k_id, k_layout), head_dim_extent)``. Q vs K by index (fusion
-    reorders the operands): the operand indexed by the score's row (M) var is Q — at ANY
-    index slot, not just -2: a fused transpose bakes the trace layout into the load index
-    (HF's per-layer Q/K arrive ``(b, s, h, d)``, seq-major). Each operand's
-    ``(seq_pos, last_pos)`` layout rides along so the fragment builder emits loads in the
-    operand's own slot order."""
+    ``((q_id, q_layout), (k_id, k_layout))``. Q vs K by index (fusion reorders the
+    operands): the operand indexed by the score's row (M) var is Q — at ANY index slot,
+    not just -2: a fused transpose bakes the trace layout into the load index (HF's
+    per-layer Q/K arrive ``(b, s, h, d)``, seq-major). Each operand's ``(seq_pos,
+    last_pos)`` layout rides along so the fragment builder emits loads in the operand's
+    own slot order."""
     op = xnode.op
     if not isinstance(op, LoopOp):
         return None
@@ -634,7 +634,7 @@ def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tu
                 elif k_pos is not None:
                     k = (ld.input, (k_pos, dd_pos))
             if q is not None and k is not None:
-                return q, k, lp.axis.extent
+                return q, k
     return None
 
 
@@ -1282,7 +1282,7 @@ def _extract_inline_qk(
     m_var: str,
     kv_var: str,
     rowmax: Loop,
-) -> tuple[tuple[str, tuple[int, int], Load | Fold], tuple[str, tuple[int, int], Load | Fold], object] | None:
+) -> tuple[tuple[str, tuple[int, int], Load | Fold], tuple[str, tuple[int, int], Load | Fold]] | None:
     """Recover canonical Q/K operand edges from an inlined softmax producer."""
     found = _qk_cell(rowmax, m_var, kv_var)
     if found is None:
@@ -1319,7 +1319,7 @@ def _extract_inline_qk(
         for stmt in Body(tuple(edge.lower() if isinstance(edge, Fold) else (edge,))).iter():
             if isinstance(stmt, Load) and any(expr.free_vars() - allowed - {"flash_q_stat", "flash_k_stat"} for expr in stmt.index):
                 return None
-    return (q_load.input, q_layout, q_edge), (k_load.input, k_layout, k_edge), qk_loop.axis.extent
+    return (q_load.input, q_layout, q_edge), (k_load.input, k_layout, k_edge)
 
 
 def _extract_inline_v(root: Node, found: tuple[Loop, tuple[Stmt, ...], str, Load]) -> tuple[tuple[int, int], Fold] | None:
@@ -1408,10 +1408,9 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if qk is None and inline_qk is None and packed is None:
         _fuse_degraded(root, "score producer's Q/K are not certifiable operand edges")
         return None
-    # A mask stranded on the score producer (a coord Select / an additive bias add) would be
-    # silently DROPPED by the canonical re-synthesis below — the fused kernel would attend
-    # outside the mask. The fusion boundary keeps masks on the consumer (010_merge_loop_ops);
-    # if one lands here anyway, decline the fuse rather than mis-attend.
+    # A mask stranded on the standalone score producer (a coord Select / an additive bias add)
+    # would be silently DROPPED by the canonical re-synthesis below. Decline the fuse rather
+    # than mis-attend. Inline score masks have already been classified above.
     if found.inline is None and any(
         isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in score_producer.op.body.iter()
     ):
@@ -1426,11 +1425,11 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         q_layout = k_layout = v_layout = None
         access_indices = (q_idx, k_idx, v_idx)
     elif inline_qk is not None:
-        (q_id, q_layout, q_edge), (k_id, k_layout, k_edge), _head_dim = inline_qk
+        (q_id, q_layout, q_edge), (k_id, k_layout, k_edge) = inline_qk
         if graph.buffer(q_id) is None or graph.buffer(k_id) is None:
             return None
     else:
-        (q_id, q_layout), (k_id, k_layout), _head_dim = qk
+        (q_id, q_layout), (k_id, k_layout) = qk
         if graph.buffer(q_id) is None or graph.buffer(k_id) is None:
             return None
     # The producer's actual scale — the flash re-synthesis re-applies it; assuming
@@ -1527,9 +1526,8 @@ def is_flash_score_producer(graph: Graph, root: Node) -> bool:
     """True iff ``root`` is the **score producer** (the scaled-QK matmul) of a flash kernel
     that :func:`try_flash` would fuse — i.e. some consumer of ``root`` is an eligible
     softmax-then-P@V kernel whose fusion **consumes** ``root``. The general lift in
-    ``010_recognize`` defers such a node (leaving it a ``LoopOp``) so the consumer's fusion
-    can still read its Q/K as plain loads. The consumed score buffer is the one node absent
-    from the fused fragment — Q/K/V inputs survive as the fragment's operands."""
+    ``010_recognize`` defers such a node (leaving it a ``LoopOp``) until its consumer has a
+    chance to fuse. The consumed score buffer is the one node absent from the fragment."""
     for consumer in graph.nodes.values():
         if root.id not in consumer.inputs:
             continue

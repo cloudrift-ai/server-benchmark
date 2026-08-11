@@ -64,8 +64,8 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     # A dtype-CHANGING copy is pure-indexmap-shaped but not plumbing: dissolving it into the
     # consumers erases the traced cast boundary, and each consumer then reads the wide producer
     # buffer through its own narrow declared dtype — fp32 bytes decoded as fp16 denormals (the
-    # fan-out cast on a merged sibling-linear projection). Same gate ``010_merge_loop_ops``
-    # applies to its single-consumer folds; the cast stays materialized at the traced boundary.
+    # fan-out cast on a merged sibling-linear projection). This fan-out-specific boundary remains
+    # materialized even though ordinary single-consumer loop fusion is gate-free.
     if not is_castfree_indexmap(graph, producer):
         raise RuleSkipped("producer is a cast copy — the traced dtype boundary stays materialized")
     if producer.id in graph.outputs:

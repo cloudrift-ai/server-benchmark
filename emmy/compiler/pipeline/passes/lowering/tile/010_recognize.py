@@ -398,16 +398,16 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The fusion is unconditional:
-    # a kernel flash recognition can certify is always fused (an uncertifiable one — RoPE'd QK —
-    # falls through to the separate score producer + softmax-then-P@V kernels below).
+    # a kernel flash recognition can certify is always fused; an uncertifiable operand cone
+    # falls through to the separate score producer + softmax-then-P@V kernels below.
     graph = match.graph
     flash = try_flash(graph, root)
     if flash is not None:
         return flash
     # (2) Defer a flash score producer: the general lift below would turn this scaled-QK
-    # matmul into a ``TileOp`` before its softmax-then-P@V consumer fuses, and that fusion
-    # reads the producer's Q/K as plain ``Load``s. Leave it a ``LoopOp`` until the consumer
-    # has had its chance to consume it (a later scan re-visits this node, by then removed).
+    # matmul into a ``TileOp`` before its softmax-then-P@V consumer fuses. Leave it a
+    # ``LoopOp`` until the consumer has had its chance to consume it (a later scan re-visits
+    # this node, by then removed).
     if is_flash_score_producer(graph, root):
         raise RuleSkipped("flash score producer — defer to its consumer's fusion")
     loop: LoopOp = root.op

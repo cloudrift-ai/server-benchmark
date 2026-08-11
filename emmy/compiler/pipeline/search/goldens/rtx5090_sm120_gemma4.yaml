@@ -8860,9 +8860,9 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: ''
     measurements:
-      emmy_us: 1.2
+      emmy_us: 0.8
       reference_us: 4.0
       reference_backend: torch-eager
 - program: 136
@@ -10681,9 +10681,9 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: ''
     measurements:
-      emmy_us: 1.7
+      emmy_us: 0.8
       reference_us: 4.0
       reference_backend: torch-eager
 - program: 210

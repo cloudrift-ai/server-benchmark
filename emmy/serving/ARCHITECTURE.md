@@ -96,7 +96,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
-  golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
+  serving-image release gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
   Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
   `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
   The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
@@ -289,8 +289,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   projections are different shapes with different optimal configs. Re-capture whenever a tracer/recognizer change
   alters the graphs: the DB's evidence is keyed to structural signatures, and stale evidence applied to new graphs
   serves worse than either coherent state. Whether the *recorded goldens* still deploy against the current twins is
-  checked continuously: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and audits per fork
-  (MATCH / DRIFT / GAP), and `tests/compiler/test_golden_drift_gate.py` runs the same audit in CI.
+  checked before a serving-image release: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and
+  audits per fork (MATCH / DRIFT / GAP); `make serve-goldens` runs the strict release gate for the pinned model,
+  revision, card, and serving widths.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:

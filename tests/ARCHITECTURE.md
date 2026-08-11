@@ -70,6 +70,10 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   than a file per capability. When a legacy one-off test's behavior is subsumed by such a matrix (or by the matmul
   coverage matrix specifically), DELETE the one-off — do not maintain both. A new capability extends the nearest
   matrix with a parameter/case before it earns its own file.
+- **Keep model/card qualification out of the default suite.** `make test` does not retrace and compile a complete
+  serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
+  model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
+  synthetic input cannot.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
 - **No mocking** — dry-run mode is the primary strategy for testing command orchestration without side effects.
 - **Real recipes** — CLI dry-run tests use recipes from the `recipes/` directory to catch config drift.

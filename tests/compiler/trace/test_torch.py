@@ -1263,8 +1263,7 @@ def test_trace_clamp_decomposes_to_min_max_chain():
 
 
 def test_trace_clamp_matches_torch_eager():
-    """End-to-end: the traced clamp chain (the gpt-oss clamped-SwiGLU shape) interprets to
-    torch's own values through the numpy reference backend."""
+    """A traced clamped-SwiGLU chain matches torch through the numpy reference backend."""
     import numpy as np
     import torch
     import torch.nn as nn

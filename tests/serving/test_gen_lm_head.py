@@ -27,7 +27,7 @@ VOCAB, HIDDEN = 256, 128
 
 def _model(*, model_id="does-not-exist/nowhere", tied=False, vocab=VOCAB, hidden=HIDDEN):
     """The surface ``load_weights`` reads: the head parameter, the HF config's tie flag, the
-    (absent) gpt-oss sinks, the runner's adopt hook, and the model id it re-opens for a coded head."""
+    optional attention sinks, the runner's adopt hook, and the model id it re-opens for a coded head."""
     param = torch.nn.Parameter(torch.full((vocab, hidden), float("nan")), requires_grad=False)
     adopted: list = []
     runner = types.SimpleNamespace(

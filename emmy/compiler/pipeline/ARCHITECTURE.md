@@ -162,7 +162,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
 | `search/golden.py` | Generic program-backed records, repository indexing, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
-| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and the CI gate (see Part 7). |
+| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and serving-image release qualification (see Part 7). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -1161,14 +1161,13 @@ forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consu
 golden realized), DRIFT (shape keyed but nothing realizes — always a defect: the recording claims a µs the deploy can
 no longer produce), or GAP (no golden for the shape). This is the in-model half of the reproduction check: the
 isolated snippet A/B reproduced 68/68 while the in-model deploys drifted (the cast-splice class), which is exactly the
-blind spot the audit closes. Coverage is gated as a **ratchet over every GAP key** — contractions, rms_norm/reduce
-sweeps, and pointwise forks alike; `major_gap_keys` (uncovered warp-contraction forks, the misdeploy/hang hazard
-class) is the close-these-first emphasis view. The CI gate (`tests/compiler/test_golden_drift_gate.py`, offline via
-a checked-in `config.json` fixture) pins the per-card gap set exactly — a new gap fails until a golden is recorded
-or the baseline is deliberately extended, a closed one fails until its baseline line is deleted, and an emptied
-baseline means full model coverage is thereafter enforced (only fork-free deterministic lowerings — rope/embedding
-gathers — sit outside the gate, having no fork for the golden tier to decide). The twins track the installed `transformers` modeling code by design: a transformers
-bump that changes the forward changes the twins exactly as it changes serving, and the gate goes loudly red.
+blind spot the audit closes. `major_gap_keys` isolates uncovered warp-contraction forks, the misdeploy/hang hazard
+class. Serving-image release qualification runs `scripts/check_serving_goldens.py` with `--strict-major-gaps` (the
+`make serve-goldens` gate) for the pinned model, revision, card, and configured widths; a
+drift, compile failure, or major gap fails the release. The default correctness suite tests the reusable audit
+mechanism with synthetic verdicts rather than retracing and compiling a model/card matrix. The twins track the
+installed `transformers` modeling code by design: a transformers bump that changes the forward changes the twins
+exactly as it changes serving, and release qualification goes loudly red.
 `scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
 
 **The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every

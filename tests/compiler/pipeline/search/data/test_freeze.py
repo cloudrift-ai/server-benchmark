@@ -65,7 +65,7 @@ def _feats(*, opt: float = 3.0, cc: float = 120.0, **knobs) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_reason_keeps_ok_leaf() -> None:
+def test_reason_keeps_ordinary_leaf() -> None:
     assert freeze_reason(_row("k", value_us=500.0, features=_feats())) is None
 
 
@@ -73,10 +73,6 @@ def test_reason_keeps_bench_fail_leaf_as_negative() -> None:
     # A fail's value_us is the watchdog sentinel — absurd as a latency, but the row is
     # a durable "doesn't build/launch here" negative and must freeze.
     assert freeze_reason(_row("k", value_us=9.17, features=_feats(), status="bench_fail")) is None
-
-
-def test_reason_keeps_ordinary_tune_rows() -> None:
-    assert freeze_reason(_row("k", value_us=500.0, features=_feats())) is None
 
 
 def test_reason_drops_rows_without_regime_stamps() -> None:

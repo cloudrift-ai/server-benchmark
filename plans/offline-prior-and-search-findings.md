@@ -298,8 +298,11 @@ Recorded because each was believed on real evidence and overturned by better evi
 ## Recommended order of work
 
 1. **Refit the shipped artifact (unblocks A1-A5).** Nothing in section A affects a real deploy until this runs. It
-   still carries a weight on a feature that no longer exists. `emmy fit --artifact`, ideally `--folds both` so the
-   cross-validation blocks compare against `_tune/fits/20260730-l2-refit`.
+   still carries a weight on a feature that no longer exists. **Pass `--folds none` explicitly**: `--folds` defaults
+   to `both`, and the `op_family` axis is **388 folds** on the current corpus, each a near-full fit — a bare
+   `emmy fit --artifact` runs for days. The last shipped fit used `fold_axes: []` for the same reason. `--folds gpu`
+   (5 folds) is the affordable holdout if cross-card metrics are wanted. Fit to a run dir first and diff its
+   `metrics.json` against `_tune/fits/20260730-l2-refit` before promoting with `--artifact`.
 2. **Chase C1, the evidence-path misdeploy.** Largest measured cost (73×), affects every deploy on an untuned shape
    that has partial measurements, and is independent of everything else here.
 3. **Fix or remove C2, the saturated offline multiplier.** A documented mechanism that silently does nothing.

@@ -95,13 +95,15 @@ GitHub App credentials for the long-running push path.
 **Discover model** runs nightly or by manual dispatch. It defaults to one H200, with repository variables and manual
 inputs able to select another exact target. It updates one rolling draft PR rather than opening one PR per model. A
 legacy discovery plan PR is adopted as the rolling PR, and the workflow fails closed if more than one rolling
-discovery PR exists.
+discovery PR exists. It also adopts one unpaired discovery branch left by an interrupted PR-creation step, while
+failing closed if multiple such branches would make ownership ambiguous.
 
 The validated manifest tags the ten selected complete recipes `maintained`, tags other complete recipes `obsolete`,
 and creates up to three `onboarding`/`untested` recipe shells. Obsolete recipes remain in git but cannot be deployed,
 benchmarked, published, or bundled. A current demand spike may return an obsolete recipe to the maintained set. The
 workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and creates
-or refreshes its `model-discovery` and `model-onboarding` labels. It never rents a VM.
+or refreshes its `model-discovery` and `model-onboarding` labels through the GitHub API. It never rents a VM and does
+not require the GitHub CLI on the self-hosted runner.
 
 ## Credentials, VM ownership, and cleanup
 

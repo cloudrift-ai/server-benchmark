@@ -76,9 +76,27 @@ jobs:
             if (pull) {
               core.info(`Updating rolling discovery PR #${pull.number} from ${pull.head.ref}`);
             }
+            let branch = pull ? pull.head.ref : '';
+            if (!pull) {
+              const refs = await github.paginate(github.rest.git.listMatchingRefs, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'heads/agents/model-discovery-',
+                per_page: 100,
+              });
+              const orphanBranches = refs.map(ref => ref.ref.replace('refs/heads/', '')).sort();
+              if (orphanBranches.length > 1) {
+                core.setFailed(`Expected at most one unpaired model discovery branch, found ${orphanBranches.length}`);
+                return;
+              }
+              branch = orphanBranches[0] || '';
+              if (branch) {
+                core.info(`Adopting unpaired discovery branch ${branch}`);
+              }
+            }
             core.setOutput('exists', pull ? 'true' : 'false');
             core.setOutput('number', pull ? String(pull.number) : '');
-            core.setOutput('branch', pull ? pull.head.ref : '');
+            core.setOutput('branch', branch);
 
       - name: Checkout discovery branch
         uses: actions/checkout@v4
@@ -202,7 +220,9 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - name: Refresh GitHub App token
-        if: steps.lifecycle.outputs.changed == 'true'
+        if: >-
+          steps.lifecycle.outputs.changed == 'true' ||
+          (steps.rolling.outputs.exists != 'true' && steps.rolling.outputs.branch != '')
         id: app-token-refresh
         uses: actions/create-github-app-token@v1
         with:
@@ -211,34 +231,66 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Create or update rolling discovery pull request
-        if: steps.lifecycle.outputs.changed == 'true'
+        if: >-
+          steps.lifecycle.outputs.changed == 'true' ||
+          (steps.rolling.outputs.exists != 'true' && steps.rolling.outputs.branch != '')
+        uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
           PR_NUMBER: ${{ steps.rolling.outputs.number }}
-          PLAN_BRANCH: ${{ steps.branch.outputs.branch }}
-        run: |
-          gh label create model-discovery \
-            --description "Automated model recipe lifecycle" \
-            --color 5319E7 --force
-          gh label create model-onboarding \
-            --description "Automated model discovery and onboarding" \
-            --color 1D76DB --force
-          if [ -n "$PR_NUMBER" ]; then
-            gh pr edit "$PR_NUMBER" \
-              --title "Refresh maintained and onboarding models" \
-              --add-label model-discovery \
-              --add-label model-onboarding \
-              --body-file "$DISCOVERY_SUMMARY"
-          else
-            gh pr create \
-              --draft \
-              --head "$PLAN_BRANCH" \
-              --base "${{ github.event.repository.default_branch }}" \
-              --title "Refresh maintained and onboarding models" \
-              --label model-discovery \
-              --label model-onboarding \
-              --body-file "$DISCOVERY_SUMMARY"
-          fi
+          PLAN_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
+        with:
+          github-token: ${{ steps.app-token-refresh.outputs.token }}
+          script: |
+            const fs = require('fs');
+            const labels = [
+              {name: 'model-discovery', description: 'Automated model recipe lifecycle', color: '5319E7'},
+              {name: 'model-onboarding', description: 'Automated model discovery and onboarding', color: '1D76DB'},
+            ];
+            for (const label of labels) {
+              try {
+                await github.rest.issues.createLabel({owner: context.repo.owner, repo: context.repo.repo, ...label});
+              } catch (error) {
+                if (error.status !== 422) throw error;
+                await github.rest.issues.updateLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  new_name: label.name,
+                  description: label.description,
+                  color: label.color,
+                });
+              }
+            }
+
+            const title = 'Refresh maintained and onboarding models';
+            const body = fs.readFileSync(process.env.DISCOVERY_SUMMARY, 'utf8');
+            let pullNumber = Number(process.env.PR_NUMBER || 0);
+            if (pullNumber) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullNumber,
+                title,
+                body,
+              });
+            } else {
+              const result = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: process.env.PLAN_BRANCH,
+                base: context.payload.repository.default_branch,
+                title,
+                body,
+                draft: true,
+              });
+              pullNumber = result.data.number;
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pullNumber,
+              labels: labels.map(label => label.name),
+            });
 
       - name: Cleanup discovery credentials and output
         if: always()

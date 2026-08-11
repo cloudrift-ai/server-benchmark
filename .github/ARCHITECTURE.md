@@ -61,7 +61,8 @@ recipes for the maintained set and up to three open-weight Hugging Face models w
 and count. Discovery remains read-only: the workflow checks that the agent did not modify the checkout, then
 `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
 reasoning wrapper around the JSON object, but requires exactly the two expected top-level fields before validating
-their contents.
+their contents. The agent writes that manifest through the runner to one explicitly allowed temporary path; it cannot
+write recipe changes itself.
 
 The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
 public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,

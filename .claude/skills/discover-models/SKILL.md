@@ -186,8 +186,9 @@ Flag any model with **no engine support yet** or **no suitable quant** as "watch
 
 ## Step 6 — Return the lifecycle manifest
 
-When lifecycle mode is requested, return exactly the JSON shape in the prompt and no prose or Markdown fence. Each
-new onboarding row needs the exact target, `generate` or `embed`, and a brief evidence-backed rationale. An empty
+When lifecycle mode is requested, produce exactly the JSON shape in the prompt and no prose or Markdown fence. If the
+prompt supplies a manifest path, use `write_file` to store the JSON there before the final response. Each new
+onboarding row needs the exact target, `generate` or `embed`, and a brief evidence-backed rationale. An empty
 `onboarding_models` list is valid. Do not edit recipe files yourself: the workflow validates exact model IDs, the
 maintained count, current recipe state, target hardware, duplicates, and rationale before making any change.
 

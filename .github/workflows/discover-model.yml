@@ -33,7 +33,8 @@ jobs:
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       AGENT_KEY_FILE: /tmp/emmy-discovery-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_PROMPT: /tmp/emmy-discovery-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
-      AGENT_OUTPUT: /tmp/emmy-discovery-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_TRANSCRIPT: /tmp/emmy-discovery-transcript-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
       APP_KEY_FILE: /tmp/emmy-discovery-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
     steps:
@@ -118,7 +119,8 @@ jobs:
           shells; do not claim they have been deployed or benchmarked. Do not edit the repository, rent hardware, or
           deploy anything.
 
-          Return exactly one JSON object as the final response, without a Markdown fence:
+          Before your final response, call write_file once with path {os.environ['AGENT_MANIFEST']} and content equal
+          to exactly one JSON object without a Markdown fence:
           {{
             "maintained_models": ["exact/org-model IDs for existing recipes; exactly {os.environ['MAINTAINED_MODEL_COUNT']}"],
             "onboarding_models": [
@@ -127,7 +129,8 @@ jobs:
             ]
           }}
           Use task "embed" only for an embedding model. Return an empty onboarding_models list when nothing new is
-          suitable.
+          suitable. The manifest file is required; do not edit any repository file. After write_file succeeds, your
+          final response may only confirm completion.
           """)
           PY
           printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
@@ -138,7 +141,8 @@ jobs:
             --skill .claude/skills/discover-models/SKILL.md \
             --prompt "$AGENT_PROMPT" \
             --model "$AGENT_MODEL" \
-            --output "$AGENT_OUTPUT"
+            --output "$AGENT_TRANSCRIPT" \
+            --allow-write "$AGENT_MANIFEST"
 
       - name: Verify discovery was read-only
         run: test -z "$(git status --porcelain)"
@@ -147,7 +151,7 @@ jobs:
         id: lifecycle
         run: |
           ./venv/bin/python .github/scripts/discovery_lifecycle.py \
-            --input "$AGENT_OUTPUT" \
+            --input "$AGENT_MANIFEST" \
             --gpu "$TARGET_GPU" \
             --gpu-count "$TARGET_GPU_COUNT" \
             --maintained-count "$MAINTAINED_MODEL_COUNT" \
@@ -233,7 +237,8 @@ jobs:
           rm -f \
             "$APP_KEY_FILE" \
             "$AGENT_PROMPT" \
-            "$AGENT_OUTPUT" \
+            "$AGENT_MANIFEST" \
+            "$AGENT_TRANSCRIPT" \
             "$DISCOVERY_SUMMARY" \
             "$AGENT_KEY_FILE"
           git config --unset-all credential.helper || true

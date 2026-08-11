@@ -9,6 +9,7 @@ class VllmConfig:
     """vLLM engine-specific configuration."""
 
     image: str = "vllm/vllm-openai:v0.17.0"
+    entrypoint: str | None = None
     extra_args: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
 
@@ -61,11 +62,13 @@ class LLMConfig:
     def entrypoint(self) -> str | None:
         """Docker entrypoint override for the active engine.
 
-        vLLM images have a built-in entrypoint; SGLang images do not,
-        so we must provide one explicitly.
+        vLLM normally uses the image entrypoint but may override it for a same-image
+        control. SGLang images do not provide one, so its launcher is explicit.
         """
         if self.sglang is not None:
             return "python3 -m sglang.launch_server"
+        if self.vllm is not None:
+            return self.vllm.entrypoint
         return None
 
     @property
@@ -121,7 +124,9 @@ class BenchmarkConfig:
 
     ``repeats`` reruns the identical bench-client workload N times against the one deployed
     server; the JSON result then reports per-field mean and stddev across the runs, so the
-    spread is run-to-run noise, not workload variation."""
+    spread is run-to-run noise, not workload variation. ``output_probe_file`` optionally
+    names a repo-relative JSONL prompt set captured sequentially after the throughput
+    workload and before teardown; the raw deterministic responses are stored with the task."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -131,6 +136,7 @@ class BenchmarkConfig:
     temperature: float | None = None
     ignore_eos: bool = False
     repeats: int = 1
+    output_probe_file: str | None = None
 
 
 @dataclass
@@ -253,6 +259,7 @@ class Recipe:
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
             repeats=bench_dict.get("repeats", 1),
+            output_probe_file=bench_dict.get("output_probe_file"),
         )
 
         deploy_dict = d.get("deploy", {})

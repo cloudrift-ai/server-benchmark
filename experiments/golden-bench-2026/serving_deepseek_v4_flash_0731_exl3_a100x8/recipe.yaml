@@ -1,0 +1,35 @@
+# Stretch portability qualification for the highest-quality 3.04-bpw branch. Stock vLLM's EXL3 refusal is the
+# baseline; add a pinned Emmy serving image before this lane can support an end-to-end unlock claim.
+model:
+  huggingface: "turboderp/DeepSeek-V4-Flash-0731-exl3"
+  revision: 80c463d631f03ae6ba35029929a04e8651c5276e
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.92
+    context_length: 32768
+    max_concurrent_requests: 8
+    vllm:
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      extra_args: >-
+        --dtype float16 --generation-config vllm --no-enable-prefix-caching
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  repeats: 1
+
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA A100 80GB"
+      deploy.gpu_count: 8
+      engine.llm.vllm.extra_env.EMMY_BENCH_PROCESS_REPEAT: ["0", "1", "2", "3", "4"]
+      zip:
+        benchmark.random_input_len: [256, 4096, 16384]
+        benchmark.random_output_len: [256, 256, 512]
+        benchmark.max_concurrency: [8, 4, 1]
+        benchmark.num_prompts: [40, 20, 5]

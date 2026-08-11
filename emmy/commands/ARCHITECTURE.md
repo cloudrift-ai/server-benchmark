@@ -414,6 +414,10 @@ the emmy arm runs at; the flag is a plain vLLM passthrough, only meaningful for 
 
 Loads each recipe, provisions cloud VMs, deploys the model, runs `vllm bench serve`, captures results, and tears down. Recipes sharing the same model and GPU type are grouped onto the same VM (see `GroupByModelAndGpuPlanner`).
 
+An inference recipe may define a local `aggregate` command that checks the complete run directory after all tasks.
+Any failed task, aggregate timeout, or aggregate nonzero status is authoritative: `emmy bench` finishes the complete
+run and artifact collection, reports the failures, and exits nonzero instead of printing a successful completion.
+
 ```bash
 emmy bench recipes/*                                    # All recipes
 emmy bench experiments/.../optimal_mcr_rtx5090          # An experiment

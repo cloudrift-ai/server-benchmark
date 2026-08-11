@@ -17,7 +17,7 @@ engine:
       extra_args: >-
         --dtype half --distributed-executor-backend mp --kv-cache-dtype fp8 --block-size 256
         --max-num-batched-tokens 4096 --tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4
-        --tool-call-parser deepseek_v4 --enable-auto-tool-choice
+        --tool-call-parser deepseek_v4 --enable-auto-tool-choice --no-enable-prefix-caching
       extra_env:
         VLLM_SM70_FLASH_ATTN_V100: "1"
         VLLM_SM70_FP8_TURBOMIND: "1"
@@ -31,13 +31,15 @@ benchmark:
   seed: 0
   temperature: 0
   ignore_eos: true
-  repeats: 3
+  repeats: 1
 
 matrices:
-  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
-    deploy.gpu_count: 16
-    zip:
-      benchmark.random_input_len: [128, 1024, 2048]
-      benchmark.random_output_len: [128, 256, 512]
-      benchmark.max_concurrency: [8, 4, 1]
-      benchmark.num_prompts: [64, 24, 8]
+  - cross:
+      deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+      deploy.gpu_count: 16
+      engine.llm.vllm.extra_env.EMMY_BENCH_PROCESS_REPEAT: ["0", "1", "2", "3", "4"]
+      zip:
+        benchmark.random_input_len: [128, 1024, 2048]
+        benchmark.random_output_len: [128, 256, 512]
+        benchmark.max_concurrency: [8, 4, 1]
+        benchmark.num_prompts: [64, 24, 8]

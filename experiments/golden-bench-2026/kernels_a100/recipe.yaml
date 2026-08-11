@@ -1,4 +1,4 @@
-# Optional common-corpus run on datacenter Blackwell. Drop this lane before weakening V100, RTX, or H200 coverage.
+# Optional Ampere common-corpus run paired with the EXL3 compatibility stretch lane.
 command:
   stage:
     - emmy
@@ -32,5 +32,5 @@ command:
   timeout: 43200
 
 matrices:
-  deploy.gpu: "NVIDIA B200"
+  deploy.gpu: "NVIDIA A100 80GB"
   deploy.gpu_count: 8

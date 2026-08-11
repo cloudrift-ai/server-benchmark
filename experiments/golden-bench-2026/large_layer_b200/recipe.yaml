@@ -1,4 +1,5 @@
-# Optional common-corpus run on datacenter Blackwell. Drop this lane before weakening V100, RTX, or H200 coverage.
+# Unsharded BF16 model-derived shape-stress corpus. It is identical to the H200 supplement and remains separate from
+# the common-corpus geomean and the runtime-derived TP8/NVFP4 evidence.
 command:
   stage:
     - emmy
@@ -20,16 +21,18 @@ command:
     export SOURCE_MANIFEST="$$source_manifest"
     [ -d venv ] || make setup
     overall_status=0
-    for seq_len in 1 512; do
-      seq_dir="$task_dir/seq-$$seq_len"
-      bash scripts/run_submission_kernel_case.sh "$$seq_dir" \
-        Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca 0 "$$seq_len" 12 4 0 \
-        "$gpu_device_ids" default none || overall_status=1
+    for layer in 0 3; do
+      for seq_len in 1 512; do
+        case_dir="$task_dir/layer-$$layer-seq-$$seq_len"
+        bash scripts/run_submission_kernel_case.sh "$$case_dir" \
+          Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9 "$$layer" "$$seq_len" 8 3 0 \
+          "$gpu_device_ids" loop-targets none || overall_status=1
+      done
     done
     exit "$$overall_status"
   result_files:
-    - "seq-*/artifacts.tar.gz"
-  timeout: 43200
+    - "layer-*-seq-*/artifacts.tar.gz"
+  timeout: 86400
 
 matrices:
   deploy.gpu: "NVIDIA B200"

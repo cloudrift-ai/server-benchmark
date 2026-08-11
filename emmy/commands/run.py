@@ -2569,6 +2569,7 @@ _BACKEND_ALIASES = {
     "tcompile": "tcompile",
     "torch.compile": "tcompile",
     "compile": "tcompile",
+    "hidet": "hidet",
 }
 
 
@@ -2583,7 +2584,7 @@ def _resolve_backends(cli_value: str | None) -> set[str]:
 
     ``emmy`` is always included even if omitted (the kernel under
     test is the point of the bench). Returns the canonical backend
-    keys ``{"eager", "tcompile", "emmy"}``.
+    keys ``{"eager", "tcompile", "hidet", "emmy"}``.
     """
     raw = config.bench_backends_raw(cli_value)
     selected: set[str] = {"emmy"}
@@ -2637,6 +2638,24 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
             torch_fns["torch.compile"] = lambda: compiled_torch_module(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
             logger.warning("torch.compile failed: %s", e)
+    if "hidet" in backends:
+        try:
+            import hidet  # noqa: PLC0415
+            import torch._dynamo  # noqa: PLC0415
+
+            torch._dynamo.reset()
+            hidet.torch.dynamo_config.search_space(2)
+            compiled_hidet_module = torch.compile(module, backend="hidet", fullgraph=True)
+            for _ in range(warmup + 5):
+                with torch.no_grad():
+                    compiled_hidet_module(*args, **kwargs)
+            with torch.no_grad():
+                eager_output = module(*args, **kwargs)
+                hidet_output = compiled_hidet_module(*args, **kwargs)
+            torch.testing.assert_close(hidet_output, eager_output, rtol=1e-3, atol=1e-3)
+            torch_fns["Hidet"] = lambda: compiled_hidet_module(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Hidet failed: %s", e)
     return torch_fns
 
 

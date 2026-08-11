@@ -1,5 +1,6 @@
 """Structured JSON benchmark results: dataclasses and parsers."""
 
+import json
 import re
 import statistics
 from dataclasses import asdict, dataclass, fields
@@ -7,6 +8,7 @@ from dataclasses import asdict, dataclass, fields
 from emmy.redact import redact_secrets
 
 RESULT_MARKER = "============ Serving Benchmark Result ============"
+OUTPUT_PROBE_MARKER = "============ Serving Output Probe ============"
 
 
 @dataclass
@@ -274,6 +276,12 @@ def compose_json_result(
         result["metrics_repeats"] = [asdict(r) for r in repeats]
     if timing is not None:
         result["timing"] = timing
+    if OUTPUT_PROBE_MARKER in benchmark_output:
+        probe_text = benchmark_output.split(OUTPUT_PROBE_MARKER, 1)[1]
+        try:
+            result["output_probe"] = [json.loads(line) for line in probe_text.splitlines() if line.strip()]
+        except json.JSONDecodeError:
+            result["output_probe"] = []
     return result
 
 

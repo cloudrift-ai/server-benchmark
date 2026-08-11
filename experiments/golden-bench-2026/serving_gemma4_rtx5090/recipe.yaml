@@ -1,5 +1,5 @@
-# Frozen RTX 5090 serving A/B: stock vLLM, Emmy standard precision, and Emmy fast math. All lanes use the same
-# prompts and scheduler-facing workload. Fast math is a separate precision lane and requires a quality evaluation.
+# Frozen RTX 5090 serving A/B from one immutable derivative image. The stock arm overrides the image's Emmy
+# entrypoint with the stock vLLM launcher; arm order alternates within each repeat to balance time and thermal drift.
 model:
   huggingface: "google/gemma-4-12B-it"
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
@@ -13,85 +13,165 @@ engine:
     context_length: 16384
     max_concurrent_requests: 64
     vllm:
-      extra_args: "--dtype float16 --no-enable-prefix-caching"
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3"
 
 benchmark:
   seed: 0
   temperature: 0
   ignore_eos: true
-  repeats: 3
+  repeats: 1
+  output_probe_file: "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl"
+
+aggregate:
+  run: >-
+    ./venv/bin/python scripts/validate_serving_output_equivalence.py
+    experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl
+    --results $run_dir/*_benchmark.json --report $run_dir/output-equivalence.json
+  timeout: 60
 
 matrices:
-  # Stock reference: short high-concurrency, interactive, batch, and long-prefill cells.
+  # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E, E/S, S/E.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
-    zip:
-      benchmark.random_input_len: [256, 4096, 4096, 8192]
-      benchmark.random_output_len: [256, 4096, 4096, 256]
-      benchmark.max_concurrency: [64, 1, 8, 4]
-      benchmark.num_prompts: [256, 8, 64, 16]
-
-  # Emmy interactive lane.
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
-    engine.llm.vllm.extra_args: >-
-      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-      --max-num-batched-tokens 4128 --no-enable-prefix-caching
-    cross:
-      engine.llm.vllm.extra_env:
-        - "EMMY_GEN_DECODE_BUCKET=32"
-        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"
-    benchmark.random_input_len: 4096
-    benchmark.random_output_len: 4096
-    benchmark.max_concurrency: 1
-    benchmark.num_prompts: 8
-
-  # Emmy batch lane with the 2048-token prefill chunk.
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
-    engine.llm.vllm.extra_args: >-
-      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-      --max-num-batched-tokens 2056 --no-enable-prefix-caching
-    cross:
-      engine.llm.vllm.extra_env:
-        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-    benchmark.random_input_len: 4096
-    benchmark.random_output_len: 4096
-    benchmark.max_concurrency: 8
-    benchmark.num_prompts: 64
-
-  # Emmy long-prefill/RAG lane.
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
-    engine.llm.vllm.extra_args: >-
-      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-      --max-num-batched-tokens 4104 --no-enable-prefix-caching
-    cross:
-      engine.llm.vllm.extra_env:
-        - "EMMY_GEN_DECODE_BUCKET=8"
-        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8"
-    benchmark.random_input_len: 8192
-    benchmark.random_output_len: 256
-    benchmark.max_concurrency: 4
-    benchmark.num_prompts: 16
-
-  # Emmy short high-concurrency lane.
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
-    engine.llm.vllm.extra_args: >-
-      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-      --max-num-batched-tokens 2112 --no-enable-prefix-caching
-    cross:
-      engine.llm.vllm.extra_env:
-        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 256
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 64
     benchmark.num_prompts: 256
+    zip:
+      engine.llm.vllm.entrypoint: &balanced_entrypoints
+        - "python3 -m vllm.entrypoints.openai.api_server"
+        - null
+        - null
+        - "python3 -m vllm.entrypoints.openai.api_server"
+        - "python3 -m vllm.entrypoints.openai.api_server"
+        - null
+        - null
+        - "python3 -m vllm.entrypoints.openai.api_server"
+        - "python3 -m vllm.entrypoints.openai.api_server"
+        - null
+      engine.llm.vllm.extra_args:
+        - &stock_short "--dtype float16 --max-num-batched-tokens 2112 --no-enable-prefix-caching"
+        - &emmy_short >-
+          --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+          --max-num-batched-tokens 2112 --no-enable-prefix-caching
+        - *emmy_short
+        - *stock_short
+        - *stock_short
+        - *emmy_short
+        - *emmy_short
+        - *stock_short
+        - *stock_short
+        - *emmy_short
+      engine.llm.vllm.extra_env:
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+
+  # Interactive point.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 8
+    zip:
+      engine.llm.vllm.entrypoint: *balanced_entrypoints
+      engine.llm.vllm.extra_args:
+        - &stock_interactive "--dtype float16 --max-num-batched-tokens 4128 --no-enable-prefix-caching"
+        - &emmy_interactive >-
+          --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+          --max-num-batched-tokens 4128 --no-enable-prefix-caching
+        - *emmy_interactive
+        - *stock_interactive
+        - *stock_interactive
+        - *emmy_interactive
+        - *emmy_interactive
+        - *stock_interactive
+        - *stock_interactive
+        - *emmy_interactive
+      engine.llm.vllm.extra_env:
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+
+  # Batch point with the 2048-token prefill chunk.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+    benchmark.max_concurrency: 8
+    benchmark.num_prompts: 64
+    zip:
+      engine.llm.vllm.entrypoint: *balanced_entrypoints
+      engine.llm.vllm.extra_args:
+        - &stock_batch "--dtype float16 --max-num-batched-tokens 2056 --no-enable-prefix-caching"
+        - &emmy_batch >-
+          --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+          --max-num-batched-tokens 2056 --no-enable-prefix-caching
+        - *emmy_batch
+        - *stock_batch
+        - *stock_batch
+        - *emmy_batch
+        - *emmy_batch
+        - *stock_batch
+        - *stock_batch
+        - *emmy_batch
+      engine.llm.vllm.extra_env:
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+
+  # Long-prefill/RAG point.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    benchmark.random_input_len: 8192
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 4
+    benchmark.num_prompts: 16
+    zip:
+      engine.llm.vllm.entrypoint: *balanced_entrypoints
+      engine.llm.vllm.extra_args:
+        - &stock_long "--dtype float16 --max-num-batched-tokens 4104 --no-enable-prefix-caching"
+        - &emmy_long >-
+          --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+          --max-num-batched-tokens 4104 --no-enable-prefix-caching
+        - *emmy_long
+        - *stock_long
+        - *stock_long
+        - *emmy_long
+        - *emmy_long
+        - *stock_long
+        - *stock_long
+        - *emmy_long
+      engine.llm.vllm.extra_env:
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
+        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
+        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"

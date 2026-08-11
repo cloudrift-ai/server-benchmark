@@ -1,0 +1,37 @@
+# Primary datacenter TP8 qualification. This stock-vLLM lane characterizes the exact system but does not prove an
+# Emmy end-to-end gain until a matched Emmy engine arm and validated runtime-derived kernel manifest are present.
+model:
+  huggingface: "zai-org/GLM-5.2-FP8"
+  revision: ba978f7d347eaf65d22f1a86833408afdb953541
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.90
+    context_length: 262144
+    max_concurrent_requests: 32
+    vllm:
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      extra_args: >-
+        --kv-cache-dtype fp8 --no-enable-prefix-caching
+        --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
+        --tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  repeats: 1
+
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA H200 141GB"
+      deploy.gpu_count: 8
+      engine.llm.vllm.extra_env.EMMY_BENCH_PROCESS_REPEAT: ["0", "1", "2", "3", "4"]
+      zip:
+        benchmark.random_input_len: [256, 8192, 32768]
+        benchmark.random_output_len: [256, 256, 1024]
+        benchmark.max_concurrency: [32, 16, 1]
+        benchmark.num_prompts: [128, 64, 6]

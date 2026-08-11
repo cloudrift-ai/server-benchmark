@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "image": "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3",
+  "stock_entrypoint": "python3 -m vllm.entrypoints.openai.api_server",
+  "emmy_architecture": "EmmyGenModel",
+  "vllm_source_revision": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+  "upstream_reference": {
+    "index": "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+    "linux_amd64_manifest": "sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0"
+  }
+}

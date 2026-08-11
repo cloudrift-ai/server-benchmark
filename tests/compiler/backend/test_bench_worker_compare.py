@@ -448,6 +448,55 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     assert benched and resp["results"] == {"Emmy": 1.0}
 
 
+def test_frontend_job_returns_strict_eager_reference(monkeypatch) -> None:
+    """The embedded-golden worker carries strict proof and same-input eager outputs to
+    the parent so every pinned realization can be checked directly against eager."""
+    import emmy.commands.run as run_mod
+    import emmy.compiler.backend.cuda.backend as backend_mod
+    from emmy.compiler.backend.cuda._bench_worker import _run_job
+
+    class _FakeBackend:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    proof = {
+        "status": "pass",
+        "reference": "eager",
+        "rtol": 1e-3,
+        "atol": 1e-3,
+        "max_abs_error": 0.0,
+        "mean_abs_error": 0.0,
+        "max_rel_error": 0.0,
+    }
+    reference = ({"x": [1.0]}, {"o": [2.0]})
+
+    async def fake_bench(frontend, graph, backend, **kwargs):
+        assert (frontend, graph) == ("FE", "G")
+        assert kwargs["strict_accuracy"] is True
+        assert kwargs["return_reference"] is True
+        return {"Emmy": 1.0}, "BENCH", True, True, None, proof, reference
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", fake_bench)
+    response = asyncio.run(
+        _run_job(
+            {
+                "graph": "G",
+                "torch_spec": ("frontend_graph", "FE"),
+                "bench_backends": "emmy",
+                "warmup": 1,
+                "iters": 2,
+                "seed": 0,
+                "strict_accuracy": True,
+                "want_ref": True,
+            }
+        )
+    )
+
+    assert response["correctness"] == proof
+    assert response["run_io"] == reference
+
+
 @requires_cuda
 def test_worker_hang_is_sigkilled_not_wedged() -> None:
     import asyncio

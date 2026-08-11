@@ -6,27 +6,28 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
+    - scripts/verify_working_golden_winners.py
+    - scripts/verify_working_golden_greedy.py
+    - scripts/capture_kernel_environment.py
+    - scripts/verify_staged_source.py
+    - scripts/run_submission_kernel_case.sh
+    - experiments/golden-bench-2026
   run: |
-    set -euo pipefail
+    set -uo pipefail
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
+    source_manifest="$repo_dir/experiments/golden-bench-2026/SOURCE_MANIFEST.json"
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_staged_source.py "$source_manifest" --root "$repo_dir" || exit $$?
+    export SOURCE_MANIFEST="$$source_manifest"
     [ -d venv ] || make setup
+    overall_status=0
     for seq_len in 1 512; do
       seq_dir="$task_dir/seq-$$seq_len"
-      mkdir -p "$$seq_dir"
-      export EMMY_TUNE_DB="$$seq_dir/autotune.db"
-      export EMMY_ONLINE_FILE="$$seq_dir/online.json"
-      export EMMY_CUBIN_CACHE="$$seq_dir/cubins"
-      ./venv/bin/emmy trace Qwen/Qwen3-0.6B --layer 0 --seq-len "$$seq_len" \
-        --model-provenance Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca \
-        --output "$$seq_dir/working.yaml" 2>&1 | tee "$$seq_dir/trace.log"
-      ./venv/bin/emmy tune --golden-file "$$seq_dir/working.yaml" --clean \
-        --devices "$gpu_device_ids" --max-candidates 12 --patience 4 --seed 0 \
-        --bench --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
-        --dump-dir "$$seq_dir/dump" 2>&1 | tee "$$seq_dir/tune.log"
-      tar -C "$$seq_dir" -czf "$$seq_dir/artifacts.tar.gz" \
-        working.yaml trace.log tune.log autotune.db cubins dump
+      bash scripts/run_submission_kernel_case.sh "$$seq_dir" \
+        Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca 0 "$$seq_len" 12 4 0 \
+        "$gpu_device_ids" default none || overall_status=1
     done
+    exit "$$overall_status"
   result_files:
     - "seq-*/artifacts.tar.gz"
   timeout: 43200

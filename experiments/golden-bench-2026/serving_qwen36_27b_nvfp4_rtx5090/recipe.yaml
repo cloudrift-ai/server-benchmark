@@ -1,5 +1,5 @@
-# Provisional RTX 5090 NVFP4 qualification. Replace the nightly image with its measured digest and prove native
-# SM120 FP4 execution from logs and generated code; a Marlin fallback is not an NVFP4 performance result.
+# Provisional RTX 5090 NVFP4 qualification. Prove native SM120 FP4 execution from logs and generated code; a Marlin
+# fallback is not an NVFP4 performance result.
 model:
   huggingface: "nvidia/Qwen3.6-27B-NVFP4"
   revision: 0893e1606ff3d5f97a441f405d5fc541a6bdf404
@@ -13,22 +13,24 @@ engine:
     context_length: 32768
     max_concurrent_requests: 8
     vllm:
-      image: "vllm/vllm-openai:nightly"
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
       extra_args: >-
         --quantization modelopt --language-model-only --enable-auto-tool-choice
-        --tool-call-parser qwen3_coder --reasoning-parser qwen3
+        --tool-call-parser qwen3_coder --reasoning-parser qwen3 --no-enable-prefix-caching
 
 benchmark:
   seed: 0
   temperature: 0
   ignore_eos: true
-  repeats: 3
+  repeats: 1
 
 matrices:
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    zip:
-      benchmark.random_input_len: [128, 4096, 16384]
-      benchmark.random_output_len: [128, 1024, 256]
-      benchmark.max_concurrency: [8, 4, 1]
-      benchmark.num_prompts: [64, 24, 6]
+  - cross:
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      engine.llm.vllm.extra_env.EMMY_BENCH_PROCESS_REPEAT: ["0", "1", "2", "3", "4"]
+      zip:
+        benchmark.random_input_len: [128, 4096, 16384]
+        benchmark.random_output_len: [128, 1024, 256]
+        benchmark.max_concurrency: [8, 4, 1]
+        benchmark.num_prompts: [64, 24, 6]

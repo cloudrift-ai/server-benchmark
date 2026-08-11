@@ -1332,7 +1332,38 @@ def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
         setattr(mlp, name, RoutedScoreScale(router, total_scale))
 
 
-def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
+def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool) -> bool:
+    """Whether one PP stage needs a quantized checkpoint leaf.
+
+    Layer leaves belong only to their absolute decoder interval. The embedding and final norm
+    follow the first/last-stage ownership used by vLLM. The output head is deliberately outside
+    this loader when PP is active: ``EmmyGenModel`` owns and decodes it on the last stage. Unknown
+    model-level leaves stay replicated; they are small architecture state and some model families
+    require them while tracing a local layer.
+    """
+    if layer_range is None:
+        return True
+    if ".layers." in key:
+        layer = int(key.split(".layers.", 1)[1].split(".", 1)[0])
+        return layer_range[0] <= layer < layer_range[1]
+    if key == "lm_head.weight" or key.startswith("lm_head.") or ".lm_head." in key:
+        return False
+    if ".embed_tokens." in key or key.startswith("embed_tokens."):
+        return include_embed
+    if key.endswith((".norm.weight", ".norm.bias")) or key.startswith("norm."):
+        return include_norm
+    return True
+
+
+def load_quantized_split(
+    model_dir,
+    dtype,
+    *,
+    compress_trunk=False,
+    layer_range=None,
+    include_embed=True,
+    include_norm=True,
+):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
     The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss):
@@ -1370,6 +1401,10 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
       (``serving/gen_runner.py`` retargets each traced constant to its checkpoint key and lets
       ``spell_trellis_constants`` fire). Nothing may read those parameters' VALUES — the store's
       ``"trunk"`` field says which lane produced the twin.
+
+    ``layer_range=(start, end)`` restricts checkpoint reads to one pipeline stage's absolute
+    decoder interval. ``include_embed`` and ``include_norm`` assign the two boundary tensors;
+    all unowned parameters remain meta and must never be read by that stage.
 
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
@@ -1432,8 +1467,20 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
             return _open(str(index[key])).get_tensor(key)
 
         for shard_path in sorted(by_shard):
+            owned_keys = [
+                key
+                for key in sorted(by_shard[shard_path])
+                if _quantized_stage_owns(
+                    _checkpoint_to_model_key(key),
+                    layer_range,
+                    include_embed=include_embed,
+                    include_norm=include_norm,
+                )
+            ]
+            if not owned_keys:
+                continue
             f = _open(shard_path)
-            for k in sorted(by_shard[shard_path]):
+            for k in owned_keys:
                 slot = _expert_slot(k)
                 if slot is not None:
                     layer, name, expert = slot
@@ -1521,14 +1568,15 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
     # selection and fails later with an opaque META-to-CUDA error.  The real Laguna EXL3
     # checkpoint stores the source-layout ``mlp.experts`` spelling, translated above; check the
     # actual load result rather than the logical quantization sidecar (which need not list it).
-    missing_routing_biases = [m for m in missing if m.endswith(".mlp.gate.e_score_correction_bias")]
+    owned_missing = [m for m in missing if _quantized_stage_owns(m, layer_range, include_embed=include_embed, include_norm=include_norm)]
+    missing_routing_biases = [m for m in owned_missing if m.endswith(".mlp.gate.e_score_correction_bias")]
     if missing_routing_biases:
         sample = missing_routing_biases[0]
         raise ValueError(
             f"quantized split checkpoint is incomplete: missing routing correction bias {sample!r} "
             f"(expected checkpoint alias {sample.replace('.mlp.gate.', '.mlp.experts.')!r})"
         )
-    missing_dense = [m for m in missing if _expert_slot(m) is None]
+    missing_dense = [m for m in owned_missing if _expert_slot(m) is None]
     if missing_dense:
         logger.info("quantized split load: %d module tensors not in checkpoint (e.g. %s)", len(missing_dense), missing_dense[0])
     _apply_exl3_laguna_routed_scale(model, exl3=exl3)

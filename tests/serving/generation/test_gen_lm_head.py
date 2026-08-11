@@ -41,6 +41,7 @@ def _model(*, model_id="does-not-exist/nowhere", tied=False, vocab=VOCAB, hidden
             sinks=None,
             runner=runner,
             _model_id=model_id,
+            _is_last_rank=True,
         ),
         adopted,
     )
@@ -163,3 +164,24 @@ def test_plain_checkpoint_is_not_probed_as_coded(tmp_path):
     w = torch.randn(VOCAB, HIDDEN)
     assert _load(model, [("lm_head.weight", w)]) == {"lm_head.weight"}
     assert torch.equal(model.lm_head.weight.data, w)
+
+
+def test_non_last_pipeline_stage_loads_only_its_attention_sinks():
+    model, _ = _model()
+    model._is_last_rank = False
+    model.start_layer, model.end_layer = 2, 4
+    model.sinks = torch.nn.ParameterList([torch.nn.Parameter(torch.full((3,), float("nan")), requires_grad=False) for _ in range(2)])
+    weights = [
+        ("model.layers.1.self_attn.sinks", torch.full((3,), 1.0)),
+        ("model.layers.2.self_attn.sinks", torch.full((3,), 2.0)),
+        ("model.layers.3.self_attn.sinks", torch.full((3,), 3.0)),
+        ("model.layers.4.self_attn.sinks", torch.full((3,), 4.0)),
+        ("lm_head.weight", torch.zeros(VOCAB, HIDDEN)),
+    ]
+
+    assert _load(model, weights) == {
+        "model.layers.2.self_attn.sinks",
+        "model.layers.3.self_attn.sinks",
+    }
+    assert torch.equal(model.sinks[0], torch.full((3,), 2.0))
+    assert torch.equal(model.sinks[1], torch.full((3,), 3.0))

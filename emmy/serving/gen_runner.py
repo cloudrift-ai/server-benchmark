@@ -546,6 +546,8 @@ class EmmyGenRunner:
         *,
         embed_weight,
         norm,
+        hidden_size=None,
+        layer_ids=None,
         pre,
         post,
         attn_meta,
@@ -566,6 +568,14 @@ class EmmyGenRunner:
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
+        if hidden_size is None:
+            if embed_weight is None:
+                raise ValueError("hidden_size is required when this runner does not own the embedding table")
+            hidden_size = embed_weight.shape[1]
+        self._hidden_size = int(hidden_size)
+        self._layer_ids = tuple(range(len(attn_meta))) if layer_ids is None else tuple(int(i) for i in layer_ids)
+        if len(self._layer_ids) != len(attn_meta):
+            raise ValueError(f"layer_ids has {len(self._layer_ids)} entries for {len(attn_meta)} attention layers")
         self._pre = pre  # list[_Program] — symbolic (prefill / any width), empty when static-covered
         self._post = post
         self._pre_decode = pre_decode  # list[_Program] — static M=decode_bucket (or None → no bucket)
@@ -644,6 +654,10 @@ class EmmyGenRunner:
         its global (``full_attention``) layers use ``global_head_dim`` > the sliding layers' head_dim."""
         return self._attn_meta[layer]
 
+    def global_layer_id(self, layer: int) -> int:
+        """Absolute decoder-layer index for one rank-local program slot."""
+        return self._layer_ids[layer]
+
     @property
     def num_layers(self) -> int:
         return len(self._attn_meta)
@@ -718,7 +732,18 @@ class EmmyGenRunner:
         return self._decode_bucket
 
     @classmethod
-    def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
+    def create(
+        cls,
+        model_id,
+        *,
+        dtype_str="float16",
+        decode_bucket=16,
+        max_tokens=None,
+        prefill_bucket=0,
+        layer_range=None,
+        include_embed=True,
+        include_norm=True,
+    ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
         carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
         ``--revision`` on). Everything the runner resolves from the checkpoint — detection,
@@ -758,7 +783,14 @@ class EmmyGenRunner:
                 checkpoint_quant_summary(qdir),
                 checkpoint_quant_digest(qdir),
             )
-            model, expert_store = load_quantized_split(qdir, getattr(torch, dtype_str), compress_trunk=coded_trunk)
+            model, expert_store = load_quantized_split(
+                qdir,
+                getattr(torch, dtype_str),
+                compress_trunk=coded_trunk,
+                layer_range=layer_range,
+                include_embed=include_embed,
+                include_norm=include_norm,
+            )
             with torch.device("cpu"):
                 return cls.from_model(
                     model,
@@ -767,17 +799,39 @@ class EmmyGenRunner:
                     max_tokens=max_tokens,
                     prefill_bucket=prefill_bucket,
                     expert_store=expert_store,
+                    layer_range=layer_range,
+                    include_embed=include_embed,
+                    include_norm=include_norm,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
         with torch.device("cpu"):
             model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str)).eval()
             return cls.from_model(
-                model, dtype_str=dtype_str, decode_bucket=decode_bucket, max_tokens=max_tokens, prefill_bucket=prefill_bucket
+                model,
+                dtype_str=dtype_str,
+                decode_bucket=decode_bucket,
+                max_tokens=max_tokens,
+                prefill_bucket=prefill_bucket,
+                layer_range=layer_range,
+                include_embed=include_embed,
+                include_norm=include_norm,
             )
 
     @classmethod
-    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0, expert_store=None):
+    def from_model(
+        cls,
+        model,
+        *,
+        dtype_str="float16",
+        decode_bucket=16,
+        max_tokens=None,
+        prefill_bucket=0,
+        expert_store=None,
+        layer_range=None,
+        include_embed=True,
+        include_norm=True,
+    ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
         ``load_quantized_split`` result) supplies the per-layer expert input tensors —
@@ -803,12 +857,17 @@ class EmmyGenRunner:
         # Multimodal wrappers (gemma-4 "unified") nest the decoder stack + embed/norm under
         # ``language_model`` and carry the text dims on ``config.text_config``.
         trunk = getattr(trunk, "language_model", trunk)
-        layers = trunk.layers
+        all_layers = trunk.layers
         text_config = getattr(model.config, "text_config", model.config)
         hidden = text_config.hidden_size
         precision_contract = _generation_precision_contract(getattr(text_config, "model_type", None), expert_store)
         residual_float32 = precision_contract is not None
         residual_dtype = torch.float32 if residual_float32 else dtype
+        start, end = layer_range or (0, len(all_layers))
+        if not 0 <= start < end <= len(all_layers):
+            raise ValueError(f"layer_range must be within 0..{len(all_layers)}, got {(start, end)}")
+        layer_items = list(enumerate(all_layers[start:end], start=start))
+        layers = [block for _i, block in layer_items]
 
         def _meta(attn):
             # Per-layer attention dims. Gemma-4's global layers use a larger head_dim
@@ -868,6 +927,8 @@ class EmmyGenRunner:
             "decode_bucket": int(decode_bucket or 0),
             "max_tokens": int(max_tokens or 0),
             "prefill_bucket": int(prefill_bucket or 0),
+            "layer_start": int(start),
+            "layer_end": int(end),
         }
         if precision_contract is not None:
             pack_key["precision_contract"] = precision_contract
@@ -892,8 +953,8 @@ class EmmyGenRunner:
                 pass
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.
-            decode_ok = decode_ok and "L00.pre.decode" in loaded
-            prefill_ok = prefill_ok and "L00.pre.prefill" in loaded
+            decode_ok = decode_ok and f"L{start:02d}.pre.decode" in loaded
+            prefill_ok = prefill_ok and f"L{start:02d}.pre.prefill" in loaded
 
         static_only = _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) and bool(decode_ok)
         if static_only:
@@ -1132,11 +1193,17 @@ class EmmyGenRunner:
                     )
             return tiers
 
-        for i, block in enumerate(layers):
+        for local_i, (i, block) in enumerate(layer_items):
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
-            logger.info("[gen_runner] compiling layer %d/%d (pre + post%s)...", i + 1, len(layers), " + decode" if decode_ok else "")
+            logger.info(
+                "[gen_runner] compiling layer %d (rank-local %d/%d, pre + post%s)...",
+                i,
+                local_i + 1,
+                len(layers),
+                " + decode" if decode_ok else "",
+            )
             moe_parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
             if moe_parts is not None:
                 import copy
@@ -1410,13 +1477,16 @@ class EmmyGenRunner:
                 if prog.program.arrays[out_name].nbytes == pf_shared.nbytes:
                     prog.program.arrays[out_name] = pf_shared
 
-        embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+        embed_weight = None
         # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
         # an ``embed_scale`` buffer); a plain ``nn.Embedding`` has none (scale 1). Fold it into the
         # gather table so ``embed`` / ``embed_device`` both apply it with zero per-step cost.
-        embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
-        if embed_scale != 1.0:
-            embed_weight = embed_weight * np_dtype.type(embed_scale)
+        embed_scale = 1.0
+        if include_embed:
+            embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+            embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
+            if embed_scale != 1.0:
+                embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
         use_m1 = m1_ok and len(pre_m1) == len(layers) and len(post_m1) == len(layers)
         use_prefill = prefill_ok and len(pre_prefill) == len(layers)
@@ -1446,7 +1516,9 @@ class EmmyGenRunner:
                     logger.warning("[gen_runner] pack write failed at %s", pack_at, exc_info=True)
         runner = cls(
             embed_weight=embed_weight,
-            norm=trunk.norm,
+            norm=trunk.norm if include_norm else None,
+            hidden_size=hidden,
+            layer_ids=[i for i, _block in layer_items],
             pre=pre_programs,
             post=post_programs,
             attn_meta=attn_meta,
@@ -1485,7 +1557,7 @@ class EmmyGenRunner:
         if hetero is not None:
             audit_layers.append(hetero)
         named = [
-            (f"L{li}.{role}.{tag}", plist[li])
+            (f"L{runner.global_layer_id(li)}.{role}.{tag}", plist[li])
             for li in audit_layers
             for tag, role, plist in (
                 (f"decode.m{decode_bucket}", "pre", runner._pre_decode),
@@ -1510,6 +1582,8 @@ class EmmyGenRunner:
         """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype."""
         import numpy as np
 
+        if self._embed_weight is None:
+            raise RuntimeError("this pipeline stage does not own the token embedding")
         rows = self._embed_weight[np.asarray(input_ids, dtype=np.int64)]
         return rows.astype(np.float32) if self._residual_float32 else rows
 
@@ -1550,6 +1624,8 @@ class EmmyGenRunner:
         import numpy as np
         import torch
 
+        if self._norm is None:
+            raise RuntimeError("this pipeline stage does not own the final norm")
         with torch.no_grad():
             out = self._norm(torch.from_numpy(np.ascontiguousarray(hidden)))
             if self._residual_float32:
@@ -1575,12 +1651,13 @@ class EmmyGenRunner:
 
         from emmy import config as emmy_config
 
-        if getattr(self, "_embed_weight_dev", None) is None:
+        if self._embed_weight is not None and getattr(self, "_embed_weight_dev", None) is None:
             if emmy_config.gen_embed_host():
                 self._embed_weight, self._embed_weight_dev = self._map_embed_table_to_host()
             else:
                 self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
-        self._norm_dev = copy.deepcopy(self._norm).to("cuda")
+        if self._norm is not None:
+            self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         if self._moe is not None:
             # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
             # vLLM's profiled footprint (same contract as the embed table above). The expert
@@ -1655,7 +1732,7 @@ class EmmyGenRunner:
                     import numpy as np  # noqa: PLC0415
 
                     k = len(self._expert_tiers[0]["slots"])
-                    h = self._embed_weight.shape[1]
+                    h = self._hidden_size
                     self._slot_sel = torch.zeros(k, dtype=torch.int32, device="cuda")
                     act_dtype = torch.from_numpy(np.empty(0, dtype=self._np_dtype)).dtype
                     slot_precision = {m["accumulate_float32"] for m in self._moe if m is not None}
@@ -1749,6 +1826,8 @@ class EmmyGenRunner:
         """``input_ids``: 1-D int torch CUDA tensor → ``[T, H]`` CUDA tensor (on-device gather).
         An adopted (raw, shared) table applies the embed scale here — in fp32, matching the
         host table's fold-at-fp32-then-cast numerics."""
+        if self._embed_weight is None and getattr(self, "_embed_weight_dev", None) is None:
+            raise RuntimeError("this pipeline stage does not own the token embedding")
         self._ensure_device()
         rows = self._embed_weight_dev[input_ids.long()]
         scale = getattr(self, "_embed_dev_scale", 1.0)
@@ -2049,6 +2128,8 @@ class EmmyGenRunner:
         """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""
         import torch
 
+        if self._norm is None:
+            raise RuntimeError("this pipeline stage does not own the final norm")
         self._ensure_device()
         with torch.no_grad():
             out = self._norm_dev(hidden)

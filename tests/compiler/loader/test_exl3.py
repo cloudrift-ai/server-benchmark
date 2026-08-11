@@ -159,10 +159,10 @@ def test_codebook_rejects_unknown_id():
 # ===================================================================
 
 
-@pytest.mark.parametrize(("K", "cb"), [(2, 0), (6, 0), (2, 1), (3, 2)])
+@pytest.mark.parametrize(("K", "cb"), [(2, 0), (6, 0), (2, 1), (3, 2), (5, 2)])
 def test_decode_trellis_matches_scalar_reference(K, cb):
     """Vectorized decode == the scalar per-tile reference (windows, codebook, placement), exactly.
-    K=2 and K=6 are the two rungs the pinned GLM-4.5-Air 2.0bpw checkpoint uses (body / lm_head)."""
+    K=2/3/4/5/6 cover the EXL3 rates used by the qualified Laguna and GLM checkpoints."""
     tr = _random_trellis(2, 2, K)
     got = decode_trellis(tr, cb)
     assert got.shape == (32, 32) and got.dtype == np.float16
@@ -691,7 +691,8 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
 
 
 @requires_cuda
-def test_input_spelling_computed_b_mma_matches_decoded_linear():
+@pytest.mark.parametrize(("K", "cb", "m", "lane"), [(2, 0, 16, "mma"), (5, 2, 1, "coop")])
+def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     """The streamed generic B cone agrees with the decoded-weight linear on CUDA."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.context import Context
@@ -704,31 +705,44 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.fork import flatten_leaves
     from emmy.compiler.pipeline.pipeline import Run
+    from tests.compiler.helpers import device_compute_capability
 
-    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    capability = device_compute_capability()
+    if lane == "mma" and capability < (8, 0):
+        pytest.skip("computed-B tensor-core lane requires SM80 or newer")
+    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=K, cb=cb)
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("x", (m, 128), "f16"), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
-    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (m, 128), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
-    spell_trellis_inputs(graph, {"w": (0, tuple(tensors["layer.trellis"].shape))})
+    spell_trellis_inputs(graph, {"w": (cb, tuple(tensors["layer.trellis"].shape))})
     # Preserve the same computed-B lowering boundary as the GPU-less source test above.
     graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
-    def choose_sync_mma(fp):
+    selected = []
+
+    def choose_lane(fp):
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+            if lane == "mma" and str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+                selected.append(row)
+                return leaf
+            if lane == "coop" and row.get("WORK") == "t128" and row.get("REDUCE") == "coop":
+                selected.append(row)
                 return leaf
         return leaves[0]
 
-    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
+    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, choose_lane)
+    assert selected
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert any("emmy_bitcast" in source and "mma.sync.aligned" in source for source in sources)
+    assert any("emmy_bitcast" in source for source in sources)
+    if lane == "mma":
+        assert any("mma.sync.aligned" in source for source in sources)
     lowered.outputs = [nid for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)]
 
-    x = (rng.standard_normal((16, 128)) * 0.25).astype(np.float16)
+    x = (rng.standard_normal((m, 128)) * 0.25).astype(np.float16)
     feed = bind_constants(lowered, {})
     assert "y_factor32" in feed and np.any(feed["y_factor32"])
     decoded_constants = [name for name in feed if name.startswith("w_decoded_")]
@@ -898,7 +912,7 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
 
 @pytest.mark.parametrize(
     ("n", "k", "K", "cb"),
-    [(128, 128, 1, 0), (256, 128, 2, 0), (192, 128, 3, 1), (128, 128, 6, 2)],
+    [(128, 128, 1, 0), (256, 128, 2, 0), (192, 128, 3, 1), (128, 256, 5, 2), (128, 128, 6, 2)],
 )
 def test_loader_binds_factored_trellis_linear(tmp_path, n, k, K, cb):
     """Birth-time spelling binds compact leaves and tracks the dense reference envelope."""

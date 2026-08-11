@@ -880,6 +880,85 @@ def test_load_quantized_split_compress_trunk_leaves_the_trunk_coded(tmp_path):
     assert values_store["trunk"] == "values"
 
 
+def test_load_quantized_split_reads_only_pipeline_stage_ownership(tmp_path, monkeypatch):
+    """A PP stage reads only its absolute layer interval and boundary tensors.
+
+    In particular, the runner never reads or materializes the output head: vLLM owns that
+    tensor on the last stage. This is the memory invariant that makes the mixed-bit Laguna
+    checkpoint fit on 8x16GB without a decoded full-model duplicate.
+    """
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from safetensors import safe_open as real_safe_open
+
+    from emmy.compiler.trace import huggingface
+
+    cfg = _tiny_glm4_moe_config(transformers)
+    torch.manual_seed(0)
+    _exl3_moe_checkpoint(tmp_path, cfg)
+    reads = []
+
+    class _RecordingHandle:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def get_tensor(self, key):
+            reads.append(key)
+            return self._inner.get_tensor(key)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    class _RecordingContext:
+        def __init__(self, *args, **kwargs):
+            self._inner = real_safe_open(*args, **kwargs)
+
+        def __enter__(self):
+            return _RecordingHandle(self._inner.__enter__())
+
+        def __exit__(self, *args):
+            return self._inner.__exit__(*args)
+
+    monkeypatch.setattr("safetensors.safe_open", _RecordingContext)
+    model, store = huggingface.load_quantized_split(
+        tmp_path,
+        torch.float16,
+        compress_trunk=True,
+        layer_range=(1, 2),
+        include_embed=False,
+        include_norm=True,
+    )
+
+    assert set(store["layers"]) == {1}
+    assert reads
+    assert all(".layers.0." not in key for key in reads)
+    assert all(not key.startswith("lm_head.") for key in reads)
+    assert all(".embed_tokens." not in key for key in reads)
+    state = model.state_dict()
+    assert state["model.layers.0.self_attn.q_proj.weight"].is_meta
+    assert not state["model.layers.1.self_attn.q_proj.weight"].is_meta
+    assert state["model.embed_tokens.weight"].is_meta
+    assert not state["model.norm.weight"].is_meta
+
+    reads.clear()
+    first, store = huggingface.load_quantized_split(
+        tmp_path,
+        torch.float16,
+        compress_trunk=True,
+        layer_range=(0, 1),
+        include_embed=True,
+        include_norm=False,
+    )
+    assert store["layers"] == {}
+    assert all(".layers.1." not in key for key in reads)
+    assert all(not key.startswith("lm_head.") for key in reads)
+    first_state = first.state_dict()
+    assert not first_state["model.layers.0.self_attn.q_proj.weight"].is_meta
+    assert first_state["model.layers.1.self_attn.q_proj.weight"].is_meta
+    assert not first_state["model.embed_tokens.weight"].is_meta
+    assert first_state["model.norm.weight"].is_meta
+
+
 def test_serving_trunk_constants_retarget_to_checkpoint_keys(tmp_path):
     """The fit blocker, at its root: a split wrapper's traced constants carry WRAPPER-relative
     parameter paths (``q_proj.weight``), which never reach the checkpoint index, so the trellis

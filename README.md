@@ -214,6 +214,9 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Recipe
 
 ```yaml
+tags:
+  - maintained
+
 model:
   huggingface: "org/model-name"
 
@@ -245,6 +248,9 @@ matrices:
       engine.llm.max_concurrent_requests: [128, 512]
       benchmark.max_concurrency: [128, 512]
 ```
+
+Discovery keeps ten tested recipes tagged `maintained`. Superseded recipes stay in git with `obsolete`; new model
+shells use `onboarding` plus `untested`. Disabled recipes are not deployable or bundled.
 
 Generic workload (run any tool on the VM, pull back result files):
 

@@ -4,8 +4,9 @@
 Pulls the open-weight models OpenRouter currently hosts (catalog entries that carry a
 `hugging_face_id` — closed models like Claude/GPT/Gemini do not), verifies each one exists on
 HuggingFace, and reports its HF popularity (downloads / likes / trendingScore) and release date.
-By default it drops models emmy already supports (anything whose base model already appears
-in `recipes/`) and anything older than ~3 months, leaving a ranked shortlist of fresh candidates.
+By default it drops models Emmy actively supports or is already onboarding, while allowing an obsolete recipe to
+resurface when activity returns. It also drops anything older than ~3 months, leaving a ranked shortlist of fresh
+candidates.
 
 Both APIs are queried keyless and read-only: OpenRouter `GET /api/v1/models` (public) and the HF
 `GET /api/models/{id}` metadata endpoint (200 = on HF + popularity, 404 = stale OpenRouter mapping).
@@ -36,6 +37,7 @@ import httpx
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from emmy.recipe.lifecycle import OBSOLETE_TAG, validate_recipe_tags  # noqa: E402
 from emmy.recipe.recipe import _load_raw_config  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
@@ -87,12 +89,14 @@ def _base_key(repo_id: str) -> str:
 
 
 def supported_base_keys(recipe_root: Path) -> set[str]:
-    """Base keys of every `model.huggingface` referenced across `recipes/*/recipe.yaml`."""
+    """Base keys of runnable and onboarding recipes; obsolete models may resurface."""
     keys: set[str] = set()
     for recipe_dir in sorted(recipe_root.glob("*")):
         if not (recipe_dir / "recipe.yaml").is_file():
             continue
         cfg = _load_raw_config(str(recipe_dir))
+        if OBSOLETE_TAG in validate_recipe_tags(cfg.get("tags")):
+            continue
         hf_id = (cfg.get("model") or {}).get("huggingface")
         if hf_id:
             keys.add(_base_key(hf_id))

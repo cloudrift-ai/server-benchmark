@@ -61,6 +61,20 @@ def test_staging_is_idempotent(fake_repo):
     assert [p.name for p in (fake_repo / "emmy" / "recipes").iterdir()] == ["kept"]
 
 
+def test_stages_only_runnable_recipes(fake_repo):
+    for name, tags in (
+        ("maintained", ["maintained"]),
+        ("obsolete", ["obsolete"]),
+        ("onboarding", ["onboarding", "untested"]),
+    ):
+        model = fake_repo / "recipes" / name
+        model.mkdir(parents=True)
+        (model / "recipe.yaml").write_text(f"tags: {tags!r}\nmodel:\n  huggingface: org/{name}\n")
+
+    assert prepare_dist.stage_recipes() == 1
+    assert [p.name for p in (fake_repo / "emmy" / "recipes").iterdir()] == ["maintained"]
+
+
 def test_refuses_to_build_a_recipe_less_package(fake_repo):
     (fake_repo / "recipes").mkdir()
 

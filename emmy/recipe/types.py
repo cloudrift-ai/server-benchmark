@@ -188,6 +188,7 @@ class DeployConfig:
 class Recipe:
     """Complete recipe configuration."""
 
+    tags: tuple[str, ...] = ()
     model: ModelConfig = field(default_factory=ModelConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
@@ -287,6 +288,7 @@ class Recipe:
             )
 
         return cls(
+            tags=tuple(d.get("tags", ())),
             model=model,
             engine=EngineConfig(llm=llm),
             benchmark=benchmark,
@@ -305,3 +307,10 @@ class Recipe:
         """True for embedding recipes (``model.task: embed``) — /v1/embeddings
         smoke test + ``vllm bench serve --backend openai-embeddings`` workload."""
         return self.model.task == "embed"
+
+    @property
+    def lifecycle(self) -> str | None:
+        """The maintained, obsolete, or onboarding lifecycle tag, when present."""
+        from emmy.recipe.lifecycle import LIFECYCLE_TAGS
+
+        return next((tag for tag in self.tags if tag in LIFECYCLE_TAGS), None)

@@ -2,19 +2,21 @@
 name: discover-models
 description: >-
   Use this skill when the user asks what new models to try or benchmark, wants newly released open models discovered,
-  or wants trending models mapped to suitable GPU hardware. It produces a ranked shortlist ready for the
-  `onboard-model` skill, using keyless discovery data, web search, and a VRAM fit calculation.
+  wants trending models mapped to suitable GPU hardware, or wants the maintained recipe set refreshed. It produces a
+  ranked shortlist or lifecycle selection ready for the `onboard-model` skill, using keyless discovery data, web
+  search, and a VRAM fit calculation.
 ---
 
 # Discover Models to Explore
 
-Turn "what new models are worth our GPU hours?" into a concrete, ranked shortlist: newly-released open-weight
-models emmy **doesn't support yet**, filtered to the ones with real demand/hype, each tagged with the GPU
-configs it fits. The output is a hand-off list for the **`onboard-model`** skill — this skill never
-deploys or benchmarks anything itself; it researches and recommends.
+Turn "what models are worth our GPU hours?" into either a concrete shortlist or a refresh of Emmy's recipe
+lifecycle. New open-weight models are filtered to the ones with real demand, then mapped to the GPU configurations
+they fit. Existing recipes are ranked by current community and serving value so the small maintained set stays
+focused while superseded models remain recorded as obsolete.
 
 Everything here is **keyless and read-only**: `scripts/new_models.py` hits public OpenRouter + HuggingFace
-endpoints, and the rest is web search. No servers are touched, no recipes are written.
+endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a JSON
+manifest; repository-owned workflow code validates it and writes recipe tags and onboarding shells.
 
 ## Pipeline
 
@@ -24,9 +26,13 @@ scripts/new_models.py  →  per-model news/hype search  →  rank by demand  →
     HF popularity + Elo)
 ```
 
-## Step 0 — Confirm scope (only what's unstated)
+## Step 0 — Choose the output mode
 
-Ask only if the user hasn't already implied it:
+Use **survey mode** for an interactive shortlist or hardware matrix. Use **lifecycle mode** when the prompt requests
+`maintained_models` and `onboarding_models` JSON for repository automation. The prompt owns the exact maintained-set
+size and target hardware; do not ask follow-up questions in lifecycle mode.
+
+For survey mode, ask only if the user has not already implied it:
 
 - **Time window** — default the script's ~90 days (`--since` default). Widen with `--since 2026-01-01` if they
   want "this year".
@@ -36,7 +42,17 @@ Ask only if the user hasn't already implied it:
   subset, only bucket for those.
 - **How many finalists** — default ~5–8, spread across the hardware tiers.
 
-## Step 1 — Get the candidate list (the script)
+## Step 1 — Inventory recipes and candidates
+
+In lifecycle mode, read every `recipes/*/recipe.yaml` first. Treat the top-level tags as follows:
+
+- `maintained` — a tested recipe selected for periodic testing and optimization;
+- `obsolete` — retained for history but disabled because demand moved on or a newer model superseded it;
+- `onboarding` + `untested` — a recipe shell that is not eligible for the maintained set yet.
+
+An obsolete recipe can return to the maintained set when current evidence shows a real activity spike. Never select
+an onboarding/untested shell as maintained. Untagged complete recipes are eligible and must be classified on the first
+lifecycle run.
 
 Run the discovery script with arena enrichment, capturing JSON for parsing and the table for a human view.
 Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bursts; don't re-run in a loop):
@@ -47,7 +63,7 @@ Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bur
 ```
 
 The script already does the hard part: it lists open-weight models OpenRouter hosts (catalog entries with a
-`hugging_face_id`), **excludes families already in `recipes/`**, drops anything older than `--since`, verifies
+`hugging_face_id`), **excludes active families already in `recipes/`**, drops anything older than `--since`, verifies
 each on HuggingFace, and ranks by HF momentum. Each JSON row in `models[]` carries:
 
 | Field | Meaning | Use |
@@ -63,6 +79,7 @@ each on HuggingFace, and ranks by HF momentum. Each JSON row in `models[]` carri
 The table footer also flags stale OpenRouter→HF mappings ("NOT ON HF") and likely arena fuzzy-match misses —
 skim those; a miss can mean a model you'd otherwise drop actually has a strong Elo under a slightly different name.
 
+Obsolete recipes are deliberately not excluded, which lets a renewed model resurface as a reactivation candidate.
 Take the top ~8–12 by `trending` (tie-break `elo`, then `downloads`) into Step 2. The script's full flag list is
 documented in `CLAUDE.md` (scripts section).
 
@@ -82,7 +99,7 @@ Distill each into a one-line **demand read**: *strong* (benchmark wins + active 
 *moderate*, or *niche/quiet*. Cross-check against the script signals — a model high on HF trend **and** loud
 online is a strong pick; high downloads but silent is often a small fine-tuning base, not a flagship.
 
-## Step 3 — Select the most promising
+## Step 3 — Select maintained and onboarding models
 
 Combine signals into a shortlist. A model is **promising** when it scores on several of:
 
@@ -95,6 +112,15 @@ Combine signals into a shortlist. A model is **promising** when it scores on sev
 Drop: tiny fine-tuning bases riding download counts, models with no engine support yet (note it, revisit later),
 and anything the user explicitly doesn't care about. Aim for a spread of **sizes** so the next step can fill
 several hardware tiers (don't pick five 400B MoEs).
+
+In lifecycle mode:
+
+- choose exactly the requested number of existing, fully configured recipes as maintained;
+- treat every other fully configured recipe as obsolete; the workflow derives this complement, so do not return a
+  separate obsolete list;
+- choose at most three genuinely new models for onboarding shells on the prompt's exact target;
+- use exact `model.huggingface` IDs from recipe YAML for maintained entries;
+- prefer current demand and serving value, while keeping a useful mix of sizes, modalities, and architectures.
 
 ## Step 4 — Hardware requirements per finalist
 
@@ -158,7 +184,14 @@ why. Cover the spectrum — small flagships on consumer cards, mid-size on Pro60
 
 Flag any model with **no engine support yet** or **no suitable quant** as "watch, revisit" rather than slotting it.
 
-## Step 6 — Hand off
+## Step 6 — Return the lifecycle manifest
+
+When lifecycle mode is requested, return exactly the JSON shape in the prompt and no prose or Markdown fence. Each
+new onboarding row needs the exact target, `generate` or `embed`, and a brief evidence-backed rationale. An empty
+`onboarding_models` list is valid. Do not edit recipe files yourself: the workflow validates exact model IDs, the
+maintained count, current recipe state, target hardware, duplicates, and rationale before making any change.
+
+## Step 7 — Hand off in survey mode
 
 For each (model, hardware) pair the user wants to pursue, offer to invoke **`onboard-model`** — pass the
 `hf_id` and the chosen GPU + `gpu_count`. That skill does the real work (engine/image research, recipe, validate,
@@ -177,6 +210,7 @@ If the user just wanted the survey, stop at the matrix.
   snapshot — lean on HF `trending` + news there.
 - **Don't spam the script.** HF rate-limits bursts; use `--workers 4` and re-run sparingly (transient failures
   land in the script's "COULD NOT VERIFY" bucket — wait and re-run, don't hammer).
-- **Don't deploy or write recipes in this skill.** Discovery only; `onboard-model` owns deployment.
+- **Don't deploy or edit recipes in this skill.** The automated workflow applies a validated lifecycle manifest;
+  `onboard-model` owns real deployment and qualification.
 - **Don't forget overhead.** The fit table is weights-only; real serving needs ~1.3× for activations + KV, more
   for long context / high concurrency.

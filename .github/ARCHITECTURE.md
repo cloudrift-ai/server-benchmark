@@ -13,7 +13,7 @@ tracked skills and CloudRift inference endpoint.
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
 | **Run Experiment** | Authorized `/run-experiment` PR comment | GitHub-hosted | Runs selected cloud experiments and commits results to the PR branch. |
 | **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
-| **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Selects one model and opens a capped plan PR without renting a VM. |
+| **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
 ## Pull-request checks
 
@@ -56,10 +56,10 @@ detector constructs the supported Emmy command from validated experiment paths a
 
 ## Model discovery and onboarding
 
-All discovery paths use the tracked `discover-models` skill and select at most one open-weight Hugging Face model
-without an existing recipe for one exact GPU name and count. Discovery is read-only: the workflow checks that the
-agent did not modify the checkout, then `.github/scripts/discovery_selection.py` validates the model ID, target,
-rationale, and absence of an existing recipe.
+All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
+recipes for the maintained set and up to three open-weight Hugging Face models without recipes for one exact GPU name
+and count. Discovery remains read-only: the workflow checks that the agent did not modify the checkout, then
+`.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest.
 
 The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
 public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,
@@ -70,7 +70,8 @@ provisions hardware. The reusable runner contract is documented in `emmy/agent/A
 
 **Onboard model** accepts an exact Hugging Face model ID, exact GPU name/count, multimodal qualification mode, optional
 existing onboarding PR, and explicit image-publication authorization. The job has a six-hour limit and gives the
-agent an earlier deadline so artifact validation and cleanup retain time.
+agent an earlier deadline so artifact validation and cleanup retain time. When the PR contains a discovery shell, the
+qualified recipe replaces it and drops the `onboarding` and `untested` tags.
 
 The workflow resolves an existing labeled onboarding PR or creates a new artifact branch, provisions exactly the
 requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
@@ -85,16 +86,18 @@ allowed recipe, experiment, serving-image, canonical-golden, and matching plan p
 output is rejected. The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable
 GitHub App credentials for the long-running push path.
 
-### Discovery and plan PR
+### Discovery lifecycle PR
 
 **Discover model** runs nightly or by manual dispatch. It defaults to one H200, with repository variables and manual
-inputs able to select another exact target. It creates no plan when three `model-onboarding` PRs are already open.
-After discovery it queries open PRs again, both to reject a duplicate model and to close the race in which another
-run reached the cap during discovery.
+inputs able to select another exact target. It updates one rolling draft PR rather than opening one PR per model. A
+legacy discovery plan PR is adopted as the rolling PR, and the workflow fails closed if more than one rolling
+discovery PR exists.
 
-When allowed, the workflow commits one `plans/onboard-<model>.md` file on a new branch and opens a draft,
-`model-onboarding`-labeled PR. It never rents a VM. Running **Onboard model** from that branch, or with the PR number,
-replaces the plan with measured artifacts and removes the plan file.
+The validated manifest tags the ten selected complete recipes `maintained`, tags other complete recipes `obsolete`,
+and creates up to three `onboarding`/`untested` recipe shells. Obsolete recipes remain in git but cannot be deployed,
+benchmarked, published, or bundled. A current demand spike may return an obsolete recipe to the maintained set. The
+workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and creates
+or refreshes its `model-discovery` and `model-onboarding` labels. It never rents a VM.
 
 ## Credentials, VM ownership, and cleanup
 

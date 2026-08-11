@@ -10,29 +10,12 @@ handles multiple consumer Loads and shared external inputs uniformly
 Splicing refuses patterns it doesn't handle yet (non-trivial σ writer
 forms, etc.); those boundaries stay as separate kernels.
 
-Blowup guards: two metrics, both summed over body leaves (max-per-leaf
-wasn't enough — a fusion that introduces a second large leaf alongside
-an existing one looks free to a max, but the actual runtime work
-doubles).
-
-- ``_total_work``: sum over compute leaves (``Assign`` / ``Accum``) of
-  ``enclosing_free × enclosing_reduce`` — proxy for arithmetic.
-- ``_total_expensive_work``: the same count restricted to transcendental
-  ``Assign`` operations. These cannot hide behind a large contraction's
-  cheap-FMA count: duplicating GELU's tanh across the output-column loop
-  is much slower than materializing its input once.
-- ``_total_reads``: sum over ``Load`` stmts of the same product — proxy
-  for memory traffic. Global reads dominate cost on small-M matmuls
-  where arithmetic is bandwidth-bound, so a fusion that grows reads
-  without growing work is still a regression.
-
-A fusion is refused if **either** metric grows by more than
-``_BLOWUP_FACTOR`` over the producer+consumer sum. In addition, a
-``multi-load-of-reducer`` guard refuses fusions where the consumer reads
-the producer from multiple ``Load`` stmts **and** the producer contains
-any reduce axis — inlining a reduce twice recomputes it, which
-``_total_*`` catches *in ratio* but only when producer is big enough
-relative to consumer; the guard catches it structurally.
+The experiment keeps one policy guard: ``_total_work`` sums the enclosing
+free×reduce iteration count of every compute leaf (``Assign`` / ``Accum``),
+and refuses a merge that grows it by more than ``_BLOWUP_FACTOR``. Every
+other materialization choice is left to placement routing. Structural region
+ownership, a real splicer rejection, and the fence around an already-realized
+``__cut_`` workspace remain invariants rather than candidate-selection gates.
 
 Factor picked empirically — swept 2…1024 on TinyLlama block (seq=32):
 2–16 ties at ~4.18ms/18 launches (best), 32–512 shifts to ~4.7ms/17
@@ -51,14 +34,11 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import closed_loop_consumer_region as _closed_loop_consumer_region
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_castfree_indexmap as _is_castfree_indexmap_shared
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 _BLOWUP_FACTOR = 8
-# Expensive scalar functions are costed separately from the aggregate FMA
-# proxy. A producer-side tanh/exp executed once per (M, K) value must not
-# move under a contraction's N loop merely because the contraction's own
-# multiply/accumulate count dominates ``_total_work``.
+# Retained as diagnostics for the gate-removal comparison; expensive work is
+# measured by tests/reports but no longer refuses a merge in this experiment.
 _EXPENSIVE_OPS = frozenset(
     {
         "cos",
@@ -438,88 +418,20 @@ PATTERN = [Pattern("producer", LoopOp)]
 WATCH_CONSUMERS = True
 
 
-def _guard_region_member(graph: Graph, member: Node, sink: Node) -> None:
-    """Apply the established pair boundary policy to one region member.
-
-    For a two-node region ``member`` is the direct producer. For a fan-out,
-    checking every interior member against the common sink prevents an
-    indirect typed-copy, contraction-half, or attention operand cone from
-    bypassing the same materialization boundary merely because it branched.
-    """
-    if _reduce_heavy(member.op) and _count_loads_from(sink.op, member.id) > 1:
-        raise RuleSkipped("reduce-heavy producer feeds sink through >1 Load — fusion would duplicate the reduce")
-
-    if _is_pure_indexmap(member.op) and not _is_castfree_indexmap(graph, member) and _is_pure_indexmap(sink.op):
-        raise RuleSkipped("cast copy feeding indexmap plumbing — the cast stays at the traced dtype boundary")
-
-    if not _is_castfree_indexmap(graph, member) and _pending_contraction_half(graph, sink):
-        raise RuleSkipped("sink is an unfused contraction half — the product merges with its reduce first")
-
-    # Flash P@V operands and Q/K score cones must remain plain loads at the
-    # recognition boundary. These tests are predictive because fusion order is
-    # free: the complete flash composite may not have formed yet.
-    if not _is_castfree_indexmap(graph, member) and (_is_flash_offer_shaped(sink.op) or _sum_contracts_exp_producer(graph, sink, member)):
-        raise RuleSkipped("sink is a (future) flash softmax-then-P@V offer site — its operands stay materialized")
-
-    if (
-        not _is_castfree_indexmap(graph, member)
-        and not any(isinstance(stmt, Accum) for stmt in member.op.body.iter())
-        and not _is_reduce_partner_merge(member, sink)
-        and not _mask_epilogue(member.op)
-        and _feeds_softmax(graph, sink)
-    ):
-        raise RuleSkipped("sink feeds a softmax (attention score producer) — Q/K cones stay materialized")
-
-    if (
-        not _is_castfree_indexmap(graph, member)
-        and any(isinstance(stmt, Accum) for stmt in member.op.body.iter())
-        and _mask_epilogue(sink.op)
-        and _feeds_softmax(graph, sink)
-    ):
-        raise RuleSkipped("score contraction stays clear of softmax mask epilogues — the masks ride the softmax sink")
-
-
 def _merge_region(match: Match, producer: Node, region: set[str], sink: Node) -> Graph:
-    """Splice a validated one- or multi-consumer region through one path."""
+    """Splice an owned one- or multi-consumer region, capped only by compute growth."""
     graph = match.graph
     interior = region - {sink.id}
     if any("__cut_" in nid for nid in interior):
         raise RuleSkipped("region crosses a decided placement cut")
-    for nid in interior:
-        member = graph.nodes[nid]
-        if len(region) > 2 and any(isinstance(stmt, Accum) for stmt in member.op.body.iter()):
-            raise RuleSkipped(f"interior reducer {nid!r} stays materialized")
-        _guard_region_member(graph, member, sink)
-    if len(region) > 2 and (_has_rowmax(sink.op) or _is_flash_offer_shaped(sink.op) or _feeds_softmax(graph, sink)):
-        raise RuleSkipped("reconvergent region crosses an attention recognition boundary")
 
     merged = _build_merged_region(graph, region, sink)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
     pre_work = sum(_total_work(graph.nodes[nid].op) for nid in region)
-    pre_expensive_work = sum(_total_expensive_work(graph.nodes[nid].op) for nid in region)
-    pre_reads = sum(_total_reads(graph.nodes[nid].op) for nid in region)
     post_work = _total_work(merged)
-    post_expensive_work = _total_expensive_work(merged)
-    post_reads = _total_reads(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:
         raise RuleSkipped(f"work blowup: post={post_work} > {_BLOWUP_FACTOR}× pre={pre_work}")
-    if post_reads > _BLOWUP_FACTOR * pre_reads:
-        raise RuleSkipped(f"read blowup: post={post_reads} > {_BLOWUP_FACTOR}× pre={pre_reads}")
-    if pre_expensive_work and post_expensive_work > _BLOWUP_FACTOR * pre_expensive_work and not _is_flash_offer_shaped(merged):
-        if len(region) > 2 or (_single_source_activation(graph, producer) and not _has_peer_activation_input(graph, producer, sink)):
-            raise RuleSkipped(f"expensive-work blowup: post={post_expensive_work} > {_BLOWUP_FACTOR}× pre={pre_expensive_work}")
-
-    if (
-        len(region) == 2
-        and _is_pure_indexmap(sink.op)
-        and not _is_pure_indexmap(producer.op)
-        and _output_numel(sink.op) > _output_numel(producer.op)
-    ):
-        raise RuleSkipped(
-            f"broadcast materialization: pure-indexmap consumer numel {_output_numel(sink.op)} > "
-            f"compute producer numel {_output_numel(producer.op)}"
-        )
 
     match.consumed = region
     match.output = sink.id

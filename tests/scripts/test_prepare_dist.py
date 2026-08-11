@@ -2,7 +2,7 @@
 
 Two things it must get right. Recipes live outside the `emmy` package, so a wheel only
 carries them because this script copies them in — and it must copy the recipe files alone,
-not the committed benchmark results sitting beside them. The README's repo-relative links
+not local benchmark output or ``RESULTS.md``. The README's repo-relative links
 resolve on GitHub but 404 on PyPI, which renders it detached from the repo.
 """
 
@@ -29,7 +29,7 @@ def fake_repo(tmp_path, monkeypatch):
 
 
 def test_stages_recipe_files_without_the_result_dirs(fake_repo):
-    """Recipe dirs accumulate timestamped run outputs; those must not reach the wheel."""
+    """Local timestamped run outputs must not reach the wheel."""
     model = fake_repo / "recipes" / "gemma-4-12B-it"
     model.mkdir(parents=True)
     (model / "recipe.yaml").write_text("model:\n  name: google/gemma-4-12b-it\n")

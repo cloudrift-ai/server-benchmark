@@ -563,16 +563,12 @@ emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run d
 
 ## Experiments
 
-Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a `recipe.yaml` and stores its results alongside it:
+Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a
+`recipe.yaml`; benchmark output is local and ignored by default:
 
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
-  2026-02-24_19-13-50_abc12345/
-    tasks.json
-    recipe.yaml
-    rtx5090x1_mcr8_c8_vllm_benchmark.txt
-    ...
 ```
 
 ```bash
@@ -581,7 +577,9 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 
 ## CI Benchmark Workflow
 
-External developers can submit experiments via pull requests. A maintainer triggers benchmarks by commenting `/run-experiment` on the PR. CI runs benchmarks on cloud GPUs and commits results back to the PR branch.
+External developers can submit experiment configurations via pull requests. A maintainer triggers benchmarks by
+commenting `/run-experiment` on the PR. That explicit command authorizes the workflow to commit its selected results
+back to the PR branch; ordinary local and onboarding runs do not commit experiment output.
 
 ```
 /run-experiment                                                       # Auto-detect: all experiments changed in the PR

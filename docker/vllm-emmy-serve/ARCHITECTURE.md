@@ -120,8 +120,10 @@ the pack's environment key — a `EMMY_FAST_MATH=1` boot can never hit a standar
 existed it silently *did*, serving standard kernels under the fast-math label (fixed 2026-08-01). What this is worth:
 in the 2026-08-01 article reproduction 24 of 28 emmy benchmark cells missed the pack at ~12 min of frontend each,
 about 4.5 hours of the session — and every customer following the documented per-workload knobs pays the same on
-every boot. An extra shape that will not converge is reported loudly but does **not** fail the release: the pinned
-shape is the contract, and the degraded outcome for the others is a cold boot, not a broken image.
+every boot. An extra shape that will not converge normally does **not** fail the release: the pinned shape is the
+contract, and the degraded outcome for other exploratory shapes is a cold boot, not a broken image. The exception is
+an `:fm` shape selected by the final recipe. FAST_MATH is the default Emmy deployment lane when its accuracy gate does
+not regress, so that selected shape must converge and pass pack-HIT plus zero-recompile verification before release.
 
 ## Files
 

@@ -1,48 +1,29 @@
-# Laguna S 2.1 FP8 on 8x V100 SXM3 32GB
+# Laguna S 2.1 FP8 on 8× V100 SXM3 32 GB
 
-Measured on 2026-08-09 with model revision `9e0b8ba630080b0e6f20a7b43294a9f2232fd247`, eight 32 GB V100 SXM3
-GPUs, driver 580.159.03, and the 1Cat image built from commit `91aca502d2bb1f05d9208ab2edec9fae53ff0d0b`.
-The local image manifest digest was
-`sha256:8405bb60d24610417d0d6da278a753e2c968bfd1e0d7ff7f79cd6601a038b2be` and its size was
-10,801,482,122 bytes.
+Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Emmy compiler coverage is complete, but the
+checkpoint is ineligible for Emmy serving because its routed FP8 expert storage is not supported by the executable
+Emmy generation path.
 
-Docker Hub publication was attempted after the serving gates passed. Authentication succeeded, but Docker Hub
-rejected `cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift` with `insufficient_scope`; the available credential cannot
-create or push that namespace repository. The tested image remains on the supplied host, and the recipe's tag is
-reserved for publication after a `cloudriftai` repository grant. No credential remains on the host.
+## Qualified deployment
 
-## Recommended configuration
+| Item | Value |
+| --- | --- |
+| Model | `poolside/Laguna-S-2.1-FP8` |
+| Model revision | `9e0b8ba630080b0e6f20a7b43294a9f2232fd247` |
+| Hardware | 8× Tesla V100-SXM3-32GB, compute capability 7.0 |
+| Driver | 580.159.03 |
+| Engine | 1Cat/vLLM `91aca502d2bb1f05d9208ab2edec9fae53ff0d0b` |
+| Image | `cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift` |
+| Image ID used | `sha256:8405bb60d24610417d0d6da278a753e2c968bfd1e0d7ff7f79cd6601a038b2be` |
+| Serving shape | TP8, context 4,096, concurrency 1, FP16 expert fallback |
 
-The checkpoint requires TP8 on V100. The native 1Cat SM70 block-FP8 MoE route loaded all 49 checkpoint shards and
-selected `FLASH_ATTN_V100`, but failed during FP8 expert post-processing with a CUDA invalid argument followed by an
-illegal memory access. The recipe therefore uses the engine's documented conservative fallback: routed experts are
-dequantized to FP16 after loading and executed by the unquantized Triton MoE path.
+`EMMY_FAST_MATH` is not set because this is not an Emmy serving engine and its precision-trading MMA lanes do not
+apply to V100 compute capability 7.0.
 
-At 4096 context and one-request concurrency, the fallback loaded successfully in 29.2 seconds and completed engine
-warmup in 13.5 seconds. Model loading used 27.9 GiB per rank; the healthy service held about 29.1 GiB per GPU and
-reported 0.46 GiB of KV-cache memory. The engine exposed a 37,792-token KV pool, but the recipe intentionally keeps
-the qualified request limit at 4096 because the native FP8 route is not usable and memory headroom is narrow.
+## Best recipe performance
 
-## Accuracy and capability checks
-
-Two deterministic chat checks passed: the model answered the capital-of-France prompt with `Paris` and computed
-17 multiplied by 19 as `323`. A tool-use prompt emitted the correct Poolside markup for
-`get_weather(city="Paris")`, but this 1Cat build left the markup in the response `content` rather than populating the
-OpenAI `tool_calls` field. The reasoning parser also logged that automatic reasoning-token initialization failed, so
-structured tool calls and parsed reasoning are not qualified by this result.
-
-The [compiler golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml)
-covers all 48 decoder layers plus token embedding, final normalization, and the output head. It is
-architecture-derived rather than an Emmy serving path: the exact checkpoint's per-expert FP8 tensors do not map to
-Emmy's packed traced expert inputs, the baked Emmy runner is single-GPU, and a full-checkpoint layer parity run
-exceeded 622 GiB of host RAM before reaching GPU execution. Serving accuracy is therefore established only for the
-measured 1Cat fallback above; compiler scope and per-target O3 evidence are documented in the
-[compiler experiment](../../experiments/Laguna-S-2.1-FP8/compiler_v100_sxm3/RESULTS.md).
-
-## One-request benchmark
-
-The reproducible workload used one 32-token random prompt, requested 16 output tokens, set temperature to zero, and
-used concurrency one.
+Measured 2026-08-09 with one random 32-token prompt, 16 requested output tokens, concurrency 1, greedy decoding, and
+ignored EOS. The deployment passed its chat smoke test and completed without failure.
 
 | Metric | Result |
 | --- | ---: |
@@ -51,31 +32,37 @@ used concurrency one.
 | Request throughput | 0.33 requests/s |
 | Output throughput | 5.27 tokens/s |
 | Total token throughput | 15.82 tokens/s |
-| Mean time to first token | 949.39 ms |
-| Mean time per output token | 138.84 ms |
-| Mean inter-token latency | 138.84 ms |
+| Mean TTFT | 949.39 ms |
+| Mean TPOT / ITL | 138.84 / 138.84 ms |
 
-Raw results are in
-`experiments/Laguna-S-2.1-FP8/serving_v100_sxm3/2026-08-09_15-31-12_1614afd1/v100x8_vllm_benchmark.json`.
+## Compiler qualification
 
-## 2026-08-11 revalidation
+The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml) covers 36
+retained targets from all 48 decoder layers plus embedding, final normalization, and the output head. All 41 stored
+realizations have positive deployable O3 and reference timings. Five large computed-operand reductions use selected
+two-kernel placement routes; their best repeated O3 totals are 13.844, 82.204, 15.308, 27.663, and 18.306 ms,
+respectively, for improvements of 3.05–10.74× over the former fused routes.
 
-The exact recipe and checkpoint revision were redeployed with `emmy bench` on the same supplied 8× V100 host. The
-registry tag was still unavailable, so the deployment inspected and used the host's cached image with the exact digest
-above; publication was not authorized or attempted in this run. Weight loading took 30.5 seconds, engine warmup took
-13.2 seconds, the service became healthy, and the standard chat smoke test passed. The workload was torn down with the
-existing SSH deploy teardown command after benchmarking.
+This architecture-derived compiler evidence does not preserve the checkpoint's routed-expert storage in a served
+Emmy graph. The recipe therefore uses the compatible 1Cat FP16 expert-dequantization fallback.
 
-| Metric | Result |
-| --- | ---: |
-| Successful / failed requests | 1 / 0 |
-| Benchmark duration | 3.39 s |
-| Request throughput | 0.30 requests/s |
-| Output throughput | 4.72 tokens/s |
-| Total token throughput | 14.17 tokens/s |
-| Mean time to first token | 969.49 ms |
-| Mean time per output token | 161.05 ms |
-| Mean inter-token latency | 161.05 ms |
+## Reproduce
 
-The fresh raw result is
-`experiments/Laguna-S-2.1-FP8/serving_v100_sxm3/2026-08-11_01-24-12_e3aef767/v100x8_vllm_benchmark.json`.
+```bash
+emmy bench experiments/Laguna-S-2.1-FP8/serving_v100_sxm3 --ssh riftuser@66.172.10.131
+```
+
+The command uses the retained experiment YAML and writes ignored local output; do not use `--commit-results`.
+
+## Limits
+
+- The native SM70 FP8 MoE path faults during expert post-processing, so the recipe dequantizes experts to FP16.
+- Structured tool calls, parsed reasoning, context beyond 4,096, and concurrency above one are not qualified.
+- No Emmy serving image was published for this checkpoint.
+
+## Current regression
+
+The 2026-08-11 same-recipe revalidation completed correctly but did not recover the best result. Output throughput
+fell from 5.27 to 4.72 tokens/s (-10.4%), mean TPOT rose from 138.84 to 161.05 ms (+16.0%), and mean TTFT rose from
+949.39 to 969.49 ms (+2.1%). Each run contained one request, so the cause remains unresolved and may include run
+variance; the 2026-08-09 complete run remains the main result.

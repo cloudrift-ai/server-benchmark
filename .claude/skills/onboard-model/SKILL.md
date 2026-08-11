@@ -12,12 +12,17 @@ description: >-
 Turn a Hugging Face model ID and an exact `(GPU name, GPU count)` into reviewed repository artifacts:
 
 - one recommended serving recipe under `recipes/<model>/recipe.yaml`;
-- reproducible qualification or comparison recipes under `experiments/<model>/` with their measured results;
-- `recipes/<model>/RESULTS.md`, which records the serving evidence behind the recipe;
-- a complete compiler golden under `emmy/compiler/pipeline/search/goldens/`, or an explicitly partial compiler report
-  under `experiments/<model>/compiler_<hardware-slug>/`, even when serving cannot be delivered;
+- reproducible qualification or comparison configurations under `experiments/<model>/`, without committed run output;
+- one compact, self-contained `recipes/<model>/RESULTS.md` only when a valid final deployment recipe exists;
+- a complete compiler golden under `emmy/compiler/pipeline/search/goldens/` when full coverage qualifies;
 - when Emmy is eligible, tuned kernels and a verified, prebuilt
   `cloudriftai/vllm-emmy-<model-slug>:<tag>` image.
+
+Repository storage is intentionally minimal. Do not commit experiment `RESULTS.md` files, benchmark JSON/TXT/logs,
+dated run snapshots, plots, compiler run summaries, partial working goldens, or onboarding-summary files unless the
+caller explicitly asks to retain a particular experiment result. Keep measurement output ignored or outside the
+checkout long enough to write the final recipe report, then remove task-owned copies from the checkout. Experiment
+YAML is reproducibility input and may remain committed.
 
 Use only the supplied SSH server. The caller owns VM creation and deletion; this skill owns deployed workloads and
 must tear them down before returning. Never switch GPU type, count, provider, model quantization, or model checkpoint
@@ -110,9 +115,10 @@ layer index and non-layer seam to a traced representative, including:
 
 Prefer one architecture-only whole-model trace. When that is not bounded for a very large checkpoint, trace each
 distinct path separately and merge the self-contained programs into one working golden. Deduplicate only identical
-programs and target identities; never merge by kernel name alone. Record the full layer-to-program mapping in the
-compiler report. A representative expert is valid only where Emmy deliberately keeps routing/sort/combine in host
-orchestration; do not stub an unsupported GPU operation merely to claim coverage.
+programs and target identities; never merge by kernel name alone. Keep the full layer-to-program mapping in the
+caller-supplied external summary and put only coverage counts and gaps in the final recipe report. A representative
+expert is valid only where Emmy deliberately keeps routing/sort/combine in host orchestration; do not stub an
+unsupported GPU operation merely to claim coverage.
 
 Call the inventory **complete** only when every manifest path emits a non-empty post-fusion target set and every
 retained target reconstructs and lowers for the exact compute capability. Otherwise call it **partial**, preserve all
@@ -132,17 +138,11 @@ must contain every traced target, explicit knobs (an empty mapping is valid for 
 `emmy_us` / reference timings, the exact GPU identity and compute capability, and the immutable model ID as provenance.
 Validate it with repository-golden validation and lower every entry again from the committed file.
 
-Do not put a partially traced model in the repository golden directory. When any manifest path cannot be traced,
-commit only these ignored experiment artifacts:
-
-- `experiments/<model>/compiler_<hardware-slug>/partial_traced_working.yaml`, preserving every successful target for
-  future compiler work without presenting it as complete deploy evidence;
-- `experiments/<model>/compiler_<hardware-slug>/RESULTS.md` with the coverage manifest, tuning measurements, exact
-  compiler gaps, and the reason canonical promotion was withheld.
-
-If no path emits a target, commit the compiler report but do not invent an empty file. Trace incompleteness is the
-only model-coverage reason to omit the usual golden YAML; tuning failures must fall back to a correct measured
-configuration, and serving failures do not block golden publication.
+Do not put a partially traced model in the repository golden directory. Preserve a partial working inventory and its
+diagnostics only in the caller-supplied external output or an ignored task directory; do not commit them or create an
+experiment `RESULTS.md` unless the caller explicitly requests that exact evidence. If no path emits a target, do not
+invent an empty file. Trace incompleteness is the only model-coverage reason to omit the usual golden YAML; tuning
+failures must fall back to a correct measured configuration, and serving failures do not block a complete golden.
 
 ## 4. Decide Emmy eligibility
 
@@ -158,17 +158,30 @@ requested hardware and the exact checkpoint quantization:
 5. representative kernel correctness succeeds, and `emmy serve --generate` or the applicable embedding path can
    serve the checkpoint.
 
-Record `eligible` or `ineligible` plus the first failed gate in `RESULTS.md`. An ineligible model still receives a
-mainstream-engine experiment, report, serving recipe, and the compiler artifacts from section 3. Never create an
-empty Emmy serving lane or imply that a stock-only qualification is an Emmy comparison.
+Record `eligible` or `ineligible` plus the first failed gate in the final recipe report. An ineligible model may still
+receive a mainstream-engine experiment configuration, serving recipe, and recipe report when that engine qualifies.
+When no engine can produce a valid final recipe, create no repository report; put the failure in the external summary.
+Never create an empty Emmy serving lane or imply that a mainstream-only qualification is an Emmy comparison.
 
 ## 5. Release when eligible
+
+Treat `EMMY_FAST_MATH=1` as the default candidate for every Emmy-backed final recipe. Before release, compare it with
+standard Emmy on the exact checkpoint, hardware, serving shape, capability probes, and a checkpoint-appropriate
+accuracy suite with a predeclared tolerance. Select FAST_MATH unless a correctness, capability, or quality regression
+is observed; if one is observed, retain standard Emmy and record the failed accuracy gate in the recipe report.
+FAST_MATH failure does not by itself change Emmy eligibility. Mainstream-only vLLM or SGLang recipes must not set
+`EMMY_FAST_MATH`.
 
 After the required compiler qualification, invoke the `release-serving-image` workflow on the same supplied server
 and follow `docker/vllm-emmy-serve/ARCHITECTURE.md`. The CI dispatch's explicit publication input satisfies the human
 approval pause described by that workflow; skip only that conversational pause. Keep every mechanical gate: golden
 coverage, toolchain preflight, headroom sweep, HF parity, warm convergence, offline zero-recompile verification, and
 image push. A failed gate means no push.
+
+When FAST_MATH is selected, its exact serving shape is a required release lane: warm it to convergence, verify the
+FAST_MATH execution-plan pack is a hit with offline zero recompilation, and set
+`engine.llm.vllm.extra_env.EMMY_FAST_MATH: "1"` in the final recipe. A missing or invalid FAST_MATH pack blocks release
+of a FAST_MATH recipe even if the standard pack succeeds.
 
 Use the repository slug helper for both config and image name. Publish only the verified tag under
 `cloudriftai/vllm-emmy-<model-slug>:<tag>`, update the recipe to that exact tag, pass credentials through
@@ -190,31 +203,55 @@ count, workload, context, request count, client concurrency, warm-up, and precis
 When Emmy is ineligible, run only the pinned mainstream lane. The experiment may contain a context/concurrency grid
 needed to justify the recommended recipe, but it must not contain a dummy Emmy lane.
 
-Commit the experiment recipe and the raw successful result files that support the report. Delete exploratory sweeps,
-failed run directories, caches, credentials, and unrelated logs. Fold the measured winner into a single-variant
-serving recipe under `recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block.
+Use comparison lanes only to select the recommended configuration. Benchmark the precision lane selected in section
+5. The final recipe report is not a comparison report: include performance only for the engine and configuration
+selected by `recipes/<model>/recipe.yaml`. If the recipe uses Emmy, report the selected Emmy precision lane; if it
+uses vLLM or SGLang without Emmy, report that lane.
 
-The repository ignores `experiments/` by default. Force-add only the intended new experiment recipe and successful
-result files during submission; never force-add the whole directory or exploratory output.
+Commit only a canonical experiment `recipe.yaml` when the comparison configuration remains useful. Do not commit raw
+successful results, failed run directories, dated recipe snapshots, rendered duplicates, caches, credentials, logs,
+plots, or experiment reports unless the caller explicitly requested a named result artifact. Fold the measured winner
+into a single-variant serving recipe under `recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block. Encode
+the selected result directly in the recipe report, then remove task-owned measurement output from the checkout.
 
 ## 7. Write the durable report
 
-Create `recipes/<model>/RESULTS.md` beside the recipe. Use measurements only; never fill gaps with estimates. Include:
+Create `recipes/<model>/RESULTS.md` only beside a valid recommended recipe. If serving qualification cannot produce a
+valid recipe, create no `RESULTS.md` in the repository; the caller-supplied external summary is the failure record.
+
+Before writing performance numbers, find a successful raw result for the exact selected recipe configuration: model
+revision, engine image tag or digest, GPU name/count, precision policy, context, concurrency, workload, and engine
+knobs must all match. Re-run that lane with the existing `emmy bench` experiment when evidence is missing, stale, or
+does not identify the selected engine. Update the report from the new measurement, but do not commit its raw output.
+Never estimate a missing value, copy a competing engine's result, or combine metrics from different runs.
+
+Keep the main performance section at the best qualified result for each comparable selected-recipe workload; do not
+accumulate a chronology of revalidations. When a newer run improves the lane, replace the main numbers. When a newer
+run regresses, retain the best result in the main section and add one final `## Current regression` section with the
+newer exact configuration, deltas, and known cause. Remove that section completely as soon as a later run recovers;
+if the recovery is a new best, promote it to the main section. Compare complete runs without cherry-picking individual
+metrics or combining measurements from different runs.
+
+Use measurements only. Include:
 
 - date, repository revision, model revision, GPU name/count, driver, CUDA, and pinned image tags or digests;
-- exact workload and raw experiment-result paths;
+- exact workload used for the selected measurement;
 - validated context, modality, tool-call and reasoning-parser results;
 - request/output throughput, TTFT, TPOT or ITL, failure count, and benchmark duration;
 - Emmy eligibility and the evidence for the decision;
-- complete/partial/none compiler coverage, the repository-golden or partial-inventory and compiler-report paths,
-  tuned target counts, O3 verification, and every remaining compiler gap; link the usual repository golden when
-  coverage is complete, otherwise link only the partial working inventory;
-- for an Emmy run, equal-workload mainstream-versus-Emmy results, kernel-tuning summary, and published image tag;
-- for a stock-only run, the qualification result with no Emmy comparison;
+- complete/partial/none compiler coverage, tuned target counts, O3 verification, and every remaining compiler gap;
+  link the repository golden only when coverage is complete;
+- the selected recipe engine's performance lane only, identified by the exact image and relevant engine knobs;
+- one clean `emmy bench experiments/<model>/<name> ...` reproduction command using a retained experiment YAML;
+  filter a comparison recipe to the selected engine and precision lane, and do not use `--commit-results`;
+- for an Emmy recipe, its serving result, kernel-tuning summary, published image tag, and the accuracy result that
+  authorized FAST_MATH or the quality regression that retained standard Emmy;
+- for a vLLM or SGLang recipe without Emmy, that engine's serving result without a comparison column;
 - the recommended serving configuration, limitations, and any unresolved upstream issue.
 
-Keep the report useful without the working directory. Link only committed experiment artifacts. The recipe is the
-decision; the report and experiment are its evidence.
+Keep the report useful without the working directory. It must not link to experiment output or an experiment report.
+The recipe is the decision and its report embeds the selected lane's compact, best qualified measurements. Experiment
+YAML is reproducibility input and may remain committed; generated output is not a repository artifact.
 
 ## 8. Verify and hand off
 
@@ -231,22 +268,26 @@ Also verify:
   golden whose every entry has paired positive O3/reference measurements and reconstructs and lowers on the requested
   compute capability, while a partial trace has no file under the repository golden directory;
 - every reported tuning winner identifies its O1 ranking lane, and only repeated O3 rows are described as deployable;
-- at least one successful serving result exists and every reported number points to it;
+- when a serving recipe exists, at least one successful result for that exact recipe lane exists and the report embeds
+  only numbers from that complete run;
 - the recipe and experiment pin immutable engine images;
 - the recipe targets exactly the requested GPU name/count;
-- the published Emmy image, when applicable, passed offline zero-recompile verification;
+- the published Emmy image, when applicable, passed offline zero-recompile verification, and a FAST_MATH recipe has a
+  verified FAST_MATH pack for the exact serving shape;
+- `EMMY_FAST_MATH=1` appears in an Emmy recipe unless its accuracy gate regressed, and never appears in a
+  mainstream-only recipe;
+- no experiment result, experiment `RESULTS.md`, dated run snapshot, or onboarding summary is staged unless the caller
+  explicitly requested that exact repository artifact;
 - tracked artifacts contain no credentials, absolute scratch paths, or VM identifiers;
 - deployed workloads are torn down and `docker logout` has run.
 
 In the summary, `cleanup.docker_logout: true` means no Docker credential remains: either logout completed after a
 login, or no Docker login was performed because the stock-only path did not require one.
 
-Write this JSON object atomically to the caller-supplied summary path and print that path as the final line:
-
-List every repository file created, modified, or deleted by the onboarding run in `artifacts`. List the committed
-compiler report plus the repository golden (complete coverage) or partial working inventory in `compiler_artifacts`,
-and the serving recipe and every successful raw result in `experiment_artifacts`; the caller uses these manifests to
-reject unrequested worktree changes and force-add only the intended ignored experiment files.
+Write this JSON object atomically to the caller-supplied summary path outside the repository and print that path as the
+final line. List every repository file created, modified, or deleted by the onboarding run in `artifacts`. List only a
+complete repository golden in `compiler_artifacts`, and only retained experiment YAML in `experiment_artifacts`. Do
+not list or commit raw measurement output.
 
 ```json
 {
@@ -259,23 +300,18 @@ reject unrequested worktree changes and force-add only the intended ignored expe
     "recipes/<model>/recipe.yaml",
     "recipes/<model>/RESULTS.md",
     "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
-    "experiments/<model>/compiler_<hardware-slug>/RESULTS.md",
-    "experiments/<model>/serving_<hardware-slug>/recipe.yaml",
-    "experiments/<model>/serving_<hardware-slug>/<run>/result.json"
+    "experiments/<model>/serving_<hardware-slug>/recipe.yaml"
   ],
   "compiler_artifacts": [
-    "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
-    "experiments/<model>/compiler_<hardware-slug>/RESULTS.md"
+    "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml"
   ],
   "experiment_artifacts": [
-    "experiments/<model>/serving_<hardware-slug>/recipe.yaml",
-    "experiments/<model>/serving_<hardware-slug>/<run>/result.json"
+    "experiments/<model>/serving_<hardware-slug>/recipe.yaml"
   ],
   "report": "recipes/<model>/RESULTS.md",
   "compiler": {
     "coverage": "complete",
     "golden": "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
-    "report": "experiments/<model>/compiler_<hardware-slug>/RESULTS.md",
     "traced_targets": 42,
     "tuned_targets": 42,
     "blocked_paths": []
@@ -286,10 +322,11 @@ reject unrequested worktree changes and force-add only the intended ignored expe
 }
 ```
 
-Use `status: "failed"`, nullable serving artifact fields, and a `failure` object with `gate` and `message` on failure.
-Keep successful compiler fields and artifacts populated even when the failure is a serving gate. Always write the
-summary, then return nonzero for a failed run. Do not delete the VM. The caller uses the SSH target and its separately
-captured provider/instance handle to perform and verify VM cleanup.
+Use `status: "failed"`, nullable serving artifact fields, `report: null`, and a `failure` object with `gate` and
+`message` when no valid serving recipe is produced. Keep a complete golden populated if compiler qualification
+succeeded. Put partial inventories and useful diagnostics in the external output location, not the repository. Always
+write the summary, then return nonzero for a failed run. Do not delete the VM. The caller uses the SSH target and its
+separately captured provider/instance handle to perform and verify VM cleanup.
 
-On any failure, preserve useful tracked candidates and untracked logs, tear down workloads, report the first failed
-gate and artifact paths, and return nonzero. Never claim partial onboarding as success.
+On any failure, tear down workloads, report the first failed gate and external diagnostic paths, remove task-owned
+measurement output from the checkout, and return nonzero. Never claim partial onboarding as success.

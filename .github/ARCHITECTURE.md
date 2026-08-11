@@ -75,8 +75,10 @@ agent an earlier deadline so artifact validation and cleanup retain time.
 The workflow resolves an existing labeled onboarding PR or creates a new artifact branch, provisions exactly the
 requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
 `onboard-model` skill. If neither provider can supply the exact target, the workflow fails; it does not silently change
-GPU type or count. The skill produces the recommended recipe, serving report, reproducible experiment and raw results,
-plus an Emmy-tuned prebuilt image only when the architecture, quantization, trace, serving, and release gates pass.
+GPU type or count. The skill produces the recommended recipe, its compact serving report, and reproducible experiment
+YAML. Raw benchmark output, experiment reports, dated run snapshots, and onboarding summaries are not repository
+artifacts. An Emmy-tuned prebuilt image is produced only when the architecture, quantization, trace, serving, and
+release gates pass.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, canonical-golden, and matching plan paths. Unmanifested or exploratory

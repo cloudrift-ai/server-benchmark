@@ -14,22 +14,20 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, AttentionGoldenConfig  # noqa: E402
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: E402
 
-_STATIC_ATTENTION = [g for g in GOLDEN_CONFIGS if isinstance(g, AttentionGoldenConfig) and not g.dynamic]
+_STATIC_ATTENTION = [g for g in GOLDEN_RECORDS if "torch.sdpa" in g.origin_ops and not g.dynamic]
 
 
 @pytest.mark.parametrize("golden", _STATIC_ATTENTION, ids=lambda g: f"{g.name}@{g.gpu_name.split()[-1]}")
 def test_static_attention_golden_pins_bind(golden, monkeypatch):
-    from emmy.commands.run import _pinned_knobs
-    from emmy.commands.trace import trace_inline_code
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
     from emmy.compiler.pipeline.fork import Fork
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    d = trace_inline_code(golden.snippet())
-    g = d["graph"] if isinstance(d, dict) else d
+    g = golden.target_program.copy()
 
     def decide(fp):
         o = fp.options[0]
@@ -38,7 +36,7 @@ def test_static_attention_golden_pins_bind(golden, monkeypatch):
         return o
 
     ctx = Context(compute_capability=tuple(golden.compute_cap))
-    with _pinned_knobs(golden.knobs):
+    with pinned_knobs({**golden.pin_map, **golden.knobs}):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(g, decide)
     tile_pins = {k: v for k, v in golden.knobs.items() if k.startswith("TILE@")}
     assert tile_pins, f"{golden.name}: static attention golden should record axis-keyed TILE pins"

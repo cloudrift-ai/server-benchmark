@@ -9,7 +9,7 @@ metadata (``commutative``, ``identity``).
 Construction resolves the callable from the op's ``name`` via
 ``_NAME_TO_FN`` (for non-numpy intrinsics like ``rsqrt`` / ``relu``) or
 ``getattr(np, name)`` otherwise. Unknown names raise. Arity is read
-from the callable's ufunc ``nin`` (non-ufunc intrinsics are all unary).
+from the callable's ufunc ``nin`` or the explicit table for non-ufunc multi-input intrinsics.
 
 This module intentionally doesn't depend on the ``Expr`` AST in
 ``ir/expr.py`` — that's the coordinate / predicate sublanguage for
@@ -27,8 +27,8 @@ from emmy.compiler.dtype import decode_f8, encode_f8
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
-# intrinsics (all unary). Every other op name matches a numpy attribute,
-# and ``__init__`` falls through to ``getattr(np, name)`` for them.
+# intrinsics. Every other op name matches a numpy attribute, and ``__init__``
+# falls through to ``getattr(np, name)`` for them.
 def _erf(x):  # numpy lacks an erf ufunc; scipy ships one and is a torch dep.
     from scipy.special import erf
 
@@ -41,10 +41,15 @@ _NAME_TO_FN: dict[str, object] = {
     "relu": lambda x: np.maximum(0.0, x),
     "sigmoid": lambda x: 1.0 / (1.0 + np.exp(-x)),
     "silu": lambda x: x / (1.0 + np.exp(-x)),
+    "softplus": lambda x: np.logaddexp(0.0, x),
     "erf": _erf,
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
+    "where": np.where,
+    # Generic scalar same-width bit reinterpretation. The destination dtype lives on the
+    # enclosing Assign/Tensor; source renderers spell the bitcast from both SSA dtypes.
+    "bitcast": lambda x: x,
     # fp8 decode casts. The dtype-boundary cast out of an fp8 tensor cannot be
     # a plain ``copy``: the numpy carrier is uint8 BITS, so copying would move
     # the bit patterns, not the values — the decode IS the cast's semantics.
@@ -59,14 +64,19 @@ _NAME_TO_FN: dict[str, object] = {
     "to_f8e5m2": lambda x: encode_f8(x, "f8e5m2"),
 }
 
+_ARITY: dict[str, int] = {
+    # ``np.where`` is a regular function rather than a ufunc, so it has no ``nin`` metadata.
+    "where": 3,
+}
+
 
 class ElementwiseImpl:
     """Named scalar op — name + numpy callable + arity + reducer metadata.
 
     Construction resolves the callable from ``_NAME_TO_FN`` (non-numpy
     intrinsics) or ``getattr(np, name)`` for numpy-aligned names, and
-    reads arity from the ufunc's ``nin`` (non-ufunc intrinsics are
-    unary). Unknown names raise. ``commutative`` / ``associative`` /
+    reads arity from the ufunc's ``nin`` or the explicit non-ufunc table.
+    Unknown names raise. ``commutative`` / ``associative`` /
     ``identity`` / ``has_identity`` are computed properties reading from
     class-level tables keyed by name — the algebraic traits reassociation
     gates (split-K, cooperative tree-combine) query instead of matching op
@@ -118,7 +128,7 @@ class ElementwiseImpl:
             raise ValueError(f"unknown elementwise op name: {name!r} (not in numpy or _NAME_TO_FN)")
         self.name = name
         self._fn = fn
-        self.arity = getattr(fn, "nin", 1)
+        self.arity = _ARITY.get(name, getattr(fn, "nin", 1))
 
     def __call__(self, *args):
         return self._fn(*args)
@@ -325,6 +335,7 @@ _OP_CLUSTERS: dict[str, str] = {
     "tanh": "exp",
     "sigmoid": "exp",
     "silu": "exp",
+    "softplus": "exp",
     "erf": "exp",
     "gelu": "exp",
     "gelu_tanh": "exp",

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Serving Image"
+  short_description: "Qualify and publish a baked serving image"
+  default_prompt: "Use $release-serving-image to qualify and publish the image pinned by this serving recipe."

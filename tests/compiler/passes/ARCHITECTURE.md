@@ -39,10 +39,9 @@ tests/compiler/passes/
 └── test_pipeline_semantics.py      # full pass chain (decompose → opt → fuse) vs numpy
 ```
 
-The `tests/compiler/conftest.py` exposes `matmul_graph(m, k, n)` — the
-shared (m,k)@(k,n)→(m,n) graph builder used by the lowering / backend /
-e2e tests, plus the `requires_cuda` skip marker and the `run_graph`
-parametrized fixture.
+`tests/compiler/helpers.py` exposes `matmul_graph(m, k, n)` — the shared (m,k)@(k,n)→(m,n) graph builder used by the
+lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/compiler/conftest.py` owns the
+`run_graph` parametrized fixture.
 
 ## Covered Rules
 

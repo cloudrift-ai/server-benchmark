@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def _randn(shape: str, dtype, scale: float | None = None) -> str:
@@ -50,22 +50,41 @@ def test_run_input_and_code_mutually_exclusive(run_cli):
 
 
 def test_pinned_knobs_sets_and_restores_env(monkeypatch):
-    """``_pinned_knobs`` pins ``EMMY_<KNOB>`` for the block, then restores the
+    """``pinned_knobs`` pins ``EMMY_<KNOB>`` for the block, then restores the
     prior environment — removing keys that were unset, restoring preexisting ones
     (the golden-bench A/B relies on this to compile a pinned variant cleanly)."""
     import os
 
-    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     monkeypatch.delenv("EMMY_TILE", raising=False)
     monkeypatch.setenv("EMMY_STAGE", "preexisting")
-    with _pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
+    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
         assert os.environ["EMMY_TILE"] == "f2x4"
         assert os.environ["EMMY_STAGE"] == "d2/cp"
         assert os.environ["EMMY_WARP_SPECIALIZE"] == "False"
     assert "EMMY_TILE" not in os.environ  # was unset → removed
     assert os.environ["EMMY_STAGE"] == "preexisting"  # restored
     assert "EMMY_WARP_SPECIALIZE" not in os.environ
+
+
+def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch):
+    """Axis-scoped programmatic pins preserve the raw aggregate that placement routing reads."""
+    import os
+
+    from emmy.compiler.pipeline.knob import parse_knob_spec
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
+    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
+    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_PLACE@A"] == "cut"
+        assert os.environ["EMMY_TILE@DD"] == "f2x2"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
+    assert os.environ["EMMY_PLACE@A"] == "fuse"
+    assert "EMMY_TILE@DD" not in os.environ
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
 
 
 def _symbolic_input_graph():
@@ -105,8 +124,7 @@ def test_hint_sized_inputs_tiles_symbolic_axes():
 
 def test_hint_sized_inputs_static_graph_is_noop():
     from emmy.commands.run import _hint_sized_inputs
-
-    from ..conftest import matmul_graph
+    from tests.compiler.helpers import matmul_graph
 
     a, b = torch.randn(4, 8), torch.randn(8, 4)
     args, kwargs, sym_env = _hint_sized_inputs(matmul_graph(4, 8, 4), (a, b), {})
@@ -211,11 +229,11 @@ def test_run_ab_rejects_malformed_spec(run_cli):
     assert "missing '='" in (stdout + stderr)
 
 
-def test_run_record_shape_rejects_bad_spec(run_cli):
-    """``--record-shape`` fails fast (before any compile/bench spend) on an invalid spec."""
+def test_run_record_shape_option_is_retired(run_cli):
+    """The obsolete shape-identity surface is no longer accepted by the parser."""
     rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--record-shape", '{"kernel": "warp_drive"}')
     assert rc == 2
-    assert "unknown kernel kind" in (stdout + stderr)
+    assert "unrecognized arguments: --record-shape" in (stdout + stderr)
 
 
 def test_ab_samples_parse_label_and_shape():
@@ -272,7 +290,7 @@ def test_intensity_floor_flags_impossible_row(monkeypatch):
     """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
     recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
     plausible latency passes, and an unregistered device degrades to no gate. The gate reads
-    ``Sample.flops`` (``GoldenConfig.flops()`` — never overestimated, hint-free) rather than
+    ``Sample.flops`` (an exact measured-work count, never a ``ShapeKey`` estimate) rather than
     reconstructing from the ShapeKey: the join key excludes symbolic axes on the matmul side
     but includes them on the reduce-tier side, so the old hint-multiplier reconstruction
     flagged every reduce-tier ``.dynM`` replay 512× over (the golden-audit false positive)."""
@@ -322,9 +340,9 @@ def test_unreproducible_pin_flag(monkeypatch):
     knobs, so absence ≠ dropped), while an unregistered family flags as a pin typo.
     A synthetic registry (mirroring space.py's TILE/STAGE/FAST_EXP declarations)
     keeps the test independent of module-load order."""
-    from emmy.commands.run import _unreproducible_pin_flag
     from emmy.compiler.pipeline import knob as knob_mod
     from emmy.compiler.pipeline.knob import Knob, KnobType
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     monkeypatch.setattr(
         knob_mod,
@@ -337,37 +355,37 @@ def test_unreproducible_pin_flag(monkeypatch):
     )
 
     # Honored pin — realized exactly.
-    assert _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
     # Silently swapped pin — the greedy-vs-greedy case the gate exists for.
-    flag = _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
+    flag = unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
     assert "unreproducible pin" in flag and "TILE=w2x1/f1x8" in flag and "w4x2/f2x4" in flag
     # A REGISTERED family with no stamp on any kernel is ungateable, not a miss: on a
     # partially re-lowered --ir reload the stamp may have been serialized away (a full
     # compile OFF-fills declared knobs, so a dropped pin still shows as (off)/conflict).
-    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
     # An UNREGISTERED family with no stamp is a typo in the pin — flagged.
-    assert "(unset)" in _unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
+    assert "(unset)" in unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
     # Multi-kernel lowering (split main + finalize): honored on the second kernel.
-    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
+    assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
     # Bare pin vs single-axis @-keyed realization.
-    assert _unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@d": "f2x2"}]) is None
+    assert unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@d": "f2x2"}]) is None
     # Bare pin vs a MULTI-axis realization (flash stamps two TILE@ keys — no collapse).
-    assert _unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
     # An @-keyed pin whose axis the re-lowering renamed: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
-    flag = _unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
+    flag = unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
     assert "TILE@d2=w2x1/f1x8" in flag and "(unset)" not in flag
     # Registry-canonical value compare (bool knob pinned via the string grammar).
-    assert _unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
+    assert unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
     # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
     # sibling never pollutes the diagnostic...
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
-    assert "realized (off)" in _unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
+    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
 
 
 def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
@@ -577,8 +595,20 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     # Greedy deployed a std kernel; the stub stands in for every kernel-node walk.
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda g: [_node({"TILE": "f2x8", "WORK": "t32x8"})])
 
-    fm = Sample(knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"}, latency_us=100.0, name="mlp_gate_up", shape=object())
-    std = Sample(knobs={"TILE": "f2x8", "WORK": "t32x8"}, latency_us=140.0, name="mlp_gate_up", shape=object())
+    fm = Sample(
+        knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
+        pins={"FAST_MATH": True},
+        latency_us=100.0,
+        name="mlp_gate_up",
+        shape=object(),
+    )
+    std = Sample(
+        knobs={"TILE": "f2x8", "WORK": "t32x8"},
+        pins={"FAST_MATH": False},
+        latency_us=140.0,
+        name="mlp_gate_up",
+        shape=object(),
+    )
     golden_benches = [run_mod._GoldenBench(s, object(), None, (), "ok") for s in (fm, std)]
 
     out = tmp_path / "ab.json"
@@ -589,6 +619,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     assert rec["greedy"]["lane"] == "std"
     lanes = {p["name"] + p["lane"]: p["lane"] for p in rec["pinned"]}  # both rows share the name
     assert sorted(lanes.values()) == ["fm", "std"]
+    assert {p["pinned_knobs"]["FAST_MATH"] for p in rec["pinned"]} == {"True", "False"}
     # The filter a sweep applies: only same-lane rows are comparable to the greedy.
     same_lane = [p for p in rec["pinned"] if p["lane"] == rec["greedy"]["lane"]]
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"

@@ -37,7 +37,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ..conftest import dyn_M, requires_cuda, requires_sm90
+from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
 
 
 def _build_norm_linear_graph(dims: dict, mode: str = "static"):
@@ -313,6 +313,111 @@ def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
     res = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(g, ctx=Context.from_target((12, 0)))
     src = "\n".join(n.op.kernel_source for n in res.nodes.values() if isinstance(n.op, CudaOp))
     assert "#pragma unroll" in src, "the small FMA inner reduce must be marked for #pragma unroll"
+
+
+def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
+    """A fused matmul/stack projection can reach materialization as a zero-axis fold with no
+    operand edge. Its boundary output sweep still wraps the projection body, and each scalar-tile
+    cell must reference the sweep's bound coordinate rather than a suffixed undefined name."""
+    import torch
+    import torch.nn as nn
+
+    for key, value in {
+        "WORK": "t16x8",
+        "TILE": "f2x2",
+        "STAGE": "",
+        "LOOPIFY": "0",
+        "INTERLEAVE_LOADS": "1",
+        "VECTORIZE_LOADS": "1",
+    }.items():
+        monkeypatch.setenv(f"EMMY_{key}", value)
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class StackMatmul(nn.Module):
+        def forward(self, x, a, b):
+            return torch.stack((-x, torch.matmul(a, b)[..., :2]), dim=-1)
+
+    graph = trace_module(
+        StackMatmul(),
+        (
+            torch.randn(1, 4, 8, 2),
+            torch.randn(1, 4, 8, 8),
+            torch.randn(1, 4, 8, 8),
+        ),
+    )
+    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
+    source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
+    assert "for (int a4 = 0; a4 < 2; a4++)" in source
+    assert "a4__c" not in source
+
+
+def test_output_sweep_declines_the_warp_tier(monkeypatch):
+    """A matmul whose boundary store adds an output sweep cannot use the straight-line MMA
+    fragment epilogue. Unpinned scheduling must keep the bound scalar fallback."""
+    import torch
+    import torch.nn as nn
+
+    monkeypatch.setenv("EMMY_LOOPIFY", "0")
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class StackMatmul(nn.Module):
+        def forward(self, x, a, b):
+            return torch.stack((-x, torch.matmul(a, b)[..., :2]), dim=-1)
+
+    graph = trace_module(
+        StackMatmul(),
+        (
+            torch.randn(1, 4, 8, 2),
+            torch.randn(1, 4, 8, 8),
+            torch.randn(1, 4, 8, 8),
+        ),
+    )
+    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
+    source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
+    assert "for (int a4 = 0; a4 < 2; a4++)" in source
+    assert "mma.sync" not in source
+
+
+def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
+    """A graph-wide warp pin can be inapplicable to a mixed-dtype sibling. The scheduler then
+    leaves that term unmapped; scalar materialization must restore its free-axis grid rather than
+    emit loads and stores that reference coordinates no thread binds."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
+
+    for key, value in {
+        "WORK": "w1x1",
+        "TILE": "mma_m8n8k4_f16_f32/f4x4/k8",
+        "REDUCE": "",
+        "STAGE": "",
+        "LOOPIFY": "0",
+        "RASTER": "",
+    }.items():
+        monkeypatch.setenv(f"EMMY_{key}", value)
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), F32), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("o", (1, 8, 4), F32), node_id="o")
+    graph.inputs, graph.outputs = ["x", "w"], ["o"]
+
+    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
+    [source] = [node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp)]
+    assert "int a0 =" in source and "int a1 =" in source
+    assert "if (_gid < 32)" in source
 
 
 @requires_cuda

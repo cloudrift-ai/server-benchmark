@@ -14,6 +14,7 @@ This package owns *all* VM lifecycle logic for the CLI:
 ```
 provisioning/
   cloud.py        # orchestrator: provision_cloud_vm + provider dispatch
+  lease.py        # durable allocation ownership, deletion, and audit
   candidates.py   # iter_candidates: ordered list of allocation attempts
   errors.py       # CapacityExhausted, TerminalProvisionError
   cloudrift.py    # CloudRift API wrapper (create/delete/wait)
@@ -35,7 +36,9 @@ provisioning/
    * **CloudRift** → one candidate per base type.
    * **GCP** → one candidate per zone in `hardware.GPU_GCP_ZONES[gpu_name]` (falls back to `DEFAULT_GCP_ZONE`); all zones for the current base type before advancing to the next entry.
 
-The orchestrator tries candidates in this order until one succeeds or all are exhausted. **Fallback never crosses the provider boundary of the initial selection** — H200 callers who passed `--provider cloudrift` won't be silently relocated to GCP.
+The orchestrator tries candidates in this order until one succeeds or all are exhausted. Without a provider filter,
+fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
+so callers that request CloudRift are never silently relocated to GCP.
 
 For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) attempts on transient errors. On the contracted exceptions it short-circuits:
 
@@ -47,6 +50,22 @@ For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) 
 | Returns `None` | Treat as soft capacity exhaustion: advance. |
 
 When every candidate is exhausted, the orchestrator returns `None` and logs the last error.
+
+`vm create gpu --exact-gpu-count` filters out provider shapes that would allocate more GPUs than requested. The normal
+deploy and benchmark paths retain the hardware table's smallest-fitting GCP behavior.
+
+## Durable allocation lease
+
+Automation can pass a `VmLeaseObserver` to `provision_cloud_vm()`. Before every attempt, the observer refuses to
+overwrite an active handle. Each provider then records its deletion handle immediately after allocation and before
+readiness or SSH polling; once ready, the orchestrator adds connection details and marks the lease active. This
+explicit lifecycle replaces interception of provider internals and preserves the handle if the process is interrupted
+after allocation.
+
+`emmy vm create gpu --lease PATH --owner ID` enables the observer. `emmy vm delete lease` validates the exact owner,
+deletes only the recorded handle, retries and polls provider state, then marks the lease deleted. `emmy vm audit
+lease` independently fails while that handle remains active. A missing lease is an idempotent no-op; an owner mismatch
+is always a hard refusal.
 
 **Timing:** `bench` (`benchmark/execution.py`) wraps `provision_cloud_vm()` → `vm_provision` and `provision_remote()`
 → `remote_provision` in a timer. These run once per `ExecutionGroup` (shared VM) but are seeded into each task's timer,
@@ -64,7 +83,10 @@ Anything else a provider raises is treated as transient by the orchestrator.
 
 ## Orphan cleanup invariant
 
-**A provider's `create_instance` must never leave a VM behind that the caller can't see.** If `create_instance` returns a `VMConnectionInfo`, the caller owns the VM and is responsible for delete. If it raises, *no VM exists*: the provider must have already terminated any partially-provisioned instance before re-raising.
+**A provider's `create_instance` must never leave a VM behind that the caller can't see.** If `create_instance` returns
+a `VMConnectionInfo`, the caller owns the VM and is responsible for delete. If it raises, the provider attempts to
+terminate any partially-provisioned instance before re-raising. When an allocation observer is present, the durable
+lease remains the final cleanup authority even if provider cleanup or the caller is interrupted.
 
 This invariant lets the orchestrator iterate candidates without leaking orphans:
 
@@ -91,8 +113,8 @@ mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `bra
 Every CloudRift request carries an envelope `{"version": API_VERSION, "data": {...}}`. The server versions its public
 types by calendar date and decodes each request against the newest declared schema whose date is `<= API_VERSION` (an
 unknown in-between date silently resolves *down* to the nearest older schema). `API_VERSION` (`cloudrift.py`) is pinned
-to `2026-05-26`, the **v059** generation: `instances/rent` resolves to v059, `instances/list` to v058, and
-`instances/terminate` to v055. Pin to a date rather than `~upcoming` (CloudRift's own client default) so a future server
+to `2026-08-05`, the current public generation for the instance endpoints used here. Pin to a date rather than
+`~upcoming` (CloudRift's own client default) so a future server
 release can't change request/response shapes under us.
 
 Two v059-era behaviours the client relies on:

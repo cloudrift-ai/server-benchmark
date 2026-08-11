@@ -1,7 +1,11 @@
 ---
 name: release-serving-image
-description: Use this skill when the user asks to "release the serving image for <model>", "build the prebuilt image for <HF model id>", "warm and bake the kernels for <model>", "create/publish the vllm-emmy docker image with prebuilt kernels", "release the gemma-4 image", or otherwise wants the per-model vllm-emmy serving image release pipeline executed end to end. Runs the documented workflow (docker/vllm-emmy-serve/ARCHITECTURE.md) on the model's target GPU — rented (via start-remote-server) or local — covering the golden coverage gate, base image, toolchain preflight, memory-headroom sweep that pins the model config, HF-parity validation gate, warm, bake, offline zero-recompile verify, and push, with hard abort gates at every step, a human approval pause before the push, and guaranteed teardown.
-version: 0.2.0
+description: >-
+  Use this skill when the user asks to release, build, warm, bake, qualify, or publish a per-model serving image,
+  including requests to run `emmy publish RECIPE`. Runs the documented vllm-emmy release workflow on the model's
+  target GPU, covering golden realization and memory gates, HF parity, warm and bake, offline zero-recompile
+  verification, canonical image naming, a distinct human approval before registry publication, and guaranteed
+  teardown.
 ---
 
 # Release a prebuilt serving image for one model
@@ -13,24 +17,45 @@ that survives SSH drops, hard PASS/FAIL gates that abort-and-teardown instead of
 the headroom-sweep policy that finalizes the model config, secret hygiene for the push, and the release
 side-effects.
 
-Every step is parameterized by `MODEL` (an HF id). The slug derived from it names both the published image and the
-pinned config, so nothing else needs naming:
+The recipe is the publication input. Resolve exactly one `model.huggingface`, one concrete engine image, one hardware
+target, and one serving shape before provisioning; reject experiment grids or multiple image variants. Use the
+resolved HF id as `MODEL` for the build and qualification commands:
 
 ```bash
 make serve-config MODEL=google/gemma-4-12B-it   # model / slug / config path / image tag / target GPU
 make serve-models                               # which models already have a pinned config
 ```
 
+The recipe image must use the canonical immutable reference that `emmy publish` validates:
+
+```text
+cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>
+```
+
+Supported runtime families are `vllm-emmy` and `1cat-vllm`. The model slug comes only from `model.huggingface`
+through Emmy's slug implementation. GPU architecture, zero-recompile status, cache manifests, checkpoint revision,
+and serving shape are image labels and qualification evidence, never tag suffixes. Refuse `latest`, `jitfree`, GPU
+names, or mutable aliases in the primary recipe reference.
+
+The exact local image must label `ai.emmy.publish.family`, `ai.emmy.model.id`, `ai.emmy.model.revision`,
+`ai.emmy.target.gpu`, `org.opencontainers.image.version`, and `org.opencontainers.image.revision`; cache-bearing
+images also carry their cache-manifest digests. Compare the model, checkpoint revision, target GPU, sealed serving
+shape, and cache manifests against the recipe, model config, and qualification evidence before publication. A label
+does not substitute for the fresh-container zero-recompile gate.
+
 Budget: ~2–3 h wall on a rental for a 12B-class model (image build ~20 min, headroom sweep ~30–60 min, validate
-~30 min, warm ~30 min, bake/verify/push ~30 min). **Hard cap: 4 h** — if the session exceeds it, capture logs, tear
-down, report. A larger checkpoint scales this up; re-estimate before starting rather than inheriting these numbers.
+~30 min, warm ~30 min, bake/verify/publication ~30 min). **Hard cap: 4 h** — if the session exceeds it, capture
+logs, tear down, and report. A larger checkpoint scales this up; re-estimate before starting rather than inheriting
+these numbers.
 
 ## Inputs to confirm
 
 Ask only for what the user hasn't already given:
 
-1. **Model** — the HF id. Required; there is no default worth guessing. Run `make serve-config MODEL=<id>` and show
-   the resolved slug, config path, image tag and target GPU before anything else happens.
+1. **Recipe** — required; there is no publication default worth guessing. Resolve its singleton HF id, engine image,
+   runtime family/version/revision, serving shape, and target GPU. When its release config exists, run
+   `make serve-config MODEL=<resolved-id>` and show the slug, config path, image tag, target GPU, and canonical golden
+   before anything else happens. For a new release, show the intended paths and make clear that Step 3 must seal them.
 2. **Mode** — rental (default) or local. Local requires the config's `SERVE_GPU` in `nvidia-smi` on this machine; if
    the box is multi-GPU, resolve that card's index and export `GPU_DEVICE=<index>` for every warm/verify
    invocation. Check ≥100 GB free disk for a 12B-class model (base image + `warm/` + baked weight layer +
@@ -38,44 +63,28 @@ Ask only for what the user hasn't already given:
    with the checkpoint.
 3. **`HF_TOKEN`** — needed for a gated download during headroom/validate/warm. Local mode with the model already in
    `~/.cache/huggingface` can skip it by pre-seeding (ARCHITECTURE.md "Running it locally").
-4. **Docker Hub credentials for the push** — ask the user for a **short-lived access token** (not their password;
-   `docker login -u <user> --password-stdin`) **and, in the same question, the username the token belongs to**: a PAT
-   authenticates only its owning account, which is usually a personal user with push rights to the `cloudriftai` org,
-   not `cloudriftai` itself — the wrong username fails as "incorrect username or password". Never echo the token;
-   `docker logout` in teardown regardless of outcome.
-5. **Env file** (CloudRift creds, rental mode) — default `.env`, per the `start-remote-server` sourcing rules.
+4. **Env file** (CloudRift creds, rental mode) — default `.env`, per the `start-remote-server` sourcing rules.
 
-## Step 0 — Golden coverage (GATE, and it comes first)
+Do not request registry credentials up front. Request the Docker username and a short-lived access token only after
+the baked image passes every gate, the publish dry-run succeeds, and the user separately approves registry
+publication. A PAT authenticates its owning account, normally a personal user with push rights to `cloudriftai`, not
+the organization name itself.
 
-```bash
-make serve-goldens MODEL=<id>      # -> scripts/check_serving_goldens.py against the config's SERVE_GPU
-```
+## Step 0 — Resolve the serving contract
 
-**Why this gates everything, before a single GPU-hour is spent.** Emmy's greedy compile resolves every fork through
-the deploy evidence hierarchy, and the live card's **recorded goldens are its top tier** — they are what seeds the
-picks with tuned kernel schedules. Warm a model with no goldens for its shapes and cold greedy chooses instead,
-which on unseeded projection shapes is not "a bit slower": it deploys a scalar tile ~770× off cuBLAS, and on some
-shapes picks a kernel that hangs outright. Those picks then get frozen into the shipped cubins **and the
-execution-plan pack**, where no later boot revisits them. A golden-less release ships that permanently.
+For an existing release, run `make serve-config MODEL=<id>`. The config must name an existing
+`SERVE_GOLDEN_FILE` in addition to model, revision, GPU, and serving shape. Record all of them before provisioning.
+They are one contract: do not accept separate model, GPU, revision, or width arguments later in the workflow.
 
-**On FAIL, stop and ask the user.** Do not decide this alone. Report which case it is — the script distinguishes
-them — and offer the real options:
-
-- *the card has no goldens at all* → the card is untuned; releasing from it is not sensible. Record goldens first
-  (the `tune-golden` skill), or release on a card that has them.
-- *the card is tuned, but not for this model* → the script lists which models it IS tuned for. Options: run a golden
-  sweep for this model's shapes first (the honest fix, hours of tuning); release anyway and accept cold-greedy picks
-  (only defensible for a throwaway or experimental image, and it must be said out loud in the release notes); or
-  release on a different card.
-- *a related checkpoint is covered but the slug missed* — e.g. a quantized variant whose base has goldens. The
-  matcher deliberately refuses to guess, because a quantized or resized model does not share the base's kernel
-  shapes. If the user knows the shapes really are identical, adding this model to the golden file's `model:`
-  provenance is the fix — not a bypass flag.
-
-Whichever the user chooses, **carry it into the release notes**. "Released without golden coverage" is a property of
-the artifact, not a detail of the session.
+For a new release with no config yet, resolve the model and GPU from the singleton recipe, record the intended config
+and canonical-golden paths, and let the headroom sweep in Step 3 create the config. The realization contract is not
+sealed until then; do not invent interim widths or run the golden audit against them.
 
 ## Step 1 — Provision (rental mode; skip in local mode)
+
+Define one cleanup path before provisioning and update it as soon as the lease handle, transient container names,
+and registry-login state become known. It must remove release containers, log out when login occurred, and delete
+and audit the rental on success, refusal, timeout, or any gate failure.
 
 Delegate to the `start-remote-server` skill, asking for the config's `SERVE_GPU`, e.g.
 `emmy vm create gpu --gpu "NVIDIA GeForce RTX 5090" --gpu-count 1` (CloudRift). On vast.ai instead: rent a **VM
@@ -91,11 +100,12 @@ degrades; `make` now guards this).
 
 **Ship the source at the pinned release commit — never rsync the live working tree.** The working tree is shared
 mutable state: a branch switch in another session mid-release yields a hybrid tree whose wheel fails in confusing,
-distant ways. Pin `origin/main`'s sha up front, get the tree onto the host (fresh clone, or rsync of the
-`git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify `git rev-parse HEAD` before any
-rebuild. Then `make setup` + `./venv/bin/pip install -e ".[serving]"` + cupy (the venv steps back the headroom
-sweep and the validate script). Host toolchain: a CUDA version whose nvcc supports the target arch (**>= 12.9** for
-sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75 or higher"); on non-CloudRift
+distant ways. Pin the selected release branch's commit SHA up front, get the tree onto the host (fresh clone, or
+rsync of the `git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify
+`git rev-parse HEAD` before any rebuild. Then run `make setup`, install `.[serving]` editable, and install cupy; the
+venv supports the headroom sweep and validation script. Host toolchain: a CUDA version whose nvcc supports the
+target arch (**>= 12.9** for sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75
+or higher"); on non-CloudRift
 hosts verify the NVIDIA container toolkit actually works (`docker run --gpus all ... nvidia-smi`) — a registered
 runtime with missing binaries fails with `could not select device driver`. The venv-based steps (headroom sweep,
 validate) additionally need `CUDA_HOME`/nvcc exported in the step's own environment (emmy refuses to serve without
@@ -116,28 +126,12 @@ xtrace prints the expanded secret into the log; wrap secret reads in `set +x` �
 `make wheel && make vllm-emmy-image` (~20 min, detached). A pulled `cloudriftai/vllm-emmy:TAG` is acceptable only if
 pushed from the same commit (the wheel is part of the cubin cache key) — when in doubt, build.
 
-## Step 3 — Toolchain preflight (GATE)
-
-```bash
-MODEL=<id> ARCH=<target arch> scripts/preflight_serving_kernels.sh
-```
-
-Run it **inside the freshly built image** so it uses the image's exact nvcc (exact command in ARCHITECTURE.md). It
-renders every golden shape recorded for this model and `nvcc --cubin`s each one — the golden set is the enumeration
-precisely because those are the picks the warm will deploy.
-
-**Gate: the output must end `== preflight done: <N> OK, 0 FAIL` with `<N>` nonzero.** `<N>` is this model's golden
-count and grows as goldens land — the gate is **0 FAIL and at least one OK**, not a specific N (the script
-hard-fails an empty enumeration, so `0 OK, 0 FAIL` cannot exit 0). Anything else → capture the failing `*.log`s from
-the preflight out dir, abort, teardown, report. Do not attempt to fix compiler or toolchain bugs inside the release
-session.
-
-## Step 4 — Headroom sweep → pin the model config
+## Step 3 — Headroom sweep → pin the model config
 
 For a **new model** this step *creates* `docker/vllm-emmy-serve/models/<slug>.env`; for an existing one it
 re-validates it. Policy (decode bucket stays at the model's tuned default): try
-`--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 → 4096 (stop at 4096 — the dynamic-dim cap),
-`--gpu-memory-utilization 0.97`, each via a detached
+`--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 → 4096 (stop at 4096 — the dynamic-dim
+cap), `--gpu-memory-utilization 0.97`, each via a detached
 `./venv/bin/emmy serve --generate <model> --bench --max-model-len N --max-num-batched-tokens N`. A config **passes**
 when the server reaches `/health`, the bench completes, AND the serve log has no `EngineCore encountered a fatal
 error` (the exit code alone hides tail crashes — a drained bench can die after its metrics print; grep the log). It
@@ -156,17 +150,48 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
 - **Any value containing spaces must be double-quoted**, or bash runs its second word as a command (`SERVE_GPU`
   is the one that bites: unquoted, it dies with `GeForce: command not found`). Make keeps the quotes in the value,
   which is why the Makefile strips them once into `SERVE_GPU_NAME` rather than at each use site.
-- Required keys: `SERVE_MODEL`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_BATCHED_TOKENS`, `SERVE_GPU_MEM_UTIL`,
-  `SERVE_DECODE_BUCKET`, `SERVE_GPU`. A test asserts all six are present and that `SERVE_MODEL`'s slug equals the
+- Required keys: `SERVE_MODEL`, `SERVE_GOLDEN_FILE`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_BATCHED_TOKENS`,
+  `SERVE_GPU_MEM_UTIL`, `SERVE_DECODE_BUCKET`, `SERVE_GPU`. A test asserts all seven are present and that
+  `SERVE_MODEL`'s slug equals the
   filename — a file named for a different slug is simply unreachable from `make serve-* MODEL=`.
 - `SERVE_GPU` is the card actually swept. `warm.sh` and `verify.sh` compare the live card against it and refuse a
   mismatch (`GPU_DEVICE=<index>` selects the card on a multi-GPU box; `SKIP_GPU_CHECK=1` overrides, and wanting to
   use it is a sign something is wrong).
+- Optional per-checkpoint keys, each defaulting to a dense unquantized default-branch release (`serve.sh` documents
+  them in full): `SERVE_REVISION` the commit sha to serve — `warm.sh` REFUSES an unpinned revision on any repo with
+  more than one branch, because the default branch may be a different variant entirely; `SERVE_QUANT=exl3` for a
+  checkpoint whose quantization method vLLM does not have; `SERVE_CAPTURE_SIZES` for the cudagraph ladder, which an
+  MoE model must cap at `[1]`; `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`).
+  Set these BEFORE the headroom sweep — they change what the sweep measures — and sweep with the same
+  `--revision <sha>` so `emmy serve` derives the same arms from the same checkpoint.
 
 After writing it, run `make serve-config MODEL=<id>` and confirm every line reads back as intended — that is the
-cheap check that both readers agree before a multi-hour warm depends on it.
+cheap check that both readers agree before a multi-hour warm depends on it. For a new release whose canonical file
+does not exist yet, use the `tune-kernels` skill with this sealed config to create, tune, verify, and promote it first;
+then rerun `make serve-config` and continue to Step 4.
 
-**The config is sealed from here on** — any later change invalidates the warm.
+**The config is sealed from here on** — any later change invalidates its realizations and the warm. For a new or
+changed config, this is also the point to commit the config and canonical recipe reference, update the pinned release
+commit on the remote, and rerun `make serve-config` from that clean checkout before Step 4. Headroom measurement may
+discover the values, but the golden audit, correctness, warm, bake, verify, and publication must all use one committed
+source snapshot.
+
+## Step 4 — Golden realization audit (GATE)
+
+```bash
+make serve-goldens MODEL=<id>
+```
+
+Run it on the config's target GPU after the headroom sweep has sealed the realization matrix. Make invokes
+`emmy eval golden <SERVE_GOLDEN_FILE> --serving-config <config>`; the command extracts model/revision/GPU and the
+realization matrix from that config. It validates the canonical schema and provenance, requires the live GPU and
+compute capability to match, proves every structural target contains every expected static/symbolic precision
+realization, reproduces every row, and audits freshly traced serving twins.
+
+**Gate: zero missing realizations, FALL-THROUGH, DRIFT, GAP, or compile failures.** Any failure means the image would
+freeze an incomplete or stale evidence set. Stop and use the `tune-kernels` skill to regenerate a symbolic serving
+inventory from the same config, tune all realizations on this GPU, perform deployable verification, and promote the
+complete canonical file. There is no release-without-coverage path.
 
 ## Step 5 — Correctness gate (GATE + human pause)
 
@@ -193,28 +218,56 @@ container, then runs the offline fixpoint passes). Confirm the summary line repo
 `warm/` is a single shared directory, so **one model at a time**: warming a second model into a populated `warm/`
 bakes a mixture of two models' caches. Clear it between models.
 
-## Step 7 — Bake, verify (GATE), push
+## Step 7 — Bake, verify, publish (GATES + separate human pause)
 
 ```bash
 make serve-image  MODEL=<id>
 make serve-verify MODEL=<id>     # GATE: must print "PASS — served offline with zero new cubins"
-docker login -u <user> --password-stdin   # the short-lived token from Inputs
-make serve-push   MODEL=<id>
-docker logout
+./venv/bin/emmy publish <recipe> --source-image <exact-local-image> --dry-run
 ```
 
 A verify FAIL means cache-key drift between warm and bake — capture the printed cubin diff (it names the recompiled
 kernels), abort, teardown, report. Do not push a partially-hitting image.
 
+The publish dry-run is another hard gate. It must resolve the recipe's canonical target, match the exact local image
+and its runtime/model provenance labels, reject a conflicting registry digest, and perform no tag or push mutation.
+Show the user the source image ID, canonical target, relevant labels, and registry collision result.
+When the local image already carries the recipe target, `--source-image` may be omitted; use the same source choice
+for dry-run and publication. If anonymous registry inspection is unavailable, stop at this gate rather than treating
+an authorization or missing-tool error as an absent target or requesting write credentials early.
+
+**Human pause: ask separately for explicit approval to publish that exact target.** Approval at the correctness gate
+does not authorize a registry write. Say that a rental continues billing during this pause. If the user declines or
+does not answer, preserve the local image and evidence, then log out if needed and tear down.
+
+Only after approval, request the Docker username and short-lived token. Read the token with shell tracing disabled,
+then publish and immediately log out:
+
+```bash
+set +x
+docker login -u <user> --password-stdin
+set -x
+./venv/bin/emmy publish <recipe> --source-image <exact-local-image> --yes
+set +x
+docker logout
+set -x
+```
+
+The command must refuse to replace a different digest. An existing target with the same digest is idempotent success.
+After a push, require the registry digest to match the local digest before declaring the release complete.
+
 ## Step 8 — Release side-effects + teardown
 
-1. On a feature branch: commit the finalized `models/<slug>.env`, point any recipe that should use the new image at
-   the pushed `cloudriftai/vllm-emmy-<slug>:<ver>-<sha>` tag, and open a PR (the repo contribution checklist
-   applies).
-2. **Teardown (rental mode) — always, including on every abort path above**: `emmy vm delete …` with the captured
-   handle, after `docker logout`. Report the total rental time.
-3. Report: pushed tag, pinned config, **the Step 0 golden coverage status**, validate summary, verify line, and any
-   findings.
+1. On the feature branch, confirm the pinned release commit already contains the finalized `models/<slug>.env` and
+   canonical recipe target used by warm, verify, and publish. Commit only the resulting qualification report or
+   release evidence now, then open or update the PR (the repo contribution checklist applies).
+2. **Teardown (rental mode) — always, including on every abort path above**: remove transient release containers,
+   run `docker logout` if login occurred, then `emmy vm delete …` with the captured handle and audit its absence.
+   Report the total rental time. A declined publication leaves the local image and evidence intact but does not keep
+   the rental running.
+3. Report: published target and registry digest, recipe/config digest, checkpoint and runtime revisions, target GPU,
+   cache manifests, **the Step 4 golden realization status**, validate summary, zero-recompile verify line, teardown
+   audit, and any findings.
 
 ## Failure handling
 

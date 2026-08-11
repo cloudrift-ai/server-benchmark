@@ -278,7 +278,7 @@ def test_serve_cmd_generate_rejects_incompatible_dtype():
 
 
 def test_serve_cmd_generate_rejects_oversized_batched_tokens():
-    with pytest.raises(ValueError, match="dynamic-dim cap"):
+    with pytest.raises(ValueError, match="prefill capacity"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "8192"], generate=True)
 
 
@@ -287,7 +287,7 @@ def test_serve_cmd_generate_batched_tokens_rider_headroom(monkeypatch):
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "32")
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "4128"], generate=True)
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4128"
-    with pytest.raises(ValueError, match="dynamic-dim cap"):
+    with pytest.raises(ValueError, match="prefill capacity"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "4129"], generate=True)
     # Bucket off -> no split coverage: the default falls back to the bare cap.
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "0")
@@ -295,10 +295,59 @@ def test_serve_cmd_generate_batched_tokens_rider_headroom(monkeypatch):
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"
 
 
+def test_serve_cmd_generate_prefill_capacity_moves_the_batched_tokens_default(monkeypatch):
+    """``EMMY_GEN_PREFILL_CAPACITY`` sizes the runner's activation arena, so the scheduler's
+    flattened width has to follow it down — a weight-filled card (GLM-4.5-Air) pays for every
+    token of capacity it never serves."""
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "16")
+    monkeypatch.setenv("EMMY_GEN_PREFILL_CAPACITY", "512")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "528"
+    assert cmd[cmd.index("--max-model-len") + 1] == "4096"  # unchanged: chunked prefill covers long prompts
+    with pytest.raises(ValueError, match="prefill capacity"):
+        build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "529"], generate=True)
+
+
+def test_serve_cmd_generate_nulls_the_quantization_config_for_exl3(tmp_path, monkeypatch):
+    """vLLM has no EXL3 quant method and refuses the boot; the emmy runner owns every coded
+    weight and the head decodes to fp16 at load, so the override says "unquantized"."""
+    cfg = {"model_type": "llama", "architectures": ["LlamaForCausalLM"], "quantization_config": {"quant_method": "exl3", "bits": 2.0}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"], "quantization_config": None}
+    # An unquantized checkpoint keeps the plain override.
+    (tmp_path / "config.json").write_text(json.dumps({k: v for k, v in cfg.items() if k != "quantization_config"}))
+    cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"]}
+
+
 def test_serve_cmd_generate_honors_explicit_batched_tokens():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "2048"], generate=True)
     assert cmd.count("--max-num-batched-tokens") == 1  # the user's, no added default
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "2048"
+
+
+@pytest.mark.parametrize("flag", [["--kv-cache-dtype", "fp8_e4m3"], ["--kv-cache-dtype=fp8_e4m3"]])
+def test_serve_cmd_generate_kv_cache_dtype_passes_through(flag):
+    """``--kv-cache-dtype`` is vLLM's own flag — emmy adds nothing, it just forwards. Pinned
+    because the quantized-KV deployments depend on it reaching BOTH arms unchanged, and on it
+    not disturbing the generative util default (fp8 KV halves the bytes per token, so the same
+    byte budget buys ~2x the KV tokens — no utilization change is needed or made)."""
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=flag, generate=True)
+    assert cmd[-len(flag) :] == flag
+    assert "--gpu-memory-utilization=0.97" in cmd
+    stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=flag, generate=True)
+    assert stock_cmd[-len(flag) :] == flag
+
+
+def test_serve_kv_cache_dtype_survives_the_remainder_reparse(capsys):
+    # The argparse-REMAINDER re-parse extracts emmy's own flags and forwards the rest; a
+    # vLLM flag emmy does not own must come out the other side intact.
+    args = _parse(["serve", MODEL, "--generate", "--dry-run", "--kv-cache-dtype", "fp8_e4m3"])
+    handle_serve(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert "--kv-cache-dtype fp8_e4m3" in out[0]
 
 
 def test_serve_generate_bench_targets_completions(capsys):

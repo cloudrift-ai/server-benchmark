@@ -1,116 +1,145 @@
-"""Trace a transformer layer (or an inline torch module) to our Graph IR."""
+"""Trace a transformer layer or inline module to self-contained golden YAML."""
 
 import ast
-import json
 import logging
 import sys
+from pathlib import Path
+
+from emmy.compiler.pipeline.search.working_golden import (
+    preflight_trace_inventory,
+    write_trace_inventories,
+    write_trace_inventory,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def register_trace_command(subparsers):
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+    from emmy.commands.compile import add_input_args  # noqa: PLC0415
 
     parser = subparsers.add_parser(
         "trace",
-        help="Trace a transformer layer or inline torch module to Graph IR",
+        help="Trace a model, debug IR, or inline torch module to golden YAML",
     )
+    add_input_args(parser, include_dump_dir=False)
+    parser.add_argument("--output", "-o", help="Output golden YAML path (default: <trace-name>.golden.yaml)")
     parser.add_argument(
-        "model",
-        nargs="?",
-        help="HuggingFace model ID (e.g., meta-llama/Llama-3.1-8B). Mutually exclusive with --code.",
-    )
-    parser.add_argument(
-        "--code",
+        "--loop-targets",
+        action="store_true",
         help=(
-            "Inline Python expression whose last statement is a call. "
-            "The callable may be an nn.Module (e.g. 'nn.RMSNorm(2048)(torch.randn(1,32,2048))') "
-            "or a torch function (e.g. 'F.silu(torch.randn(1,32,2048))', "
-            "'torch.matmul(torch.randn(4,3), torch.randn(3,2))'). "
-            "Call args are used as example inputs. Mutually exclusive with the positional model ID."
+            "Persist every target as exact post-fusion Loop IR. Use for compiler-sensitive storage formats "
+            "whose fusion grouping is not a stable frontend-provenance selector."
         ),
     )
     parser.add_argument(
-        "--layer",
-        type=int,
-        default=None,
-        help="Layer index to trace. Omit to trace the whole model (input_ids -> logits).",
+        "--serving-twins",
+        action="store_true",
+        help=(
+            "Capture every config-only pre/post/expert serving twin and combine its distinct kernels into one "
+            "exact-Loop-IR working golden. Reads model config and quantization allocation metadata, not weight payloads."
+        ),
     )
     parser.add_argument(
-        "--seq-len",
-        type=int,
-        default=DEFAULT_SEQ_HINT,
-        help="Sequence length for the example input (default: 512, matching ``DEFAULT_SEQ_HINT``).",
+        "--serving-config",
+        metavar="PATH",
+        help=(
+            "With --serving-twins, read the model provenance and every static/dynamic precision realization "
+            "from this pinned release env. The trace stores each structural kernel once as symbolic IR."
+        ),
     )
-    parser.add_argument("--output", "-o", help="Output JSON path (default: auto-generated)")
+    parser.add_argument(
+        "--model-provenance",
+        metavar="REPO@REVISION",
+        help=(
+            "Record this exact model provenance in the working YAML instead of the input path. "
+            "Use the uploaded HF repo plus its 40-character checkpoint revision for release goldens."
+        ),
+    )
     parser.set_defaults(func=handle_trace)
 
 
 def handle_trace(args):
-    if args.code and args.model:
-        logger.error("--code and positional model are mutually exclusive")
+    if args.code and args.input:
+        logger.error("--code and positional input are mutually exclusive")
         sys.exit(2)
-    if not args.code and not args.model:
-        logger.error("either a positional model ID or --code is required")
+    if not args.code and not args.input:
+        logger.error("either a positional model ID / IR file or --code is required")
         sys.exit(2)
+    from emmy.commands.compile import load_or_trace  # noqa: PLC0415
+    from emmy.compiler.target import apply_target_arg  # noqa: PLC0415
 
-    if args.code:
-        _handle_trace_code(args)
-    else:
-        _handle_trace_model(args)
+    apply_target_arg(args)
+    if args.serving_config and not args.serving_twins:
+        logger.error("--serving-config requires --serving-twins")
+        sys.exit(2)
+    if args.serving_twins:
+        if not args.serving_config:
+            logger.error("--serving-twins requires --serving-config PATH")
+            sys.exit(2)
+        conflicts = []
+        if args.code:
+            conflicts.append("--code")
+        if args.layer is not None:
+            conflicts.append("--layer")
+        if args.dynamic:
+            conflicts.append("--dynamic")
+        if args.adapter != "causal-lm":
+            conflicts.append("--adapter dit")
+        input_path = Path(args.input) if args.input else None
+        if input_path is not None and input_path.suffix == ".json" and input_path.exists():
+            conflicts.append("a JSON IR input")
+        if conflicts:
+            logger.error("--serving-twins is incompatible with %s", ", ".join(conflicts))
+            sys.exit(2)
+        from emmy.serving.release import load_serving_config  # noqa: PLC0415
+        from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
 
-
-def _handle_trace_model(args):
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM
-    except ImportError:
-        logger.error("torch and transformers are required: pip install torch transformers")
-        sys.exit(1)
-
-    from emmy.compiler.trace.torch import trace_module
-
-    logger.info("Loading %s...", args.model)
-    dtype = torch.float32 if args.layer is None else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
-    model.eval()
-    seq_len = args.seq_len
-
-    if args.layer is None:
-        from emmy.compiler.trace.huggingface import build_full_model_wrapper
-
-        logger.info("Tracing full model (seq_len=%d)...", seq_len)
-        wrapper = build_full_model_wrapper(model, seq_len, dtype)
-        input_ids = torch.zeros((1, seq_len), dtype=torch.long)
-        graph = trace_module(wrapper, (input_ids,))
-        basename = f"{args.model.replace('/', '-').lower()}-full-s{seq_len}"
-    else:
-        layers = model.model.layers
-        if args.layer >= len(layers):
-            logger.error("Layer %d not found (model has %d layers)", args.layer, len(layers))
-            sys.exit(1)
-
-        block = layers[args.layer]
-        logger.info("Tracing layer %d...", args.layer)
-
-        hidden_size = model.config.hidden_size
-        x = torch.randn(1, seq_len, hidden_size, dtype=dtype)
-        position_ids = torch.arange(seq_len).unsqueeze(0)
-        cos, sin = model.model.rotary_emb(x, position_ids)
-
-        graph = trace_module(
-            block,
-            (x,),
-            kwargs={"position_embeddings": (cos, sin)},
+        try:
+            serving = load_serving_config(args.serving_config)
+        except (OSError, ValueError) as exc:
+            logger.error("invalid serving config: %s", exc)
+            sys.exit(2)
+        graphs = capture_twin_graphs(args.input, decode_bucket=0, prefill_bucket=0)
+        source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
+        destination = args.output or f"{source_name}.serving-twins.golden.yaml"
+        try:
+            preflight_trace_inventory(destination)
+        except FileExistsError as e:
+            logger.error(str(e))
+            sys.exit(2)
+        if args.model_provenance and args.model_provenance != serving.model_provenance:
+            logger.error("--model-provenance must match the serving config (%s)", serving.model_provenance)
+            sys.exit(2)
+        result = write_trace_inventories(
+            graphs,
+            destination,
+            model=serving.model_provenance,
+            realizations=[row.to_golden() for row in serving.realizations],
         )
-        basename = f"{args.model.replace('/', '-').lower()}-layer{args.layer}"
-
-    _save(graph, args, default_basename=basename)
-
-
-def _handle_trace_code(args):
-    graph, slug, _ = graph_from_code(args.code)
-    _save(graph, args, default_basename=slug)
+        logger.info(
+            "Saved serving-twin golden YAML: %s (%d graph(s), %d distinct kernel(s))",
+            result.path,
+            len(graphs),
+            result.target_count,
+        )
+        return
+    # A trace inventory records programs and shapes, not checkpoint values. On a
+    # multi-hundred-billion-parameter checkpoint, avoid materializing a
+    # full eager architecture twin merely to export one requested layer.
+    graph, basename, _ = load_or_trace(args, architecture_only=True)
+    destination = args.output or f"{basename}.golden.yaml"
+    try:
+        preflight_trace_inventory(destination)
+    except FileExistsError as e:
+        logger.error(str(e))
+        sys.exit(2)
+    _log_trace(graph)
+    input_path = Path(args.input) if args.input else None
+    model = args.model_provenance or (
+        args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
+    )
+    result = write_trace_inventory(graph, destination, model=model, force_loop_targets=args.loop_targets)
+    logger.info("Saved golden YAML: %s (%d distinct kernel(s))", result.path, result.target_count)
 
 
 def graph_from_code(code: str, dynamic_shapes: dict | None = None):
@@ -300,7 +329,7 @@ def _slugify(src: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in src).strip("_").lower() or "inline"
 
 
-def _save(graph, args, default_basename: str) -> None:
+def _log_trace(graph) -> None:
     ops_count: dict[str, int] = {}
     for n in graph.nodes.values():
         name = type(n.op).__name__
@@ -311,9 +340,3 @@ def _save(graph, args, default_basename: str) -> None:
         len(graph.nodes),
         ", ".join(f"{v} {k}" for k, v in sorted(ops_count.items())),
     )
-
-    output_path = args.output or f"{default_basename}.json"
-    with open(output_path, "w") as f:
-        json.dump(graph.to_dict(), f, indent=2)
-
-    logger.info("Saved: %s", output_path)

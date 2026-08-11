@@ -228,6 +228,10 @@ entry points (`handle_run`, `_handle_run_ir`, `_run_bench`) bridge with `asyncio
 run-path job flags), `test_hung_kernel_watchdog.py` (watchdog raises promptly), and
 `tests/compiler/cli/test_tune_bench_hung_kernel.py` (the `_run_bench` control flow).
 
+The one-shot comparison result includes the worker's non-fatal `accuracy_error` beside timings, reference
+availability, and capture state. `tune --bench` persists that verdict per provenance reproducer instead of treating a
+successful timing response as proof of correctness.
+
 **One async transport — `_AsyncBenchWorker`.** It drives the `_bench_worker.py` subprocess protocol (`<8-byte LE
 length><pickle>`, both directions) over `asyncio` streams, so one event loop can keep N device-pinned workers benching
 concurrently (`tune --gpus`, see `pipeline/ARCHITECTURE.md` → *Per-kernel GPU parallelism*). Two entry shapes:

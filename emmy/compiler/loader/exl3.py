@@ -26,7 +26,17 @@ decoded weight is just a constant.
 
 from __future__ import annotations
 
+import json
+import logging
+from collections.abc import Iterator
+from pathlib import Path
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+#: The per-module allocation sidecar exllamav3 writes beside ``config.json``.
+_SIDECAR = "quantization_config.json"
 
 # The full-codebook standard deviation of codebook 0 (exllamav3 quantize.py ``codebook_scale``):
 # decoded code values are approximately N(0, CODEBOOK_SCALE^2), so a decoded tile's rms sits near it.
@@ -177,8 +187,12 @@ def decode_trellis(trellis: np.ndarray, cb: int = 0) -> np.ndarray:
     return out.reshape(kt, nt, 16, 16).transpose(0, 2, 1, 3).reshape(16 * kt, 16 * nt)
 
 
-def _sylvester_had(n: int) -> np.ndarray:
-    """The natural-order Sylvester Hadamard matrix of size ``n`` (a power of two), float64."""
+def sylvester_hadamard(n: int) -> np.ndarray:
+    """The natural-order Sylvester Hadamard matrix of size ``n`` (a power of two), float64.
+
+    Symmetric (``H == H.T``) and ``H @ H == n·I``, so ``H/sqrt(n)`` is its own inverse — the
+    property both the weight-side fold (:func:`fold_hadamard`) and the activation-side basis
+    restore rely on."""
     h = np.ones((1, 1), dtype=np.float64)
     while h.shape[0] < n:
         h = np.block([[h, h], [h, -h]])
@@ -201,13 +215,54 @@ def fold_hadamard(w_hat: np.ndarray, suh: np.ndarray, svh: np.ndarray) -> np.nda
     suh, svh = np.asarray(suh), np.asarray(svh)
     if suh.shape != (k,) or svh.shape != (n,):
         raise ValueError(f"suh/svh shapes {suh.shape}/{svh.shape} do not match weight shape {w_hat.shape}")
-    h = _sylvester_had(HAD_BLOCK) / np.sqrt(HAD_BLOCK)
+    h = sylvester_hadamard(HAD_BLOCK) / np.sqrt(HAD_BLOCK)
     w = w_hat.astype(np.float64)
     w = (h @ w.reshape(k // HAD_BLOCK, HAD_BLOCK, n)).reshape(k, n)  # H128 . W_hat, per 128 rows
     w = (w.reshape(k, n // HAD_BLOCK, HAD_BLOCK) @ h).reshape(k, n)  # … . H128, per 128 cols
     w *= suh.astype(np.float64)[:, None]
     w *= svh.astype(np.float64)[None, :]
     return w.astype(np.float16)
+
+
+def _codebook_id(mcg, mul1) -> int:
+    """The codebook id a module's optional marker siblings select (presence only, values unread)."""
+    if mcg is not None and mul1 is not None:
+        raise ValueError("mcg and mul1 codebook markers are mutually exclusive")
+    return 1 if mcg is not None else 2 if mul1 is not None else 0
+
+
+def decode_exl3_blocks(
+    trellis: np.ndarray,
+    suh: np.ndarray,
+    svh: np.ndarray,
+    *,
+    mcg: np.ndarray | None = None,
+    mul1: np.ndarray | None = None,
+    cols: int = 4096,
+) -> Iterator[tuple[int, int, np.ndarray]]:
+    """:func:`decode_exl3_linear` in OUT-FEATURE blocks — yields ``(lo, hi, W[:, lo:hi])``.
+
+    The point is peak memory: the fold runs in float64, so a vocab-sized head (``lm_head``,
+    4096x151552) costs ~5 GiB decoded whole and one block's worth this way. ``cols`` is rounded
+    down to a whole number of 128-blocks.
+
+    Blocking is exact where the format is exact — tiles are independent walks, the trailing
+    ``H128`` acts per 128-column block and ``svh`` is per column, so the HAT-BASIS decode
+    (:func:`decode_trellis`, the bit-exact surface) is bit-identical to the whole-tensor result.
+    The fold's fp16 rounding is not: a block's float64 GEMM has its own reduction order, which
+    lands ~0.01 % of entries one ULP off the whole-tensor fold. That is the same
+    implementation-defined rounding :func:`fold_hadamard` already documents, orders of magnitude
+    inside exllamav3's own fused-vs-reference tolerance.
+    """
+    cb = _codebook_id(mcg, mul1)
+    _check_trellis(trellis)
+    n = trellis.shape[1] * 16
+    step = max(HAD_BLOCK, (int(cols) // HAD_BLOCK) * HAD_BLOCK)
+    svh = np.asarray(svh)
+    for lo in range(0, n, step):
+        hi = min(lo + step, n)
+        w_hat = decode_trellis(trellis[:, lo // 16 : hi // 16], cb)
+        yield lo, hi, fold_hadamard(w_hat, suh, svh[lo:hi])
 
 
 def decode_exl3_linear(
@@ -225,7 +280,51 @@ def decode_exl3_linear(
     the trellis shape. The optional ``bias`` sibling is a plain fp16 tensor with nothing to
     decode, so it is not an argument here; the module computes ``y = x @ W (+ bias)``.
     """
-    if mcg is not None and mul1 is not None:
-        raise ValueError("mcg and mul1 codebook markers are mutually exclusive")
-    cb = 1 if mcg is not None else 2 if mul1 is not None else 0
-    return fold_hadamard(decode_trellis(trellis, cb), suh, svh)
+    return fold_hadamard(decode_trellis(trellis, _codebook_id(mcg, mul1)), suh, svh)
+
+
+def coded_tensor_storage(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> dict:
+    """Every EXL3-coded module of a checkpoint, WEIGHT-FREE: ``{module: entry}``, where each entry
+    carries the module's code rate (``bits_per_weight``) and the exact shapes of its ``trellis`` /
+    ``suh`` / ``svh`` siblings.
+
+    The source is ``quantization_config.json`` at the checkpoint root — a few-hundred-KB sidecar
+    exllamav3 writes beside ``config.json``, listing the per-module allocation. Reading it is the
+    only way to learn a module's rate without the shards, which is what lets a WEIGHT-FREE serving
+    twin (``emmy/serving/twins.py``) spell the same coded contractions the deployed program does.
+    (The checkpoint-driven speller does not use this: with the shards in hand the safetensors index
+    is the pairing source, exactly as for fp8.)
+
+    ``hf_config`` is an already-loaded transformers config, consulted only to confirm the scheme is
+    EXL3 before any fetch — so a caller holding a config need never touch the hub for an ordinary
+    model. Omit it and the checkpoint's own ``config.json`` decides (local paths only). Anything
+    that is not an EXL3 checkpoint, or a sidecar that cannot be fetched, yields ``{}``.
+    """
+    scheme = getattr(hf_config, "quantization_config", None) if hf_config is not None else _local_quant_config(model_id_or_path)
+    method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
+    if method != "exl3":
+        return {}
+    path = Path(model_id_or_path) / _SIDECAR
+    if not path.exists():
+        try:
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
+
+            path = Path(hf_hub_download(model_id_or_path, _SIDECAR, revision=revision))
+        except Exception as exc:  # noqa: BLE001 — an unfetchable sidecar means "no rates known", never a crash
+            logger.warning("%s declares EXL3 but %s is unavailable (%s)", model_id_or_path, _SIDECAR, exc)
+            return {}
+    storage = json.loads(path.read_text()).get("tensor_storage") or {}
+    return {name: e for name, e in storage.items() if e.get("quant_format") == "exl3" and _is_codable(name, e)}
+
+
+def _local_quant_config(model_dir: str) -> dict | None:
+    path = Path(model_dir) / "config.json"
+    return json.loads(path.read_text()).get("quantization_config") if path.exists() else None
+
+
+def _is_codable(name: str, entry: dict) -> bool:
+    """Whether an entry records everything the activation-side spelling needs: a rate and all three
+    leaves. A legacy packed-sign checkpoint (``su``/``sv``, no ``suh``/``svh``) is skipped here
+    exactly as the checkpoint-driven speller leaves it alone."""
+    stored = entry.get("stored_tensors") or {}
+    return "bits_per_weight" in entry and all(f"{name}.{leaf}" in stored for leaf in ("trellis", "suh", "svh"))

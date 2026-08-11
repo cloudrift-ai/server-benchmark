@@ -9,9 +9,20 @@ silently.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data import Dataset, Sample, ShapeKey
 from emmy.compiler.pipeline.search.db import PerfSample, PerfStats, SearchDB
+
+_GOLDENS = Path(__file__).parents[5] / "emmy/compiler/pipeline/search/goldens"
+
+
+def _golden_records(filename: str):
+    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
+
+    return load_golden_records(load_golden_file(_GOLDENS / filename))
 
 
 def _stats(median: float) -> PerfStats:
@@ -71,55 +82,17 @@ def test_shapekey_dynamic_twin_mirrors_stamp() -> None:
 
 
 def test_golden_dynamic_compile_s_feats_mirror() -> None:
-    """A dynamic golden's compiled histogram comes from the actually-symbolic
-    (masked-tile) trace: the symbolic axis is excluded from the extent products
-    and ``S_ext_n_symbolic_axis`` is set — and the cheap arith fallback is a
-    consistent subset of it, so grouping and featurization agree across tiers.
-    The op-side constructor closes the join on the full histogram."""
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
-
-    g = MatmulGoldenConfig(name="matmul.square.512.dynM", M=512, N=512, K=512, dynamic=True)
+    """A program-backed dynamic golden derives the symbolic histogram and key."""
+    g = next(record for record in _golden_records("rtx4090_sm89.yaml") if record.name == "matmul.square.512.dynM")
     s = Sample.from_golden(g, compile_s_feats=True)
     assert s.shape is not None and s.shape.is_dyn is True
     full = s.s_features()
     assert full["S_ext_n_symbolic_axis"] == 1.0
     assert full["S_ext_free_prod"] == 512.0  # N only — the symbolic M is excluded by the stamp
-    arith = Sample.from_golden(g).s_features()
+    arith = s.shape.s_features_arith()
     assert set(arith) <= set(full)
     assert all(arith[k] == full[k] for k in arith)
     assert ShapeKey.from_s_features(full) == s.shape
-
-
-def test_traced_s_features_matmul_parity_and_no_match() -> None:
-    """The kind-generic ``traced_s_features`` agrees with ``compiled_s_features`` on a
-    single-op matmul snippet (same trace, selection is a no-op there), and returns
-    ``None`` for a key no traced op matches — the caller's arith-fallback signal."""
-    from emmy.compiler.pipeline.search.data.sample import compiled_s_features, traced_s_features
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
-
-    g = MatmulGoldenConfig(name="matmul.square.512", M=512, N=512, K=512, dtype="fp16")
-    traced = traced_s_features(g.snippet(), (), g.shape_key())
-    assert traced == compiled_s_features(512, 512, 512, "fp16", g.compute_cap)
-    assert traced_s_features(g.snippet(), (), ShapeKey.from_matmul(3, 5, 7, "fp32")) is None
-
-
-def test_traced_s_features_selects_the_keyed_op_in_multi_op_graphs() -> None:
-    """A ``linear_norm`` snippet traces a producer matmul BESIDE the norm op — the
-    selection must return the norm's histogram (the golden's key), not the matmul's
-    and not a cross-op merge."""
-    from emmy.compiler.pipeline.search.data.sample import traced_s_features
-    from emmy.compiler.pipeline.search.golden import LinearNormGoldenConfig
-
-    cfg = LinearNormGoldenConfig(name="ln.key", M=64, K=64, H=64, dtype="fp16")
-    traced = traced_s_features(cfg.snippet(), (), cfg.shape_key())
-    assert traced is not None
-    s = dict(traced)
-    op_key = ShapeKey.from_s_features(s)
-    assert op_key.kind == "rms_norm"  # the norm op, not the producer matmul
-    # The fp16-pure snippet flips the sweep op's dtype-derived is_warp (no f32 constants,
-    # unlike a served graph) — exactly what ShapeKey.joins tolerates for sweep kinds.
-    assert op_key.joins(cfg.shape_key())
-    assert not op_key.joins(ShapeKey.from_matmul(64, 64, 64, "fp16"))  # never the producer's key
 
 
 # --- Sample round-trips (the acceptance gates) ------------------------------
@@ -162,24 +135,15 @@ def test_prior_row_round_trip_is_lossless() -> None:
     assert s.source == "prior"
 
 
-def test_golden_compile_s_feats_matches_inline(monkeypatch) -> None:
+def test_golden_compile_s_feats_matches_inline() -> None:
     """The high-risk gate: a golden's full-histogram feature vector via
     ``Sample.from_golden(compile_s_feats=True)`` equals the old inline
     compile-and-scrape (eval's ``_emit_golden_features``), and the cheap arithmetic
     extents are a subset that agrees on the shared keys."""
-    from emmy.commands.trace import graph_from_code
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-    from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig
 
-    g = next(c for c in GOLDEN_CONFIGS if isinstance(c, MatmulGoldenConfig) and c.name == "matmul.square.2048")
-
-    graph, _, _ = graph_from_code(g.snippet())
-    compiled = Pipeline.build(LOOP_PASSES).run(graph)
-    s_feats: dict = {}
-    for n in compiled.nodes.values():
-        s_feats.update({k: v for k, v in (getattr(n.op, "knobs", {}) or {}).items() if k.startswith(STRUCT_PREFIX)})
+    g = next(c for c in _golden_records("rtx4090_sm89.yaml") if c.name == "matmul.square.2048")
+    s_feats = g.structural_features
     # gpu_name pins the device-physical H_* features to the golden's own card's
     # memorized specs (so a 4090 golden gets 128 SMs, not the live device's count) —
     # Sample.from_golden does the same, so the two must still agree.
@@ -187,7 +151,7 @@ def test_golden_compile_s_feats_matches_inline(monkeypatch) -> None:
 
     assert Sample.from_golden(g, compile_s_feats=True).features() == inline
 
-    arith = Sample.from_golden(g).s_features()
+    arith = g.shape_key.s_features_arith()
     full = Sample.from_golden(g, compile_s_feats=True).s_features()
     assert set(arith) <= set(full)
     assert all(arith[k] == full[k] for k in arith)
@@ -197,9 +161,13 @@ def test_golden_features_use_own_cards_sm_count() -> None:
     """A golden featurizes with its OWN card's SM count (from the gpu registry via
     gpu_name), not the live device's — the fix that makes same-compute_cap cards
     (RTX 5090 = 170 vs RTX PRO 6000 = 188 SMs) distinguishable in the model."""
-    from emmy.compiler.pipeline.search.golden import goldens_by_name
-
-    by_gpu = {g.gpu_name: Sample.from_golden(g).context["H_sm_count"] for g in goldens_by_name("matmul.square.2048")}
+    records = [
+        record
+        for filename in ("rtx4090_sm89.yaml", "rtx5090_sm120.yaml", "rtxpro6000_sm120.yaml")
+        for record in _golden_records(filename)
+        if record.name == "matmul.square.2048"
+    ]
+    by_gpu = {g.gpu_name: Sample.from_golden(g).context["H_sm_count"] for g in records}
     assert by_gpu["NVIDIA GeForce RTX 4090"] == 128.0
     assert by_gpu["NVIDIA GeForce RTX 5090"] == 170.0
     assert by_gpu["NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"] == 188.0
@@ -208,12 +176,21 @@ def test_golden_features_use_own_cards_sm_count() -> None:
 # --- Dataset adapters + grouping --------------------------------------------
 
 
-def test_from_golden_filters() -> None:
+def test_from_golden_filters(monkeypatch) -> None:
+    from emmy.compiler.pipeline.search import golden as golden_mod
+
+    records = [
+        SimpleNamespace(name="matmul.square.512", dtype="fp32"),
+        SimpleNamespace(name="matmul.square.512.fp16", dtype="fp16"),
+        SimpleNamespace(name="rms_norm.h4096", dtype="fp32"),
+    ]
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(Sample, "from_golden", classmethod(lambda _cls, config, *, compile_s_feats=False: config))
     assert len(Dataset.from_golden()) == len(Dataset.from_golden(kernel="")) > 0
     assert all("square" in s.name for s in Dataset.from_golden(kernel="square"))
     assert all(s.dtype == "fp16" for s in Dataset.from_golden(dtype="fp16"))
-    named = Dataset.from_golden(name="matmul.square.2048").samples
-    assert named and all(s.name == "matmul.square.2048" for s in named)
+    named = Dataset.from_golden(name="matmul.square.512").samples
+    assert named and all(s.name == "matmul.square.512" for s in named)
 
 
 def test_from_db_grouping(tmp_path) -> None:

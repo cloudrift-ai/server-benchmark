@@ -13,8 +13,7 @@ from emmy.compiler.ir.frontend.ir import ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 torch = pytest.importorskip("torch")
 
@@ -326,9 +325,8 @@ def test_spell_honors_regex_ignore(tmp_path):
 
 
 def test_spell_pairs_non_weight_leaf_scale(tmp_path):
-    """The general ``<key>_scale`` pairing on a non-``.weight`` leaf — the gpt-oss 3-D expert
-    param convention (``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``): the
-    constant is spelled with the scale constant reading the ``_scale`` key."""
+    """A 3-D expert parameter can pair with a sibling ``<key>_scale`` tensor even though the
+    parameter name does not end in ``.weight``."""
     qc = {
         "quant_method": "compressed-tensors",
         "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 8, "strategy": "channel"}}},
@@ -541,9 +539,8 @@ def test_load_dequantized_state_dict(tmp_path):
 
 
 def test_load_dequantized_state_dict_expert_param_pairing(tmp_path):
-    """The general pairing on gpt-oss's 3-D expert params: ``…experts.gate_up_proj`` (fp8,
-    (E, in, out)) + ``…experts.gate_up_proj_scale`` (bf16, (E, 1, out)) dequantizes and the
-    scale is consumed; the sibling ``_bias`` passes through as values."""
+    """A 3-D expert parameter and per-output-channel scale dequantize together, consume the
+    scale entry, and leave the sibling bias as ordinary values."""
     from emmy.compiler.loader.quant import load_dequantized_state_dict
 
     qc = {
@@ -589,6 +586,73 @@ def test_quantized_checkpoint_dir_detection(tmp_path):
     _write_checkpoint(plain, {"layer.weight": torch.ones(4, 8)})
     assert quantized_checkpoint_dir(str(quantized)) == quantized
     assert quantized_checkpoint_dir(str(plain)) is None
+
+
+def _rung(dirpath, bits, allocation=None):
+    """A checkpoint declaring an EXL3 rung: ``config.json`` plus, optionally, the allocation
+    sidecar. Architecture fields are identical across rungs — only the rate differs."""
+    dirpath.mkdir()
+    (dirpath / "config.json").write_text(
+        json.dumps(
+            {"model_type": "llama", "hidden_size": 64, "quantization_config": {"quant_method": "exl3", "bits": bits, "head_bits": 6}}
+        )
+    )
+    if allocation is not None:
+        (dirpath / "quantization_config.json").write_text(json.dumps({"tensor_storage": allocation}))
+    return dirpath
+
+
+def test_checkpoint_quant_digest_separates_rungs_a_config_hash_cannot(tmp_path):
+    """The serving pack key hashes the twin's config, and the twin is built with
+    ``quantization_config`` STRIPPED — so two EXL3 rungs of one repo hash identically and shared a
+    pack, whose stored plans carry the other rung's coded extents. The digest is what separates
+    them, and it prefers the per-module allocation over the declared average rate."""
+    from emmy.compiler.loader.quant import checkpoint_quant_digest
+
+    a = _rung(tmp_path / "r200", 2.0)
+    b = _rung(tmp_path / "r225", 2.26)
+    # Precondition: strip quantization_config (what ``load_quantized_split`` does) and the two
+    # configs are byte-identical — the aliasing this key entry exists to break.
+    stripped = [{k: v for k, v in json.loads((d / "config.json").read_text()).items() if k != "quantization_config"} for d in (a, b)]
+    assert stripped[0] == stripped[1]
+    assert checkpoint_quant_digest(a) != checkpoint_quant_digest(b)
+
+    # The sidecar wins when present: same declared rate, different per-module allocation.
+    c = _rung(tmp_path / "s1", 2.26, {"model.layers.0.self_attn.q_proj": {"bits_per_weight": 4.0}})
+    d = _rung(tmp_path / "s2", 2.26, {"model.layers.0.self_attn.q_proj": {"bits_per_weight": 3.0}})
+    assert checkpoint_quant_digest(c) != checkpoint_quant_digest(d)
+
+    # An unquantized checkpoint contributes nothing, so its pack key is unchanged.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "config.json").write_text(json.dumps({"model_type": "llama", "hidden_size": 64}))
+    assert checkpoint_quant_digest(plain) is None
+    assert checkpoint_quant_digest(tmp_path / "absent") is None
+
+    # The boot log's summary carries the rate, so which rung a running server opened is readable
+    # from the log alone — the observable both revision controls are checked against.
+    from emmy.compiler.loader.quant import checkpoint_quant_summary
+
+    assert checkpoint_quant_summary(a) == "exl3 2.0 bpw (head 6)"
+    assert checkpoint_quant_summary(b) == "exl3 2.26 bpw (head 6)"
+    assert checkpoint_quant_summary(plain) == "unquantized"
+
+
+def test_is_exl3_checkpoint_is_the_narrow_coded_trunk_decision(tmp_path):
+    from emmy.compiler.loader.quant import is_exl3_checkpoint
+
+    exl3 = _rung(tmp_path / "exl3", 1.98)
+    fp8 = tmp_path / "fp8"
+    plain = tmp_path / "plain-format"
+    fp8.mkdir()
+    plain.mkdir()
+    (fp8 / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "fp8"}}))
+    (plain / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "gptq"}}))
+
+    assert is_exl3_checkpoint(exl3)
+    assert not is_exl3_checkpoint(fp8)
+    assert not is_exl3_checkpoint(plain)
+    assert not is_exl3_checkpoint(tmp_path / "absent")
 
 
 # ===================================================================
@@ -765,6 +829,7 @@ _QUANT_CONCEPT_PATTERN = r"QuantSpec|quantization_config|quant_method|weight_sca
 
 _FRONTEND_BAND_ALLOWLIST = {
     "emmy/commands/compile.py",  # the post-trace spelling call site (twin trace + speller)
+    "emmy/compiler/loader/exl3.py",  # EXL3 format reader: the trellis decode + the weight-free allocation sidecar
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection

@@ -132,6 +132,10 @@ class CudaBackend(Backend):
             await self._async_worker_obj.aclose()
             self._async_worker_obj = None
 
+    async def warm_async_worker(self, *, wall_timeout_s: float = 60.0) -> None:
+        """Initialize the isolated worker before candidate timing begins."""
+        await self._async_worker().warmup(wall_timeout_s=wall_timeout_s)
+
     def compile(self, graph: Graph) -> Graph:
         """Lower ``Graph`` → ``Graph[LoopOp]`` → ``Graph[TileOp]`` → ``Graph[CudaOp]``."""
         db = None

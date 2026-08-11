@@ -117,12 +117,17 @@ class Rule:
     * ``pass_`` — backref to the owning ``Pass``. Stamped by ``Pass``
       at construction time; ``None`` only on stray ``Rule`` instances
       built outside a pipeline (none exist in production paths).
+    * ``watch_consumers`` — include the root's immediate consumers in the
+      match identity snapshot without consuming them. A graph-aware rewrite
+      such as Loop region fusion can then discover its dynamic region while
+      retaining the same overlap invalidation a static two-node pattern had.
     """
 
     name: str
     pattern: list[Pattern]
     rewrite: Callable[..., Graph | Op | None] | None = None
     param_names: tuple[str, ...] = field(default_factory=tuple)
+    watch_consumers: bool = False
     pass_: Pass | None = field(default=None, repr=False, compare=False)
 
 
@@ -209,12 +214,21 @@ class Pass:
             spec.loader.exec_module(module)
             pattern = getattr(module, "PATTERN", None)
             rewrite_fn = getattr(module, "rewrite", None)
+            watch_consumers = bool(getattr(module, "WATCH_CONSUMERS", False))
             if pattern is None:
                 raise ValueError(f"Rule {path} missing PATTERN")
             if rewrite_fn is None:
                 raise ValueError(f"Rule {path} missing rewrite() function")
             param_names = tuple(inspect.signature(rewrite_fn).parameters.keys())
-            rules.append(Rule(name=path.stem, pattern=pattern, rewrite=rewrite_fn, param_names=param_names))
+            rules.append(
+                Rule(
+                    name=path.stem,
+                    pattern=pattern,
+                    rewrite=rewrite_fn,
+                    param_names=param_names,
+                    watch_consumers=watch_consumers,
+                )
+            )
             # Collect the knobs this rule module declares OR imports (e.g. the
             # planner imports the ``_enumeration`` tier knobs) — ``Cursor.advance``
             # uses them to OFF-fill the pass's variants.
@@ -259,12 +273,11 @@ class Match:
     # splice — see ``Graph.splice``). ``None`` defaults to ``root_node_id``.
     output: str | dict[str, str] | None = None
     is_last: bool = False
-    # Snapshot of id(Node) at match time for every consumed node. The
-    # ``is_alive`` check uses this to detect the case where an earlier
-    # match in the same batch removed a consumed node and a different
-    # node was added at the same id (e.g. splicer auto-rename hitting
-    # a recently-freed name). Pure id-existence wouldn't catch that.
-    _identities: dict[str, int] = field(default_factory=dict, repr=False)
+    # Strong snapshot of every consumed or explicitly watched node. The
+    # ``is_alive`` check uses object identity to detect removal followed by a
+    # different node at the same graph id. Holding the object itself prevents
+    # CPython from recycling its integer ``id()`` before the check.
+    _identities: dict[str, Node] = field(default_factory=dict, repr=False)
 
     @property
     def root(self) -> Node:
@@ -287,12 +300,12 @@ class Match:
         return self.graph.producer(root.inputs[i])
 
     def is_alive(self) -> bool:
-        """``True`` when every consumed node still resolves to the same
+        """``True`` when every watched node still resolves to the same
         ``Node`` object captured at match time. Catches both removal and
         the "removed-then-re-added under same id" case."""
-        for nid in self.consumed:
+        for nid in self._identities:
             n = self.graph.nodes.get(nid)
-            if n is None or id(n) != self._identities.get(nid):
+            if n is not self._identities[nid]:
                 return False
         return True
 
@@ -303,7 +316,7 @@ class Match:
         still works after the copy. Used when materializing a lazy
         fork — the fork copies the parent's snapshot, then needs a
         match anchored on the copy."""
-        identities = {nid: id(graph.nodes[nid]) for nid in self.consumed if nid in graph.nodes}
+        identities = {nid: graph.nodes[nid] for nid in self._identities if nid in graph.nodes}
         return Match(
             graph=graph,
             root_node_id=self.root_node_id,
@@ -421,7 +434,7 @@ class Pipeline:
         (cursor advance flows through ``Candidate.try_rewrite`` /
         ``Candidate.apply``). Drops matches that fail
         :meth:`Match.is_alive` — an earlier match in the same batch
-        may have removed a consumed node."""
+        may have removed a consumed or explicitly watched node."""
         results: list[Match] = []
         for nid in graph.topological_order():
             m = _match_at(graph, nid, rule)
@@ -609,7 +622,8 @@ class Pipeline:
             n_terminals += 1
             if backend is not None:
                 logger.info("[tune] variant #%d  [%s]", n_terminals, variant_label(cand.graph))
-            stats, status = await _bench_terminal_async(cand, backend=backend, db=run.db)
+            stats, status, measured = await _bench_terminal_async(cand, backend=backend, db=run.db)
+            search.note_bench(measured=measured)
             search.observe(token, stats, status, candidate=cand)
             if backend is not None and getattr(search, "last_o3_worthy", False):
                 o3_us = await _rebench_o3_async(cand, backend)
@@ -1068,7 +1082,7 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     nid: str | None = start
     nodes: dict[str, str] = {}
     consumed: set[str] = set()
-    identities: dict[str, int] = {}
+    identities: dict[str, Node] = {}
     matched_nodes: list[Node] = []
     for prod in rule.pattern:
         if nid is None:
@@ -1080,7 +1094,7 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
             return None
         nodes[prod.name] = nid
         consumed.add(nid)
-        identities[nid] = id(node)
+        identities[nid] = node
         matched_nodes.append(node)
         consumers = graph.consumers(nid)
         nid = consumers[0] if len(consumers) == 1 else None
@@ -1089,6 +1103,11 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     # straight off the op without re-querying the graph.
     for node in matched_nodes:
         node.op.populate_io(graph, node)
+    if rule.watch_consumers:
+        for consumer_id in graph.users(start):
+            consumer = graph.nodes.get(consumer_id)
+            if consumer is not None:
+                identities[consumer_id] = consumer
     return Match(
         graph=graph,
         root_node_id=start,
@@ -1377,18 +1396,19 @@ class _TerminalBench:
 async def _bench_terminal_async(cand, *, backend, db):
     """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` /
     inventory / lowering rows, and return ``(stats, status)`` where ``stats`` is the
-    per-kernel ``PerfStats`` summed across the graph (total terminal latency). The
+    per-kernel ``PerfStats`` summed across the graph (total terminal latency), plus
+    whether a live backend measurement was required. The
     only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
     event loop; cache-hit / stub / persistence semantics live in :class:`_TerminalBench`."""
     b = _TerminalBench(cand, backend=backend, db=db)
     kind, payload = b.prelude()
     if kind == "done":
-        return payload
+        return *payload, False
     try:
         result = await backend.benchmark_async(b.graph, num_iters="auto")
     except Exception as exc:  # noqa: BLE001
-        return b.finalize_exc(exc)
-    return b.finalize_result(result)
+        return *b.finalize_exc(exc), True
+    return *b.finalize_result(result), True
 
 
 __all__ = ["Decision", "ForkPoint", "LoweringError", "Match", "Pass", "Pattern", "Pipeline", "Rule", "RuleSkipped"]

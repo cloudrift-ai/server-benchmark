@@ -10,9 +10,14 @@ GB = 1e9
 
 
 class _Prog:
-    def __init__(self, const_bytes):
+    def __init__(self, const_bytes, input_weight_bytes=0):
         self.program = object()
         self.const_bytes = const_bytes
+        self.input_weight_bytes = input_weight_bytes
+
+    @property
+    def weight_bytes(self):
+        return self.const_bytes + self.input_weight_bytes
 
 
 def test_flag_ratio_thresholds():
@@ -29,8 +34,19 @@ def test_flag_ratio_thresholds():
 
 def test_flag_ratio_skips_tiny_and_degenerate():
     assert flag_ratio(1e6, 1_000, 1000 * GB) is None  # floor below MIN_FLOOR_US → skip
-    assert flag_ratio(1e6, 0, 1000 * GB) is None  # no bound constants
+    assert flag_ratio(1e6, 0, 1000 * GB) is None  # no weights at all
     assert flag_ratio(1e6, 1_000_000, 0.0) is None  # broken bandwidth measurement
+
+
+def test_audit_counts_weight_inputs(monkeypatch, caplog):
+    """An expert program holds no constants — its weights arrive as per-launch INPUTS. Counting
+    only the constant side would give it a zero floor and audit nothing."""
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
+    monkeypatch.setattr(roofline, "time_program_us", lambda program: 50_000.0)  # 500x its 100 µs floor
+    with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
+        audit_boot_programs([("moe.expert.one", _Prog(0, input_weight_bytes=100_000_000))])
+    assert len(caplog.records) == 1
+    assert "moe.expert.one" in caplog.text
 
 
 def test_audit_warns_on_outlier_and_stays_quiet_on_healthy(monkeypatch, caplog):

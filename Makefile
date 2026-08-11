@@ -14,21 +14,28 @@ help:
 	@echo "  wheel          - Build the emmy wheel into dist/"
 	@echo "  vllm-emmy-image - Build the vLLM + emmy serving image (docker/vllm-emmy)"
 	@echo "  vllm-emmy-push  - Push the serving image to Docker Hub (cloudriftai/)"
-	@echo "  serve-goldens / serve-warm / serve-image / serve-verify / serve-push  MODEL=<hf-id>"
-	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, push a"
+	@echo "  serve-goldens / serve-warm / serve-image / serve-verify  MODEL=<hf-id>"
+	@echo "  emmy publish <recipe> --dry-run / --yes  validate / publish the recipe image"
+	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
-setup:
-	@if [ ! -d "venv" ]; then \
+setup: venv/.setup-complete
+
+# Keep the completion marker inside the venv so an interrupted dependency install
+# cannot leave `make setup` permanently succeeding with an unusable environment.
+# pyproject.toml is a prerequisite so dependency edits also refresh the venv.
+venv/.setup-complete: pyproject.toml
+	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
-		echo "Installing Python dependencies..."; \
-		./venv/bin/pip install -e ".[dev]"; \
 	fi
+	@echo "Installing Python dependencies..."
+	./venv/bin/pip install -e ".[dev]"
+	@touch $@
 
 setup-ci:
 	python3.12 -m venv venv --prompt "emmy"
@@ -122,6 +129,10 @@ SERVE_TAG ?= cloudriftai/vllm-emmy-$(MODEL_SLUG):$(patsubst v%,%,$(VLLM_VERSION)
 # `subst`, not `patsubst`: patsubst matches per WORD, and a quoted multi-word value is
 # several words to make, so `"%"` never matches and the quotes survive into the argv.
 SERVE_GPU_NAME := $(subst ",,$(SERVE_GPU))
+# Same treatment for the two per-checkpoint values that also carry spaces (serve.sh documents
+# them): the cudagraph capture ladder and any further pinned vLLM flags.
+SERVE_CAPTURE_SIZES_VALUE := $(subst ",,$(SERVE_CAPTURE_SIZES))
+SERVE_EXTRA_ARGS_VALUE := $(subst ",,$(SERVE_EXTRA_ARGS))
 
 # What a `make serve-* MODEL=<id>` would act on. The release workflow prints this first, so
 # the model / card / tag under test are on the record before any multi-hour step starts.
@@ -132,7 +143,14 @@ serve-config: serve-config-guard
 	@echo "image tag  = $(SERVE_TAG)"
 	@echo "base image = $(VLLM_EMMY_TAG)"
 	@echo "target GPU = $(SERVE_GPU_NAME)"
+	@echo "goldens    = $(SERVE_GOLDEN_FILE)"
+	@echo "revision   = $(if $(SERVE_REVISION),$(SERVE_REVISION),unpinned - the repo default branch)"
 	@echo "serve      = --max-model-len $(SERVE_MAX_MODEL_LEN) --max-num-batched-tokens $(SERVE_MAX_NUM_BATCHED_TOKENS) --gpu-memory-utilization $(SERVE_GPU_MEM_UTIL) (decode bucket $(SERVE_DECODE_BUCKET))"
+	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
+	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
+	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
+	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
+	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
 
 serve-models:
 	@echo "Models with a pinned release config ($(SERVE_DIR)/models/):"
@@ -145,14 +163,21 @@ serve-config-guard:
 		echo "  see $(SERVE_DIR)/ARCHITECTURE.md, then add the file. Existing:"; \
 		ls -1 $(SERVE_DIR)/models/*.env 2>/dev/null | sed 's|.*/||; s|\.env$$||; s|^|    |'; \
 		exit 1)
+	@! grep -q '__FILL_FINAL_' "$(SERVE_CONFIG)" || ( \
+		echo "ERROR: $(SERVE_CONFIG) still contains __FILL_FINAL_ release placeholders."; \
+		echo "  Fill every measured checkpoint, serving, and revision value before warming or baking."; \
+		exit 1)
+	@test -n "$(SERVE_GOLDEN_FILE)" -a -f "$(SERVE_GOLDEN_FILE)" || ( \
+		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden YAML."; \
+		exit 1)
 
-# The goldens are the top tier of the fork-resolution evidence hierarchy — without them the
-# warm bakes cold-greedy picks (catastrophic on unseeded projection shapes) into cubins and
-# the pack, where nothing downstream revisits them. Gate the warm on coverage existing.
+# The goldens are the top tier of the fork-resolution evidence hierarchy. Validate the exact
+# config-derived realization matrix on the target GPU before warming; the pinned config owns
+# model, revision, GPU, canonical file, widths, and precision regimes together.
 serve-goldens: serve-config-guard
-	./venv/bin/python scripts/check_serving_goldens.py --model "$(SERVE_MODEL)" --gpu "$(SERVE_GPU_NAME)"
+	./venv/bin/emmy eval golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
 
-serve-warm: serve-config-guard
+serve-warm: serve-goldens
 	BASE_IMAGE=$(VLLM_EMMY_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/warm.sh
 
 serve-image: git-sha-guard serve-config-guard
@@ -165,18 +190,31 @@ serve-image: git-sha-guard serve-config-guard
 	$(SERVE_DIR)/split_hf.sh
 	docker build -f $(SERVE_DIR)/Dockerfile \
 		--build-arg BASE_IMAGE=$(VLLM_EMMY_TAG) \
+		--build-arg PUBLISH_FAMILY=vllm-emmy \
+		--build-arg PUBLISH_VERSION=$(patsubst v%,%,$(VLLM_VERSION)) \
+		--build-arg PUBLISH_REVISION=$(shell git rev-parse HEAD) \
 		--build-arg MODEL=$(SERVE_MODEL) \
+		--build-arg TARGET_GPU='$(SERVE_GPU_NAME)' \
 		--build-arg MAX_MODEL_LEN=$(SERVE_MAX_MODEL_LEN) \
 		--build-arg MAX_NUM_BATCHED_TOKENS=$(SERVE_MAX_NUM_BATCHED_TOKENS) \
 		--build-arg GPU_MEM_UTIL=$(SERVE_GPU_MEM_UTIL) \
 		--build-arg DECODE_BUCKET=$(SERVE_DECODE_BUCKET) \
+		--build-arg REVISION=$(SERVE_REVISION) \
+		--build-arg QUANT=$(SERVE_QUANT) \
+		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
+		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
+		--build-arg EMBED_HOST=$(SERVE_EMBED_HOST) \
+		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
+		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
+		--build-arg M1_TIER=$(SERVE_M1_TIER) \
 		-t $(SERVE_TAG) $(SERVE_DIR)
 
 serve-verify: serve-config-guard
 	IMAGE=$(SERVE_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/verify.sh
 
 serve-push: serve-config-guard
-	docker push $(SERVE_TAG)
+	@echo "ERROR: direct serving-image pushes are disabled; use 'emmy publish <recipe>'." >&2
+	@exit 2
 
 bench: setup
 	@echo "Running benchmarks..."

@@ -145,19 +145,51 @@ def _canonical_dtype_name(dtype) -> str:
     return dtype.name
 
 
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_ELEMENTWISE_OPS = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "floor_divide",
+        "remainder",
+        "mod",
+        "left_shift",
+        "right_shift",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+        "bitwise_count",
+    }
+)
+
+
 def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     """Promote an elementwise op's arg dtypes to a single result dtype.
 
     Mirrors the inline rule in ``Assign.render``: the result is the
     common dtype iff every arg agrees; any disagreement promotes to f32.
-    Today's IR only meaningfully encounters f16/f32 mixes; the rule is
-    "all f16 → f16, otherwise f32." ``op_name`` is accepted for future
-    op-specific overrides (e.g. ``relu`` would still emit f16 even with
-    no f16 args), but is unused today.
+    Floating point keeps the historical "all f16 → f16, otherwise f32"
+    rule. Integer arithmetic/bit manipulation must instead retain a common
+    integer dtype: promoting packed words to f32 loses bits before the CUDA
+    renderer sees the operation. Comparisons and logical masks deliberately
+    stay on the floating-point rule.
 
     Lifted out of ``Assign.render`` so the ``030_stamp_types`` pass can
     reuse the same rule when stamping ``Assign.dtype`` on the IR.
     """
+    if arg_dtypes and op_name in _INTEGER_ELEMENTWISE_OPS and all(d in _INTEGER_DTYPES for d in arg_dtypes):
+        # Keep packed arithmetic in the integer family.  NumPy promotes u64+i32 to f64 because
+        # neither integer type contains the other's full range; that is disastrous for bit
+        # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
+        # wins a tie, while a strictly wider signed type can represent the narrower unsigned
+        # range.  This gives u16+u32 -> u32, u64+i32 -> u64, and i64+u32 -> i64.
+        widths = {"i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
+        signed_width = max((widths[d] for d in arg_dtypes if d.startswith("i")), default=0)
+        unsigned_width = max((widths[d] for d in arg_dtypes if d.startswith("u")), default=0)
+        if unsigned_width >= signed_width:
+            return f"u{unsigned_width}"
+        return f"i{signed_width}"
     if arg_dtypes and all(d == "f16" for d in arg_dtypes):
         return "f16"
     return "f32"
@@ -200,14 +232,32 @@ _BINARY_OP: dict[str, str] = {
     "bitwise_and": "&&",
 }
 
+_INTEGER_BINARY_OP: dict[str, str] = {
+    "floor_divide": "//",
+    "remainder": "%",
+    "mod": "%",
+    "left_shift": "<<",
+    "right_shift": ">>",
+    "bitwise_or": "|",
+    "bitwise_and": "&",
+    "bitwise_xor": "^",
+}
 
-def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
+
+def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr:
     """Translate an elementwise op name to an ``Expr`` tree.
 
     Emits abstract intrinsic names (``"exp"``, ``"fmax"``, ``"fabs"``, ...)
     that targets translate to libm / CUDA spellings via
-    ``RenderCtx.intrinsics`` at ``FuncCallExpr.render`` time.
+    ``RenderCtx.intrinsics`` at ``FuncCallExpr.render`` time. ``dtype``
+    distinguishes integer bit manipulation from the traced mask convention:
+    integer ``bitwise_and``/``bitwise_or`` render as ``&``/``|``, while the
+    historical f32 mask path remains logical ``&&``/``||``.
     """
+    if dtype in _INTEGER_DTYPES and fn in _INTEGER_BINARY_OP:
+        return BinaryExpr(_INTEGER_BINARY_OP[fn], inputs[0], inputs[1])
+    if dtype in _INTEGER_DTYPES and fn == "bitwise_count":
+        return FuncCallExpr("bitwise_count", tuple(inputs))
     if fn in _BINARY_OP:
         return BinaryExpr(_BINARY_OP[fn], inputs[0], inputs[1])
     if fn == "maximum":
@@ -242,7 +292,7 @@ def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
         neg_x = BinaryExpr("-", Literal(0.0, "float"), inputs[0])
         exp_neg = FuncCallExpr("exp", (neg_x,))
         return BinaryExpr("/", Literal(1.0, "float"), BinaryExpr("+", Literal(1.0, "float"), exp_neg))
-    if fn in ("exp", "exp_fast", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf"):
+    if fn in ("exp", "exp_fast", "log", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf"):
         return FuncCallExpr(fn, tuple(inputs))
     if fn == "abs":
         return FuncCallExpr("fabs", tuple(inputs))
@@ -250,6 +300,18 @@ def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
         # np.where(cond, a, b) — the mask-apply tail of the explicit-mask
         # subgraph. The f32-promoted cond is C-truthy (nonzero) in ``?:``.
         return TernaryExpr(inputs[0], inputs[1], inputs[2])
+    if fn == "bitwise_not":
+        # Torch spells ``~mask`` as bitwise_not even when ``mask`` is bool. Loop
+        # IR historically promotes boolean mask SSA values to f32, so both the
+        # implicit f32 convention and an explicitly bool-stamped value mean
+        # logical-not. Never infer integer complement here: that requires a
+        # separately typed and tested ``~`` path.
+        if dtype not in (None, "f32", "bool"):
+            raise NotImplementedError(f"render: bitwise_not supports boolean masks only, got dtype={dtype!r}")
+        if len(inputs) != 1:
+            raise ValueError(f"render: bitwise_not requires one input, got {len(inputs)}")
+        zero = Literal(0.0, "float") if dtype in (None, "f32") else Literal(0, "int")
+        return BinaryExpr("==", inputs[0], zero)
     raise NotImplementedError(f"render: elementwise fn={fn!r} not supported")
 
 
@@ -286,7 +348,7 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
         # ``__half`` value loaded into the partial, as in fp16 flash's ``p · v``) so
         # the operator isn't ambiguous. The cast is a no-op for matching args.
         arg_exprs = [Var(x) if ctx.ssa_dtypes.get(x, dt) == dt else CastExpr(ty, Var(x)) for x in a.args]
-        rhs = op_to_expr(a.op.name, arg_exprs).render(ctx)
+        rhs = op_to_expr(a.op.name, arg_exprs, dtype=dt).render(ctx)
         if a.name in sset:
             out.append(f"{pad}{a.name} = {rhs};")  # reassign carried state
         else:
@@ -623,7 +685,13 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         bases: dict[str, frozenset[str]] = {}  # inlined temp → the base names its folded expression reads
         stmts = list(body)
         for di, s in enumerate(stmts):
-            if not (isinstance(s, Assign) and total.get(s.name, 0) == 1 and local.get(s.name, 0) == 1 and s.name not in inline):
+            if not (
+                isinstance(s, Assign)
+                and s.op.name != "bitcast"
+                and total.get(s.name, 0) == 1
+                and local.get(s.name, 0) == 1
+                and s.name not in inline
+            ):
                 continue
             # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
             # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp
@@ -639,7 +707,11 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             names = frozenset(nm for a in s.args for nm in bases.get(a, (a,)))
             if any(nm in st.defines() for st in stmts[di + 1 : ri] for nm in names):
                 continue
-            expr = op_to_expr(s.op.name, [Var(a) for a in s.args])
+            expr = op_to_expr(
+                s.op.name,
+                [Var(a) for a in s.args],
+                dtype=s.dtype.name if s.dtype is not None else None,
+            )
             rendered = expr.render(replace(ctx, inline_exprs=inline))
             inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
             bases[s.name] = names

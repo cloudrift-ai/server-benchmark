@@ -200,8 +200,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Prior** — In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured.
   The offline prior is fitted ahead of time (by `emmy fit`, on the golden dataset) and ships with the repo; the
   online prior learns from collected measurements.
-- **Golden configuration** — A reviewed, GPU-specific schedule and latency for a standard problem shape. It is
-  trusted deployment evidence and a regression reference.
+- **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
+  dimension bindings and input pin regimes that were tuned for that target.
+- **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
+  input knob pins, the selected schedule knobs, and (after verification) paired measurements.
+- **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
+  realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
+- **Canonical golden file** — A reviewed per-GPU YAML under `compiler/pipeline/search/goldens/`. Every realization
+  contains verified deployable measurements; `emmy tune` refuses to mutate these files directly.
 - **Evidence** — A compatible recorded measurement used to select between schedule candidates.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly

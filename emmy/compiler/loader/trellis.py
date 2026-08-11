@@ -1,9 +1,10 @@
-"""Birth-time spelling of trellis reconstruction into format-neutral tensor IR.
+"""Birth-time spelling of coded linears into format-neutral tensor IR.
 
 This is loader/frontend code: it knows the checkpoint representation, but every node it
 emits is an ordinary range, cast/bitcast, elementwise operation, gather/index map, layout
-operation, or matmul. The generic constant folder removes the whole static cone before
-Loop IR, so no checkpoint-format operation enters lowering, scheduling, or codegen.
+operation, or matmul. The packed decode remains a computed operand of the core contraction;
+the logical dense weight is never materialized. No checkpoint-format operation enters
+decomposition, lowering, scheduling, or codegen.
 """
 
 from __future__ import annotations
@@ -12,11 +13,10 @@ import numpy as np
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SliceOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
-    CastOp,
     ElementwiseOp,
     GatherOp,
     IndexMapOp,
@@ -44,8 +44,15 @@ class _Builder:
         )
 
     def cast(self, src: str, dtype: str, suffix: str) -> str:
+        """Emit an explicit scalar conversion boundary.
+
+        Coded reconstruction needs these integer width changes at the point of
+        use, but does not need a standalone tensor-level ``CastOp`` kernel.
+        ``ElementwiseOp(copy)`` carries the destination dtype into Loop IR as a
+        typed SSA assignment, where ordinary fusion can absorb it.
+        """
         return self.graph.add_node(
-            op=CastOp(dtype=dtype),
+            op=ElementwiseOp(op="copy"),
             inputs=[src],
             output=Tensor(f"{self.prefix}_{suffix}", self.node(src).output.shape, dtype),
         )
@@ -80,20 +87,40 @@ class _Builder:
         return self.ew(op, (src,), shape, dtype, suffix)
 
     def range(self, stop: int, suffix: str) -> str:
-        return self.graph.add_node(
+        # Reconstruction ranges are static lookup tables, not runtime work.
+        # Keep the Range only inside a source-free constant record, evaluated
+        # once by the binder; no Range enters the executable graph or needs a
+        # lowering path.
+        source = Graph()
+        source_id = source.add_node(
             op=RangeOp(stop=stop, dtype="i32"),
+            inputs=[],
+            output=Tensor("value", (stop,), "i32"),
+            node_id="value",
+        )
+        source.outputs = [source_id]
+        return self.graph.add_node(
+            op=ConstantOp(
+                name=f"{self.prefix}_{suffix}",
+                source_graph=source,
+                source_shape=(stop,),
+                source_dtype="i32",
+            ),
             inputs=[],
             output=Tensor(f"{self.prefix}_{suffix}", (stop,), "i32"),
         )
 
-    def strided(self, src: str, shape: tuple[int, ...], stride: int, offset: int, suffix: str) -> str:
-        last = len(shape) - 1
-        coords = tuple(placeholder(i) for i in range(last)) + (placeholder(last) * Literal(stride, "int") + Literal(offset, "int"),)
+    def indexed(self, src: str, shape: tuple[int, ...], coords: tuple, suffix: str) -> str:
         return self.graph.add_node(
             op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=coords),)),
             inputs=[src],
             output=Tensor(f"{self.prefix}_{suffix}", shape, self.node(src).output.dtype),
         )
+
+    def strided(self, src: str, shape: tuple[int, ...], stride: int, offset: int, suffix: str) -> str:
+        last = len(shape) - 1
+        coords = tuple(placeholder(i) for i in range(last)) + (placeholder(last) * Literal(stride, "int") + Literal(offset, "int"),)
+        return self.indexed(src, shape, coords, suffix)
 
 
 def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
@@ -108,29 +135,26 @@ def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
     odd_hi = b.binary("left_shift", odd, b.scalar("shift16", 16, "u32"), word_shape, "u32", "word_odd_hi")
     words = b.binary("bitwise_or", even, odd_hi, word_shape, "u32", "words")
 
-    step = b.range(256, "step")
-    ints = {v: b.scalar(f"i32_{v}", v, "i32") for v in (1, 16, 32, 48, K, 256 * K, 8 * K)}
-    step1 = b.binary("add", step, ints[1], (256,), "i32", "step1")
-    bit_end = b.binary("multiply", step1, ints[K], (256,), "i32", "bit_end")
-    raw_start = b.binary("subtract", bit_end, ints[16], (256,), "i32", "bit_start_raw")
-    start = b.binary("remainder", raw_start, ints[256 * K], (256,), "i32", "bit_start")
-    word_idx = b.binary("floor_divide", start, ints[32], (256,), "i32", "word_idx")
-    next_raw = b.binary("add", word_idx, ints[1], (256,), "i32", "next_word_raw")
-    next_idx = b.binary("remainder", next_raw, ints[8 * K], (256,), "i32", "next_word")
-    intra = b.binary("remainder", start, ints[32], (256,), "i32", "intra_word")
-    shift = b.binary("subtract", ints[48], intra, (256,), "i32", "window_shift")
-
     shape = (kt, nt, 256)
-    lo = b.graph.add_node(
-        op=GatherOp(axis=-1),
-        inputs=[words, word_idx],
-        output=Tensor(f"{b.prefix}_window_lo", shape, "u32"),
-    )
-    hi = b.graph.add_node(
-        op=GatherOp(axis=-1),
-        inputs=[words, next_idx],
-        output=Tensor(f"{b.prefix}_window_hi", shape, "u32"),
-    )
+    step = placeholder(2)
+    modulus = 256 * K
+    # Adding one full modulus before ``%`` makes the dividend non-negative
+    # for every K/step, so Python evaluation and rendered C agree exactly.
+    start = ((step + 1) * K - 16 + modulus) % modulus
+    word_idx = BinaryExpr("//", start, Literal(32, "int"))
+    next_idx = (word_idx + 1) % (8 * K)
+    leading = (placeholder(0), placeholder(1))
+    lo = b.indexed(words, shape, leading + (word_idx,), "window_lo")
+    hi = b.indexed(words, shape, leading + (next_idx,), "window_hi")
+
+    shift_step = b.range(256, "shift_step")
+    one = b.scalar("shift_one", 1, "i32")
+    start = b.binary("add", shift_step, one, (256,), "i32", "shift_step1")
+    start = b.binary("multiply", start, b.scalar("shift_k", K, "i32"), (256,), "i32", "shift_end")
+    start = b.binary("subtract", start, b.scalar("shift_bias", 16, "i32"), (256,), "i32", "shift_start")
+    start = b.binary("add", start, b.scalar("shift_modulus", modulus, "i32"), (256,), "i32", "shift_start_nonnegative")
+    intra = b.binary("remainder", start, b.scalar("shift_word", 32, "i32"), (256,), "i32", "shift_intra")
+    shift = b.binary("subtract", b.scalar("shift_top", 48, "i32"), intra, (256,), "i32", "window_shift")
     lo64, hi64 = b.cast(lo, "u64", "window_lo_u64"), b.cast(hi, "u64", "window_hi_u64")
     joined_hi = b.binary(
         "left_shift",
@@ -244,71 +268,139 @@ def _hadamard(b: _Builder) -> str:
     return b.binary("multiply", signs, scale, shape, "f64", "had")
 
 
-def spell_reconstruction(
+def spell_factored_linear(
     graph: Graph,
     codes: str,
     suh: str,
     svh: str,
     *,
     cb: int,
-    shape: tuple[int, int],
-    name: str,
-    dtype,
+    weight_shape: tuple[int, int],
+    x: str,
+    bias: str | None,
+    out: Tensor,
+    weight_name: str,
 ) -> str:
-    """Return the root of the generic reconstruction cone added to ``graph``."""
-    b = _Builder(graph, name)
+    """Spell one coded linear directly as generic factorized contractions.
+
+    The executable graph never owns a materialized decoded weight.  Packed storage is
+    expanded only at the core contraction's scalar B use, while the two Hadamard factors
+    are applied on the activation/result sides.  This is the birth-time EXL3 spelling;
+    every emitted operation is ordinary tensor algebra and no format identity survives.
+    """
+    n, k = weight_shape
+    code_shape = tuple(d.as_static() for d in graph.nodes[codes].output.shape)
+    k_pad, n_pad = code_shape[0] * 16, code_shape[1] * 16
+    if k_pad < k or n_pad < n:
+        raise ValueError(f"coded linear {weight_name}: padded storage {(n_pad, k_pad)} cannot execute directly as logical weight {(n, k)}")
+    x_node = graph.nodes[x]
+    # Only the contraction axes are intrinsically static.  Serving's symbolic
+    # twins tie every leading activation/result axis to the same runtime Dim;
+    # retain those Dim objects throughout the factored contraction instead of
+    # forcing the whole tensor shape through ``as_static``.
+    x_shape = tuple(d.as_static() if d.is_static else d for d in x_node.output.shape)
+    out_shape = tuple(d.as_static() if d.is_static else d for d in out.shape)
+    x_k = x_shape[-1] if x_shape and isinstance(x_shape[-1], int) else None
+    out_n = out_shape[-1] if out_shape and isinstance(out_shape[-1], int) else None
+    if not x_shape or x_k != k or out_n != n or out_shape[:-1] != x_shape[:-1]:
+        raise ValueError(f"coded linear {weight_name}: activation/result shapes {x_shape}/{out_shape} do not match {(n, k)}")
+    if x_node.output.dtype.name not in {"f16", "f32"} or out.dtype.name not in {"f16", "f32"}:
+        raise ValueError(
+            f"coded linear {weight_name}: direct execution requires f16/f32 activation/result, "
+            f"got {x_node.output.dtype.name}/{out.dtype.name}"
+        )
+    if bias is not None:
+        bias_node = graph.nodes[bias]
+        bias_shape = tuple(d.as_static() for d in bias_node.output.shape)
+        if bias_shape != (n,) or bias_node.output.dtype.name not in {"f16", "f32"}:
+            raise ValueError(f"coded linear {weight_name}: bias must be f16/f32[{n}], got {bias_node.output.dtype.name}{bias_shape}")
+
+    b = _Builder(graph, weight_name)
     windows, kt, nt = _unpack_windows(b, codes)
-    values = _codebook(b, windows, cb, (kt, nt, 256))
-    w_hat = _tile_order(b, values, kt, nt)
-    k_pad, n_pad = kt * 16, nt * 16
+    core = _tile_order(b, _codebook(b, windows, cb, (kt, nt, 256)), kt, nt)
+    factor = _hadamard(b)
 
-    had = _hadamard(b)
-    w64 = b.cast(w_hat, "f64", "hat64")
-    blocks = b.reshape(w64, (k_pad // 128, 128, n_pad), "left_blocks")
-    left = graph.add_node(
-        op=MatmulOp(),
-        inputs=[had, blocks],
-        output=Tensor(f"{name}_left", (k_pad // 128, 128, n_pad), "f64"),
-    )
-    left = b.reshape(left, (k_pad, n_pad), "left_flat")
-    right_blocks = b.reshape(left, (k_pad, n_pad // 128, 128), "right_blocks")
-    restored = graph.add_node(
-        op=MatmulOp(),
-        inputs=[right_blocks, had],
-        output=Tensor(f"{name}_restored_blocks", (k_pad, n_pad // 128, 128), "f64"),
-    )
-    restored = b.reshape(restored, (k_pad, n_pad), "restored")
-    suh64 = b.reshape(b.cast(suh, "f64", "suh64"), (k_pad, 1), "suh_col")
-    svh64 = b.reshape(b.cast(svh, "f64", "svh64"), (1, n_pad), "svh_row")
-    restored = b.binary("multiply", restored, suh64, (k_pad, n_pad), "f64", "scaled_in")
-    restored = b.binary("multiply", restored, svh64, (k_pad, n_pad), "f64", "scaled_out")
-    restored = b.cast(restored, "f16", "decoded_f16")
-    transposed = graph.add_node(
-        op=TransposeOp(axes=(1, 0)),
-        inputs=[restored],
-        output=Tensor(f"{name}_decoded_t", (n_pad, k_pad), "f16"),
-    )
+    def copy(src: str, name: str, shape: tuple, dtype: str) -> str:
+        return graph.add_node(op=ElementwiseOp(op="copy"), inputs=[src], output=Tensor(name, shape, dtype))
 
-    n, k = shape
-    logical = transposed
-    if n != n_pad:
-        logical = graph.add_node(
-            op=SliceOp(shape=(n, k_pad), dim=0, start=0),
-            inputs=[logical],
-            output=Tensor(f"{name}_slice_n", (n, k_pad), "f16"),
+    def reshape(src: str, name: str, shape: tuple) -> str:
+        return graph.add_node(
+            op=ReshapeOp(shape=shape),
+            inputs=[src],
+            output=Tensor(name, shape, graph.nodes[src].output.dtype),
         )
-    if k != k_pad:
-        logical = graph.add_node(
-            op=SliceOp(shape=(n, k), dim=1, start=0),
-            inputs=[logical],
-            output=Tensor(f"{name}_slice_k", (n, k), "f16"),
+
+    def matmul(lhs: str, rhs: str, name: str, shape: tuple) -> str:
+        return graph.add_node(op=MatmulOp(), inputs=[lhs, rhs], output=Tensor(name, shape, "f32"))
+
+    factor32 = copy(factor, f"{out.name}_factor32", (128, 128), "f32")
+    exec_x = x
+    exec_x_shape = x_shape[:-1] + (k_pad,)
+    if k_pad != k:
+        last = len(x_shape) - 1
+        coord = placeholder(last)
+        in_bounds = coord.lt(Literal(k, "int"))
+        clamped = TernaryExpr(cond=in_bounds, if_true=coord, if_false=Literal(0, "int"))
+        x_coords = tuple(placeholder(i) for i in range(last)) + (clamped,)
+        zero = b.scalar("x_pad_zero", 0.0, x_node.output.dtype.name)
+        exec_x = graph.add_node(
+            op=IndexMapOp(
+                out_shape=exec_x_shape,
+                sources=(
+                    IndexSource(input_idx=0, coord_map=x_coords, select=in_bounds),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[x, zero],
+            output=Tensor(f"{out.name}_x_padded", exec_x_shape, x_node.output.dtype),
         )
-    if dtype.name != "f16":
-        logical = graph.add_node(
-            op=CastOp(dtype=dtype.name),
-            inputs=[logical],
-            output=Tensor(name, (n, k), dtype),
+    x32 = copy(exec_x, f"{out.name}_x32", exec_x_shape, "f32")
+    suh32 = copy(suh, f"{out.name}_left_scale32", (k_pad,), "f32")
+    scaled_x = b.binary(
+        "multiply",
+        x32,
+        broadcast_to(graph, suh32, exec_x_shape).id,
+        exec_x_shape,
+        "f32",
+        f"{out.name}_left_scaled",
+    )
+    left_block_shape = x_shape[:-1] + (k_pad // 128, 1, 128)
+    left_blocks = reshape(scaled_x, f"{out.name}_left_blocks", left_block_shape)
+    left = matmul(left_blocks, factor32, f"{out.name}_left_factor", left_block_shape)
+    left_flat32 = reshape(left, f"{out.name}_left_flat32", exec_x_shape)
+    left_flat = copy(left_flat32, f"{out.name}_left_flat", exec_x_shape, "f16")
+
+    padded_core_shape = x_shape[:-1] + (n_pad,)
+    core_out = matmul(left_flat, core, f"{out.name}_core", padded_core_shape)
+    right_block_shape = padded_core_shape[:-1] + (n_pad // 128, 1, 128)
+    right_blocks = reshape(core_out, f"{out.name}_right_blocks", right_block_shape)
+    right = matmul(right_blocks, factor32, f"{out.name}_right_factor", right_block_shape)
+    right_flat = reshape(right, f"{out.name}_right_flat", padded_core_shape)
+
+    svh32 = copy(svh, f"{out.name}_right_scale32", (n_pad,), "f32")
+    scaled = b.binary(
+        "multiply",
+        right_flat,
+        broadcast_to(graph, svh32, padded_core_shape).id,
+        padded_core_shape,
+        "f32",
+        f"{out.name}_scaled32",
+    )
+    core_shape = x_shape[:-1] + (n,)
+    if n_pad != n:
+        scaled = graph.add_node(
+            op=SliceOp(shape=core_shape, dim=-1, start=0),
+            inputs=[scaled],
+            output=Tensor(f"{out.name}_logical", core_shape, "f32"),
         )
-    else:
-        graph.nodes[logical].outputs = (Tensor(name, (n, k), dtype),)
-    return logical
+    if bias is not None:
+        bias32 = copy(bias, f"{out.name}_bias32", (n,), "f32")
+        scaled = b.binary(
+            "add",
+            scaled,
+            broadcast_to(graph, bias32, core_shape).id,
+            core_shape,
+            "f32",
+            f"{out.name}_biased32",
+        )
+    return copy(scaled, out.name, core_shape, out.dtype.name)

@@ -1,17 +1,15 @@
-"""``ShapeKey`` — the cheap arithmetic structural identity of a tiled op.
+"""``ShapeKey`` — a derived, in-memory index over stamped structural features.
 
-A kernel's full structural signature is the ``S_*`` histogram the
-``992_stamp_structural_features`` pass stamps (op counts, dtypes, loop depths,
-extents). For grouping, the cold-start ``OfflinePrior`` ranking, and matching a
-golden config to a kernel, only the *extents* matter — and those are derivable
-arithmetically from a matmul's ``(M, N, K)`` with no compile. ``ShapeKey`` is that
-arithmetic handle: ``(free_prod, reduce_max, is_warp)``, the same triple the prior
-diagnostics and the per-kernel golden A/B already match on.
+The current lowering pipeline stamps a kernel's ``S_*`` histogram (operations,
+dtypes, loop depths, and extents). ``ShapeKey`` projects that compiler-owned row
+into the compact identity used by datasets and evidence joins. It is intentionally
+not a persistence format: golden YAML stores stable frontend IR plus provenance,
+then derives both the histogram and this key with the current compiler.
 
-It deliberately carries only the extent keys. A *trained* ``OnlinePrior`` regresses
-on the full ``S_*`` histogram, so the full set is derived (by compiling the snippet)
-and cached on the :class:`~emmy.compiler.pipeline.search.data.sample.Sample`,
-not here — see that module's ``compile_s_feats`` path.
+``from_matmul`` remains a convenience for callers that already have explicit
+matmul dimensions. Generic golden records start from ``from_s_features`` and replay
+their stored schedule prefix through the same offer-aware classifier as deployment,
+which supplies the otherwise-unstamped flash and pre-split computed-A kind signal.
 """
 
 from __future__ import annotations
@@ -21,13 +19,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ShapeKey:
-    """Arithmetic extent identity of a matmul-shaped op.
+    """Derived extent identity used for grouping compiler measurements.
 
     ``free_prod`` is the product of the **static** output free dims (``M*N``; a
     symbolic axis is excluded, mirroring the ``992`` stamp — see :meth:`from_matmul`),
     ``reduce_max`` the reduce extent (``K``), ``is_warp`` whether it lowers on the
     tensor-core warp tier (any non-fp32 matmul), ``is_dyn`` whether an axis is
-    symbolic — the split that keeps a dynamic golden and its static twin apart,
+    symbolic — the split that keeps a dynamic target and its static twin apart,
     exactly as ``is_warp`` keeps the fp32/fp16 twins apart. Hashable, so it keys
     ``Dataset`` groupings."""
 
@@ -86,7 +84,7 @@ class ShapeKey:
     _FREE_MAX_KINDS = ("", "fused")
 
     # Golden/CLI dtype spellings that name fp8 B-side storage (``fp8`` is the
-    # generic golden spelling, defaulting to e4m3 — see ``golden_eval._DTYPES``).
+    # generic compatibility spelling, defaulting to e4m3).
     _F8_DTYPES = ("fp8", "f8e4m3", "f8e5m2")
 
     def __post_init__(self) -> None:
@@ -188,9 +186,8 @@ class ShapeKey:
         return self == golden
 
     def s_features_arith(self) -> dict[str, float]:
-        """The extent ``S_*`` features derivable without compiling — the exact set
-        the cold ``OfflinePrior`` reads (``golden_eval._offline_scorer`` builds the
-        same dict). For a matmul the reduce axis is a single contraction, so
+        """The extent ``S_*`` features derivable without compiling. For a matmul
+        the reduce axis is a single contraction, so
         ``S_ext_reduce_prod == S_ext_reduce_max == K``. A dynamic key adds the
         ``S_ext_n_symbolic_axis`` flag (and its ``free_prod`` already excludes the
         symbolic axis), mirroring the stamped histogram so the arith fallback

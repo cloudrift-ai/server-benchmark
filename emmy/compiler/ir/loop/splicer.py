@@ -293,7 +293,7 @@ class _Splicer(LoopBuilder):
         if name not in meta.defs:
             raise _NotSupported(f"_ensure_dep: {name!r} is not defined in loop {origin!r}")
 
-        required_axes = tuple(_remap_axis_name(a, sigma) for a in meta.scopes[name].enclosing)
+        required_axes = tuple(mapped for axis in meta.scopes[name].enclosing for mapped in _remap_axis_names(axis, sigma, ref_scope))
         emit_scope = _scope_for_axes(ref_scope, required_axes)
 
         # σ restricted to axes transitively used in Expr subtrees reachable
@@ -363,7 +363,11 @@ class _Splicer(LoopBuilder):
                 f"splice edge into {target_tag!r}: no Write with output={target_output_buf!r} "
                 f"(target writes {[w.output for w, _ in target.writes]}) — usually a buf-name != node-id mismatch on the producer"
             )
-        effective_index = tuple(d.sigma.apply(e) for e in stmt.index)
+        source_meta = self.loops[d.origin]
+        index_rename = {
+            name: Var(self._ensure_dep(name, d.origin, d.sigma, d.demand_scope)) for name in stmt.deps() if name in source_meta.defs
+        }
+        effective_index = tuple(d.sigma.apply(e).substitute(index_rename) for e in stmt.index)
         sigma = _solve_sigma(target_write.index, effective_index, {a.name for a in target.op.axes})
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
@@ -412,32 +416,30 @@ def _scope_for_axes(ref_scope: Scope, required: tuple[str, ...]) -> Scope:
     return Scope(enclosing=ref_scope.enclosing[:k])
 
 
-def _remap_axis_name(axis: Axis, sigma: Sigma) -> str:
-    """Pick the merged-kernel axis that ``axis`` lands under, given σ's target.
+def _remap_axis_names(axis: Axis, sigma: Sigma, ref_scope: Scope) -> tuple[str, ...]:
+    """Pick the merged-kernel axes that ``axis``'s σ target depends on.
 
-    σ can map a producer axis to any single-variable expression built from the
-    consumer's axes — ``Var(b)`` (plain rename), ``Var(b) + 5`` (offset slice),
-    ``2*Var(b)`` (strided slice), ``3*Var(b) + 1`` (strided+offset), etc. In
-    all these cases the merged kernel's enclosing loop iterates ``b``; every
-    occurrence of ``Var(a)`` in the producer body is substituted to the full
-    expression by the caller's σ-rewrite, so the arithmetic lands inside the
-    stmt's Exprs rather than on the loop axis itself.
+    Every occurrence of the producer axis is substituted with the complete target expression by
+    the caller's σ rewrite.  Placement therefore needs the shortest consumer scope containing
+    *all* variables read by that expression: one for an offset/stride, several for a flatten /
+    tile-coordinate map, and none when the reader fixes the producer axis to a constant.  The
+    old single-variable restriction unnecessarily materialized a pure producer before layouts
+    such as ``(tile_k, tile_n, lane) -> (k, n)`` even though substitution is exact.
 
-    Rejected shapes: targets that reference two or more variables (would need
-    the merged kernel to iterate over multiple consumer axes here — requires
-    a scope-splitting refactor beyond this hook) and targets with zero
-    variables (σ fixes the axis to a constant — the def should be hoisted
-    out of any loop, which isn't representable as a single axis name).
+    ``_scope_for_axes`` already accepts a set of required axes and chooses the common enclosing
+    prefix, so multi-axis targets need no new loop representation.
     """
     target = sigma.get(axis.name)
     if target is None:
-        return axis.name
-    if isinstance(target, Var):
-        return target.name
-    vars_in_target = target.free_vars()
-    if len(vars_in_target) == 1:
-        return next(iter(vars_in_target))
-    raise _NotSupported(f"axis {axis.name!r} σ-maps to a multi-variable target {target.pretty()} (vars {sorted(vars_in_target)})")
+        return (axis.name,)
+    variables = target.free_vars()
+    scope_axes = tuple(a.name for a in ref_scope.enclosing)
+    if any(name not in scope_axes for name in variables):
+        # A non-axis variable is an SSA gather index. Keep the producer at the reader's current
+        # scope, where the defining load/assign is available, instead of treating the SSA name as
+        # a missing loop axis.
+        return scope_axes
+    return tuple(sorted(variables))
 
 
 def _solve_sigma(

@@ -20,10 +20,10 @@ re-spelled by hand, never silently re-keyed."""
 from __future__ import annotations
 
 import glob
+import importlib
 import os
 
 import pytest
-import yaml
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -31,6 +31,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import PATH_FAMILIES, canonical, resolve, sites
@@ -38,6 +39,8 @@ from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "../../../../emmy/compiler/pipeline/search/goldens")
 
@@ -126,8 +129,8 @@ def _attention() -> Graph:
     return graph
 
 
-def _tree(build, pick=None):
-    """The recognized tile tree for one kernel kind — resolve the tile passes, take the (single)
+def _trees(build, pick=None, *, target=(12, 0)):
+    """The recognized tile trees for one target — resolve the tile passes and collect every
     ``TileOp``'s stored op. ``pick`` selects a fork leaf (default option-0; the schedule slices a
     row stamps never change the walker's structure)."""
 
@@ -139,10 +142,27 @@ def _tree(build, pick=None):
                     return leaf
         return leaves[0]
 
-    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(build(), decide)
-    tiles = [n.op for n in rg.nodes.values() if isinstance(n.op, TileOp)]
-    assert len(tiles) == 1, f"expected one kernel, got {len(tiles)}"
-    return tiles[0].op
+    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(target)).resolve(build(), decide)
+    return [n.op.op for n in rg.nodes.values() if isinstance(n.op, TileOp)]
+
+
+def _tree(build, pick=None, *, target=(12, 0)):
+    roots = _trees(build, pick, target=target)
+    assert len(roots) == 1, f"expected one kernel, got {len(roots)}"
+    return roots[0]
+
+
+def _routing_tree(record):
+    """Rebuild the pre-schedule tree that placement routing resolves against."""
+    recognize = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    graph = record.target_program.copy()
+    roots = [n for n in graph.nodes.values() if isinstance(n.op, LoopOp)]
+    assert len(roots) == 1, f"{record.name}: expected one persisted LoopOp, got {len(roots)}"
+    root = roots[0]
+    fused, _ = recognize._fuse(root.op.body)
+    node, free, stores = recognize._lift(list(fused), root.output.name)
+    prologue = recognize.bind_prologue_contraction(node, free)
+    return prologue[0] if prologue is not None else node
 
 
 def _is_warp_row(row: dict) -> bool:
@@ -172,42 +192,85 @@ def _entries():
     files = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))
     assert files, f"no golden YAMLs under {_GOLDEN_DIR}"
     for f in files:
-        with open(f) as fh:
-            doc = yaml.safe_load(fh)
-        for cfg in doc.get("configs", []):
-            yield os.path.basename(f), cfg
+        doc = load_golden_file(f)
+        for record in load_golden_records(doc):
+            yield os.path.basename(f), record
+
+
+def _tree_kind(record) -> str | None:
+    """Derive the reference tree from the persisted frontend target.
+
+    Golden v2 deliberately stores no kernel-class discriminator.  The current
+    compiler category is an index over the stable origin operations, just like
+    ShapeKey and the structural features.
+    """
+    origins = record.origin_ops
+    if "torch.sdpa" in origins:
+        return "attention"
+    if record.shape_key.kind == "fused":
+        contractions = sum(op in {"torch.linear", "torch.matmul"} for op in origins)
+        return "mlp_geglu" if contractions > 1 else "norm_linear"
+    if record.shape_key.kind in {"rms_norm", "softmax"}:
+        return record.shape_key.kind
+    if "tensor.reduce" in origins:
+        return "reduce"
+    if any(op in {"torch.linear", "torch.matmul"} for op in origins):
+        return "matmul"
+    if origins == ("tensor.elementwise",):
+        return "pointwise"
+    return None
 
 
 def test_every_stored_golden_spelling_is_canonical(trees):
     checked = 0
     for fname, cfg in _entries():
-        kind = cfg["kernel"]
-        if kind not in trees:
+        kind = _tree_kind(cfg)
+        if cfg.loop_wire is not None:
+            # A Loop IR target deliberately has no frontend operation discriminator. Its
+            # persisted algebra is the authoritative tree for path-key spelling. Cooperative
+            # reductions lower to a partial and finalize kernel, so a target may contribute
+            # more than one recognized tree.
+            # Schedule rows need their recorded fork selected before inspecting the tree. A
+            # routing row names the computed-A reference tree before that tree is cut or the
+            # scheduler chooses another reading, so rebuild the same reference used by 010.
+            if cfg.is_routing:
+                roots = [_routing_tree(cfg)]
+            else:
+                with pinned_knobs({**cfg.pin_map, **cfg.knobs}):
+                    roots = _trees(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
+            assert roots, f"{fname}:{cfg.name}: Loop target lowered to no TileOps"
+            kind = "loop"
+        elif kind in trees:
+            roots = [trees[kind]]
+        else:
             # rope / embedding entries carry no tree-path families — nothing to resolve.
-            path_keys = [k for k in cfg.get("knobs", {}) if family_of(k) in PATH_FAMILIES]
-            assert not path_keys, f"{fname}:{cfg['name']}: kind {kind!r} has path-family keys but no reference tree"
+            path_keys = [k for k in cfg.knobs if family_of(k) in PATH_FAMILIES]
+            assert not path_keys, f"{fname}:{cfg.name}: derived kind {kind!r} has path-family keys but no reference tree"
             continue
-        root = trees[kind]
-        all_sites = sites(root)
-        for key, value in cfg.get("knobs", {}).items():
+        roots_and_sites = [(root, sites(root)) for root in roots]
+        for key, value in cfg.knobs.items():
             if family_of(key) not in PATH_FAMILIES:
                 continue
-            ctx = f"{fname}:{cfg['name']}: {key}={value!r}"
+            ctx = f"{fname}:{cfg.name}: {key}={value!r}"
             if key == family_of(key):  # bare — the canonical spelling of the primary site
                 if kind == "attention" and key == "TILE":
                     # The documented exception: a dynamic attention golden records ONE bare TILE
                     # (its PV plan) — ambiguous on the tree by design, matched any-of by the
                     # golden layer. Assert the exception holds exactly (dynamic entries only).
-                    assert cfg.get("dynamic"), f"{ctx}: a STATIC attention golden must spell TILE@dd/TILE@pj"
+                    assert cfg.dynamic, f"{ctx}: a STATIC attention golden must spell TILE@dd/TILE@pj"
                     with pytest.raises(ValueError, match="ambiguous"):
-                        resolve(root, key, all_sites=all_sites)
+                        resolve(roots[0], key, all_sites=roots_and_sites[0][1])
                     continue
-                site = resolve(root, key, all_sites=all_sites)  # ambiguity would raise — the tripwire
-                if site is None:
+                resolved = [(root, all_sites) for root, all_sites in roots_and_sites if resolve(root, key, all_sites=all_sites) is not None]
+                if not resolved:
                     assert value in ("", None), f"{ctx}: no {key} site on the {kind} tree, yet a non-empty value"
                 else:
-                    assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: bare is not this site's canonical spelling"
+                    for root, all_sites in resolved:
+                        assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: bare is not this site's canonical spelling"
             else:
-                assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: stored spelling is not canonical"
+                resolved = [(root, all_sites) for root, all_sites in roots_and_sites if resolve(root, key, all_sites=all_sites) is not None]
+                assert resolved, f"{ctx}: no matching site on the {kind} tree"
+                for root, all_sites in resolved:
+                    assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: stored spelling is not canonical"
             checked += 1
     assert checked > 1000, f"suspiciously few golden keys checked ({checked}) — did the loader change?"

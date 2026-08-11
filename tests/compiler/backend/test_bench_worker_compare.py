@@ -18,7 +18,63 @@ import sys
 import textwrap
 import time
 
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
+
+
+def test_oneshot_compare_worker_uses_selected_device(monkeypatch) -> None:
+    from emmy.compiler.backend.cuda import program
+
+    seen = []
+
+    class Worker:
+        def __init__(self, *, device_id=None):
+            seen.append(("init", device_id))
+
+        async def run_job(self, request, *, wall_timeout_s):
+            seen.append(("run", request, wall_timeout_s))
+            return {"ok": True}
+
+        async def aclose(self):
+            seen.append(("close",))
+
+    monkeypatch.setattr(program, "_AsyncBenchWorker", Worker)
+
+    result = asyncio.run(program._run_job_oneshot({"job": "compare"}, wall_timeout_s=5.0, device_id=3))
+
+    assert result == {"ok": True}
+    assert seen == [("init", 3), ("run", {"job": "compare"}, 5.0), ("close",)]
+
+
+def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
+    from emmy.compiler.backend.cuda import program
+
+    async def _fake_oneshot(request, *, wall_timeout_s, device_id=None):
+        assert request["torch_spec"] == ("frontend_graph", "FE")
+        assert wall_timeout_s == 5.0
+        assert device_id == 2
+        return {
+            "results": {"Emmy": 2.0},
+            "result": "BENCH",
+            "torch_available": True,
+            "captured": True,
+            "accuracy_error": "wrong-answer: rel err 1.000",
+        }
+
+    monkeypatch.setattr(program, "_run_job_oneshot", _fake_oneshot)
+    result = asyncio.run(
+        program.benchmark_compare_isolated_async(
+            lowered="LOWERED",
+            torch_spec=("frontend_graph", "FE"),
+            bench_backends="emmy",
+            wall_timeout_s=5.0,
+            warmup=1,
+            iters=1,
+            seed=0,
+            device_id=2,
+        )
+    )
+
+    assert result == ({"Emmy": 2.0}, "BENCH", True, True, "wrong-answer: rel err 1.000")
 
 
 @requires_cuda
@@ -35,7 +91,7 @@ def test_compare_in_worker_returns_torch_and_emmy() -> None:
     tail = _passes_after_stage(_detect_stage(g))
     lowered = Pipeline.build(tail).run(g) if tail else g
 
-    results, bench, torch_available, _captured = asyncio.run(
+    results, bench, torch_available, _captured, accuracy_error = asyncio.run(
         benchmark_compare_isolated_async(
             lowered=lowered,
             torch_spec=("frontend_graph", fe),
@@ -51,6 +107,7 @@ def test_compare_in_worker_returns_torch_and_emmy() -> None:
     assert results.get("Emmy", 0) > 0, f"missing emmy number: {results}"
     assert results.get("Eager PyTorch", 0) > 0, f"missing eager torch number: {results}"
     assert bench is not None
+    assert accuracy_error is None
 
 
 def _scripted_worker(child_src: str):

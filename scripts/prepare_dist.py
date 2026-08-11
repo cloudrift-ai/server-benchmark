@@ -7,7 +7,7 @@ Two independent steps, each behind its own flag, both run from the repo root:
     Copy every ``recipes/<model>/recipe.yaml`` into ``emmy/recipes/`` so the wheel
     ships the recommended serving configs (``recipes/`` sits outside the ``emmy``
     package, so setuptools cannot pick it up in place). Only the recipe files are
-    copied — the committed benchmark result directories beside them are not.
+    copied — local benchmark output and ``RESULTS.md`` are not.
 
 ``--readme``
     Rewrite README.md's repo-relative links to absolute GitHub URLs, in place.

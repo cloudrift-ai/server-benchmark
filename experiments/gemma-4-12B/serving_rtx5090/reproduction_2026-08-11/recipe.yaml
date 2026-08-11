@@ -1,0 +1,165 @@
+# gemma-4-12B-it end-to-end serving A/B on one RTX 5090 — the three vLLM lanes of the
+# "Optimizing Gemma4 12B for RTX GPUs" blog article in a single recipe: stock vLLM kernels,
+# vLLM + emmy plugin (EmmyGenModel), and the EMMY_FAST_MATH fork. The llama.cpp lane is the
+# sibling command recipe (serving_llamacpp_rtx5090). All lanes share the identical controlled
+# workload (seed 0, greedy, ignore_eos, prefix caching off) and the article's six points:
+#   4096/4096  c=1 (interactive), c=4, c=8 (batch scaling curve)
+#   8192/256   c=4 (RAG — TTFT-dominated long-input prefill)
+#   256/256    c=64 (API/agent short-turn, high concurrency); c=1 is a DIAGNOSTIC-only
+#              point (decode floor + integration overhead) — it runs here but the article
+#              table omits it (single-stream 256-in is synthetic per the community audit).
+# Single-stream points run with repeats: 3 (mean/stddev) per the article's methodology; the
+# batched points' run-to-run spread was measured < 0.3 %, so they run once. The methodology's
+# single-machine rule applies: compare lanes only WITHIN one run on one box.
+#
+# The per-arm recipes with the wider input sweep live in recipes/gemma-4-12B-it*; this
+# experiment pins the article's exact grid. The emmy lanes ride the prebuilt
+# cloudriftai/vllm-emmy-gemma-4-12b-it image (docker/vllm-emmy-serve/), which bakes the
+# model snapshot + warmed sm_120 cubins + the execution-plan pack — a tokenless,
+# download-free boot when the served shape matches what it was warmed at. It is the only PUBLISHED emmy
+# image; the general compile-on-boot cloudriftai/vllm-emmy base this recipe used to pin is
+# not on Docker Hub, so that tag was unpullable outside the org.
+#
+# The `:latest` pin is deliberate — these lanes track the current release rather than a
+# frozen one. The cost is that a run does NOT record which emmy revision it measured, so
+# capture `docker inspect`'s digest (or the tag list) alongside any numbers you intend to
+# compare against the article; `latest` as of 2026-08-05 is digest 5add12d3 = the 78f5364f build.
+#
+# What the baked artifacts do NOT cover. Both cost only BOOT TIME — each lane still runs the
+# kernels its own configuration selects, and reports the numbers that configuration is meant
+# to produce; it just pays to build them once instead of finding them baked:
+#   - the pack is keyed on the serving shape, of which EMMY_GEN_DECODE_BUCKET is part, so
+#     the c=4/c=8 (bucket 8) and c=64 (bucket 64) lanes miss it and re-run the compiler
+#     frontend per program (~50 min of host CPU measured at an uncovered width). That can
+#     exceed the compose healthcheck window on a low-core host — see the image's
+#     ARCHITECTURE.md. serving_mtp_rtx5090 already accepts the same trade.
+#   - the baked cubins are the STANDARD fork's. The six EMMY_FAST_MATH lanes deliberately
+#     select DIFFERENT kernels (f16-accumulate mma, __expf — that is what the fork is), so
+#     nothing baked can serve them and they compile their own on first boot (cubin-cached
+#     thereafter). Their numbers are the fast-math lane's numbers either way; only the
+#     first boot is slower.
+# Re-warming the image at the width/fork a lane needs removes both; the article's numbers
+# were measured with a warm cache either way.
+#
+# Lane knobs (the article's equal-tuning protocol): EVERY vLLM lane runs
+# --gpu-memory-utilization 0.96. The emmy lanes additionally set the two documented
+# per-workload knobs: the decode bucket (EMMY_GEN_DECODE_BUCKET = 32 at c=1, 8 at c=4/c=8,
+# 64 at c=64 — the static decode-twin width matched to the concurrency) and, on the mixed
+# prefill+decode cells (4K/4K c=4 and c=8), the CHUNK QUANTUM (EMMY_GEN_PREFILL_BUCKET=2048
+# + --max-num-batched-tokens 2056 — 2048-token static chunk steps with bucket-sized rider
+# headroom). Other cells pass the default mnbt (chunk width 4096 + bucket) explicitly so the
+# recipe is image-version-independent. NOTE: the quantum/rider knobs need an emmy image at or
+# after the 2026-07-26 parity rev (m2048 golden tier + rider split).
+#
+#
+# CONTEXT 16384 (raised 2026-07-31 from the original 8448 measurement). The article was
+# re-measured and updated to the 16384 protocol before publication (2026-08-01, the
+# article-reproduction session's re-run) — a run here compares against the published
+# table directly.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/serving_rtx5090 --local
+model:
+  huggingface: "google/gemma-4-12B-it"
+  revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    context_length: 16384
+    # The supplied desktop has 941 MiB held by its graphical session. Bound sampler
+    # warm-up to the protocol's actual maximum concurrency rather than vLLM's default 256.
+    max_concurrent_requests: 64
+    vllm:
+      extra_args: "--dtype float16 --no-enable-prefix-caching"
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  # ---- stock vLLM: all six points ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
+    zip:
+      benchmark.random_input_len: [256, 256, 4096, 4096, 4096, 8192]
+      benchmark.random_output_len: [256, 256, 4096, 4096, 4096, 256]
+      benchmark.max_concurrency: [1, 64, 1, 4, 8, 4]
+      benchmark.num_prompts: [16, 256, 8, 32, 64, 16]
+      benchmark.repeats: [3, 1, 3, 1, 1, 1]
+
+  # ---- emmy lanes: c=1 points (decode bucket 32; default chunk width 4096 + rider headroom) ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=32", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"]
+      zip:
+        benchmark.random_input_len: [256, 4096]
+        benchmark.random_output_len: [256, 4096]
+        benchmark.max_concurrency: [1, 1]
+        benchmark.num_prompts: [16, 8]
+        benchmark.repeats: [3, 3]
+
+  # ---- emmy lanes: the mixed 4K/4K c=4 and c=8 points (bucket 8 + the 2048 chunk quantum) ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
+      zip:
+        benchmark.random_input_len: [4096, 4096]
+        benchmark.random_output_len: [4096, 4096]
+        benchmark.max_concurrency: [4, 8]
+        benchmark.num_prompts: [32, 64]
+        benchmark.repeats: [1, 1]
+
+  # ---- emmy lanes: the RAG 8192/256 c=4 point (bucket 8; chunk width 4096 + rider headroom) ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8"]
+    benchmark.random_input_len: 8192
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 4
+    benchmark.num_prompts: 16
+
+  # ---- emmy lanes: the 256/256 c=64 point (decode bucket 64 + the 2048 chunk quantum) ----
+  # The quantum joined this lane on 2026-08-02 after a same-box A/B at the article's single-wave
+  # TTFT protocol (--num-prompts 64), both precision lanes, every shape pack-hit:
+  #
+  #   lane        no quantum   + 2048 quantum
+  #   emmy std      2263 ms      1986 ms   (-12%)
+  #   emmy fm       1834 ms      1688 ms   (-8%)
+  #   stock         1512 ms
+  #
+  # It is not a KV-capacity effect, which was the leading hypothesis and is refuted: this
+  # workload needs 64 x 512 = 32,768 KV tokens and emmy has 43,499 without the quantum (65,232
+  # with it), so all 64 requests are resident either way. The gain is step structure — shorter
+  # chunk steps interleave first tokens sooner. The lane still trails stock by ~12% on TTFT;
+  # the residual is the plugin running a mixed prefill+decode step as two passes over disjoint
+  # rows where stock composes one fused varlen batch, which is a serving-stack change rather
+  # than a knob. TPOT at this point is already at parity (26.7 vs stock 26.9).
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2112 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env:
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+    benchmark.random_input_len: 256
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 64
+    benchmark.num_prompts: 256

@@ -18,14 +18,13 @@ schedule fork exists, so it cannot wait for ``020``.)
 All recognition lives in THIS one rule (no separate flash / softmax pass), in order (each
 step unconditional — no knobs):
 
-1. **Flash attention** — a softmax-then-P@V kernel (+ its clean scaled-QK producer) is
-   the online-softmax twisted reduce over a streaming KV axis; rewrite the pair to one fused
+1. **Flash attention** — an SDPA unit across either supported loop-fusion boundary is
+   the online-softmax twisted reduce over a streaming KV axis; rewrite the unit to one fused
    flash ``TileOp`` (the ``(m, l, O)`` ``TWISTED`` kv loop over a nested ``CONTRACTION`` score
    loop), with its free ``(batch…, m, d)`` axes carried on the schedule. Graph rewrite —
-   consumes the score producer. Recognition + construction live in the ``_flash`` helper
-   (``try_flash``). Because the fusion reads the score producer's Q/K as plain ``Load``\\ s, a
-   node that IS such a producer is *deferred* (left a ``LoopOp``, :func:`is_flash_score_producer`)
-   so step 3 doesn't lift it out from under its consumer.
+   consumes the score/probability producer. Recognition + construction live in the ``_flash``
+   helper (``try_flash``). A standalone score producer is *deferred* (left a ``LoopOp``,
+   :func:`is_flash_score_producer`) so step 3 doesn't lift it out from under its consumer.
 2. **Online softmax** — an adjacent ``(rowmax, Σ exp)`` reduce pair over the same input fuses
    into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the ``(m, d)``
    exp-family merge dissolved in the body. The ``_softmax`` helper
@@ -327,7 +326,10 @@ def _nodify_contraction(node, free: tuple):
             con = Fold.contraction(
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
-                channels=(Channel(b=b_load, acc=acc),),
+                # A computed B is a closed zero-axis operand node. Unlike A's norm/activation
+                # cone it has no row-statistic seam to split; its whole generic MAP tree is
+                # evaluated at each (k, n) slab cell by the sync compute-fill.
+                channels=(Channel(b=b_load if isinstance(b_load, Load) else Fold.projection(body=Body(tuple(b_load))), acc=acc),),
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
             # STORED form is the contraction itself (1s) — pure algebra; the
@@ -396,16 +398,16 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The fusion is unconditional:
-    # a kernel flash recognition can certify is always fused (an uncertifiable one — RoPE'd QK —
-    # falls through to the separate score producer + softmax-then-P@V kernels below).
+    # a kernel flash recognition can certify is always fused; an uncertifiable operand cone
+    # falls through to the separate score producer + softmax-then-P@V kernels below.
     graph = match.graph
     flash = try_flash(graph, root)
     if flash is not None:
         return flash
     # (2) Defer a flash score producer: the general lift below would turn this scaled-QK
-    # matmul into a ``TileOp`` before its softmax-then-P@V consumer fuses, and that fusion
-    # reads the producer's Q/K as plain ``Load``s. Leave it a ``LoopOp`` until the consumer
-    # has had its chance to consume it (a later scan re-visits this node, by then removed).
+    # matmul into a ``TileOp`` before its softmax-then-P@V consumer fuses. Leave it a
+    # ``LoopOp`` until the consumer has had its chance to consume it (a later scan re-visits
+    # this node, by then removed).
     if is_flash_score_producer(graph, root):
         raise RuleSkipped("flash score producer — defer to its consumer's fusion")
     loop: LoopOp = root.op

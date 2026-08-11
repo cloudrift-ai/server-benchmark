@@ -3,8 +3,8 @@
 # (no HF_TOKEN needed). One built image serves exactly one (model, GPU, config) triple.
 #
 # Build (the Makefile drives it; MODEL picks the pinned models/<slug>.env):
-#   0. `make serve-goldens MODEL=<id>` — assert recorded goldens cover this model on this
-#      card, so the warm bakes tuned fork picks rather than cold-greedy ones.
+#   0. `make serve-goldens MODEL=<id>` on the target GPU — validate that the pinned
+#      canonical file has every serving realization and that all freshly traced twins match.
 #   1. `make serve-warm MODEL=<id>` on a machine with the target GPU — serves once from
 #      the plain vllm-emmy image with ./warm mounted at /opt/emmy, populating
 #      warm/cubin (compiled kernels) + warm/hf (the model snapshot).
@@ -19,6 +19,11 @@
 #   docker run --gpus all --ipc=host -p 8000:8000 cloudriftai/vllm-emmy-<slug>:TAG
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
+
+ARG PUBLISH_FAMILY
+ARG PUBLISH_VERSION
+ARG PUBLISH_REVISION
+ARG TARGET_GPU
 
 ENV HF_HOME=/opt/emmy/hf \
     EMMY_CUBIN_CACHE=/opt/emmy/cubin \
@@ -54,6 +59,35 @@ ENV SERVE_MODEL=${MODEL} \
     SERVE_MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS} \
     SERVE_GPU_MEM_UTIL=${GPU_MEM_UTIL} \
     EMMY_GEN_DECODE_BUCKET=${DECODE_BUCKET}
+
+# The per-checkpoint half of the same config (serve.sh documents each; empty = its default,
+# which reproduces the pre-existing invocation exactly). REVISION is the one whose absence is
+# silent rather than loud — an unpinned multi-rung repo bakes whichever rung its default
+# branch points at — so verify.sh compares this baked value against the config it was built
+# from. The values are quoted because CAPTURE_SIZES and EXTRA_ARGS carry spaces.
+ARG REVISION=
+ARG QUANT=
+ARG CAPTURE_SIZES=
+ARG EXTRA_ARGS=
+ARG EMBED_HOST=
+ARG PREFILL_CAPACITY=
+ARG PREFILL_BUCKET=
+ARG M1_TIER=
+ENV SERVE_REVISION="${REVISION}" \
+    SERVE_QUANT="${QUANT}" \
+    SERVE_CAPTURE_SIZES="${CAPTURE_SIZES}" \
+    SERVE_EXTRA_ARGS="${EXTRA_ARGS}" \
+    EMMY_GEN_EMBED_HOST="${EMBED_HOST}" \
+    EMMY_GEN_PREFILL_CAPACITY="${PREFILL_CAPACITY}" \
+    EMMY_GEN_PREFILL_BUCKET="${PREFILL_BUCKET}" \
+    EMMY_GEN_M1_TIER="${M1_TIER}"
+
+LABEL ai.emmy.publish.family="${PUBLISH_FAMILY}" \
+      ai.emmy.model.id="${MODEL}" \
+      ai.emmy.model.revision="${REVISION}" \
+      ai.emmy.target.gpu="${TARGET_GPU}" \
+      org.opencontainers.image.version="${PUBLISH_VERSION}" \
+      org.opencontainers.image.revision="${PUBLISH_REVISION}"
 
 COPY serve.sh /opt/emmy/serve.sh
 RUN chmod +x /opt/emmy/serve.sh

@@ -22,11 +22,11 @@ DEFAULT_IMAGE_URL_NVIDIA_PROPRIETARY = (
 )
 DEFAULT_IMAGE_URL_AMD = "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-rocm-64-20260220-025112.img"
 DEFAULT_CLOUDINIT_URL = "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
-# Pins the CloudRift v059 protocol generation: instances/rent resolves to v059,
-# instances/list to v058 (mask-aware response), instances/terminate to v055.
+# Pins the CloudRift protocol generation currently returned by the public API.
 # Pin to the date rather than "~upcoming" so a future server version can't silently
 # change request/response shapes (e.g. add another default-off field mask) under us.
-API_VERSION = "2026-05-26"
+API_VERSION = "2026-08-05"
+TERMINAL_INSTANCE_STATUSES = {"Deleted", "Failed", "Inactive", "Terminated"}
 
 
 def select_image_url(instance_type):
@@ -367,6 +367,7 @@ async def create_instance(
     billing_exempt=False,
     network=None,
     extra_public_keys=None,
+    allocation_observer=None,
 ):
     """Create a CloudRift VM instance.
 
@@ -381,6 +382,8 @@ async def create_instance(
             (e.g. {"Inactive"}).
         wait_ssh: if True, wait for SSH connectivity after Active status.
         ssh_private_key_path: path to the SSH private key (needed for wait_ssh).
+        allocation_observer: optional observer notified as soon as a deletion
+            handle exists.
 
     Returns:
         VMConnectionInfo on success, None on failure.
@@ -426,6 +429,8 @@ async def create_instance(
             raise TerminalProvisionError(f"CloudRift rent returned {code}: {body}") from exc
         raise
     if dry_run:
+        if allocation_observer is not None:
+            await allocation_observer.allocated(("cloudrift", "dry-run-id"))
         logger.info("[dry-run] Would wait for Active status, then print connection info.")
         return VMConnectionInfo(
             host="dry-run-host",
@@ -439,9 +444,10 @@ async def create_instance(
         # Rent succeeded HTTP-wise but allocated nothing — treat as no-capacity.
         raise CapacityExhausted(f"CloudRift rent returned no instance ID for {instance_type}")
     instance_id = instance_ids[0]
-    logger.info(f"Instance rented (id={instance_id}). Waiting for Active status (timeout: {timeout}s)...")
-
     try:
+        if allocation_observer is not None:
+            await allocation_observer.allocated(("cloudrift", instance_id))
+        logger.info(f"Instance rented (id={instance_id}). Waiting for Active status (timeout: {timeout}s)...")
         info = await wait_for_status(api_key, instance_id, "Active", timeout, api_url, fail_statuses=fail_statuses)
     except Exception:
         logger.warning(f"Terminating orphaned instance {instance_id} after exception during wait_for_status.")
@@ -472,6 +478,12 @@ async def create_instance(
         await wait_for_ssh(conn.host, conn.username, conn.ssh_port, ssh_private_key_path)
 
     return conn
+
+
+async def instance_is_active(api_key, instance_id, api_url=DEFAULT_API_URL):
+    """Return whether CloudRift still reports an active instance handle."""
+    info = await _get_instance_info(api_key, instance_id, api_url)
+    return info is not None and info.get("status") not in TERMINAL_INSTANCE_STATUSES
 
 
 async def delete_instance(api_key, instance_id, api_url=DEFAULT_API_URL, dry_run=False):

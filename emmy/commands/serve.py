@@ -153,14 +153,11 @@ def _spec_query_len(vllm_args: list[str]) -> int:
     return int(cfg.get("num_speculative_tokens", 0) or 0) + 1
 
 
-def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
-    """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
-    probe — ``local_files_only`` keeps command construction hermetic (no hub round-trip: offline
-    test doubles and uncached models resolve to False in milliseconds), and ``--trust-remote-code``
-    / ``--revision`` forward so custom-code checkpoints still probe. The probe is UX only: the
-    authoritative guard is in ``EmmyGenModel.__init__``, which validates an MoE capture boot
-    against the runner (fixed-slot tier present, capture sizes capped at 1) — a probe miss here
-    degrades to that clear boot error, never to a capture crash."""
+def _local_config(model: str, vllm_args: list[str]):
+    """The checkpoint's HF config, read LOCALLY (``local_files_only``) so command construction
+    stays hermetic — offline test doubles and uncached models resolve to ``None`` in
+    milliseconds. ``--trust-remote-code`` / ``--revision`` forward so custom-code checkpoints
+    still probe. Every caller treats a ``None`` as "no special case"."""
     try:
         from transformers import AutoConfig  # noqa: PLC0415
 
@@ -170,11 +167,20 @@ def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
         revision = _flag_value(vllm_args, "--revision", "")
         if revision:
             kwargs["revision"] = revision
-        cfg = AutoConfig.from_pretrained(model, **kwargs)
-        cfg = getattr(cfg, "text_config", cfg)
-        return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
+        return AutoConfig.from_pretrained(model, **kwargs)
     except Exception:  # noqa: BLE001 — any probe failure: let the serve proceed un-special-cased
-        return False
+        return None
+
+
+def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
+    """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
+    probe (:func:`_local_config`). The probe is UX only: the authoritative guard is in
+    ``EmmyGenModel.__init__``, which validates an MoE capture boot against the runner (fixed-slot
+    tier present, capture sizes capped at 1) — a probe miss here degrades to that clear boot
+    error, never to a capture crash."""
+    cfg = _local_config(model, vllm_args)
+    cfg = getattr(cfg, "text_config", cfg)
+    return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
 
 
 def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[str]:
@@ -262,7 +268,15 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
     cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
     if not stock and generate:
         cmd += _gen_graph_args(vllm_args, model=model)
-        cmd += ["--hf-overrides", '{"architectures": ["EmmyGenModel"]}']
+        # A checkpoint whose compressed weights emmy's loader owns end to end must be presented
+        # to vLLM as unquantized — vLLM carries no method for the scheme and would refuse the
+        # boot, while nothing in the engine needs one. The loader band decides which schemes
+        # those are (naming a checkpoint format here would cross the band).
+        from emmy.compiler.loader.quant import engine_config_overrides  # noqa: PLC0415
+
+        overrides: dict = {"architectures": ["EmmyGenModel"]}
+        overrides.update(engine_config_overrides(_local_config(model, vllm_args)))
+        cmd += ["--hf-overrides", json.dumps(overrides)]
         # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
         # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.
         if _has_flag(vllm_args, "--dtype"):
@@ -271,19 +285,20 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
                 raise ValueError(f"generative serving requires fp16; --dtype {dt!r} is incompatible (use --dtype float16)")
         else:
             cmd += ["--dtype", "float16"]
-        # The flattened width (sum of newly-scheduled tokens per step) must stay within
-        # DYNAMIC_DIM_MAX (= _DEFAULT_MAX_MODEL_LEN) PLUS the decode bucket: the chunk-twin
-        # + decode-twin row split covers the bucket-sized headroom, so a full chunk step
-        # keeps carrying its decode riders (and the previous prompt's tail) instead of
-        # freezing every decoding request per chunk. vLLM's default max_num_batched_tokens
-        # (e.g. 8192 on a big GPU) would trip the model's startup bound, so default it to
-        # the covered maximum here.
+        # The flattened width (sum of newly-scheduled tokens per step) must stay within the
+        # runner's prefill CAPACITY (the dynamic-dim cap = _DEFAULT_MAX_MODEL_LEN, or a lower
+        # EMMY_GEN_PREFILL_CAPACITY) PLUS the decode bucket: the chunk-twin + decode-twin row
+        # split covers the bucket-sized headroom, so a full chunk step keeps carrying its decode
+        # riders (and the previous prompt's tail) instead of freezing every decoding request per
+        # chunk. vLLM's default max_num_batched_tokens (e.g. 8192 on a big GPU) would trip the
+        # model's startup bound, so default it to the covered maximum here.
         bucket = emmy_config.gen_decode_bucket()
-        top = int(_DEFAULT_MAX_MODEL_LEN) + max(bucket, 0)
+        capacity = emmy_config.gen_prefill_capacity()
+        top = (capacity if 0 < capacity else int(_DEFAULT_MAX_MODEL_LEN)) + max(bucket, 0)
         if _has_flag(vllm_args, "--max-num-batched-tokens"):
             mnbt = _flag_value(vllm_args, "--max-num-batched-tokens", "")
             if mnbt.isdigit() and int(mnbt) > top:
-                raise ValueError(f"--max-num-batched-tokens {mnbt} exceeds the dynamic-dim cap + decode bucket ({top}); use it or lower")
+                raise ValueError(f"--max-num-batched-tokens {mnbt} exceeds the prefill capacity + decode bucket ({top}); use it or lower")
         else:
             cmd += ["--max-num-batched-tokens", str(top)]
     elif not stock:

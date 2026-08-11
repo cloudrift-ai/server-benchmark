@@ -29,7 +29,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from ..conftest import from_pretrained_or_skip, requires_cuda, requires_sm90
+from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda, requires_sm90
 
 
 class _Sdpa(torch.nn.Module):
@@ -1814,13 +1814,10 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
 @requires_cuda
 def test_warp_flash_f32_value_operand_converts(monkeypatch):
     """A V operand traced at f32 (gemma-4's V-norm: ``v_f16 * f32 row stat`` promotes, and the
-    traced ``.half()`` cast rides a view) must reach the flash stream as an f16 BUFFER: the
-    cast splits out of the view (``005_split_cast_from_indexmap``), fusion keeps it
-    materialized at flash offer sites (``_is_castfree_indexmap`` — a dtype-changing copy is
-    not plumbing) and fuses the f32 ``mul`` producer INTO it, so the stream sees an
-    atom-dtype operand and the pinned cp.async ring RESOLVES (the pre-split behavior fused
-    the cast into the flash load, and the f32 buffer declined every staged row —
-    gmem-direct forever, the gemma layer-0 lockout)."""
+    traced ``.half()`` cast rides a view) must reach the flash stream as an f16 buffer. Gate-free
+    fusion may inline the cast and scale, so flash recognition factors that closed pure-map V
+    cone into a canonical feeder workspace. The stream then sees an atom-dtype operand and the
+    pinned cp.async ring resolves."""
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x4/k4")
     monkeypatch.setenv("EMMY_WORK", "w2x1")
     monkeypatch.setenv("EMMY_STAGE", "d2/cp")  # resolves: the split-out cast feeds f16 V

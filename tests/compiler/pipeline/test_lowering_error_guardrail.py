@@ -32,7 +32,7 @@ from emmy.compiler.ir.kernel.ir import KernelOp, Smem
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LoweringError
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule, _raise_on_unlowered
-from tests.compiler.conftest import drain_tune
+from tests.compiler.helpers import drain_tune
 
 
 def _small_smem_ctx() -> Context:

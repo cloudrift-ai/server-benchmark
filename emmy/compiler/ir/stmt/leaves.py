@@ -13,6 +13,7 @@ from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
+    _INTEGER_DTYPES,
     RenderCtx,
     Stmt,
     _pad,
@@ -377,8 +378,16 @@ class Assign(Stmt):
         pad = _pad(ctx.indent)
         op_name = self.op.name
         arg_dtypes = [ctx.ssa_dtypes.get(a, "f32") for a in self.args]
-        # Default rule: result matches the input dtype when all inputs
-        # agree; any fp32 input promotes the whole expression to fp32.
+        if op_name == "bitcast":
+            if len(self.args) != 1 or self.dtype is None:
+                raise ValueError("bitcast Assign requires one argument and an explicit destination dtype")
+            result_dt = self.dtype.name
+            body = ctx.target.bitcast(self.args[0], arg_dtypes[0], result_dt)
+            ctx.ssa_dtypes[self.name] = result_dt
+            return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {body};"]
+        # Default rule: f16 stays narrow only when all inputs agree; generic
+        # integer arithmetic/bit operations likewise retain one common integer
+        # dtype. Other cases promote to f32.
         # Explicit ``self.dtype`` overrides — the demote pass uses this
         # to force a narrower dtype on the result.
         if self.dtype is not None:
@@ -387,7 +396,8 @@ class Assign(Stmt):
             result_dt = dtype_promote(op_name, arg_dtypes)
 
         all_args_at_result = bool(arg_dtypes) and all(d == result_dt for d in arg_dtypes)
-        if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and all_args_at_result:
+        integer_promotion = result_dt in _INTEGER_DTYPES and bool(arg_dtypes) and all(d in _INTEGER_DTYPES for d in arg_dtypes)
+        if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and (all_args_at_result or integer_promotion):
             # Native non-f32 path: all args already at ``result_dt`` so
             # no per-arg conversion is needed. Render with the target's
             # dtype-specific intrinsics. ``Literal.render`` wraps embedded
@@ -398,7 +408,7 @@ class Assign(Stmt):
             # below — computing in fp32 and converting once preserves
             # precision better than converting each arg to fp16 first.
             args = _args_at_dtype(ctx.target, self.args, arg_dtypes, result_dt)
-            expr = op_to_expr(op_name, args)
+            expr = op_to_expr(op_name, args, dtype=result_dt)
             saved_intr = ctx.intrinsics
             saved_lit = ctx.literal_default_dtype
             ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
@@ -414,7 +424,7 @@ class Assign(Stmt):
         # f32 / no-native path: promote args to f32, render in f32, then
         # convert the result back to ``result_dt`` when narrower.
         promoted = _args_at_dtype(ctx.target, self.args, arg_dtypes, "f32")
-        expr = op_to_expr(op_name, promoted)
+        expr = op_to_expr(op_name, promoted, dtype="f32")
         body_str = expr.render(ctx)
         if result_dt != "f32":
             body_str = ctx.target.convert(body_str, "f32", result_dt)

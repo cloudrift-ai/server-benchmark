@@ -12,10 +12,10 @@ never executes it; calling it directly is what makes the regression visible off-
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.ir.stmt import Body, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _scalar_protected, copy_cell
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import _pv_streamed
@@ -85,6 +85,40 @@ def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
     # shared coordinate is captured by the rename — the failure the threading prevents.
     [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(node, tile))
     assert captured.index[0] == Var("bt__ar0")
+
+
+def test_the_output_sweep_axis_survives_the_per_cell_rename() -> None:
+    """A scalar register tile replicates its projection per output cell, including an output sweep.
+    The sweep coordinate is bound by the copied loop and must remain unsuffixed inside its select and
+    write; only the per-cell SSA values receive the cell suffix."""
+    node, tile = _node(), _slice()
+    sweep = Axis("sweep", 2)
+    body = Body(
+        (
+            Loop(
+                axis=sweep,
+                body=Body(
+                    (
+                        Select(
+                            name="value",
+                            branches=(
+                                SelectBranch(value="input", select=BinaryExpr("==", Var("sweep"), Literal(0, "int"))),
+                                SelectBranch(value="acc", select=Literal(1, "int")),
+                            ),
+                        ),
+                        Write(output="out", index=(Var("m"), Var("n"), Var("sweep")), value="value"),
+                    )
+                ),
+            ),
+        )
+    )
+
+    [copied] = copy_cell(body, Sigma({}), "__c0_0", _scalar_protected(node, tile, body=body))
+    select, write = copied.body
+    assert copied.axis.name == "sweep"
+    assert select.name == "value__c0_0" and write.values == ("value__c0_0",)
+    assert select.branches[0].select == BinaryExpr("==", Var("sweep"), Literal(0, "int"))
+    assert write.index[-1] == Var("sweep")
 
 
 # --- the (m, n) binding lives on the SCHEDULING STRUCTURE, not at each reader ------------------- #

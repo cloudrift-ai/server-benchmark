@@ -188,6 +188,34 @@ def test_silu_correctness():
 
 
 # ===================================================================
+# Softplus decomposition: stable max(x, 0) + log(1 + exp(-abs(x)))
+# ===================================================================
+
+
+def _make_softplus_graph():
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 32)), node_id="x")
+    g.add_node(op=ElementwiseOp(op="softplus"), inputs=["x"], output=Tensor("out", (4, 32)), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+    return g
+
+
+def test_softplus_decomposes_to_stable_primitives():
+    result = _apply(_make_softplus_graph(), "025_softplus.py")
+    fns = {n.op.name for n in result.nodes.values() if isinstance(n.op, ElementwiseOp)}
+    assert "softplus" not in fns
+    assert {"abs", "negative", "exp", "log", "maximum", "add"} <= fns
+
+
+def test_softplus_correctness_including_large_magnitudes():
+    g = _make_softplus_graph()
+    x = np.linspace(-100.0, 100.0, 128, dtype=np.float32).reshape(4, 32)
+    before = _run(g, {"x": x})
+    after = _run(_apply(g, "025_softplus.py"), {"x": x})
+    _assert_close(before, after, rtol=1e-6, atol=1e-6)
+
+
+# ===================================================================
 # Mean decomposition: mean(x, axis) → sum(x, axis) / dim_size
 # ===================================================================
 

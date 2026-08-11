@@ -10,11 +10,24 @@ signatures (fork rows stamped, leaf rows not), ``Prior.evidence_pick`` never joi
 
 from __future__ import annotations
 
+from emmy.compiler import dtype as _dt
 from emmy.compiler.context import Context
+from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.golden_eval import _matmul_graph
+
+
+def _matmul_graph(M: int, N: int, K: int, dtype: str) -> Graph:
+    graph = Graph()
+    dt = _dt.get({"fp16": "f16", "fp32": "f32"}.get(dtype, dtype))
+    graph.add_node(InputOp(), [], Tensor("a", (M, K), dt), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (K, N), dt), node_id="b")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("o", (M, N), dt), node_id="o")
+    graph.inputs, graph.outputs = ["a", "b"], ["o"]
+    return graph
 
 
 def _resolve_option0(graph, ctx):

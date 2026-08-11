@@ -9,7 +9,6 @@ the same shape as ``scripts/bench_block.py`` but for arbitrary inline ops.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import sys
@@ -18,6 +17,7 @@ from collections import namedtuple
 from pathlib import Path
 
 from emmy import config
+from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag
 
 logger = logging.getLogger(__name__)
 
@@ -150,18 +150,6 @@ def register_run_command(subparsers):
             "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
         ),
     )
-    parser.add_argument(
-        "--record-shape",
-        default=None,
-        metavar="JSON",
-        help=(
-            "Declarative identity of the benched shape, spelled like a golden YAML entry minus knobs/latencies "
-            '(e.g. \'{"kernel": "matmul", "M": 512, "N": 512, "K": 512, "dtype": "fp16", "trans_b": false, '
-            '"dynamic": false}\'). Recorded rows whose stamped extents match carry it as their shape_spec — the '
-            "identity the goldens-format measurement freeze keeps. Passed by the golden-neighborhood collection "
-            "sweep; no effect with --no-record-nodes."
-        ),
-    )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
     parser.add_argument("--debug", action="store_true", help="Per-launch tensor dumps in the emmy backend.")
     parser.add_argument(
@@ -209,7 +197,7 @@ def handle_run(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    resolve_golden_arg(args)  # --golden NAME → --code <snippet>
+    resolve_golden_arg(args)
     if sum(x is not None for x in (args.input, args.code, args.ir)) > 1:
         logger.error("input / --code / --ir are mutually exclusive")
         sys.exit(1)
@@ -224,7 +212,7 @@ def handle_run(args):
         if not args.bench:
             logger.error("--ab requires --bench (the A/B rows render in the kernel table)")
             sys.exit(2)
-        if args.code is None and ir_path is None:
+        if args.code is None and ir_path is None and not hasattr(args, "_golden_graph"):
             logger.error("--ab requires a re-lowerable input: --code, --golden, or --ir (each config re-lowers a fresh graph)")
             sys.exit(2)
         try:
@@ -232,15 +220,6 @@ def handle_run(args):
         except ValueError as exc:
             logger.error("--ab: %s", exc)
             sys.exit(2)
-    if args.record_shape is not None:
-        from emmy.compiler.pipeline.search.bench_record import parse_record_shape  # noqa: PLC0415
-
-        try:
-            parse_record_shape(args.record_shape)  # fail fast, before any compile/bench spend
-        except ValueError as exc:
-            logger.error("%s", exc)
-            sys.exit(2)
-
     if not torch.cuda.is_available():
         logger.error("CUDA GPU required")
         sys.exit(1)
@@ -250,8 +229,12 @@ def handle_run(args):
         _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
+    if hasattr(args, "_golden_graph"):
+        _handle_run_ir(args, CudaBackend, CompilerDump)
+        return
+
     if args.input is None and args.code is None:
-        logger.error("Either a model ID / .json input, --code, or --ir is required")
+        logger.error("Either a model ID / .json input, --code, --golden, or --ir is required")
         sys.exit(1)
 
     # Model ID or --code: trace to a frontend graph + keep the runnable module
@@ -426,7 +409,7 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, parse_record_shape, record_bench_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -440,11 +423,8 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
     if not leaves:
         return
-    # Re-parse (validated at arg-check time): the declarative identity the sweep passes,
-    # attached per matching leaf inside record_bench_leaves.
-    shape = parse_record_shape(args.record_shape) if getattr(args, "record_shape", None) else None
     db_path = resolve_tune_db()
-    n = record_bench_leaves(db_path, Context.probe(), leaves, shape=shape)
+    n = record_bench_leaves(db_path, Context.probe(), leaves)
     print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 
@@ -572,8 +552,7 @@ def _intensity_floor_flag(sample, total_us: float) -> str | None:
     bench (skipped finalize, silent failure), not a fast kernel (the 8.2 µs "2 PFLOP/s"
     2048³ golden row of the sixth sweep). Returns a flag string, or ``None`` when clean /
     ungateable (no shape, no FLOPs, unknown device peak)."""
-    # The CONFIG-side FLOP count (``GoldenConfig.flops()`` via ``Sample.from_golden`` — never an
-    # overestimate, dynamic axes already sized at their benched hint). Never reconstructed from
+    # Use a FLOP count only when the sample source can derive one without guessing. Never reconstruct it from
     # the ShapeKey: the join key excludes symbolic axes on the matmul side but includes them on
     # the reduce-tier/attention side, so the old hint-multiplier formula overcounted reduce-tier
     # ``.dynM`` replays 512× and flagged every one "impossible" at its correct recorded value.
@@ -623,85 +602,6 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
-def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
-    """Realized-vs-pinned gate for a golden / ``--ab`` row. A structurally invalid pin
-    yields an empty enumeration and the per-call-site fallback silently substitutes the
-    planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
-    while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
-    every pinned knob against the compiled graph's realized knobs: honored iff SOME
-    kernel carries a same-family key that satisfies the pin (``knob.pin_key_matches`` — a
-    bare ``TILE`` golden spelling matches the axis-stamped ``TILE@dd``) with an equal value (``knob.values_equal`` — registry-canonical, so
-    alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
-    "not applicable", never conflicts (``knob.is_off_value``). The any-kernel scan
-    tolerates a split main+finalize pair where a knob applies to one kernel only — the
-    accepted blind spot: a pin dropped on its target kernel that coincidentally matches
-    a sibling kernel's realized value passes undetected.
-
-    A REGISTERED family with no realized key on ANY kernel is ungateable, not a miss:
-    serialization drops ``op.knobs``, so on a reloaded ``--ir`` graph an absent stamp is
-    indistinguishable from a dropped pin (on a full compile the OFF fill keeps declared
-    knobs present, so a genuinely dropped pin still surfaces as ``(off)`` or a
-    conflicting value). An UNREGISTERED family with no realized key is a typo in the
-    pin and flags ``(unset)``. Returns a flag naming each dropped pin and what ran
-    instead, or ``None`` when clean / ungateable."""
-    from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
-
-    if not any(kernel_knobs):
-        return None
-    misses: list[str] = []
-    for name, want in pinned.items():
-        fam = family_of(name)
-        if fam == "PLACE":
-            # A realized cut leaves no knob stamp — the routed pieces are plain re-recognized
-            # kernels (the cut is visible as the ``__cut_`` workspace kernel, not a knob) — so
-            # a PLACE pin is ungateable here, never a miss.
-            continue
-        others: list[str] = []
-        saw_off = False
-        hit = False
-        for raw in kernel_knobs:
-            for key, got in raw.items():
-                if family_of(key) != fam:
-                    continue
-                if pin_key_matches(name, key) and values_equal(name, want, got):
-                    hit = True
-                elif is_off_value(fam, got):
-                    saw_off = True
-                else:
-                    spell = f"{key}={got}" if key != name else str(got)
-                    if spell not in others:
-                        others.append(spell)
-            if hit:
-                break
-        if hit:
-            continue
-        if not others and not saw_off and get(fam) is not None:
-            continue  # registered family, no stamp anywhere — ungateable (see docstring)
-        ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
-        misses.append(f"{name}={want} realized {ran}")
-    return f"unreproducible pin: {'; '.join(misses)}" if misses else None
-
-
-@contextlib.contextmanager
-def _pinned_knobs(knobs: dict):
-    """Pin ``EMMY_<KNOB>`` env vars for the duration of one compile, restoring
-    the prior environment on exit. A pinned knob collapses its fork to that value
-    (``Knob.narrow``), so ``backend.compile`` lowers exactly these knobs."""
-    saved: dict[str, str | None] = {}
-    try:
-        for name, value in knobs.items():
-            key = config.knob_var(name)
-            saved[key] = os.environ.get(key)
-            os.environ[key] = str(value)
-        yield
-    finally:
-        for key, prev in saved.items():
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
-
-
 def _ab_samples(specs, dynamic=None):
     """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` to pin
     (the ``EMMY_KNOBS`` grammar), ``.name`` the table label, ``.shape None`` —
@@ -717,12 +617,18 @@ def _ab_samples(specs, dynamic=None):
     return [SimpleNamespace(name=f"ab {raw}", knobs=parse_knob_spec(raw), shape=None, dynamic=dyn) for raw in specs]
 
 
-async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters, ref=None):
+def _sample_replay_knobs(sample) -> dict:
+    """All knob pins needed to reproduce a golden winner or explicit A/B row."""
+    return {**getattr(sample, "pins", {}), **sample.knobs}
+
+
+async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
     row beside the greedy pick. ``golden_configs`` are
-    :class:`~emmy.compiler.pipeline.search.data.Sample`s, whose ``knobs`` are
-    already the tunable-only set to pin (``S_*`` / ``H_*`` features are not knobs) —
+    :class:`~emmy.compiler.pipeline.search.data.Sample`s, whose ``pins`` hold the
+    input regime and whose ``knobs`` hold the tunable-only measured winner
+    (``S_*`` / ``H_*`` features are not knobs) —
     or the shapeless ``--ab`` pseudo-samples from :func:`_ab_samples` (same duck
     type). Each config re-traces a **fresh** graph from ``code`` — a frontend graph
     can't be re-compiled (the first lowering mutates it in place, so a reused graph
@@ -739,7 +645,7 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     CUDA context stays clean, and the next row's job respawns a fresh child.
 
     **A pin matching no offered row fails the row loudly, before any GPU time**: the
-    realized-vs-pinned check (:func:`_unreproducible_pin_flag`) runs right after the pinned
+    realized-vs-pinned check (:func:`unreproducible_pin_flag`) runs right after the pinned
     compile, and a miss marks the row ``pin_unmatched`` / NOT benched. Benching the fallback
     realization would measure the planner's own pick under the pin's name — the silent-degrade
     class that misled the hd256 flash sweep (a misspelled pin read as a form refusal).
@@ -759,19 +665,25 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
     for sample in golden_configs or []:
-        dyn = getattr(sample, "dynamic", None)
+        replay_knobs = _sample_replay_knobs(sample)
+        # String sources must be retraced at the recorded symbolic shape. An
+        # embedded stable program already carries its symbolic dimensions.
+        dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
         flags = []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
-            with _pinned_knobs(sample.knobs):
-                # Fresh graph; knobs baked into the kernel source here.
-                graph, _, _ = graph_from_code(code, dynamic_shapes=dynamic_shapes)
+            with pinned_knobs(replay_knobs):
+                # Fresh graph; lowering mutates it and bakes the pins into the kernel.
+                if isinstance(source, str):
+                    graph, _, _ = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                else:
+                    graph = source.copy()
                 g_compiled = backend.compile(graph)
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
+        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1037,7 +949,8 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
     ``--golden`` / ``--ab`` pinned row with its recorded reference latencies and integrity
-    flags. This is the golden-sweep workflow's parse target (it retires the ad-hoc stdout
+    flags. ``pinned_knobs`` is the exact input-regime-plus-winner map used for replay. This is
+    the golden-sweep workflow's parse target (it retires the ad-hoc stdout
     table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
     the confirm-twice rule diffs two of these files instead of two terminal scrollbacks.
 
@@ -1098,7 +1011,7 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
                 "kind": "golden" if sample.shape is not None else "ab",
                 "lane": _lane(sample.knobs),
                 "status": gb.status,
-                "pinned_knobs": {k: str(v) for k, v in sample.knobs.items()},
+                "pinned_knobs": {k: str(v) for k, v in _sample_replay_knobs(sample).items()},
                 "total_us": _total_us(gb.bench),
                 "kernels": _kernel_rows(gb.graph, gb.bench),
                 "flags": list(gb.flags),
@@ -1517,6 +1430,21 @@ def _passes_after_stage(stage: str) -> list[str]:
     return [p for p in CUDA_PASSES if p not in completed]
 
 
+def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list[str]]:
+    """The input label and pass list for an IR replay.
+
+    A persisted golden Loop target stores stable algebra, not the derived ``LoopOp.knobs`` from
+    the structural stamp. Replay it through the full pipeline so deploy evidence can see those
+    features. A direct ``--ir`` input keeps its declared-stage tail semantics.
+    """
+    if embedded_golden:
+        from emmy.compiler.pipeline import CUDA_PASSES  # noqa: PLC0415
+
+        return "golden Loop", CUDA_PASSES
+    stage = _detect_stage(graph)
+    return stage, _passes_after_stage(stage)
+
+
 async def bench_lowered_vs_torch(frontend, lowered, backend, *, seed, do_bench, warmup, iters, bench_backends, capture_graphs=True):
     """Run + (optionally) benchmark a lowered graph against its torch reference on
     shared random inputs. The common bench primitive behind ``run --ir`` and
@@ -1687,6 +1615,14 @@ async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, war
     return await _bench_interleaved_captured(cuda_module, cuda_args, cuda_kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns)
 
 
+def _pinned_samples_for_ir(args, embedded):
+    """Automatic verified pins plus explicit ``--ab`` pins for an embedded golden target."""
+    pinned = list(getattr(args, "golden_configs", None) or [])
+    if embedded is not None and (specs := getattr(args, "ab", None)):
+        pinned.extend(_ab_samples(specs, dynamic=getattr(args, "dynamic", None)))
+    return pinned
+
+
 def _handle_run_ir(args, CudaBackend, CompilerDump):
     """Run path: load JSON IR (any stage), finish lowering, execute, bench."""
     import json
@@ -1695,16 +1631,19 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline import Pipeline
 
-    path = Path(args.ir)
-    with open(path) as f:
-        data = json.load(f)
-    graph = Graph.from_dict(data)
+    embedded = getattr(args, "_golden_graph", None)
+    path = Path(args.ir) if embedded is None else None
+    if embedded is None:
+        with open(path) as f:
+            data = json.load(f)
+        graph = Graph.from_dict(data)
+    else:
+        graph = embedded.copy()
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --ir (the trace is already complete)")
         sys.exit(2)
 
-    stage = _detect_stage(graph)
-    tail = _passes_after_stage(stage)
+    stage, tail = _replay_stage_and_passes(graph, embedded_golden=embedded is not None)
     logger.info("Loaded %s IR; running tail passes: %s", stage, tail or "(none)")
 
     dump = CompilerDump.resolve(args.dump_dir)
@@ -1713,7 +1652,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
 
     # Snapshot the pre-lowering frontend graph so we can build a torch
     # reference (eager + torch.compile) and compare accuracy/latency vs torch —
-    # the same table the --code path produces, now for a dumped .torch.json.
+    # the same table the --code path produces for a debug Graph IR input.
     # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench.
     frontend = graph.copy() if torch_ref.is_runnable(graph) else None
 
@@ -1781,7 +1720,19 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]
-            if args.ab and tail:
+            pinned = _pinned_samples_for_ir(args, embedded)
+            if pinned and tail:
+                if greedy_fail:
+                    logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
+                ab_benches = await _bench_golden_variants(
+                    backend,
+                    embedded,
+                    pinned,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                )
+            elif args.ab and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; --ab rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
@@ -1841,7 +1792,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     out = []
     for sample in _ab_samples(specs):
         try:
-            with _pinned_knobs(sample.knobs):
+            with pinned_knobs(sample.knobs):
                 g = Graph.from_dict(_json.loads(Path(ir_path).read_text()))
                 if tail:
                     g = Pipeline.build(tail).run(g, db=db)
@@ -1849,7 +1800,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             logger.warning("[ab] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
+        flag = unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
         if flag:
             logger.error("[ab] %s: %s — the pinned config did not realize; fix the pin spelling (row kept unbenched)", sample.name, flag)
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))
@@ -2303,8 +2254,7 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
         torch_fns["Eager PyTorch"] = lambda: module(*args, **kwargs)
     if "tcompile" in backends:
         try:
-            # Persistent bench processes (the SIGKILL-able worker, ``tune
-            # --dataset golden``'s in-process loop) compile a fresh closure of
+            # Persistent/repeated bench workers compile a fresh closure of
             # the SAME ``torch_ref`` ``fn`` code object per row; dynamo's
             # recompile limit is keyed per code object, so after ~8 rows it
             # silently stops compiling and the tcompile column quietly measures

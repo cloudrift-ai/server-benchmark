@@ -3,6 +3,7 @@
 # Emmy's JSON. Publication requires build_volta_article_manifest.py --phase 2 --final.
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
+  revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate
 
 engine:
@@ -16,7 +17,6 @@ engine:
       image: "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
       extra_args: >-
         --dtype half
-        --revision dc4d348443bc740c68e2d77492492c11606384d5
         --language-model-only
         --attention-backend FLASH_ATTN_V100
         --mamba-cache-mode align

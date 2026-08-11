@@ -8,7 +8,7 @@ Layer-1 frontend ops.
 ### `torch.py` — FX → Graph IR
 
 `trace_module(module, args, kwargs=None) → Graph` runs
-`torch.export.export()` to get an FX graph, then walks each node and
+`torch.export.export()` under `torch.no_grad()` to get the inference FX graph, then walks each node and
 emits the matching frontend op (`LinearOp`, `MatmulOp`, `SdpaOp`,
 `ElementwiseOp`, `ReduceOp`, …). `trace_module_with_constants` returns
 the graph plus a `placeholder_name → attr_path` dict for resolving
@@ -18,6 +18,26 @@ Per-op handlers map aten names (`aten.add.Tensor`,
 `aten.linear.default`, …) to dialect op constructors; input shapes are
 pulled from the FX meta and fed into the op's `infer_output_shape` to
 stamp the output tensor.
+
+Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
+constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice chain
+rooted at a local `new_zeros` / `new_full` allocation additionally reassembles the updated base as a two-source
+`IndexMapOp`: the copied value supplies the written region and the previous base supplies the remainder. Rebinding
+the allocation's FX name versions sequential slice writes and later aliases built from that name; an empty slice write
+leaves that version unchanged. A write through an input/parameter, a dynamic or strided slice, a used `copy_` return,
+or a view created before the write still fails closed; those forms need general alias versioning rather than this local
+functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
+instead of becoming NaN through arithmetic selection.
+
+A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
+`fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
+slice/select chain rooted at a local value can also reassemble that base with the filled rectangle. Multidimensional
+roll, dynamic or strided views, input/parameter mutation, used mutation returns, and aliases created before the write
+fail closed.
+
+Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
+instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
@@ -77,6 +97,22 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   no seam for the `hidden * per_layer_input` multiply and would silently drop it
   (`tests/compiler/trace/test_huggingface.py`).
 
+  Rotary labels normally live on `self_attn.layer_type`. Laguna instead exposes only `self_attn.layer_idx`, so the
+  shared `trace_selected_layer` library path derives the label from `config.layer_types[layer_idx]`. The command and
+  architecture inventory providers both use that path, including hyper-connection input lanes and required attention
+  kwargs. When the label is one of the rotary module's own `layer_types`, the block receives its one `(cos, sin)`
+  tuple; models whose rotary keys are independent names (DeepSeek V4's `main` / `compress`) continue to receive the
+  complete mapping.
+
+  A static DeepSeek V4 layer receives the same materialized sliding causal mask as the model wrapper. HCA/CSA can
+  therefore extend it with the compressor's per-query `block_bias`; tracing with `attention_mask=None` would make that
+  bias dead. Any future SDPA form is stamped with the selected attention module's own `sliding_window`, including HCA
+  and CSA rather than only `sliding_attention`. At the canonical 512-token width, CSA's 128 compressed entries are all
+  selected by `index_topk=512`; the trace retains the installed compressor's KV computation and rebuilds the identical
+  causal bias after discarding the value-independent scorer/top-k/scatter tail. This specialization is required for a
+  CSA profile and additionally requires the compressor and indexer to enumerate entries at the same rate; a missing
+  specialization, a rate mismatch, or a width where top-k is selective fails closed.
+
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
   (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named
   `gate` (OLMoE/Qwen lineage) or `router` (gpt-oss) beside 3-D `gate_up_proj` / `down_proj` expert parameters).
@@ -99,18 +135,43 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   module (a plain dense MLP over the same normed `xn`) folds INTO `post_attn`'s returned `h`, so the combine
   stays `h + Σ w_e · expert_e(xn)` with no runner change; Qwen-MoE's GATED shared expert (`shared_expert_gate`)
   and Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+  `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
+  coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
+  input-side channel vector and the merged spelling would only add a concat the chunk split undoes.
+  A model's `routed_scaling_factor` multiplies only the routed expert result before that shared-expert addition.
+  Laguna's optional softplus `g_proj` attention gate is likewise retained in both dense and MoE post-attention
+  programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
+  The split reads an explicit gate layout when the Transformers module provides one and otherwise derives it from the
+  gate, query-projection, and head widths, covering older built-in Laguna modules without a model-name special case.
+  Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
+  DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
+  above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
   trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
   (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
   and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
-  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. Never the whole dict at
-  once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
+  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An EXL3 checkpoint takes the
+  same split at the trellis format's own shapes (`fmt == "exl3"`). Its explicit reference API may decode trunk
+  values, while serving passes `compress_trunk=True`: the twin parameters stay uninitialized placeholders and the
+  caller re-sources each coded linear from the checkpoint (`serving/gen_runner.py`). There is no automatic dense
+  serving fallback; an unsupported coded linear fails during birth-time spelling. Either
+  way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
+  reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
+  E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the
+  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. The store also carries
+  `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
+  `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
+  whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
   whole-dict eager/accuracy twin for models small enough to hold (fp8 and EXL3 checkpoints alike); on the way in
   it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
   round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
   the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).
+
+  Quantized architecture construction uses the same guarded remote-code rule as the ordinary model trace. It first
+  asks Transformers for its built-in config/model class and retries with `trust_remote_code=True` only when that call
+  raises the explicit trust-required `ValueError`; unrelated configuration failures propagate unchanged.
 
 - `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
   a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at
@@ -121,6 +182,13 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   operand may keep less, e.g. padding — it stays applied), which is what lets the lowering skip key blocks wholly
   outside the band and both reference backends (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
   `commands/compile.py` calls it after every model/layer `trace_module`.
+
+`torch.py` converts only FX nodes observable through the exported value output. FX's stock dead-code elimination
+deliberately retains every mutating ATen schema as impure, including mutations of local tensors whose values never
+escape the function. Reverse reachability removes those local branches; ATen schema aliases additionally retain a
+write through a view of a returned tensor. An unsupported operation on an observable path remains live and fails
+loudly, so the filter is not an operator-support fallback. Retaining a write does not itself functionalize storage:
+`copy_` and `fill_` handle the bounded local view forms above and separately reject aliases that cannot be versioned.
 
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —
@@ -141,10 +209,19 @@ shared with CausalLM traces.
 
 ## Entry points
 
+- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile`, `run`, and `tune`, so
+  adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
+- Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
+  `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, enumerates
+  every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden YAML. Each
+  target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
+  post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
+  file is loaded.
+  `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,
   `trace_module(build_layer_wrapper(block, …), (x,), dynamic_shapes={"x": {1: Dim("seq_len")}})`.
-- Inline expression: `graph_from_code("torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))")` (used by `emmy compile --code` and `emmy trace --code`).
+- Inline expression: `graph_from_code("torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))")` (used by every compiler CLI).
 - DiT block: `trace_dit_model("facebook/DiT-XL-2-256", 0)` (fixed FP16 block workload).
 
 ## Rule

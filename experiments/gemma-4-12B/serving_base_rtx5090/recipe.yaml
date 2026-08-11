@@ -1,0 +1,33 @@
+# Exact base-checkpoint serving evidence. The article-backed instruction-tuned A/B stays
+# in serving_rtx5090; this experiment verifies the separately requested base checkpoint.
+model:
+  huggingface: "google/gemma-4-12B"
+  revision: 023679ed352de9bb66cc873c9009ce3482585c08
+  smoke_test: completion
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    context_length: 16384
+    max_concurrent_requests: 1
+    # The supplied workstation retains about 941 MiB while idle; 0.96 requests 30.07 GiB
+    # after imports with only 29.91 GiB free, so 0.95 is the highest clean stock setting.
+    gpu_memory_utilization: 0.95
+    vllm:
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      extra_args: >-
+        --dtype float16
+        --generation-config vllm
+
+benchmark:
+  random_input_len: 256
+  random_output_len: 128
+  max_concurrency: 1
+  num_prompts: 4
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1

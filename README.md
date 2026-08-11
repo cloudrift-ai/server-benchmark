@@ -30,6 +30,15 @@ A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse i
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
+# Trace a dynamic model layer into an unmeasured working golden for remote tuning
+emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.yaml
+# Measure proposed rows, then spend the remaining per-kernel budget on MCTS
+emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
+# Capture one symbolic serving inventory with every release realization, then audit it on the pinned GPU
+emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
+  -o _tune/gemma/working.yaml
+emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \
+  --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
@@ -172,6 +181,20 @@ emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gp
 which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
 its run directories. A path that exists always wins, so an edited working copy is never overwritten.
 
+## Publish a serving image
+
+The serving recipe pins the canonical immutable image reference. Validate the local image, its provenance labels,
+and the registry collision before requesting publication approval; only then log in and perform the push:
+
+```bash
+emmy publish recipes/DeepSeek-V4-Flash-0731 --dry-run
+emmy publish recipes/DeepSeek-V4-Flash-0731 --source-image local-baked-image --yes
+```
+
+Published references use
+`cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>`; see the
+[prebuilt-serving-image architecture](docker/vllm-emmy-serve/ARCHITECTURE.md) for the release gates and labels.
+
 ## Serve (compiled embeddings via vLLM)
 
 ```bash
@@ -239,6 +262,11 @@ matrices:
 ## Virtual Machine Management
 
 ```bash
+# GPU-based allocation with an interrupt-safe ownership lease
+emmy vm create gpu --gpu "NVIDIA H200 141GB" --gpu-count 1 --exact-gpu-count \
+  --lease /tmp/emmy-vm.json --owner local-run --json
+emmy vm delete lease /tmp/emmy-vm.json --owner local-run
+
 # GCP
 emmy vm create gcp --instance my-vm --zone us-central1-a --machine-type a2-highgpu-1g
 emmy vm delete gcp --instance my-vm --zone us-central1-a
@@ -246,6 +274,14 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 # CloudRift
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
+```
+
+## Agent Skills
+
+```bash
+emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
+emmy agent tools # the exact model tool definitions as JSON
 ```
 
 ## Development
@@ -270,16 +306,20 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 
 ## Project Structure
 
+- [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
+  (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
   - [emmy.py](emmy/emmy.py) — CLI entrypoint
   - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration
   - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
+  - [agent/](emmy/agent/) — tracked-skill runner and bounded model tools
+    (see [ARCHITECTURE.md](emmy/agent/ARCHITECTURE.md))
   - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
   - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
     - [deploy/](emmy/commands/deploy/) — `deploy local`, `deploy ssh`, `deploy cloud` commands
     - [bench/](emmy/commands/bench/) — `bench` command
-    - [vm/](emmy/commands/vm/) — `vm create/delete` commands (GCP, CloudRift)
+    - [vm/](emmy/commands/vm/) — `vm create/delete/audit` commands (GCP, CloudRift, owned leases)
     - [teardown.py](emmy/commands/teardown.py) — `teardown` command
     - [pull.py](emmy/commands/pull.py) — `pull` command (download HF model)
     - [trace.py](emmy/commands/trace.py) — `trace` command (PyTorch → Graph IR)
@@ -303,7 +343,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
-  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned CloudRift 1Cat-vLLM runtime for Volta Qwen3.5)
+  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs
 - [kernels/](kernels/) — Standalone CUDA kernel sources

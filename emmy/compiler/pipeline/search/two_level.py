@@ -133,6 +133,11 @@ class OpResult:
     op_key: str
     best_us: float | None
     multiplicity: int = 1
+    # Fastest directly observed terminal from this invocation. Kept separate
+    # from ``best_us`` because that aggregate can come from older DB evidence.
+    searched_knobs: dict[str, str] | None = None
+    searched_us: float | None = None
+    searched_cuda_ops: int | None = None
 
 
 @dataclass
@@ -145,6 +150,21 @@ class InnerReward:
     # Online-prior end-of-run sanity block(s) — printed by the command after
     # the progress bar closes.
     prior_summaries: list[str] = field(default_factory=list)
+
+    def searched_winner(self) -> tuple[dict[str, str], float] | None:
+        """The actual searched winner when it maps to exactly one CUDA kernel.
+
+        A target can contain repeated/heterogeneous post-fusion kernels, and one
+        post-fusion kernel can lower to several CudaOps. In either case there is
+        no single golden-format knob row whose latency represents the target, so
+        callers must omit a winner annotation instead of inventing one.
+        """
+        if len(self.per_op) != 1:
+            return None
+        op = self.per_op[0]
+        if op.multiplicity != 1 or op.searched_cuda_ops != 1 or op.searched_knobs is None or op.searched_us is None:
+            return None
+        return dict(op.searched_knobs), op.searched_us
 
 
 @dataclass
@@ -187,7 +207,21 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
 
 
 async def _inner_reward_async(
-    fused_graph, *, ctx, db, pool, patience, ucb_c, explore_eps, seed, progress, prior, run_id: str = ""
+    fused_graph,
+    *,
+    ctx,
+    db,
+    pool,
+    patience,
+    ucb_c,
+    explore_eps,
+    seed,
+    progress,
+    prior,
+    run_id: str = "",
+    max_candidates: int | None = None,
+    backend_slots=None,
+    close_backends: bool = True,
 ) -> InnerReward:
     """Tune every post-fusion kernel of ``fused_graph`` in its own single-node slice
     and return ``Σ best-per-op time`` — the outer terminal reward.
@@ -216,7 +250,12 @@ async def _inner_reward_async(
     or ``None``) drives the CLI progress bar: one op leaf ticked per *unique* kernel,
     the live tail updated per benched variant. Leaves are deduped by ``Op.cache_key``
     before iteration; multiplicity is preserved so ``total_us`` weights each unique
-    kernel's best by its node count (order-stable, identical to per-node iteration)."""
+    kernel's best by its node count (order-stable, identical to per-node iteration).
+
+    ``max_candidates`` caps live measurements per kernel; cached observations do
+    not consume it. ``backend_slots`` and ``close_backends=False`` let several
+    independent working-file targets share one command-owned device queue.
+    """
     from collections import OrderedDict  # noqa: PLC0415
 
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
@@ -261,9 +300,10 @@ async def _inner_reward_async(
 
     # Slot queue: each coroutine pops a device-pinned backend, benches its op's
     # whole inner search on it, returns it. ``len(pool)`` benches run at once.
-    slots: asyncio.Queue = asyncio.Queue()
-    for b in pool:
-        slots.put_nowait(b)
+    slots: asyncio.Queue = backend_slots if backend_slots is not None else asyncio.Queue()
+    if backend_slots is None:
+        for b in pool:
+            slots.put_nowait(b)
     results: dict[int, OpResult] = {}
 
     async def tune_op(op_idx: int, key: str, nid: str, op, count: int) -> None:
@@ -287,6 +327,7 @@ async def _inner_reward_async(
                 ucb_c=ucb_c,
                 explore_eps=explore_eps,
                 seed=seed + op_idx,
+                max_measurements=max_candidates,
                 prior_model=prior,
                 base_knobs=base_knobs,
             )
@@ -307,6 +348,7 @@ async def _inner_reward_async(
             # main + combine both count). Record that total under the LoopOp
             # key so ``best_per_op_time`` reads the true per-op cost.
             best_total = 1.0 / inner.tree.best_reward if inner.tree.best_reward > 0 else None
+            searched = inner.best_realized()
             if best_total is not None:
                 # captured=True: the sweep benches under graph capture by default, so
                 # this Σ-best bookkeeping row derives from captured measurements (a
@@ -337,7 +379,22 @@ async def _inner_reward_async(
                 inner._collect_node_records(context_key=ctx_key, op_sig=op_sig, gpu=gpu, run_id=run_id, o3_context_key=o3_ctx_key)
             )
             best = db.best_per_op_time(ctx_key, key, backend=backend_name)
-            results[op_idx] = OpResult(name=name, op_key=key, best_us=best, multiplicity=count)
+            searched_knobs = searched_us = searched_cuda_ops = None
+            if searched is not None:
+                from emmy.compiler.pipeline.knob import stamp_schedule_families  # noqa: PLC0415
+
+                searched_knobs = stamp_schedule_families(searched[0])
+                searched_us = searched[1]
+                searched_cuda_ops = searched[2]
+            results[op_idx] = OpResult(
+                name=name,
+                op_key=key,
+                best_us=best,
+                multiplicity=count,
+                searched_knobs=searched_knobs,
+                searched_us=searched_us,
+                searched_cuda_ops=searched_cuda_ops,
+            )
             if progress is not None:
                 progress.op_done(name, slot=op_idx)
         finally:
@@ -351,10 +408,11 @@ async def _inner_reward_async(
         # between terminals). Backend objects persist — their workers respawn lazily
         # on the next terminal's first ``benchmark_async`` (same loop, since the whole
         # outer drive runs under one ``asyncio.run`` in ``handle_tune``).
-        for b in pool:
-            aclose = getattr(b, "aclose_async_worker", None)
-            if aclose is not None:
-                await aclose()
+        if close_backends:
+            for b in pool:
+                aclose = getattr(b, "aclose_async_worker", None)
+                if aclose is not None:
+                    await aclose()
 
     # Accumulate in ``op_idx`` order so the reward / ``per_op`` order is
     # execution-order-independent (the float sum is order-stable, matching serial).
@@ -386,6 +444,11 @@ async def run_two_level_tune(
     progress=None,
     prior_seed: int = 0,
     run_id: str | None = None,
+    max_candidates: int | None = None,
+    prior=None,
+    manage_prior: bool = True,
+    backend_slots=None,
+    close_backends: bool = True,
 ) -> TwoLevelResult:
     """Drive the outer structural search, scoring each terminal by
     :func:`_inner_reward_async`, then greedy-assemble the DB-best kernels and bench
@@ -393,7 +456,9 @@ async def run_two_level_tune(
 
     ``backends`` (a list of device-pinned :class:`CudaBackend`s) fans the inner
     per-kernel search out across GPUs; the default single ``backend`` is the
-    one-slot serial pool.
+    one-slot serial pool. A caller driving several independent targets can provide
+    one shared ``prior`` and ``backend_slots`` queue, set ``manage_prior=False`` /
+    ``close_backends=False``, and own their final checkpoint and worker teardown.
 
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
@@ -418,13 +483,14 @@ async def run_two_level_tune(
     # fallback, so the first op's inner search is heuristic-guided, not uniform.
     # Training (add_rows / maybe_refit / checkpoint) delegates to the online half
     # (lazy import keeps catboost off non-tune callers).
-    from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
+    if prior is None:
+        from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
-    prior = load_prior(seed=prior_seed)
+        prior = load_prior(seed=prior_seed)
     outer = TuningSearch(patience=patience, ucb_c=ucb_c, prior_model=prior, base_knobs=ctx.features())
     # The outer drives only the graph-changing passes (through the
     # pre-partition tile head) — no dump on this Run; the winning config's
-    # full stage artifacts (incl. per-kernel ``.torch.json`` reproducers) come
+    # full stage artifacts and in-memory frontend provenance slices come
     # from the final assembled CUDA_PASSES run below.
     outer_run = Run(pipeline=outer_pipeline(), ctx=ctx, search=outer, db=db)
 
@@ -447,6 +513,9 @@ async def run_two_level_tune(
             progress=progress,
             prior=prior,
             run_id=run_id,
+            max_candidates=max_candidates,
+            backend_slots=backend_slots,
+            close_backends=close_backends,
         )
         stats = PerfStats(median=reward.total_us, min=reward.total_us, max=reward.total_us, mean=reward.total_us, variance=0.0, n_samples=0)
         outer.observe(token, stats, "ok" if reward.ok else "bench_fail")
@@ -462,12 +531,13 @@ async def run_two_level_tune(
             best_fused, best_reward = fused.graph, reward
 
     # One global end-of-run sanity block (the prior spans every kernel now).
-    if prior.fitted or prior.trajectory:
+    if manage_prior and (prior.fitted or prior.trajectory):
         prior_summaries.append(prior.summary("global"))
     # Force a final fit so even a small tune that never crossed a refit tier ends
     # with a usable model, then persist (dataset accumulates across runs).
-    prior.maybe_refit(force=True)
-    prior.checkpoint()
+    if manage_prior:
+        prior.maybe_refit(force=True)
+        prior.checkpoint()
 
     assembled: Graph | None = None
     if best_fused is not None:

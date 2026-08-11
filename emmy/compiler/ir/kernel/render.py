@@ -14,7 +14,7 @@ from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, CpAsyncCopy, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
 from emmy.compiler.ir.stmt import RenderCtx, render_body
-from emmy.compiler.ir.stmt.leaves import Write
+from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.tensor import Tensor
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
@@ -24,6 +24,17 @@ from emmy.compiler.tensor import Tensor
 # total Smem footprint exceeds this, ``render_kernelop`` switches to a
 # single dynamic pool with per-buffer offsets.
 STATIC_SMEM_CAP = 48 * 1024
+
+_BITCAST_PRELUDE = """\
+template <typename To, typename From>
+static __device__ __forceinline__ To emmy_bitcast(From value) {
+    static_assert(sizeof(To) == sizeof(From), "emmy_bitcast requires equal widths");
+    union { From from; To to; } bits;
+    bits.from = value;
+    return bits.to;
+}
+
+"""
 
 # TMA / mbarrier prelude. NVRTC doesn't ship ``<cuda.h>`` /
 # ``<cuda/ptx>`` / ``<cuda/barrier>``, so we can't ``#include`` the
@@ -994,6 +1005,7 @@ def render_kernelop(
     prelude = _TMA_PRELUDE if desc_names else ""
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
+    sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so
@@ -1013,7 +1025,8 @@ def render_kernelop(
         mma_sync_prelude += _F8_STAGED_PRELUDE
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
-    preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
+    preludes = f"{includes}{bitcast_prelude}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

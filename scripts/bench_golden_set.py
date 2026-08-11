@@ -16,14 +16,9 @@ Only names recorded for the live GPU are benched (``--golden`` resolution is car
 a filter that matches no card-local name lists which cards do carry it. Rows sort
 losers-first by the eager ratio.
 
-Vs ``bench_model_kernels.py``: that script benches the ``.torch.json`` reproducers of a model
-dump, so its numbers depend on re-tracing each torch slice and re-resolving every fork from the
-local DB/prior — the right tool for auditing what a *dump's* kernels deploy as, but on a fresh
-box the whole-model trace is fp32 (no fp16 mma tier) and a cold prior can bury the real picks.
-This script benches the *golden dataset* instead: each case is a curated, card-scoped shape with
+Each case comes from the *golden dataset*: a curated, card-scoped program with
 a recorded ground-truth config benched live beside the greedy pick, so the table is stable while
-the prior/deploy path is in flux. Use it when the question is "how do this model's kernels
-compare against torch on this card", not "what did this dump compile to".
+the prior/deploy path is in flux.
 """
 
 from __future__ import annotations
@@ -38,7 +33,7 @@ from pathlib import Path
 # repo-root on sys.path so this script runs without ``pip install -e``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: E402
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: E402
 
 _BIN = Path(sys.executable).parent
 _ROW = re.compile(r"^(Eager PyTorch|torch\.compile|Emmy)\s+([\d.]+)")
@@ -74,9 +69,9 @@ def main() -> None:
     import torch
 
     gpu = torch.cuda.get_device_name(0)
-    names = sorted({c.name for c in GOLDEN_CONFIGS if args.filter in c.name and c.gpu_name == gpu})
+    names = sorted({c.name for c in GOLDEN_RECORDS if args.filter in c.name and c.gpu_name == gpu})
     if not names:
-        cards = sorted({c.gpu_name for c in GOLDEN_CONFIGS if args.filter in c.name})
+        cards = sorted({c.gpu_name for c in GOLDEN_RECORDS if args.filter in c.name})
         print(f"no golden names match {args.filter!r} on {gpu!r} (matching cards: {cards})", file=sys.stderr)
         sys.exit(1)
 

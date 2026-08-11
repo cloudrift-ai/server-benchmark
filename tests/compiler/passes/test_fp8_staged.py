@@ -27,8 +27,7 @@ from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
 from emmy.compiler.pipeline.search.space import stage_moves
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -196,13 +195,13 @@ def test_byte_slab_pad_keeps_the_drain_conflict_free():
 
 
 def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     from .test_fp8_operand_binding import _fp8_linear_graph
 
     pins = {"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
-    with _pinned_knobs(pins):
+    with pinned_knobs(pins):
         compiled = backend.compile(_fp8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync" in s), "")
@@ -245,12 +244,12 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
     scalar convert gather — and split-K composed with the staged byte slab. Each staged form is
     bit-identical to the gmem-direct kernel of the SAME reduce plan (split-K reassociates, so
     the serial kernel is not its baseline)."""
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.frontend.ir import MatmulOp
     from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(5)
@@ -269,7 +268,7 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
     backend = CudaBackend()
 
     def run(stage, red):
-        with _pinned_knobs({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": red, "STAGE": stage}):
+        with pinned_knobs({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": red, "STAGE": stage}):
             compiled = backend.compile(graph())
         srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
         src = next((s for s in srcs if "mma.sync" in s), "")
@@ -290,8 +289,8 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
 def test_k32_staged_bit_identical_to_gmem_direct_cuda():
     """Staged W8A8 (the k32 byte repack — raw bytes both slabs) is BIT-identical to the
     gmem-direct ``_b8`` gathers, and the contiguous-K drains ride the vector (u32) loaders."""
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     from .test_fp8_mma import _bare_f8_linear_graph
 
@@ -303,7 +302,7 @@ def test_k32_staged_bit_identical_to_gmem_direct_cuda():
 
     def run(stage_pin):
         pins = {"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
-        with _pinned_knobs(pins):
+        with pinned_knobs(pins):
             compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
         srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
         src = next((s for s in srcs if "m16n8k32" in s), "")

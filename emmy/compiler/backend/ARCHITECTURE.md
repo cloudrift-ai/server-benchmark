@@ -34,11 +34,10 @@ unsupported, so `run --ir` falls back to emmy-only benchmarking for non-frontend
 input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
-shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic-trace `<kname>.torch.json`
-reproducer gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
+shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
+gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 `commands/run.py::bench_lowered_vs_torch`, which sizes its random inputs by hint-resolving symbolic dims). Used to
-turn a dumped `<kname>.torch.json` reproducer into an accuracy + latency comparison vs torch — see `../provenance.py`
-and `commands/run.py:_handle_run_ir`.
+benchmark decoded golden programs and in-memory provenance slices against torch.
 
 ## Backend ABC (`base.py`)
 
@@ -110,6 +109,13 @@ on-disk format survives compiler changes; only runtime-contract changes bump `PL
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
 
+`plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
+It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while
+preserving their alias pattern and `source_parts` order. The stored `ExecutionPlan` template carries binding slots;
+every lookup returns a fresh plan whose `WeightSpec`s contain that graph instance's real paths. Unknown compiler-minted
+paths or unresolved slots fail closed, and only these instantiated plans may reach source loading or pack serialization.
+This is deliberately not a persistent cache: `pack.py` owns cross-process environment/model validity.
+
 **Indirect operands** (`LaunchSpec.indirect_args`, `(arg, table_arg, sel_arg, slot)` per marked input): the
 kernel takes `const T* const* <arg>__table, const int* <arg>__sel, int <arg>__slot` in place of the plain
 pointer and resolves `table[sel[slot]]` in a body preamble — the serving MoE fixed-slot dispatch, where the
@@ -123,7 +129,12 @@ fails the lowering loudly (descriptors bake the base address at encode). A plan 
 a plan and fall back to the full compile; plans without the field keep format 1 byte-compatibly.
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
-key + environment tags + provenance + program index) and `plan/<program>.json`. Cubins are **not** copied — plans
+key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by
+the *runner*, and "model" there must cover everything the compiled programs read off the CHECKPOINT — not just its
+architecture config. A compressed checkpoint is the case that makes the difference: two rungs of one conversion
+share an architecture config and differ only in the per-tensor rates, which set the coded extents, so the runner
+adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key.
+Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
 the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*
 disqualifier (format/environment/key mismatch, unparsable plan, evicted cubin) and the caller falls back to the

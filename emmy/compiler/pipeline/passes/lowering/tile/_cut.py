@@ -92,9 +92,9 @@ def _card_has_routing(gpu_name, cap) -> bool:
     if not gpu_name:
         return False
     try:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
 
-        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_CONFIGS)
+        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_RECORDS)
     except Exception:  # noqa: BLE001
         return False
 
@@ -117,16 +117,15 @@ def _routing_entry(ctx, knobs: dict, root=None):
     (-O1) compile never consults them; off-GPU / unseeded cards read an empty set.
 
     The consult key follows the FUSED-KIND CONVENTION ``greedy._fork_shape_key`` documents: a
-    computed-A cone's stamped histogram cannot fire ``kind="fused"`` (the statistic — when there
-    is one at all — lives in the nested A-cone sub-body; a stat-free cone like the geglu→down
-    edge has nothing to fire on), so a raw ``from_s_features`` key reads ``kind=""`` and misses
-    every ``fused``-keyed routing entry. The fork-side rebuild reads the offer's sync-STAGE
-    signal; here no offer exists yet, so the rebuild reads the TREE instead — a computed-A
-    contraction is structural (``_has_computed_a``). Found live: the gemma-4 geglu→down cut
-    entries never fired in-model, so every ``mlp_down`` deployed the fused computed-A form —
-    the m4096 chunk-prefill TTFT regression of the 2026-07-31 article-repro session."""
+    computed-A cone's stamped histogram cannot always fire ``kind="fused"``: a stat-free cone
+    like the geglu→down edge has no statistic or second reduce axis. The fork-side rebuild reads
+    the offer's sync-STAGE signal; here no offer exists yet, so the TREE supplies the structural
+    computed-A fact (``_has_computed_a``). The golden builder reads ``PLACE@a`` as the same fact,
+    keeping this a single-key lookup without letting the plain key recursively match a cut piece.
+    Found live: the Laguna activation→down entry measured correctly under a pin but could not
+    deploy from its golden."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
@@ -146,9 +145,7 @@ def _routing_entry(ctx, knobs: dict, root=None):
             key = replace(key, kind="fused", is_warp=True)
         cap = tuple(ctx.compute_capability)
         entries = [
-            g
-            for g in GOLDEN_CONFIGS
-            if g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap and key.joins(g.shape_key())
+            g for g in GOLDEN_RECORDS if g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap and key.joins(g.shape_key)
         ]
     except Exception:  # noqa: BLE001 — a routing consult failure must never break compile
         return None

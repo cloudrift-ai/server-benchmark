@@ -1,0 +1,34 @@
+# Native vLLM qualification of the corrected 2.00 bpw Laguna S 2.1 EXL3 checkpoint.
+model:
+  huggingface: "riftstack/Laguna-S-2.1-exl3"
+  revision: 45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    context_length: 128
+    max_concurrent_requests: 1
+    gpu_memory_utilization: 0.95
+    vllm:
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      extra_args: >-
+        --dtype float16
+        --generation-config vllm
+        --max-num-batched-tokens 128
+        --enforce-eager
+        --no-enable-prefix-caching
+      extra_env:
+        PYTORCH_ALLOC_CONF: "expandable_segments:True"
+
+benchmark:
+  random_input_len: 1
+  random_output_len: 8
+  max_concurrency: 1
+  num_prompts: 4
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1

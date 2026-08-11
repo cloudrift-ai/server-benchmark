@@ -1,6 +1,7 @@
 """Shared data types for VM providers."""
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 
 @dataclass
@@ -17,3 +18,13 @@ class VMConnectionInfo:
     def address(self) -> str:
         """SSH address string (user@host)."""
         return f"{self.username}@{self.host}" if self.username else self.host
+
+
+class AllocationObserver(Protocol):
+    """Receive durable VM allocation lifecycle events from the orchestrator."""
+
+    async def before_allocate(self, provider: str) -> None: ...
+
+    async def allocated(self, delete_info: tuple) -> None: ...
+
+    async def ready(self, connection: VMConnectionInfo) -> None: ...

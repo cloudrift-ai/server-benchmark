@@ -131,6 +131,7 @@ async def run_deploy(
         await write_file("docker-compose.yaml", compose_content)
     else:
         logger.info(f"Downloading model {model_name}...")
+        revision_arg = f" --revision {recipe.model.revision}" if recipe.model.revision else ""
         dl_cmd = (
             f"docker run --rm"
             f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
@@ -138,7 +139,7 @@ async def run_deploy(
             f" -v {model_dir}:{model_dir}"
             f" --entrypoint bash"
             f" {image}"
-            f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}'"
+            f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}{revision_arg}'"
         )
         async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
             rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
@@ -211,6 +212,14 @@ async def run_deploy(
                     f''' -d '{{"model":"{model_name}","input":"What is 2+2?"}}' '''
                 )
                 check = _check_embedding_response
+            elif recipe.model.smoke_test == "completion":
+                prompt = "2 + 2 ="
+                smoke_cmd = (
+                    f"curl -s http://localhost:{internal_port}/v1/completions"
+                    f" -H 'Content-Type: application/json'"
+                    f''' -d '{{"model":"{model_name}","prompt":"{prompt}","max_tokens":16,"temperature":0}}' '''
+                )
+                check = _check_completion_response
             else:
                 prompt = "What is 2+2? Answer with just the number."
                 smoke_cmd = (
@@ -258,6 +267,16 @@ async def run_deploy(
             f'      "input": "Hello"\n'
             f"    }}'"
         )
+    elif recipe.model.smoke_test == "completion":
+        logger.info(
+            f"  curl http://{host}:{external_port}/v1/completions \\\n"
+            f"    -H 'Content-Type: application/json' \\\n"
+            f"    -d '{{\n"
+            f'      "model": "{model_name}",\n'
+            f'      "prompt": "Hello",\n'
+            f'      "max_tokens": 64\n'
+            f"    }}'"
+        )
     else:
         logger.info(
             f"  curl http://{host}:{external_port}/v1/chat/completions \\\n"
@@ -281,6 +300,19 @@ def _check_chat_response(stdout: str) -> tuple[str, str]:
         body = json.loads(stdout)
         message = body["choices"][0]["message"]
         answer = message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return "retry", ""
+    if not answer:
+        return "retry", ""
+    if "4" in answer:
+        return "pass", ""
+    return "fail", f"model returned wrong answer: {answer!r}"
+
+
+def _check_completion_response(stdout: str) -> tuple[str, str]:
+    """Validate the base-model completion smoke response."""
+    try:
+        answer = json.loads(stdout)["choices"][0]["text"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
         return "retry", ""
     if not answer:

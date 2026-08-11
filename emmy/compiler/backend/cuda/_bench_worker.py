@@ -21,6 +21,7 @@ Protocol (length-prefixed pickle on stdin/stdout):
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None}``
   or ``{"ok": False, "error": str, "traceback": str}`` on exception.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
+- A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -95,6 +96,14 @@ async def _run_job(req: dict) -> dict:
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
     the compile at a given opt level (the cubin cache key folds it in)."""
+    if req.get("worker_warmup"):
+        import cupy as cp
+
+        cp.cuda.Device().use()
+        cp.cuda.runtime.free(0)
+        cp.cuda.runtime.deviceSynchronize()
+        return {"warmed": True}
+
     from emmy import config
 
     with config.nvcc_flags_override(req.get("nvcc_flags")):
@@ -149,7 +158,7 @@ async def _run_job(req: dict) -> dict:
 
             _, _, bundle = load_or_trace(types.SimpleNamespace(**payload))
             if bundle is None:
-                raise RuntimeError("trace_args produced no runnable module (--ir JSON path has none)")
+                raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
             if req.get("accuracy"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
@@ -221,7 +230,7 @@ def main() -> None:
     # A bench worker never dumps compiler artifacts — but a child-built ``CudaBackend()``
     # defaults its dump to ``CompilerDump.from_env()``, whose ``__post_init__`` rmtrees the
     # directory. With ``EMMY_DUMP_DIR`` inherited from the parent that would wipe the
-    # parent's dump (the ``.torch.json`` reproducers a ``tune --bench`` is about to read).
+    # parent's dump while ``tune --bench`` consumes its in-memory frontend slices.
     from emmy import config
 
     os.environ.pop(config.DUMP_DIR, None)

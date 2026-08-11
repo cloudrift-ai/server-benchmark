@@ -74,7 +74,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden configs** | per-GPU YAML files under `search/goldens/`, checked into the repo | recorded by hand from `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1); `emmy fit` trains the offline prior on them; `tune --dataset golden`; `emmy eval golden` |
+| **Golden configs** | per-GPU YAML files under `search/goldens/`, checked into the repo | promoted by hand from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1); `emmy fit` trains the offline prior on them; `emmy eval golden` |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — one row per benched kernel, at whatever flags the sweep ran | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
@@ -142,7 +142,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** regime, `-Xcicc -O1` the fast-compiling one a tune sweep uses — plus whether fast math is on. |
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
-| **golden config** | A hand-recorded known-good config for a benchmark shape, used as ground truth and for A/B checks. |
+| **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
 | **`Op.cache_key`** | A name-invariant digest of an op's body + knobs — the identity measurements are stored under. A `TileOp`'s structure digests as the α-invariant term hash (`Fold.structural_key`), never the lowered nest. |
 
 ## Module map
@@ -160,9 +160,9 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
 | `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
-| `search/data/` | The harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). |
-| `search/golden.py` | `GoldenConfig` and its subclasses (see Part 7, "Golden configs and the A/B integrity gates"). |
-| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and the CI gate (see Part 7). |
+| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
+| `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
+| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-realization pin-only signal). Backs the file-scoped `emmy eval golden` release audit (see Part 7). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -182,6 +182,8 @@ Multi-node patterns only fire when each intermediate node has exactly one consum
 rewriter exits after the first successful rewrite per iteration, so overlap is just candidate enumeration.
 `Match.nodes` maps each pattern entry's name to the matched `Node`. `Match.consumed` and `Match.output` are
 overridable by the rewrite function, to control which nodes the splicer removes and which node's edges get rewired.
+Matches retain the watched node objects themselves, so `Match.is_alive()` rejects removal followed by a different
+node at the same graph id even when the Python allocator would otherwise recycle an integer object address.
 
 ### Writing a rule
 
@@ -493,6 +495,10 @@ still picked up.
 machine-local caches written by local tunes, so a fresh machine — every rented box — used to deploy on pure model
 extrapolation, with misdeploys up to 29× (HISTORY.md: "The saturated-score plateau").
 
+The repository index is materialized on first evidence access, not when the module is imported. Commands that never
+consult the golden tier therefore do not parse the corpus; when it is needed, the loader uses PyYAML's safe C loader
+when available and falls back to the safe Python loader.
+
 At a fork, `greedy_decide` joins the op by `ShapeKey` against the goldens recorded for the GPU being compiled for, and
 picks the offered candidate that agrees with the fastest recorded entry. Every **kind** of golden takes part — an
 entry's kind is which standard shape it describes: matmul, attention (flash), rms_norm, softmax, reduce, pointwise,
@@ -521,8 +527,9 @@ The join has some deliberately non-obvious mechanics:
   because before the split, this fork carries only one reduce axis, with the rsqrt still buried inside the sub-body
   that produces A, so the stamped counts read it as a plain scalar matmul. It is rebuilt under the fused key, which is
   what lets the norm→qkv kernels find their goldens on a cold deploy. A fused golden is required by the schema to
-  record a `d*/sync` STAGE, so its config can never be used for a plain matmul that loads A from global memory and
-  happens to have the same extents.
+  record a `d*/sync` STAGE. `GoldenRecord.shape_key` replays that stored schedule prefix through the same fork-key
+  classifier, so a Loop fallback persists the fused join without serializing a derived ShapeKey; its config can never
+  be used for a plain matmul that loads A from global memory and happens to have the same extents.
 - A golden key that names its axes (a static attention golden's `TILE@dd` plus `TILE@pj`) is all-or-nothing: both must
   match. A golden key written with no axis, for a kind that has several, behaves like a hand pin instead — one plan,
   satisfied by ANY option of the same knob family. That is how a dynamic attention golden's single unsuffixed `TILE`
@@ -554,7 +561,7 @@ fallthrough"). Two consequences when recording a fused row:
   — so record one or the other. The schema check accepts a combination that the offered options then reject.
 - A row must be verified to **deploy**, not merely to reproduce under a hand-forced pin. `--ab` reproduces configs the
   compiler would never offer on its own, so a row that only works when pinned still looks healthy in the isolated
-  golden-reproduction check. Only the in-model audit (`eval golden --in-model`) catches it.
+  golden-reproduction check. Only the serving-matrix audit catches it.
 
 **The golden tier needs no prior.** A resolve with no prior at all — `load_prior` failed (a corrupt online checkpoint
 or an erroring offline artifact; see the hierarchy section above), or `Pipeline.run` fell back to taking each rule's
@@ -683,8 +690,8 @@ sorted tuning-knob rendering): the model argmin (`Prior.pick` and the greedy fal
 measured-evidence argmins, and the golden realization pick. An order-broken tie is a per-boot coin flip — leaf order
 can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image with a bimodal boot-time cubin set
 (HISTORY.md: "The bimodal boot-time kernel set").
-Pinned by `tests/compiler/pipeline/search/test_deploy_pick_determinism.py` (tier-level permutation invariance plus a
-cross-subprocess selected-kernel-set pin, the resolution counterpart of `test_source_determinism.py`).
+Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py` at every evidence tier; rendered
+bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
 **Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
 `_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only
@@ -798,13 +805,19 @@ trajectory; re-running lets it reach and bench the genuinely-new variants the im
 rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that re-exploration and was removed —
 HISTORY.md: "Retired designs".)
 
-### Per-kernel GPU parallelism (`--gpus N` / `--devices 0,1,2`)
+### Per-kernel and working-target GPU parallelism (`--gpus N` / `--devices 0,1,2`)
 
 Because the inner search tunes each unique kernel independently, the per-op loop fans out across GPUs. The whole tuner
 is async-only: `run_two_level_tune` `await`s `_inner_reward_async` per outer terminal, which runs one coroutine per
 unique kernel over an `asyncio.Queue` of `len(pool)` device-pinned `CudaBackend`s — each pops a backend, drives its
 op's whole inner search via `Pipeline.tune_async`, then returns the backend. So `len(pool)` benches run at once, one
 per GPU.
+
+A `--golden-file` sweep adds a second safe unit of parallelism: independent targets are driven concurrently over the
+same backend queue after their process-global proposal pins have been measured in file order. All target tasks share
+one DB and one prior instance on the same event-loop thread; they do not create independent checkpoints. This keeps
+multiple GPUs busy even when every traced reproducer contains only one post-fusion kernel. A requested dump root gets
+one indexed target subdirectory so concurrent compiler artifacts never overwrite each other.
 
 - **True single-thread asyncio**: every Python statement (lowering, DB writes, prior `add_rows` / `maybe_refit` /
   `checkpoint`) runs on the one event-loop thread and yields only at the bench `await`, so the shared `db` / `prior`
@@ -817,6 +830,37 @@ per GPU.
 - A backend pins its async worker to a physical GPU via the child spawn env (`CUDA_VISIBLE_DEVICES`, plus a per-device
   `EMMY_GPU_LOCK` suffix), never mutating the parent `os.environ`.
 - Parallelism is bounded by the unique-kernel count; devices must be homogeneous.
+- Multi-GPU tune initializes isolated workers two at a time before measuring candidates. CUDA-context startup uses a
+  separate readiness budget, so host import pressure cannot become a false 16-second candidate failure on larger pools.
+
+### Working-golden proposals and measured-candidate budgets
+
+`search/working_golden.py` owns the mutable working-file lifecycle: fold-aware trace inventory generation, safe
+sidecar writes, target/candidate reconstruction, exact proposal measurement, and atomic ranking/winner persistence.
+`search/pins.py` owns the scoped knob environment and realized-pin validation shared with `run`; neither reusable
+service belongs to the CLI layer.
+
+For `tune --golden-file`, each realization specializes its parent symbolic program with its `bindings` and applies
+its registered input `pins` before enumeration. Every realization with an explicit `knobs` mapping (including `{}`
+for a forkless anchor) is compiled with scoped authoritative pins and measured through
+the normal isolated benchmark and DB persistence path before MCTS continues in the same input pin regime. A
+realized-vs-requested check marks an
+unoffered proposal `pin_unmatched` instead of attributing the planner's fallback to the proposed row. Successful seed
+rows feed the shared prior immediately, so the following MCTS can use their evidence. Ranking feedback is flushed to
+the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
+only when their union is conflict-free; otherwise the ranking is explicitly ambiguous.
+
+`--max-candidates N` is a hard per-kernel budget. Each supplied proposal reserves one slot even if its measurement is
+already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals consistently. MCTS receives the remaining
+slots and counts only terminals that reached a live backend; cached replay observations update the tree without
+spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
+and the final tune winner is annotated or appended as another proposal only when one directly searched observation
+provides both its knob row and cost. A later greedy deploy replay can select different golden/DB evidence and is never
+paired with that search reward. These `-O1` ranking numbers never populate
+`emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
+
+Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
+proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.
 
 ### Search dynamics (the MCTS itself)
 
@@ -901,8 +945,8 @@ resumes from the cached state. On default verbosity (and a tty) a `TuneProgress`
 (completed/total tuned op leaves plus a `<kernel> <current us> (best <best us>) <knobs>` tail), threaded as an optional
 `progress=` through `run_two_level_tune` (duck-typed, so the search package keeps no `commands/` dependency); `-v`
 shows the per-`[tune]` INFO lines instead, `-q` is quiet. `--bench` re-benches the tuned winner at -O3 (deployable,
-not the -O1 ranking pass): the full model against the real torch module and each kernel via its `.torch.json`
-provenance reproducer, vs eager / `torch.compile` / Emmy.
+not the -O1 ranking pass): the full model against the real torch module and each kernel via its in-memory frontend
+provenance slice, vs eager / `torch.compile` / Emmy.
 
 ## Part 6: Persistence and keys
 
@@ -969,45 +1013,29 @@ depend on which DB is merged into which — a stale leaf snapshot never comes ba
 rows share a key — so node data measured on a rented GPU (with no local CUDA) folds into one canonical DB without
 different GPUs' rows colliding.
 
-It is driven by `scripts/merge_node_db.py` and the `collect-node-data` skill. On the remote machine,
-`remote_node_collect.py` runs `scripts/golden_neighbor_bench.py`: a sweep over each golden kind's set of candidates,
-bounded by a wall-clock budget, benching each candidate twice under a pin — once at `-O1` and once at `-O3`
-(`run --bench --ab`). The candidate set is divided by distance from the recorded goldens (this GPU's own
-neighborhood; the areas around other GPUs' goldens that this GPU can also produce; and a capped uniform sample of
-everything else), and each division gets a configurable share of the budget. Every batch is drawn in proportion to
-what is left in its division, so a run cut short by the time limit is still close to a uniform sample of it, and runs
-resume from a ledger the orchestrator pushes and fetches. This budgeted sweep replaced an earlier collection mode
-driven by the search itself, whose sampling followed whatever prior was in place at the time
-(HISTORY.md: "Retired designs"); `tune --explore-eps` survives for interactive tuning.
+Cross-machine DBs are combined by `scripts/merge_node_db.py`. The retired class-specific golden-neighborhood and
+remote orchestration scripts are no longer part of persistence; measurement collection uses the ordinary tune/run
+paths and stable DB operation identity.
 
 **Measurement freeze** (`data/freeze.py`, driven by `scripts/freeze_node_store.py`). The node DB is a live store —
-tunes and merges keep writing into it — so a model fit read straight from it is not reproducible. A *freeze* (v2) is a
+tunes and merges keep writing into it — so a model fit read straight from it is not reproducible. A *freeze* (v3) is a
 snapshot of it, written into a local DIRECTORY laid out like `goldens/`: one YAML file per `(gpu, compute_cap)`
 (a `gpu_name`/`compute_cap` header plus a `configs` list), beside a `manifest.json` holding the provenance header and
 the content digests.
 
-- **Each row is written in the golden files' format**: the declarative `shape_spec` captured when the row was
-  collected (`kernel` + shape fields + `dynamic` — see the bench-to-node recorder below), the TUNABLE knobs verbatim,
-  and a measurement block (`value_us`, `opt` — which nvcc cicc optimization level it was measured at — `status`,
-  `variance`/`n_samples`, `run_id`/`measured_at`).
-- **Nothing in feature form is stored.** The loader rebuilds `H_*` faithfully for the GPU from the gpu registry
-  (`Context.from_target`, with `H_opt` overridden from the row's `opt`), and rebuilds the full `S_*` counts by
-  re-tracing the kind's little PyTorch snippet once per distinct shape (`data/sample.py::traced_s_features` — the
-  kind-generic sibling of `compiled_s_features`, which picks the traced op whose key matches the golden's `ShapeKey`;
-  it falls back to computing them arithmetically, with a warning). So a featurizer change that only alters encodings
-  never invalidates a freeze, and there is deliberately no `feat_ver` check at load time — the stored `feat_ver` /
-  `knob_ver` / `encoding_ver` are there as provenance only.
-- **Only leaves that carry a declared shape identity are frozen**, as filtered by `freeze_reason`: a `shape_spec` must
-  be present (older tune rows without one stay in the DB but never freeze), `feat_ver` must have been current when the
-  row was written, and the row must pass the two physical-plausibility checks the DB shares
+- **Each row records DB `op_sig`, its measured `S_*` structural row, tunable knobs, and measurement metadata.** This
+  is a regenerable measurement snapshot, not the stable golden format. Device `H_*` facts are derived faithfully from
+  the GPU header and `opt` at load time.
+- **Only current-vocabulary leaves freeze**, as filtered by `freeze_reason`: `feat_ver` must have been current when
+  the row was written, and the row must pass the two physical-plausibility checks the DB shares
   (`implausible_value_reason` / `impossible_kernel_reason`). `bench_fail` leaves are kept, as negative examples.
   Branch rows are never frozen and no tree structure is stored — the partly-decided rows are rebuilt at fit time under
   whatever fork structure is current then.
 - **Freezing the same DB twice yields the same digests.** Every row serializes to one canonical JSON line, rows sort
   by that line, the per-file sha256 covers exactly those lines (content-level — immune to YAML style), the manifest's
   top sha256 folds the sorted per-file digests, and `created_at` enters none of them.
-- A loaded row's `op_sig` is the canonical JSON of its `shape_spec` — a stable key for grouping rows by op, so the
-  `-O1` and `-O3` rows of one shape share it.
+- A loaded row retains the DB's canonical `op_sig`, so the `-O1` and `-O3` measurements of one operation group
+  together without a second shape schema.
 - **Loading is strict.** `load_freeze` hard-errors on a missing/foreign/corrupt manifest, a `freeze_ver` mismatch, a
   listed file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback.
   `load_node_rows` sniffs a path (directory = freeze, sqlite file = DB, a v1 JSONL freeze is refused with a re-freeze
@@ -1051,16 +1079,6 @@ store").
   recorded as ONE leaf for the whole variant. If every kernel in a graph loses its fork point, the recorder warns
   loudly rather than silently recording nothing. Rows that were flagged (a pin that did not match, a wrong answer, an
   implausible arithmetic intensity) and anything from the `--ir` path are never recorded.
-- The caller may declare what shape was benched, via `run --bench --record-shape '<json>'` — a golden YAML entry with
-  its knobs and latencies removed, validated by instantiating the golden kind's class; the collection sweep passes the
-  spec for the group it is benching. It is stored as the node row's `shape_spec`, on exactly those leaves whose
-  stamped extents key to the spec's `ShapeKey` (`ShapeKey.joins`, which tolerates the sweep kinds' `is_warp` being
-  derived from dtypes that the snippet does not fix, but is strict about telling two contractions apart). So the
-  secondary ops of a multi-op snippet — a `linear_norm`'s producer matmul, for instance — are left without a declared
-  shape. A spec that matches no leaf at all warns loudly.
-- Carrying a `shape_spec` is what makes a row eligible for the measurement freeze described above, and it belongs to
-  the row's identity in the store: `record_nodes` keeps it (via COALESCE) whichever row replaces which, so a later
-  re-measurement that declares no shape never destroys that eligibility.
 - `record_nodes` protects the leaf update by **comparing measurement quality**: a newer measurement that is
   unambiguously worse (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a casual bench
   cannot overwrite tune-grade data. When quality is comparable or unknown, newest simply wins, so an honest
@@ -1088,34 +1106,59 @@ backend). It short-circuits when every `CudaOp` in the graph already has a `perf
 backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
 lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
 
-## Part 7: Golden configs and the A/B integrity gates
+## Part 7: Golden records and the A/B integrity gates
 
-A golden config is a reviewed, per-GPU measurement of a standard shape. It serves three purposes: deploy evidence
+A golden record is a reviewed, per-GPU measurement of a frontend program target. It serves three purposes: deploy evidence
 (Part 3, tier 1), training data for the offline prior, and a regression reference. This Part covers what the kinds
 are, how a golden's layout has to match the fork it is meant to decide, the two audits that catch a golden that no
 longer deploys, and the checks that keep the A/B honest.
 
-`golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / norm_linear / mlp_geglu /
-rope / embedding / pointwise subclasses — the `OfflinePrior`'s ground truth. The `rope` / `embedding` kinds are
-fork-nothing memory-bound anchors: they record empty knobs and can only serve as `eval golden` regression checks (no
-fork means nothing to warm at deploy). Every kind carries `shape_key()` / `snippet()` / `dtype`, so
-`tune --dataset golden` and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
-`NormLinearGoldenConfig` (the fused `rms_norm(x)·nw @ W` computed-A megakernel) and `MlpGeGluGoldenConfig` (its
-multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A kinds — both trace to the single fused
-mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSNorm output via a lambda
-(`(lambda r: gelu(r@Wg)*(r@Wu))(rms_norm(x))`) since a torch expression cannot otherwise share it.
+`golden.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend Torch
+IR program by its document-local list index. The preferred target selector is a non-empty, unique set of frontend
+provenance origins.
+When lowering produces a kernel without such a selector, the record points into the document's optional `loops` pool,
+which stores that standalone post-fusion Loop IR slice. Current lowering derives the `S_*` histogram, `ShapeKey`, dtype
+classification, dynamic status, and operation kind lazily; none is serialized. Trace inventories retain the complete
+frontend program so provenance selectors re-lower in their original fusion context, while Loop IR fallbacks load
+directly. There are no kernel-kind classes or snippet generators.
 
-**Latencies are recorded in pairs, or not at all.** A MEASURED entry carries `emmy_us` and `cublas_us` (both > 0)
-— the ordinary case, and the only one `ratio` / `golden` / the A/B gates below mean anything for. An UNMEASURED entry
-carries both as exactly `0.0`: a verified-deployable SCHEDULE with no timing, for a shape whose winner is known but
-whose µs were never recorded. The deploy tier accepts it and ranks it LAST (`_golden_evidence_index` sorts on
-`emmy_us or inf`), so it decides a shape no measured entry covers and yields the moment one is recorded. One-sided is
-a recording bug and the well-formedness gate rejects it (`ratio` would silently read 0 or divide by a missing
-baseline). Prefer measuring; an unmeasured entry is how a hardcoded deploy default gets out of the scheduler and into
-the corpus without inventing numbers for it.
+**Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
+The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
+every golden under `search/goldens/` in the same change. The loader does not carry migrations or legacy decoders for
+working files outside the repository; keeping the checked-in corpus loadable is the compatibility gate. Programs are
+a plain list and structural configs refer to them by integer index; no program digest or persistent identifier is
+stored. Loop IR
+fallbacks are implementation-level rather than a compatibility promise and follow the same regenerate-the-corpus
+invariant. Frontend graph nodes omit empty `attrs` / `inputs`, store tensors as `[name, dtype, shape]`, and encode static
+dimensions as integers to keep the persistence surface small.
 
-**A matmul golden's layout must match the fork it is meant to decide.** `MatmulGoldenConfig.trans_b` spells the
-serving Linear layout — B given `(N, K)`, contracted as `x @ w.T` via an `F.linear` snippet. The traced contraction
+**One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** Each structural
+config contains only `model`, `program`, `target`, and a non-empty `realizations` array. A realization contains its
+name, positive named dimension `bindings`, and explicit registered input `pins`, plus optional `knobs`, `measurements`,
+and working-only `ranking`. `pins` defines the enumeration regime; `knobs` records the configuration selected and
+measured inside that regime. Empty bindings retain the symbolic program; non-empty bindings specialize it before
+lowering. A working realization may be inventory-only, a proposal, or verified. Repository promotion requires an
+explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
+every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
+they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
+the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
+An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
+entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
+self-contradictory during the all-of offer check. Promotion rejects that ambiguity before the offer audit.
+
+The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
+Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
+post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
+compiled, repeated O3 `emmy-greedy` row as its positive reference only when the candidate and reference execute on
+identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
+this checks compiler-configuration parity rather than independent framework correctness. The original frontend
+program remains embedded for provenance, while the selected standalone target is what both configurations execute.
+
+The three historical RTX 4080 rows without measurements were dropped during migration; repository validation has no
+provisional exception.
+
+**A matmul golden's layout must match the fork it is meant to decide.** The embedded Torch IR spells the
+serving Linear layout — B given `(N, K)`, contracted as `x @ w.T`. The traced contraction
 carries `b_trans`. The warp tier stages it like any canonical matmul (cp.async and TMA fill an N-MAJOR B slab —
 `tile_n × bk`, K stride-1 in gmem and smem alike — drained by the plain no-`.trans` ldmatrix; historically the
 transports declined transposed B and the `.lin` forks ran gmem-direct only — HISTORY.md: "The transposed-B staging
@@ -1125,54 +1168,41 @@ and gmem walk), which is why a golden meant to decide a served model's linear fo
 `F.linear` snippet. The two layouts share one ShapeKey on purpose: at a fork the shared bucket sorts by µs, so a
 canonical entry (the harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape — keep
 BOTH current, since with staging realizable on either layout a stale twin's config now deploys cross-layout with its
-foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still does not exist). The fused computed-A
-kinds (`NormLinearGoldenConfig` / `MlpGeGluGoldenConfig`) carry the same `trans_b` field — their `F.linear` snippets
-are the fused edges a SERVED model deploys (`.lin` fused twins; the sync compute-fill stages every B fold channel
-via cp.async on either layout, so the same `d*/sync` spellings realize on both).
+foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still does not exist). The same rule applies
+to fused computed-A programs: their stored `torch.linear` edge is the served layout, and the sync compute-fill stages
+every B fold channel via cp.async on either layout.
 
-**Provenance and the in-model drift audit.** A golden file (or entry) may carry an optional `model:` header — the HF
-model id whose serving graph the shapes came from (`GoldenConfig.model`; pure provenance, never part of any join key).
-Model-tagged goldens opt into the **in-model drift audit** (`emmy eval golden --in-model`, library `search/audit.py`):
-the model's serving twins are re-traced **weight-free** (`emmy/serving/twins.py` builds a trimmed random-init skeleton
-from `config.json` alone — a trace never reads a weight value) and each tagged card's twins are compiled with the
-golden tier as the only evidence (no tune DB, online file pointed at a nonexistent path, deployable nvcc regime
-forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consultation — and the card targeted via
-`Context.from_target`, so verdicts are machine-independent). Each golden-tier consultation yields MATCH (a recorded
-golden realized), DRIFT (shape keyed but nothing realizes — always a defect: the recording claims a µs the deploy can
-no longer produce), or GAP (no golden for the shape). This is the in-model half of the reproduction check: the
-isolated snippet A/B reproduced 68/68 while the in-model deploys drifted (the cast-splice class), which is exactly the
-blind spot the audit closes. Coverage is gated as a **ratchet over every GAP key** — contractions, rms_norm/reduce
-sweeps, and pointwise forks alike; `major_gap_keys` (uncovered warp-contraction forks, the misdeploy/hang hazard
-class) is the close-these-first emphasis view. The CI gate (`tests/compiler/test_golden_drift_gate.py`, offline via
-a checked-in `config.json` fixture) pins the per-card gap set exactly — a new gap fails until a golden is recorded
-or the baseline is deliberately extended, a closed one fails until its baseline line is deleted, and an emptied
-baseline means full model coverage is thereafter enforced (only fork-free deterministic lowerings — rope/embedding
-gathers — sit outside the gate, having no fork for the golden tier to decide). The twins track the installed `transformers` modeling code by design: a transformers
-bump that changes the forward changes the twins exactly as it changes serving, and the gate goes loudly red.
-`scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
+**Provenance and the serving-matrix audit.** `emmy eval golden GOLDEN_YAML --serving-config PATH` derives model,
+revision, GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env. The
+command requires that exact file and live GPU, validates that every structural target contains every expected
+realization, and re-traces the model's twins weight-free. It compiles each precision lane with only that file's
+records as golden evidence. Each consultation yields MATCH, DRIFT, or GAP; any DRIFT, GAP, or compile failure blocks
+release. The same command also runs the own-program reproduction and offer audit, closing both the pin-only and fused
+in-model blind spots in one operation. The default correctness suite tests the reusable audit mechanism with
+synthetic verdicts rather than retracing and compiling a model/card matrix. The twins track the installed
+`transformers` modeling code by design: a change to the model forward changes the twins exactly as it changes serving,
+and release qualification goes loudly red. `scripts/diagnostics/audit_golden_match.py` is the lower-level audit over
+explicit graph JSONs on a live box.
 
 **The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every
-forking golden entry it re-compiles the shape's OWN snippet un-pinned (deployable regime, the golden file's own card —
-the enumeration is static given shape+context, so no GPU bench) and checks the recorded knobs against the offered
-candidates. An entry only a pin can realize (`EMMY_KNOBS` / `tune --golden` benches it, the enumeration never offers
+forking realization it re-compiles the target's own program under the realization's input pins, without pinning its
+recorded winner (deployable regime, the golden file's own card — the enumeration is static given shape+context, so no
+GPU bench), and checks the recorded knobs against the offered candidates. An entry only an additional winner pin can
+realize (`EMMY_KNOBS` / working-file proposal measurement benches it, the input-regime enumeration never offers
 it) reports **PIN-ONLY** — legal as a documented lever while an OFFERED sibling floors the shape (the 4090
 `attention.hd512.s4096` split-KV row beside its serial deploy-floor sibling); a shape whose entries are ALL pin-only
 reports **FALL-THROUGH** and exits 1: a deploy logs "no offered candidate realizes any of them" and falls past the
 golden tier — the missing-floor pathology that deployed a 111 ms 0.03x `mlp_down.m4096` kernel and NaN-poisoned the
-downstream accuracy check before the floor-sibling discipline. Fast-math entries audit under the pinned
-`F16_MMA_F32_ACC` gate (their own deploy regime). The own-snippet and in-model views genuinely differ: the 5090
-`mlp_down.m4096` split-K row realizes standalone but not on the serving twin's epilogue-fused down — the offer audit
-passes it and `--in-model` is the authority there, while the s4096 split-KV row fails even standalone, which is what
-this audit catches at record time.
+downstream accuracy check before the floor-sibling discipline. Every realization audits under its explicit input
+pins. The own-program and serving-twin views genuinely differ: the 5090 `mlp_down.m4096`
+split-K row realizes standalone but not on the serving twin's epilogue-fused down, while the s4096 split-KV row fails
+even standalone. The unified release command runs both views.
 
-**Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
-(`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union
-would tune another card's config under the live card's name. For `tune` the scoping is strict: a live card with no
-recorded goldens exits with an error instead of inheriting the union fallback — golden tuning targets the live card's
-own recordings only, so an uncovered card is fixed by recording goldens for it, not papered over
-(`live_recorded_goldens` is the no-fallback probe that tells an uncovered card from an off-GPU run). `run` / `compile`
-`--golden` keep the union fallback on an uncovered card (the seed / transfer flow — the pinned config re-benches
-live), and off-GPU the full union is returned (pure-logic tests).
+**Live-GPU scoping.** `run` / `compile --golden NAME` prefer the **live** card's goldens
+(`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can
+select another card's spelling. They keep the union fallback on an uncovered card (the seed / transfer flow — the
+pinned config re-benches live), and off-GPU the full union is returned (pure-logic tests). Tuning instead consumes an
+explicit working file whose GPU header is checked against the selected tune device.
 
 **The A/B carries three integrity gates:**
 
@@ -1234,7 +1264,7 @@ lands in the record.
 `emmy eval` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. The views
 below run over the goldens, the tune DB's `node` table, or a measurement freeze.
 
-**A golden's rank counts ties against it** (`eval offline` / `eval online`, via `golden_eval.evaluate_golden`). The
+**A golden's rank counts ties against it** (`eval offline` / `eval online`, via `golden_eval.evaluate_record`). The
 golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
 earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
 Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
@@ -1427,9 +1457,8 @@ The SKU-exact `facebook/DiT-XL-2-256` deploy overrides that used to sit beside i
 table, a flash-winner matcher and a `b128` LayerNorm `REDUCE` narrowing, all string-matched on `NVIDIA GeForce RTX
 4080`. A recorded winner belongs in the golden corpus, which the deploy evidence tier already consults ahead of the
 prior, and which is versioned, auditable through `emmy eval golden`, and covered by the drift gate. What could be
-expressed as a golden moved to `goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, schedule-only — see the unmeasured-entry
-convention under GOLDEN below): the two plain-A projections as `matmul` entries and the block's SDPA as an
-`attention` entry.
+expressed as a golden moved to `goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, the three exact provisional entries
+described in Part 7): the two plain-A projections as `matmul` entries and the block's SDPA as an `attention` entry.
 
 What could NOT be expressed was deleted rather than mis-filed, both times for the same reason: **no golden kind
 describes a LayerNorm**. The DiT prologue is AdaLayerNorm-Zero, while every fused kind (`norm_linear` / `mlp_geglu`)
@@ -1541,7 +1570,7 @@ of algebraic rewrites they may apply are documented there too.
 | `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. Before `LinearOp` decomposes, `merge_sibling_linears` folds ALL sibling linears sharing one activation (q/k/v, gate/up) into ONE linear over load-time N-concat weights and optional biases (`ConstantOp.source_parts` — the loader concatenates before the `load_ops` chain, zero runtime cost) with `SliceOp` views re-deriving each original output; one launch (one split-K partial+finalize) replaces the per-projection set, and the merged result is a plain matmul that every downstream code path already handles. Guards: pristine exclusively-owned parameters with uniform bias presence, and no sibling whose output reaches a graph output through layout ops alone (the view would demote to a copy kernel at the capture ABI). The concat order is graph-insertion order — canonical regardless of match enumeration, because the buffer layout is ABI for goldens and packs. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
-| `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
+| `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
 | `loop/recognize/`         | Empty (retired) — flash / online-softmax recognition moved into `lowering/tile/010_recognize` (the `_flash` / `_softmax` helpers), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
 | `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
@@ -1555,12 +1584,9 @@ of algebraic rewrites they may apply are documented there too.
 in the pass name flatten to underscores. The pre-pipeline input graph is dumped separately as `00_input.*` via
 `dump.dump_input_graph(graph)`. The uniform strategy means adding a pass automatically gets dumped — no registration.
 
-Per compute kernel, `_dump_per_kernel` writes `<prefix>.kernels/<kname>.json` — a standalone sub-graph (kernel + its
-`InputOp` / `ConstantOp` producers) loadable via `emmy run --ir`. When op provenance is present (see
-`compiler/provenance.py`), it also writes `<kname>.torch.json` + `.torch.txt`: the **original Torch ops** that kernel
-implements, sliced from the pristine pre-decomposition graph by origin id (so the slice is always whole Torch ops),
-with an `i/N` coverage header — runnable via `emmy run --ir <kname>.torch.json --bench` to reproduce accuracy /
-latency vs torch.
+Per compute kernel, `_dump_per_kernel` writes `<prefix>.kernels/<kname>.json` — a standalone lowered sub-graph
+(kernel + its `InputOp` / `ConstantOp` producers) loadable via `emmy run --ir`. Original frontend slices selected by
+provenance stay in memory for tune benchmarking and are never written as trace artifacts.
 
 ## Per-rule diff output (`rule_diff.py`)
 

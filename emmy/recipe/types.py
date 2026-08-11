@@ -99,9 +99,14 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Immutable Hugging Face revision used by both model prefetch and the serving engine.
+    revision: str | None = None
     # What the model serves: "generate" (completion/chat, the default) or
     # "embed" (/v1/embeddings). Drives the smoke test and the bench workload.
     task: str = "generate"
+    # Generative checkpoints default to the semantic chat smoke test. Base models that
+    # are not instruction-tuned use the completion endpoint instead.
+    smoke_test: str = "chat"
 
 
 @dataclass
@@ -197,7 +202,12 @@ class Recipe:
     def from_dict(cls, d: dict) -> "Recipe":
         """Build a Recipe from a (post-merge, post-migrate) config dict."""
         model_dict = d.get("model", {})
-        model = ModelConfig(huggingface=model_dict.get("huggingface", ""), task=model_dict.get("task", "generate"))
+        model = ModelConfig(
+            huggingface=model_dict.get("huggingface", ""),
+            revision=model_dict.get("revision"),
+            task=model_dict.get("task", "generate"),
+            smoke_test=model_dict.get("smoke_test", "chat"),
+        )
 
         engine_dict = d.get("engine", {})
         llm_dict = engine_dict.get("llm", {})

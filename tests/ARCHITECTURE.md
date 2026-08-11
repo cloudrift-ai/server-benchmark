@@ -20,8 +20,8 @@ because `emmy/compiler/pipeline/search/` has them, so a test for `policy/greedy.
 deploy-pick order invariance, or a process-wide cache over two subsystems — sit at the level that owns all of
 them, not inside one arbitrary child.
 
-Four directories break the mirror deliberately, because their organizing axis is the *kind* of test, not the
-source module:
+Seven directories break the `emmy/` mirror deliberately, because their organizing axis is the *kind* of test or their
+source lives outside the package:
 
 | Directory | Axis |
 |---|---|
@@ -29,8 +29,21 @@ source module:
 | `compiler/cli/` | `emmy <command>` as a subprocess, via the `run_cli` fixture |
 | `compiler/fixtures/` | checked-in traces and model configs, not tests |
 | `perf/` | GPU perf comparison vs PyTorch, gated by the `perf` marker (see `tests/perf/ARCHITECTURE.md`) |
+| `github/` | unit tests for repository automation helpers under `.github/scripts/` |
+| `scripts/` | tests for executable helpers under the repository's `scripts/` directory |
+| `architecture/` | repository-wide dependency and layering invariants |
 
-`compiler/passes/` and `compiler/perf/` carry their own `ARCHITECTURE.md`; read those before adding to them.
+Three small organizing directories are also intentional:
+
+| Directory | Purpose |
+|---|---|
+| `benchmark/models/` | named-model configuration contracts spanning recipes, experiments, and runtime images |
+| `serving/generation/` | the generation runner, loop, capture, and vLLM generation adapter as one serving workflow |
+| `support/` | ordinary data builders shared across source-subsystem boundaries; never tests or pytest hooks |
+
+Do not add a directory merely to shorten a file listing. These directories exist because their tests share one workflow
+or span several source trees. `compiler/passes/` and `perf/` carry their own `ARCHITECTURE.md`; read those before adding
+to them.
 
 ## Test Layers
 
@@ -39,7 +52,8 @@ The suite runs in four layers, distinguished by what they touch rather than by w
 - **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. The bulk of the suite.
 - **CLI dry-run** — the full argument-parsing → config-loading → orchestration path invoked as a subprocess with
   `--dry-run`, stopping just before any real side effect (SSH, Docker, file writes). Covers `deploy ssh/local/cloud`,
-  `bench`, `teardown`, and `vm create/delete`. These use real recipes from `recipes/` so config drift fails a test.
+  `bench`, `teardown`, and `vm create/delete/audit`. These use real recipes from `recipes/` so config drift fails a
+  test.
 - **GPU** — guarded by `requires_cuda` / `requires_sm90` / `importorskip` so they skip cleanly off-GPU, and routed
   onto a serial worker chain by the root conftest (see **Running**).
 - **End-to-end** — a traced model or snippet through the whole compiler, compared against PyTorch eager or numpy.
@@ -47,7 +61,7 @@ The suite runs in four layers, distinguished by what they touch rather than by w
 A test belongs to the lowest layer that can prove the property. Reach for a subprocess or a GPU only when the
 behavior genuinely lives there — each costs roughly an order of magnitude more wall time than the layer below it.
 
-## Shared Fixtures (`conftest.py`)
+## Fixtures and Helpers
 
 | Fixture | Scope | Purpose |
 |---------|-------|---------|
@@ -60,6 +74,13 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
 | `sample_config_sglang` | function | Single-instance SGLang config dict for compose tests |
 | `sample_config_multi` | function | Multi-instance config dict for compose tests |
 
+`conftest.py` files expose only pytest-discovered fixtures and hooks; private hook implementation stays beside its hook.
+Reusable callables live in an explicit helper module at the nearest directory shared by their callers: compiler-wide
+helpers and CUDA markers in `tests/compiler/helpers.py`, search-only node builders in
+`tests/compiler/pipeline/search/helpers.py`, and the
+cross-subsystem synthetic checkpoint builder in `tests/support/checkpoints.py`. Test modules import those dependencies
+directly; they never import from another test module or from `conftest.py`.
+
 ## Conventions
 
 - **Prefer combinatorial coverage matrices over per-capability test files.** The compiler e2e suite covers each
@@ -68,6 +89,15 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   than a file per capability. When a legacy one-off test's behavior is subsumed by such a matrix (or by the matmul
   coverage matrix specifically), DELETE the one-off — do not maintain both. A new capability extends the nearest
   matrix with a parameter/case before it earns its own file.
+- **Keep model/card qualification out of the default suite.** `make test` does not retrace and compile a complete
+  serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
+  model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
+  synthetic input cannot.
+- **Do not load the repository golden corpus for unrelated tests.** The index is lazy so ordinary CLI startup and
+  commands that never consult deploy evidence do not parse every checked-in program. Golden format tests load one
+  file at a time and perform all per-file schema assertions in that pass.
+- **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
+  records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
 - **No mocking** — dry-run mode is the primary strategy for testing command orchestration without side effects.
 - **Real recipes** — CLI dry-run tests use recipes from the `recipes/` directory to catch config drift.
@@ -78,7 +108,7 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   `tests/deploy/` ↔ `emmy/deploy/`), and that holds all the way down: when a source package gains a subpackage,
   its tests move into a matching test subpackage rather than staying flat beside their new siblings. One test
   module per source module; a file covering several modules of a package sits at the level that owns them all.
-  The exceptions are the four kind-organized directories listed under **Directory Structure**.
+  The exceptions are the kind- and workflow-organized directories listed under **Directory Structure**.
 - **One file per subject, not per bug.** A behavior discovered later belongs in the file that already owns its
   subject, as a new section with a comment header — not in a new file named after the incident. Several small
   files re-declaring the same fixtures is the signal to merge them; a file whose sections share no scaffolding
@@ -105,7 +135,7 @@ serial chains via dynamic `xdist_group` markers — `cuda` for in-process device
 the attention-chain accuracy thresholds deterministic) and `cuda-cli` for `run_cli` subprocess tests (each owns a
 fresh CUDA context; bounding their concurrency prevents GPU OOM from ~30 simultaneous subprocesses). CUDA items
 are detected via the `requires_cuda` skipif reason, a `[cuda...]` callspec id, or an explicit
-`xdist_group("cuda")` pytestmark (the `tests/serving/*_gpu.py` convention — honoring it matters because the LPT
+`xdist_group("cuda")` pytestmark (the `tests/serving/**/*_gpu.py` convention — honoring it matters because the LPT
 bucketing would otherwise add a function-level group that shadows the module-level mark). The hook is
 `tryfirst` because xdist's worker-side hook bakes group names into nodeids before plain conftest hooks run —
 without it the markers land too late and CUDA tests silently scatter across workers. Non-CUDA tests are
@@ -131,7 +161,7 @@ The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/
 perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate
 also covers subset runs like `pytest tests/serving/`. Reserve `perf` for two things — the
 perf-comparison tests `make bench-kernels` runs, and tests that genuinely cannot ride the parallel suite (today the
-two in-process vLLM engine tests, `test_vllm_plugin_gpu.py` / `test_vllm_plugin_gen_gpu.py`: the engine demands a
+two in-process vLLM engine tests, `test_vllm_plugin_gpu.py` / `generation/test_vllm_plugin_gen_gpu.py`: the engine demands a
 large fraction of the card FREE at startup, plus checkpoint downloads and minutes of whole-model compile — since
 `make bench-kernels` only runs `tests/perf/`, these two run nowhere by default; exercise them explicitly with
 `pytest tests/serving/ -m perf` on a machine with the card mostly free). A perf
@@ -142,7 +172,7 @@ Optional adapter tests use `pytest.importorskip` for their own dependency extras
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and
 requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gigabyte checkpoint.
 
-`tests/compiler/conftest.py` also exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
+`tests/compiler/helpers.py` exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated
 target the TMA path emits is rejected by nvcc (`Unsupported gpu architecture 'sm_89a'`), and `ldmatrix` itself faults
@@ -157,8 +187,8 @@ transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ 
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
 gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin declines and the kernel stays
 gmem-direct, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp` siblings run on
-sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `--dataset golden` resolve against the
-**live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_CONFIGS` with card-less
+sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `eval --dataset golden` resolve against the
+**live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_RECORDS` with card-less
 fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
 `run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the
 local card happens to have recorded.

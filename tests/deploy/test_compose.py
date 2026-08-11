@@ -35,6 +35,13 @@ def test_compose_context_length_and_max_concurrent(sample_config):
     assert "--max-num-seqs 256" in result
 
 
+def test_compose_uses_named_model_revision(sample_config):
+    sample_config["model"]["revision"] = "0123456789abcdef"
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1)
+    assert "--revision 0123456789abcdef" in result
+
+
 def test_compose_omits_unset_named_fields():
     config = {
         "model": {"huggingface": "test-org/test-model"},

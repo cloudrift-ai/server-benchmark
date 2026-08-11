@@ -9,12 +9,19 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
+commands/agent ─► agent (tracked skill runner and tool schemas)
+commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
 - `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
+- `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
+- `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
+  runner
+- `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
+  trace and eval
 - `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
   INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
@@ -44,11 +51,14 @@ transports, and the scale-out strategies (`DataParallelismScaleOutStrategy`, `Re
 `DeployParams` carries the `recipe`, `gpu_device_ids`, etc. `run_deploy()` / `deploy()` accept an optional
 `timer: PhaseTimer` that records per-step durations (see [Timing metrics](#timing-metrics)).
 
-The post-health **smoke test** branches on `recipe.is_embedding` (`model.task: embed`): chat models POST
-`/v1/chat/completions` ("What is 2+2?" must contain "4"); embedding models POST `/v1/embeddings` and require a non-empty
-finite vector with L2 norm in [0.9, 1.1] (the pooler normalizes — garbage/NaN models fail). Same retry/timeout/log-dump
-loop either way. `parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container
-logs.
+The post-health **smoke test** branches on the recipe model config. Embedding models (`model.task: embed`) POST
+`/v1/embeddings` and require a non-empty finite vector with L2 norm in [0.9, 1.1]. Generative models use the chat
+endpoint by default ("What is 2+2?" must contain "4"); base checkpoints set `model.smoke_test: completion` to test the
+same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop.
+`parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container logs.
+
+`model.revision` is the one immutable Hugging Face revision for a deployment. The model-download phase passes it to
+`hf download`, and Compose passes the same revision to vLLM or SGLang; recipes must not duplicate it in `extra_args`.
 
 **GPU visibility:** `generate_compose()` accepts a `gpu_device_ids` parameter to restrict GPU visibility via
 `device_ids: [...]` instead of `count: all`. Used by bench when a task needs fewer GPUs than the VM has.
@@ -100,13 +110,82 @@ async def _handle_foo(args):
     await ...
 ```
 
-The compiler commands (`compile`, `run`, and `tune`) share a model-adapter selector. `causal-lm` is the default and
+The compiler commands (`trace`, `compile`, `run`, and `tune`) share the same input loader and model-adapter selector.
+They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm` is the default and
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. A quantized checkpoint (config.json
-`quantization_config`, e.g. an FP8 release) resolves to its bf16 architecture twin for tracing; the loader
-dequantizes the real weights at bind time (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+and Emmy always rebuild the same module and example inputs. Dynamic-shape parsing, quantized architecture twins and
+their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
+identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+For a single-layer trace, the loader derives a missing attention `layer_type` from
+`config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
+modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.
+
+The trace/tune handlers delegate working-golden inventory construction, target reconstruction, proposal measurement,
+and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by
+`run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
+handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
+
+`emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
+The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
+structurally identical occurrences are not collapsed and a missing cache key never drops a target. A target uses
+frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
+Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
+stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
+refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
+
+`emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
+calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct
+pre/post/expert and coded rate-profile kernel into one document, and stores each structural target once as symbolic
+Loop IR. The pinned env supplies the model provenance and complete realization matrix: decode, prefill, M=1, extra
+warm shapes, symbolic fallbacks, and standard/precision-trading input pin regimes. Each target receives a
+`realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
+independent serving-shape surface. A static-only release is accepted
+only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
+directly by `tune --golden-file` and verified by `run --golden-file --golden NAME`.
+
+The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
+dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
+per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
+This provider is audit-only; `emmy trace --serving-twins` does not claim a DeepSeek serving split it cannot execute,
+and the file-scoped audit rejects a serving matrix the fixed full-layer provider cannot represent.
+
+`emmy tune --golden-file PATH` consumes embedded programs directly. Realizations sharing one symbolic target are
+specialized from their named bindings and grouped by target, bindings, and input pins. Knob-bearing
+realizations are measured in file order before MCTS and written back as working-only `ranking` metadata.
+`--max-candidates N`
+is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
+remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize
+several CudaOps; conflicting multi-CudaOp knob rows are reported as ambiguous instead of being assigned an invented
+winner. Proposal feedback is written immediately after measurement, before MCTS, so an interruption preserves it.
+The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
+the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
+flags and never writes the trusted
+`emmy_us` / `cublas_us` fields. With multiple homogeneous `--devices`, independent working-file targets share one
+event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
+When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
+rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
+rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
+non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
+reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
+
+`emmy compile/run --golden-file PATH --golden NAME` is the verification counterpart: it resolves the name only in
+that explicit working YAML and compiles its exact provenance or Loop IR target, without canonical-corpus or live-card
+filtering. Inventory and proposal rows select the graph but are not trusted as automatic A/B pins; only verified rows
+with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded
+Loop IR stores stable algebra rather than derived structural stamps, so `run --golden` replays it through the full
+compiler pipeline. A direct `run --ir` input remains a stage-complete artifact and runs only the later passes.
+
+For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
+knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
+
+`emmy eval golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact canonical
+file. The command validates the nested schema and model provenance, requires the live GPU to match both the config
+and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
+and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
+a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
@@ -205,6 +284,7 @@ emmy
 +-- bench        -- deploy + benchmark + teardown on cloud VMs
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
++-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- vm
     +-- create
     |   +-- gpu        -- name a GPU from the hardware table (orchestrator: retries + fallback)
@@ -244,7 +324,9 @@ emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25
 
 ### `emmy deploy cloud`
 
-Provisions a cloud VM and deploys via SSH. Requires `--gpu` and `--gpu-count` to select the matching matrix entry from the recipe (no auto-detection — there is no host yet). When a GPU is offered by more than one provider, the first provider in `hardware.py`'s `GPU_INSTANCE_TYPES` table is chosen by default; pass `--provider {gcp,cloudrift}` to override.
+Provisions a cloud VM and deploys via SSH. Requires `--gpu` and `--gpu-count` to select the matching matrix entry from
+the recipe (no auto-detection — there is no host yet). When several providers offer a GPU, their hardware-table order
+sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the search to one provider.
 
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
@@ -260,7 +342,11 @@ Serves an embedding model (or a generative chat model via `EmmyGenModel` with `-
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
-applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. Generative serving
+applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
+vLLM *and* reaches the emmy runner** — the plugin composes `<repo>@<revision>` and every checkpoint read inside emmy
+resolves that commit (see `serving/ARCHITECTURE.md`); without it a repo publishing several branches warns loudly and
+takes its default. `emmy pull` and `emmy compile` / `emmy run` accept the same `<repo>@<revision>` spelling directly,
+so a served rung can be reproduced off the CLI. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
@@ -273,11 +359,17 @@ round-up to that multiple cannot push a step's padded width past the decode buck
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
 `--gpu-memory-utilization` to **0.97** (its
 cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
-model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the dynamic-dim cap + the decode bucket** — the
-bucket-sized rider headroom is covered by the chunk+decode twin row split (`serving/ARCHITECTURE.md`), so full
-chunk steps keep carrying their decode riders; an explicit value past that cap is rejected. `EMMY_SERVING_BATCHED=1`
+model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
+bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
+(`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap
+is rejected. Capacity is the dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
+lever for a card the weights nearly fill), and the default follows it down. `EMMY_SERVING_BATCHED=1`
 embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
-the batch.
+the batch. A checkpoint whose compressed weights emmy's loader owns end to end (today: **EXL3**, trellis-coded) is
+additionally presented to vLLM as **unquantized** through the `--hf-overrides` — vLLM carries no method for the
+scheme and refuses the boot outright, while nothing in the engine needs one, since the runner owns every coded
+weight and the one vLLM-owned parameter (`lm_head`) decodes to fp16 at load. Which schemes those are is the loader
+band's call (`compiler/loader/quant.py::engine_config_overrides`), not the command layer's.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)
@@ -316,6 +408,28 @@ emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host poo
 
 Results are stored in `{recipe_dir}/{timestamp}_{hash}/` — each recipe directory holds its own run directories alongside `recipe.yaml`.
 
+### `emmy publish`
+
+Publishes the local serving image named by one concrete inference recipe. The recipe image is the destination and
+must match `cloudriftai/(vllm-emmy|1cat-vllm)-<model-slug>:<runtime-version>-<source-sha>`, where the source SHA is
+7–12 lowercase hexadecimal characters. The model slug comes from the same `emmy.publish.model_slug()` implementation
+used by `docker/vllm-emmy-serve/model_slug.sh`; `latest`, hardware tags, and qualification suffixes are rejected.
+
+The local source must carry `ai.emmy.publish.family`, `ai.emmy.model.id`, `org.opencontainers.image.version`, and
+`org.opencontainers.image.revision` labels matching the recipe destination. `--source-image` retags a local build
+whose temporary name differs from that destination. A matrix is accepted only when it expands to one concrete
+variant.
+
+Before any mutation, the command checks the registry destination. An existing destination is accepted only when its
+digest is already among the local image's `RepoDigests`; a different or unprovable digest is never overwritten. After
+a push, the registry digest must appear on the local destination image. `--dry-run` performs every read-only gate and
+prints the pending Docker commands; an actual push requires the explicit noninteractive `--yes` confirmation.
+
+```bash
+emmy publish recipes/MyModel --source-image local/my-model:baked --dry-run
+emmy publish recipes/MyModel --source-image local/my-model:baked --yes
+```
+
 **`--local` note:** runs the workload over SSH to `127.0.0.1` (same code path as remote hosts). Requires a running SSH server on localhost and that `--ssh-key` (default `~/.ssh/id_ed25519`) is in `~/.ssh/authorized_keys`. Quick check: `ssh -i ~/.ssh/id_ed25519 $USER@127.0.0.1 echo ok`.
 
 **Fixed-host mode:** when `--local` and/or `--ssh` are supplied, `bench` detects each host's GPU and verifies that every planned execution group can run on at least one host (matching `deploy.gpu` and sufficient `deploy.gpu_count`). Unsatisfied groups abort the run before any work starts. Fixed hosts are never deleted at the end of the run.
@@ -328,7 +442,7 @@ Cleans up VMs left running by `bench --no-teardown`. Reads `instances.json` from
 emmy teardown <run_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
-### `emmy vm create / delete`
+### `emmy vm create / delete / audit`
 
 Manages cloud GPU VM lifecycles directly. Instances are ephemeral — `delete` removes them entirely. Run `emmy vm create {gpu,gcp,cloudrift} --help` for full flag lists.
 
@@ -349,6 +463,18 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
 ```
+
+Automated jobs can require an exact physical GPU count and persist an interrupt-safe ownership lease:
+
+```bash
+emmy vm create gpu --gpu "NVIDIA H200 141GB" --gpu-count 1 --exact-gpu-count \
+  --lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1 --json
+emmy vm delete lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1
+emmy vm audit lease /tmp/onboard-vm.json --owner cloudrift-ai/emmy/123-1
+```
+
+The lease records the provider deletion handle before readiness polling, then adds SSH connection details. Delete and
+audit accept only the exact recorded owner and never enumerate unrelated provider resources.
 
 CloudRift attach to a specific network with `--network <name>` (on `vm create cloudrift`, `vm create gpu`, `deploy cloud`, and `bench`). The name must exist in the target datacenter; omit to let CloudRift pick a public network.
 
@@ -386,11 +512,29 @@ emmy vm create gpu --gpu "NVIDIA B200" --gpu-count 8 --provider gcp --provisioni
 
 #### Allocation strategy (shared by `deploy cloud`, `bench`, `vm create gpu`)
 
-All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud.py`. It enumerates *candidates* from `hardware.GPU_INSTANCE_TYPES` (preference-ordered) and, for GCP, fans out across the zones listed in `GPU_GCP_ZONES`. For each candidate it makes up to `SAME_CANDIDATE_RETRIES` attempts on transient failures, then advances. Providers signal "no capacity, try next" by raising `CapacityExhausted`; non-retryable errors raise `TerminalProvisionError` and abort. Fallback never silently crosses provider boundaries — `--provider` (or the first hardware-table entry) bounds the search.
+All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud.py`. It enumerates preference-ordered
+candidates from `hardware.GPU_INSTANCE_TYPES` and fans GCP entries across `GPU_GCP_ZONES`. Each candidate gets up to
+`SAME_CANDIDATE_RETRIES` transient attempts. `CapacityExhausted` advances; `TerminalProvisionError` aborts. Without a
+filter, fallback can cross providers in hardware-table order; `--provider` restricts the complete search.
 
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
+
+### `emmy agent`
+
+Runs a tracked repository skill non-interactively through an OpenAI-compatible Chat Completions endpoint. The API key
+must arrive through a one-use mode-`0600` file or inherited file descriptor and is removed from every tool subprocess.
+
+```bash
+emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
+emmy agent tools --output /tmp/emmy-agent-tools.json
+```
+
+Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
+from the same definitions the runner sends to the model. See `emmy/agent/ARCHITECTURE.md` for the security and
+workflow-ownership boundary.
 
 ### `emmy fit`
 
@@ -422,16 +566,12 @@ emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run d
 
 ## Experiments
 
-Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a `recipe.yaml` and stores its results alongside it:
+Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a
+`recipe.yaml`; benchmark output is local and ignored by default:
 
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
-  2026-02-24_19-13-50_abc12345/
-    tasks.json
-    recipe.yaml
-    rtx5090x1_mcr8_c8_vllm_benchmark.txt
-    ...
 ```
 
 ```bash
@@ -440,7 +580,9 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 
 ## CI Benchmark Workflow
 
-External developers can submit experiments via pull requests. A maintainer triggers benchmarks by commenting `/run-experiment` on the PR. CI runs benchmarks on cloud GPUs and commits results back to the PR branch.
+External developers can submit experiment configurations via pull requests. A maintainer triggers benchmarks by
+commenting `/run-experiment` on the PR. That explicit command authorizes the workflow to commit its selected results
+back to the PR branch; ordinary local and onboarding runs do not commit experiment output.
 
 ```
 /run-experiment                                                       # Auto-detect: all experiments changed in the PR

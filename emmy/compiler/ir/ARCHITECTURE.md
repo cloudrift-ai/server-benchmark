@@ -131,7 +131,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
-| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`exp`/`sin`/`cos`/…). |
+| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…). |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
@@ -161,6 +161,8 @@ behind the four sites that used to switch on the reduce op name (`Accum.render`'
 max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
 dtype an op is the decode cast for (the f8 family today) — the trait the tile binding
 arm's factor hoist queries instead of matching op names.
+Non-ufunc scalar functions whose arity cannot be read from NumPy declare it in the same module; ternary `where` is
+the current example. Its condition and both value operands are explicitly broadcast before the elementwise node.
 
 ## `loop/`
 
@@ -302,6 +304,10 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 (per-stmt copy with SSA rename + Expr substitution),
 `Stmt.pretty(indent)` (rendered lines for kernel dumps; block stmts
 recurse via `pretty_body`).
+
+CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
+so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
+same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
 
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` / `Body.forward_cone(seeds)` build a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound

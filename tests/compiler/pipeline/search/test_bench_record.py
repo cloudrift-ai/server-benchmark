@@ -18,12 +18,11 @@ from emmy.compiler.pipeline.search.bench_record import (
     bench_leaves,
     meets_quality_bar,
     mint_bench_run_id,
-    parse_record_shape,
     record_bench_leaves,
 )
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
 from emmy.compiler.pipeline.search.db import SearchDB
-from tests.compiler.pipeline.search.conftest import node_row
+from tests.compiler.pipeline.search.helpers import node_row
 
 _GPU = "NVIDIA GeForce RTX 5090"
 
@@ -156,7 +155,7 @@ def test_record_round_trip_into_node_store(compiled_matmul, tmp_path) -> None:
     ctx = Context.from_target((12, 0), gpu_name=_GPU)
     leaves = bench_leaves(compiled_matmul, _fake_bench(_n_cuda_kernels(compiled_matmul), time_ms=0.5))
     db_path = tmp_path / "tune.db"
-    n = record_bench_leaves(db_path, ctx, leaves, shape=parse_record_shape(_MM_SPEC))
+    n = record_bench_leaves(db_path, ctx, leaves)
     assert n == len(leaves)
     db = SearchDB.open_readonly(db_path)
     try:
@@ -177,7 +176,7 @@ def test_record_round_trip_into_node_store(compiled_matmul, tmp_path) -> None:
 def test_record_fail_leaf_kept_as_negative(compiled_matmul, tmp_path) -> None:
     ctx = Context.from_target((12, 0), gpu_name=_GPU)
     leaves = bench_leaves(compiled_matmul, None, status="bench_fail")
-    record_bench_leaves(tmp_path / "tune.db", ctx, leaves, shape=parse_record_shape(_MM_SPEC))
+    record_bench_leaves(tmp_path / "tune.db", ctx, leaves)
     db = SearchDB.open_readonly(tmp_path / "tune.db")
     try:
         rows = list(db.iter_nodes())
@@ -191,65 +190,6 @@ def test_quality_bar_and_run_id() -> None:
     assert meets_quality_bar(5, 20) and meets_quality_bar(10, 100)
     assert not meets_quality_bar(4, 100) and not meets_quality_bar(10, 19)
     assert mint_bench_run_id().startswith("bench-")
-
-
-# ---------------------------------------------------------------------------
-# --record-shape: spec parsing + the per-leaf identity gate
-# ---------------------------------------------------------------------------
-
-_MM_SPEC = '{"kernel": "matmul", "M": 512, "N": 512, "K": 512, "dtype": "fp16", "trans_b": false, "dynamic": false}'
-
-
-def test_parse_record_shape_round_trips_through_kind_class() -> None:
-    from emmy.compiler.pipeline.search.data.shape import ShapeKey
-
-    rs = parse_record_shape(_MM_SPEC)
-    assert rs.spec["kernel"] == "matmul" and rs.spec["M"] == 512
-    assert rs.key == ShapeKey.from_matmul(512, 512, 512, "fp16")
-
-
-@pytest.mark.parametrize(
-    ("text", "match"),
-    [
-        ("not json", "not valid JSON"),
-        ('["matmul"]', 'JSON object with a "kernel" field'),
-        ('{"kernel": "warp_drive"}', "unknown kernel kind"),
-        ('{"kernel": "matmul", "M": 512}', "invalid 'matmul' spec"),  # missing N/K
-    ],
-)
-def test_parse_record_shape_rejects_bad_specs(text: str, match: str) -> None:
-    with pytest.raises(ValueError, match=match):
-        parse_record_shape(text)
-
-
-def test_record_shape_tags_matching_leaves(compiled_matmul, tmp_path) -> None:
-    """The benched op's stamped extents key to the spec's ShapeKey → the leaf carries the
-    declarative identity, spelled exactly as passed."""
-    ctx = Context.from_target((12, 0), gpu_name=_GPU)
-    leaves = bench_leaves(compiled_matmul, _fake_bench(_n_cuda_kernels(compiled_matmul), time_ms=0.5))
-    record_bench_leaves(tmp_path / "tune.db", ctx, leaves, shape=parse_record_shape(_MM_SPEC))
-    db = SearchDB.open_readonly(tmp_path / "tune.db")
-    try:
-        rows = list(db.iter_nodes())
-    finally:
-        db.close()
-    assert rows and all(r.shape_spec == parse_record_shape(_MM_SPEC).spec for r in rows)
-
-
-def test_record_shape_mismatch_stays_identity_less_and_warns(compiled_matmul, tmp_path, caplog) -> None:
-    """A spec whose ShapeKey matches no benched leaf records identity-less rows (the
-    legacy treatment) and warns — silence must never read as a tagged sweep."""
-    wrong = parse_record_shape('{"kernel": "matmul", "M": 64, "N": 64, "K": 64, "dtype": "fp32", "trans_b": false, "dynamic": false}')
-    ctx = Context.from_target((12, 0), gpu_name=_GPU)
-    leaves = bench_leaves(compiled_matmul, _fake_bench(_n_cuda_kernels(compiled_matmul), time_ms=0.5))
-    with caplog.at_level("WARNING"):
-        record_bench_leaves(tmp_path / "tune.db", ctx, leaves, shape=wrong)
-    assert any("matched none" in r.message for r in caplog.records)
-    db = SearchDB.open_readonly(tmp_path / "tune.db")
-    try:
-        assert all(r.shape_spec is None for r in db.iter_nodes())
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------

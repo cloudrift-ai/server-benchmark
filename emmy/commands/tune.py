@@ -6,24 +6,31 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 
 from emmy import config
 from emmy.commands.compile import (
     add_diagnostics_args,
-    add_golden_arg,
     add_input_args,
     add_nvcc_args,
     apply_nvcc_flags,
     format_stage,
     load_or_trace,
-    resolve_golden_arg,
     resolve_tune_db,
     setup_pipeline_runtime,
     validate_trace_adapter_args,
 )
-from emmy.commands.dataset_args import add_dataset_args, require_source
 from emmy.compiler.pipeline import TuningSearch
+from emmy.compiler.pipeline.search.working_golden import (
+    WorkingGoldenTarget,
+    load_working_targets,
+    measure_proposals,
+    persist_proposal_rankings,
+    persist_tune_winner,
+    validate_working_gpu,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +38,26 @@ logger = logging.getLogger(__name__)
 def register_tune_command(subparsers):
     parser = subparsers.add_parser(
         "tune",
+        allow_abbrev=False,
         help=(
             "Bench every CudaOp produced by the lowering pipeline, attribute per-kernel "
             "latency to every ancestor along Op.source, and write the rows to the tuning cache."
         ),
     )
     add_input_args(parser)
-    add_golden_arg(parser)
-    # ``--dataset golden`` tunes every golden shape in sequence (the built-in
-    # equivalent of looping ``--golden NAME`` over GOLDEN_CONFIGS); ``--kernel``
-    # narrows to a name substring. Default None → ordinary single-op tune.
-    add_dataset_args(parser, default=None)
+    parser.add_argument(
+        "--kernel",
+        help="With --golden-file, tune only entries whose target name contains this substring.",
+    )
+    parser.add_argument(
+        "--golden-file",
+        metavar="PATH",
+        help=(
+            "Tune every target in a working golden YAML file. Each target is reconstructed from embedded stable "
+            "Torch IR plus provenance, or from its Loop IR fallback. Entries with a knobs mapping are measured before MCTS and ranking "
+            "results are written back to the working file."
+        ),
+    )
     parser.add_argument("--output", "-o", help="Output path for the tuned CUDA IR")
     parser.add_argument(
         "--patience",
@@ -50,6 +66,16 @@ def register_tune_command(subparsers):
         help=(
             "Stop after this many consecutive measured variants haven't beaten the current best latency. "
             "Falls back to ``EMMY_TUNE_PATIENCE`` env var, then to 50."
+        ),
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=None,
+        help=(
+            "Hard candidate budget per tuned kernel. Every working-golden proposal reserves one slot before MCTS "
+            "(including a cached replay); MCTS DB cache hits do not spend its remaining live-measurement slots. "
+            "By default patience alone stops the search."
         ),
     )
     parser.add_argument(
@@ -83,7 +109,7 @@ def register_tune_command(subparsers):
         action="store_true",
         help=(
             "After tuning, re-bench the winner at -O3 (deployable numbers, NOT the -O1 ranking pass): the full "
-            "compiled model and each individual kernel (via its provenance .torch.json reproducer) vs eager "
+            "compiled model and each individual kernel (via its in-memory frontend provenance slice) vs eager "
             "PyTorch / torch.compile / Emmy, then print a comparison table. Writes an HTML per-kernel chart "
             "to <dump-dir>/kernels.html when a dump dir is set. Can take minutes on a large model."
         ),
@@ -162,6 +188,14 @@ def _tune_backend(device_id: int | None = None):
     return CudaBackend(bench_compile_timeout_s=12.0, bench_run_timeout_s=2.0, bench_wall_timeout_s=16.0, device_id=device_id)
 
 
+async def _warm_tune_backends(backends) -> None:
+    """Ramp multi-GPU workers without charging startup to a candidate timeout."""
+    if len(backends) < 2:
+        return
+    for start in range(0, len(backends), 2):
+        await asyncio.gather(*(backend.warm_async_worker() for backend in backends[start : start + 2]))
+
+
 def _resolve_devices(args) -> list[int | None]:
     """Resolve ``--gpus`` / ``--devices`` into a device-id list (``--devices`` wins).
     Default ``[None]`` → a single unpinned slot = today's serial behavior. Two or
@@ -188,23 +222,99 @@ def _resolve_devices(args) -> list[int | None]:
 
 def _require_homogeneous_devices(devices: list[int | None]) -> None:
     try:
-        import cupy as cp
-    except Exception:  # noqa: BLE001 — no cupy → can't probe; let the bench surface any mismatch
+        import cupy  # noqa: F401, PLC0415
+    except Exception:  # noqa: BLE001 — the live tune path will report the missing runtime
         return
-    caps = {}
+    identities = {}
     for d in devices:
         try:
-            props = cp.cuda.runtime.getDeviceProperties(d)
+            props = _device_properties(d)
         except Exception as exc:  # noqa: BLE001
             logger.error("--devices: GPU %s not available (%s)", d, exc)
             sys.exit(2)
-        caps[d] = (props["major"], props["minor"])
-    if len(set(caps.values())) > 1:
-        logger.error("--devices must be homogeneous (one perf key per tune); got compute capabilities %s", caps)
+        name = props.get("name")
+        if isinstance(name, bytes):
+            name = name.decode(errors="replace")
+        identities[d] = (props["major"], props["minor"], name)
+    if len(set(identities.values())) > 1:
+        logger.error("--devices must be homogeneous (one perf key per tune); got GPU identities %s", identities)
         sys.exit(2)
 
 
-def _tune_one(args, *, backends, db, ctx, dump, run_id=None):
+def _device_properties(device_id: int | None) -> dict:
+    """CUDA properties for one explicit ordinal (or the active ordinal)."""
+    import cupy as cp
+
+    ordinal = cp.cuda.Device().id if device_id is None else device_id
+    return cp.cuda.runtime.getDeviceProperties(ordinal)
+
+
+def _context_for_device(device_id: int | None, *, target: str | None = None):
+    """Build the tune context from the physical GPU that runs its benches.
+
+    ``Context.probe`` follows the process-current device and normally describes
+    ordinal 0 even when ``--devices 3`` selected another card. Explicit ordinals
+    are probed directly, including the canonical SKU identity and physical
+    feature vector used by prior and node-store keys.
+    """
+    from emmy import gpu
+    from emmy.compiler.context import Context
+
+    if device_id is None:
+        return Context.probe()
+    try:
+        props = _device_properties(device_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("--devices: GPU %s not available (%s)", device_id, exc)
+        sys.exit(2)
+    cap = (int(props["major"]), int(props["minor"]))
+    if target is not None:
+        from emmy.compiler.target import parse_sm
+
+        requested = parse_sm(target)
+        if requested != cap:
+            logger.error("--target %s cannot be benchmarked on selected GPU %s (sm_%d%d)", target, device_id, cap[0], cap[1])
+            sys.exit(2)
+    raw_name = props.get("name")
+    if isinstance(raw_name, bytes):
+        raw_name = raw_name.decode(errors="replace")
+    raw_name = str(raw_name) if raw_name is not None else None
+    spec = gpu.by_name(raw_name) if raw_name else None
+    gpu_name = spec.name if spec else raw_name
+    ctx = Context.from_target(cap, gpu_name=gpu_name)
+    fallback = ctx.device_props
+    feature_keys = {
+        "sm_count": "multiProcessorCount",
+        "smem_per_sm": "sharedMemPerMultiprocessor",
+        "smem_per_block": "sharedMemPerBlock",
+        "regs_per_block": "regsPerBlock",
+        "warp_size": "warpSize",
+        "total_mem": "totalGlobalMem",
+    }
+    live_features = {
+        key: float(props[prop_key]) if prop_key in props else float(fallback.get(key, 0.0)) for key, prop_key in feature_keys.items()
+    }
+    return replace(
+        ctx,
+        sm_count=int(live_features["sm_count"] or ctx.sm_count),
+        device_props=live_features,
+        gpu_name=gpu_name,
+        max_threads_per_cta=int(props.get("maxThreadsPerBlock", ctx.max_threads_per_cta)),
+        warp_size=int(live_features["warp_size"] or ctx.warp_size),
+    )
+
+
+def _tune_one(
+    args,
+    *,
+    backends,
+    db,
+    ctx,
+    dump,
+    run_id=None,
+    proposals=(),
+    proposal_ranking_callback=None,
+):
     """Trace ``args.code`` / ``args.input`` and run the two-level tune on that one
     graph; return ``(result, bench_bundle)``. Manages the live progress bar (closed
     in ``finally``) and prints the per-op ``done`` summary. Lets ``KeyboardInterrupt``
@@ -231,25 +341,48 @@ def _tune_one(args, *, backends, db, ctx, dump, run_id=None):
     patience = args.patience if args.patience is not None else config.tune_patience(50)
     explore_eps = args.explore_eps if args.explore_eps is not None else config.tune_eps(0.0)
     t0 = time.monotonic()
-    try:
-        # The two-level tune is async (per-kernel benches fan across device-pinned
-        # workers on one event loop); ``handle_tune`` is the sync CLI boundary, so the
-        # whole outer drive runs under one ``asyncio.run`` here.
-        result = asyncio.run(
-            run_two_level_tune(
-                graph,
-                ctx=ctx,
-                db=db,
-                backends=backends,
-                patience=patience,
-                ucb_c=args.ucb_c,
-                explore_eps=explore_eps,
-                dump=dump,
-                progress=progress,
-                prior_seed=args.seed,
-                run_id=run_id,
-            )
+
+    async def run():
+        from emmy.compiler.pipeline.search.prior import load_prior
+
+        await _warm_tune_backends(backends)
+        prior = load_prior(seed=args.seed)
+        rankings = await measure_proposals(
+            graph,
+            proposals,
+            backend=backends[0],
+            db=db,
+            ctx=ctx,
+            max_candidates=getattr(args, "max_candidates", None),
+            prior=prior,
         )
+        # Working-file feedback is durable as soon as its measurements finish;
+        # an interrupted/failed MCTS must not discard already-paid proposal data.
+        if proposal_ranking_callback is not None:
+            proposal_ranking_callback(rankings)
+        budget = getattr(args, "max_candidates", None)
+        remaining = None if budget is None else max(0, budget - min(len(proposals), budget))
+        result = await run_two_level_tune(
+            graph,
+            ctx=ctx,
+            db=db,
+            backends=backends,
+            patience=patience,
+            ucb_c=args.ucb_c,
+            explore_eps=explore_eps,
+            dump=dump,
+            progress=progress,
+            prior_seed=args.seed,
+            run_id=run_id,
+            max_candidates=remaining,
+            prior=prior,
+        )
+        return result, rankings
+
+    try:
+        # Proposal measurements and MCTS share one event loop and backend worker,
+        # so an exact seed cannot race a search compile through process-global pins.
+        result, rankings = asyncio.run(run())
     finally:
         progress.close()
     sys.stderr.write(f"\n[tune] done: {result.n_terminals} fused terminal(s) in {time.monotonic() - t0:.1f}s\n")
@@ -268,86 +401,219 @@ def _exit_flushed(code: int) -> None:
 
 
 def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | None]]:
-    """The ``(label, code, input, dynamic)`` shapes this invocation tunes — the **only**
-    place golden and non-golden diverge. ``--dataset golden`` expands to every golden
-    shape recorded for the **live** card (deduped by name, ``--kernel SUBSTR``
-    narrowing; off-GPU it's the full multi-card union, for pure-logic tests). Golden
-    targets are strictly the live card's own recordings — a live card with NO goldens
-    exits 2 instead of falling back to other cards' entries (tuning a foreign golden
-    under the live card's name was the cross-card shadowing bug; record goldens for
-    the card first). The same guard covers ``--golden NAME``, so a foreign-only name
-    never resolves as a tune target. Otherwise it's the single ``--code`` / positional
-    input / ``--golden NAME`` target. ``dynamic`` is the ``--dynamic NAME@INPUT:AXIS``
-    spec list the target traces with: a dynamic golden's own recorded spec, or the CLI
-    flag for an ad-hoc target. ``handle_tune`` then loops over this list uniformly, so
-    one shape and the whole golden set share one codepath. Exits 2 on a degenerate /
-    conflicting source."""
-    if getattr(args, "dataset", None) or getattr(args, "golden", None):
-        from emmy.compiler.pipeline.search.golden import live_recorded_goldens
+    """The one direct ``(label, code, input, dynamic)`` tune target.
 
-        live = live_recorded_goldens()
-        if live is not None and not live:
-            logger.error(
-                "the live GPU has no recorded goldens — golden tuning targets the live card's own goldens only "
-                "(tuning another card's config under this card's name corrupts the per-card records); "
-                "record goldens for this card (goldens/*.yaml) before running the sweep"
-            )
-            sys.exit(2)
-    if getattr(args, "dataset", None):
-        from emmy.compiler.pipeline.search.data import Dataset
-
-        require_source(args, {"golden"}, "tune --dataset only supports 'golden' (db rows have no shape to tune)")
-        if args.code or args.input or getattr(args, "golden", None):
-            logger.error("--dataset golden is mutually exclusive with --code / positional input / --golden NAME")
-            sys.exit(2)
-        if getattr(args, "dynamic", None):
-            logger.error("--dynamic is incompatible with --dataset golden (a dynamic golden's spec is part of its config)")
-            sys.exit(2)
-        # Configs under one name share the shape (and dynamic spec) on any single
-        # card, so any one's snippet is interchangeable (the guard above pins the
-        # on-GPU set to the live card; the off-GPU union is tests-only).
-        by_name: dict[str, tuple[str, list[str] | None]] = {}
-        for s in Dataset.from_golden(kernel=args.kernel, live_gpu=True).samples:
-            by_name.setdefault(s.name, (s.snippet, list(s.dynamic) if s.dynamic else None))
-        if not by_name:
-            logger.error("no golden shapes matched --kernel %r", args.kernel)
-            sys.exit(2)
-        return [(name, code, None, dyn) for name, (code, dyn) in by_name.items()]
-
-    resolve_golden_arg(args)  # --golden NAME → args.code (+ args.dynamic for a dynamic golden)
+    Multi-target inventory and candidate seeding belong exclusively to a mutable
+    ``--golden-file``; the old dataset/canonical-golden target shims are gone.
+    """
     if args.code and args.input:
         logger.error("--code and positional input are mutually exclusive")
         sys.exit(2)
     return [(args.code or args.input, args.code, args.input, getattr(args, "dynamic", None))]
 
 
-def _bench_dump(args):
-    """Per-target dump dir. ``--bench`` reads the ``.torch.json`` provenance
-    reproducers from a dump dir; route through a temp dir when no ``--dump-dir`` was
+def _target_artifact_name(index: int, label: str) -> str:
+    """Stable, filesystem-safe directory name for one multi-target artifact set."""
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in label).strip("._") or "target"
+    return f"{index:03d}_{safe}"
+
+
+def _bench_dump(args, *, target_dir: str | None = None):
+    """Per-target artifact collector. ``--bench`` reads frontend provenance
+    slices from memory; route other dump artifacts through a temp dir when no ``--dump-dir`` was
     given (HTML is only written for a real ``--dump-dir`` / ``EMMY_DUMP_DIR``).
     Returns ``(dump, tmp_dir_or_None)``."""
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    dump = CompilerDump.resolve(args.dump_dir)
+    configured = Path(args.dump_dir) if args.dump_dir else config.dump_dir()
+    if configured is not None and target_dir is not None:
+        dump = CompilerDump(configured / target_dir)
+    else:
+        dump = CompilerDump.resolve(args.dump_dir)
     if args.bench and dump is None:
         import tempfile
 
         tmp = Path(tempfile.mkdtemp(prefix="emmy-tune-bench-"))
-        return CompilerDump(dir=tmp), tmp
+        try:
+            return CompilerDump(dir=tmp), tmp
+        except BaseException:
+            _cleanup_temp_dump(tmp)
+            raise
     return dump, None
 
 
+def _cleanup_temp_dump(path: Path | None) -> None:
+    """Remove only a command-created bench temp directory (never a user dump)."""
+    if path is None:
+        return
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _select_tune_target(args, target: WorkingGoldenTarget) -> None:
+    """Install either a normal trace source or an embedded working-golden program."""
+    args.code, args.input, args.dynamic = target.code, target.input, target.dynamic
+    if target.program is not None:
+        args._golden_graph = target.program
+    elif hasattr(args, "_golden_graph"):
+        del args._golden_graph
+
+
+def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -> int:
+    """Tune independent working-golden targets concurrently across GPU slots.
+
+    Tracing and proposal pinning remain ordered in the parent process. Once seeds
+    are measured, all targets share one event loop, backend-slot queue, DB, and
+    prior instance, so one-kernel trace entries occupy different GPUs without
+    racing checkpoints or process-global pins.
+    """
+    from emmy.commands.tune_progress import TuneProgress
+    from emmy.compiler.pipeline.search.prior import load_prior
+    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+
+    prepared = []
+    temp_dumps: list[Path] = []
+    try:
+        for index, target in enumerate(targets):
+            _select_tune_target(args, target)
+            dump, tmp_dump = _bench_dump(args, target_dir=_target_artifact_name(index, target.label))
+            if tmp_dump is not None:
+                temp_dumps.append(tmp_dump)
+            graph, _, bench_bundle = load_or_trace(args)
+            if dump:
+                dump.dump_input_graph(graph)
+            prepared.append((target, graph, bench_bundle, dump, tmp_dump))
+    except BaseException:
+        for tmp_dump in temp_dumps:
+            _cleanup_temp_dump(tmp_dump)
+        raise
+
+    patience = args.patience if args.patience is not None else config.tune_patience(50)
+    explore_eps = args.explore_eps if args.explore_eps is not None else config.tune_eps(0.0)
+
+    async def run_all():
+        await _warm_tune_backends(backends)
+        prior = load_prior(seed=args.seed)
+        # Pins are process-global. Measure proposals before starting concurrent
+        # MCTS tasks, rotating their isolated jobs across the available GPUs.
+        for index, (target, graph, _bundle, _dump, _tmp) in enumerate(prepared):
+            rankings = await measure_proposals(
+                graph,
+                target.proposals,
+                backend=backends[index % len(backends)],
+                db=db,
+                ctx=ctx,
+                max_candidates=getattr(args, "max_candidates", None),
+                prior=prior,
+            )
+            if target.proposals:
+                persist_proposal_rankings(args.golden_file, document, target, rankings)
+
+        slots: asyncio.Queue = asyncio.Queue()
+        for backend in backends:
+            slots.put_nowait(backend)
+
+        async def tune_target(index, target, graph, dump):
+            budget = getattr(args, "max_candidates", None)
+            remaining = None if budget is None else max(0, budget - min(len(target.proposals), budget))
+            return await run_two_level_tune(
+                graph,
+                ctx=ctx,
+                db=db,
+                backends=backends,
+                patience=patience,
+                ucb_c=args.ucb_c,
+                explore_eps=explore_eps,
+                dump=dump,
+                progress=TuneProgress(enabled=False),
+                prior_seed=args.seed + index,
+                run_id=run_id,
+                max_candidates=remaining,
+                prior=prior,
+                manage_prior=False,
+                backend_slots=slots,
+                close_backends=False,
+            )
+
+        try:
+            results = await asyncio.gather(
+                *[tune_target(index, target, graph, dump) for index, (target, graph, _bundle, dump, _tmp) in enumerate(prepared)]
+            )
+            summaries = [prior.summary("global")] if prior.fitted or prior.trajectory else []
+            prior.maybe_refit(force=True)
+            prior.checkpoint()
+            if results:
+                results[0].prior_summaries.extend(summaries)
+            return results
+        finally:
+            for backend in backends:
+                aclose = getattr(backend, "aclose_async_worker", None)
+                if aclose is not None:
+                    await aclose()
+
+    try:
+        results = asyncio.run(run_all())
+        for (target, _graph, bench_bundle, dump, tmp_dump), result in zip(prepared, results, strict=True):
+            _select_tune_target(args, target)
+            if result.best_reward is not None:
+                if args.output and result.assembled is not None:
+                    Path(args.output).write_text(format_stage(result.assembled, "cuda"))
+                if args.bench and result.assembled is not None:
+                    _run_bench(
+                        args,
+                        bench_bundle,
+                        result.assembled,
+                        dump,
+                        html_dir=(dump.dir if dump and tmp_dump is None else None),
+                        device_id=backends[0].device_id,
+                    )
+            winner = result.best_reward.searched_winner() if result.best_reward is not None else None
+            persist_tune_winner(args.golden_file, document, target, winner, compile_flags=config.nvcc_flags())
+        for block in results[0].prior_summaries if results else []:
+            sys.stderr.write(block + "\n")
+        sys.stderr.write(f"\n[tune] done: {len(results)}/{len(targets)} working-golden target(s)\n")
+        return len(results)
+    finally:
+        for tmp_dump in temp_dumps:
+            _cleanup_temp_dump(tmp_dump)
+
+
 def handle_tune(args):
-    if not getattr(args, "dataset", None) and not args.code and not args.input and not getattr(args, "golden", None):
+    if getattr(args, "max_candidates", None) is not None and args.max_candidates < 1:
+        logger.error("--max-candidates must be >= 1")
+        sys.exit(2)
+    if getattr(args, "kernel", None) and not getattr(args, "golden_file", None):
+        logger.error("--kernel requires --golden-file")
+        sys.exit(2)
+    if not args.code and not args.input and not getattr(args, "golden_file", None):
         # No op to tune → offline mode: refit the online prior on its persisted
         # dataset and print diagnostics (reachability, calibration, golden coverage).
         _tune_offline(args)
         return
 
-    targets = _tune_targets(args)  # one shape, or the whole golden set — same loop below
+    working_document = None
+    if getattr(args, "golden_file", None):
+        conflicts = []
+        if args.code or args.input:
+            conflicts.append("--code / positional input")
+        if getattr(args, "dynamic", None):
+            conflicts.append("--dynamic")
+        if conflicts:
+            logger.error("--golden-file is mutually exclusive with %s", " / ".join(conflicts))
+            sys.exit(2)
+        try:
+            working_document, targets = load_working_targets(args.golden_file, kernel=args.kernel)
+        except ValueError as exc:
+            logger.error(str(exc))
+            sys.exit(2)
+    else:
+        targets = [WorkingGoldenTarget(label, code, inp, dyn) for label, code, inp, dyn in _tune_targets(args)]
+    if len(targets) > 1 and args.output:
+        logger.error("--output is only valid for a single tune target; use --dump-dir for multi-target artifacts")
+        sys.exit(2)
     validate_trace_adapter_args(args)
 
-    from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search import SearchDB
 
     setup_pipeline_runtime(args)
@@ -375,7 +641,13 @@ def handle_tune(args):
     backends = [_tune_backend(device_id=d) for d in devices]
     if len(backends) > 1:
         sys.stderr.write(f"[tune] per-kernel parallel across {len(backends)} GPUs: {[d for d in devices]}\n")
-    ctx = Context.probe()
+    ctx = _context_for_device(devices[0], target=getattr(args, "target", None))
+    if working_document is not None:
+        try:
+            validate_working_gpu(working_document, ctx)
+        except ValueError as exc:
+            logger.error(str(exc))
+            sys.exit(2)
     # One session id per CLI invocation (a golden sweep = one collection session) —
     # stamped on every node row this run writes, so cross-run keep-min drift in the
     # node store is traceable to its tune session.
@@ -383,54 +655,116 @@ def handle_tune(args):
 
     run_id = _mint_run_id()
 
+    one_pin_set = len({tuple(sorted(target.pins.items())) for target in targets}) == 1
+    if working_document is not None and len(backends) > 1 and len(targets) > 1 and one_pin_set:
+        sys.stderr.write(f"[tune] target-parallel working-golden sweep: {len(targets)} target(s) across {len(backends)} GPUs\n")
+        try:
+            from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+            with pinned_knobs(targets[0].pins):
+                _tune_working_multi(
+                    args,
+                    targets,
+                    working_document,
+                    backends=backends,
+                    db=db,
+                    ctx=ctx,
+                    run_id=run_id,
+                )
+        except KeyboardInterrupt:
+            sys.stderr.write("\n[tune] interrupted — partial measured results are preserved in the DB\n")
+            _exit_flushed(0)
+        except RuntimeError as exc:
+            if isinstance(exc, NotImplementedError):
+                raise
+            sys.stderr.write(f"\n[tune] aborted: {exc}\n")
+            _exit_flushed(1)
+        _exit_flushed(0)
+
     multi = len(targets) > 1
     if multi:
         sys.stderr.write(f"[tune] {len(targets)} shape(s) into {db_path}{' (--clean)' if args.clean else ''}\n")
     done = 0
-    for i, (label, code, inp, dyn) in enumerate(targets):
-        args.code, args.input, args.dynamic = code, inp, dyn
+    for i, target in enumerate(targets):
+        label, code = target.label, target.code
+        _select_tune_target(args, target)
         if multi:
             sys.stderr.write(f"\n[tune] === {i + 1}/{len(targets)}: {label} → {code} ===\n")
-        dump, tmp_dump = _bench_dump(args)
+        target_dir = _target_artifact_name(i, label) if multi else None
+        dump, tmp_dump = _bench_dump(args, target_dir=target_dir)
         try:
-            result, bench_bundle = _tune_one(args, backends=backends, db=db, ctx=ctx, dump=dump, run_id=run_id)
+            from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+            regime = pinned_knobs(target.pins) if working_document is not None else nullcontext()
+            with regime:
+                result, bench_bundle = _tune_one(
+                    args,
+                    backends=backends,
+                    db=db,
+                    ctx=ctx,
+                    dump=dump,
+                    run_id=run_id,
+                    proposals=target.proposals,
+                    proposal_ranking_callback=(
+                        (lambda measured, target=target: persist_proposal_rankings(args.golden_file, working_document, target, measured))
+                        if working_document is not None and target.proposals
+                        else None
+                    ),
+                )
         except KeyboardInterrupt:
             # Per-op bests already landed in the DB as they were measured, so a re-run resumes.
             sys.stderr.write(f"\n[tune] interrupted{f' at {label}' if multi else ''} — partial per-op results are in the DB\n")
+            _cleanup_temp_dump(tmp_dump)
             _exit_flushed(0)
         except RuntimeError as exc:
             # A NotImplementedError is never the watchdog signal — it's a
             # compiler contract bug (e.g. an unconsumed AtomTile reaching
             # render); re-raise so the traceback isn't swallowed.
             if isinstance(exc, NotImplementedError):
+                _cleanup_temp_dump(tmp_dump)
                 raise
             # Bench watchdog couldn't bail (GPU queue saturated) → the parent CUDA stream
             # is dirty, so the rest of the sweep can't run reliably here. Abort (the DB has
             # the per-op bests; a re-run resumes). os._exit bypasses the cupy atexit deadlock.
             sys.stderr.write(f"\n[tune] aborted{f' at {label}' if multi else ''}: {exc}\n")
+            _cleanup_temp_dump(tmp_dump)
             _exit_flushed(1)
 
-        if result.best_reward is None:
-            if not multi:
-                sys.stderr.write("[tune] no kernels tuned — exiting without output\n")
-        else:
-            # Only write the assembled CUDA when ``--output`` is given (a multi-kB dump
-            # to stdout after a long tune is noise; ``-o`` or ``compile`` replays it).
-            if args.output and result.assembled is not None:
-                Path(args.output).write_text(format_stage(result.assembled, "cuda"))
-                logger.info("Saved cuda IR: %s", args.output)
-            if args.bench and result.assembled is not None:
-                _run_bench(args, bench_bundle, result.assembled, dump, html_dir=(dump.dir if dump and tmp_dump is None else None))
-        if tmp_dump is not None:
-            import shutil
-
-            shutil.rmtree(tmp_dump, ignore_errors=True)
-        done += 1
+        try:
+            if result.best_reward is None:
+                if not multi:
+                    sys.stderr.write("[tune] no kernels tuned — exiting without output\n")
+            else:
+                # Only write the assembled CUDA when ``--output`` is given (a multi-kB dump
+                # to stdout after a long tune is noise; ``-o`` or ``compile`` replays it).
+                if args.output and result.assembled is not None:
+                    Path(args.output).write_text(format_stage(result.assembled, "cuda"))
+                    logger.info("Saved cuda IR: %s", args.output)
+                if args.bench and result.assembled is not None:
+                    _run_bench(
+                        args,
+                        bench_bundle,
+                        result.assembled,
+                        dump,
+                        html_dir=(dump.dir if dump and tmp_dump is None else None),
+                        device_id=backends[0].device_id,
+                    )
+            if working_document is not None:
+                winner = result.best_reward.searched_winner() if result.best_reward is not None else None
+                persist_tune_winner(
+                    args.golden_file,
+                    working_document,
+                    target,
+                    winner,
+                    compile_flags=config.nvcc_flags(),
+                )
+                sys.stderr.write(f"[tune] updated working golden rankings: {args.golden_file}\n")
+            done += 1
+        finally:
+            _cleanup_temp_dump(tmp_dump)
 
     if multi:
         sys.stderr.write(f"\n[tune] done: {done}/{len(targets)} shape(s)\n")
-    _exit_flushed(0)
-
     _exit_flushed(0)
 
 
@@ -473,10 +807,10 @@ _FULL_MODEL_BENCH_WALL_S = 300.0
 _PER_KERNEL_BENCH_WALL_S = 120.0
 
 
-def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
+def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int | None = None) -> None:
     """``tune --bench``: re-bench the tuned winner at -O3 (deployable numbers, NOT the
     -O1 ranking pass) — full model **against the real torch module** (eager /
-    torch.compile / Emmy) and each per-kernel ``.torch.json`` reproducer against
+    torch.compile / Emmy) and each in-memory per-kernel frontend slice against
     its torch-ref reconstruction, each in the SIGKILL-able bench worker so a hung kernel
     can't wedge the run. Prints both tables and (when ``html_dir`` is set) writes an HTML
     per-kernel chart. ``bench_bundle = (module, args, kwargs) | None``; when ``None`` (an
@@ -493,18 +827,17 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
     # so the -O1-tuned winners are still picked when re-benching here at -O3.
     bench_flags = args.nvcc_flags if args.nvcc_flags is not None else ""
     os.environ[config.NVCC_FLAGS] = bench_flags
+    bench_ctx = _context_for_device(device_id, target=getattr(args, "target", None))
     sys.stderr.write(f"\n[tune] --bench: re-benching at -O3 ({bench_flags or 'nvcc default -O3'}) — deployable numbers\n")
 
     # Build the bench backend with EMMY_DUMP_DIR cleared: CudaBackend defaults its
-    # dump to CompilerDump.from_env(), whose __post_init__ would rmtree the dump dir —
-    # destroying the .torch.json reproducers the assembled tuning run just wrote there
-    # (and which the per-kernel bench reads). Clearing it also avoids per-launch dump
-    # noise during benching. (No-op when tuning used a temp dump — the env wasn't set.)
+    # dump to CompilerDump.from_env(), whose __post_init__ would replace the dump dir.
+    # Clearing it also avoids per-launch dump noise during benching.
     saved_dump_env = os.environ.pop(config.DUMP_DIR, None)
     # ``backend`` here is only the handle to resolve the tune DB (for the per-kernel re-lowering);
     # the benches themselves run in the SIGKILL-able worker (``benchmark_compare_isolated_async``), which
     # builds its own backend. DUMP_DIR is cleared so CudaBackend's default CompilerDump doesn't
-    # rmtree the reproducer dir the per-kernel bench reads.
+    # replace the artifact dir while the bench is using its in-memory slices.
     backend = CudaBackend(tune_db="auto")
     if saved_dump_env is not None:
         os.environ[config.DUMP_DIR] = saved_dump_env
@@ -524,7 +857,7 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
             "dynamic": getattr(args, "dynamic", None),
         }
         try:
-            full, _, _, full_captured = asyncio.run(
+            full, _, _, full_captured, _ = asyncio.run(
                 benchmark_compare_isolated_async(
                     lowered=assembled,
                     torch_spec=("trace_args", trace_args),
@@ -534,6 +867,7 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
                     iters=args.iters,
                     seed=args.seed,
                     nvcc_flags=bench_flags,
+                    device_id=device_id,
                 )
             )
             # The worker tiled the torch inputs to the hint for a symbolic graph
@@ -548,9 +882,9 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
             # parent device stays clean — per-kernel runs in its own worker — so continue.
             sys.stderr.write(f"[tune] full-model bench failed ({exc}); continuing to per-kernel\n")
     else:
-        sys.stderr.write("\n[tune] full-model bench skipped (no runnable module — --ir JSON path)\n")
+        sys.stderr.write("\n[tune] full-model bench skipped (the embedded program has no runnable eager module)\n")
 
-    rows, fallback = _bench_per_kernel(args, dump.dir, db)
+    rows, fallback = _bench_per_kernel(args, dump, db, device_id=device_id, ctx=bench_ctx)
     if rows:
         _print_per_kernel_table(rows)
         if fallback:
@@ -559,22 +893,19 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
             render_kernel_chart(rows, Path(html_dir) / "kernels.html")
 
 
-def _bench_per_kernel(args, dump_dir, db):
-    """Bench each kernel's ``.torch.json`` provenance reproducer (re-lowered greedily so the tuned
+def _bench_per_kernel(args, dump, db, *, device_id: int | None = None, ctx=None):
+    """Bench each kernel's frontend provenance slice (re-lowered greedily so the tuned
     DB-best forks are picked) vs eager / torch.compile / emmy at -O3 — each in the SIGKILL-able
     worker (``benchmark_compare_isolated_async``). Re-lowering runs in the parent (CPU; greedy forks read
     the DB); only the GPU bench is isolated, so a hung / failed kernel skips just that reproducer and
     the sweep continues. Returns ``(rows, fallback)`` — ``rows`` is ``[(label, {backend: us})]``,
     ``fallback`` the labels that benched without CUDA graph capture (dispatch-inclusive timings)."""
-    import json
-
     from emmy.commands.run import _detect_stage, _passes_after_stage
     from emmy.compiler.backend import torch_ref
     from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
-    from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline import Pipeline
 
-    repros = final_kernel_repros(dump_dir)
+    repros = dump.frontend_reproducers()
     if not repros:
         return [], []
     bench_flags = os.environ.get(config.NVCC_FLAGS, "")
@@ -582,16 +913,15 @@ def _bench_per_kernel(args, dump_dir, db):
     rows: list[tuple[str, dict]] = []
     fallback: list[str] = []
     records: list[dict] = []  # persisted as 62_kernel_bench.json — the `emmy compare` input
-    for repro in repros:
-        label = _short_kernel(repro.name)
+    for name, frontend in sorted(repros.items()):
+        label = _short_kernel(name)
         try:
-            with open(repro) as f:
-                g = Graph.from_dict(json.load(f))
+            g = frontend.copy()
             fe = g.copy() if torch_ref.is_runnable(g) else None
             tail = _passes_after_stage(_detect_stage(g))
             # No dump here — re-creating a CompilerDump on the repro dir would rmtree it.
-            lowered = Pipeline.build(tail).run(g, db=db) if tail else g
-            results, _, _, captured = asyncio.run(
+            lowered = Pipeline.build(tail).run(g, ctx=ctx, db=db) if tail else g
+            results, _, reference_available, captured, accuracy_error = asyncio.run(
                 benchmark_compare_isolated_async(
                     lowered=lowered,
                     torch_spec=("frontend_graph", fe),
@@ -601,36 +931,43 @@ def _bench_per_kernel(args, dump_dir, db):
                     iters=args.iters,
                     seed=args.seed,
                     nvcc_flags=bench_flags,
+                    device_id=device_id,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — isolated, so a hung / failed kernel skips just this one
             sys.stderr.write(f"[tune]   {label}: skipped ({exc})\n")
             continue
         rows.append((label, results))
-        records.append({"kernel": repro.name.removesuffix(".torch.json"), "label": label, "captured": captured, "backends": results})
+        records.append(
+            {
+                "kernel": name,
+                "label": label,
+                "captured": captured,
+                "reference_available": reference_available,
+                "accuracy_error": accuracy_error,
+                "backends": results,
+            }
+        )
         if not captured:
             fallback.append(label)
+        if accuracy_error is not None:
+            sys.stderr.write(f"[tune]   {label}: accuracy failed ({accuracy_error})\n")
         dp = results.get("Emmy")
         sys.stderr.write(f"[tune]   {label}: emmy={dp:.0f}us\n" if dp is not None else f"[tune]   {label}: (no result)\n")
     if records:
         # Per-kernel -O3 bench results in machine-readable form, beside the table /
         # kernels.html — the per-kernel input `emmy compare <dumpA> <dumpB>` diffs.
-        (Path(dump_dir) / "62_kernel_bench.json").write_text(json.dumps(records, indent=2, default=str))
+        import json
+
+        (dump.dir / "62_kernel_bench.json").write_text(json.dumps(records, indent=2, default=str))
     return rows, fallback
 
 
-def final_kernel_repros(dump_dir):
-    """The ``.torch.json`` provenance reproducers from the last (CUDA) stage dump."""
-    dump_dir = Path(dump_dir)
-    kernel_dirs = sorted(dump_dir.glob("*.kernels"))
-    return sorted(kernel_dirs[-1].glob("*.torch.json")) if kernel_dirs else []
-
-
 def _short_kernel(name: str) -> str:
-    """Readable kernel label: drop the ``.torch.json`` suffix + trailing structural hash."""
+    """Readable kernel label with its trailing structural hash removed."""
     import re
 
-    return re.sub(r"_[0-9a-f]{6}$", "", name.removesuffix(".torch.json"))
+    return re.sub(r"_[0-9a-f]{6}$", "", name)
 
 
 def _fmt_us(us) -> str:
@@ -668,7 +1005,7 @@ def render_kernel_chart(rows, out_html) -> None:
         ],
         value_name="latency (µs) — lower is faster",
         title="tune --bench — per-kernel latency (-O3)",
-        subtitle=f"{len(rows)} kernels benched from their .torch.json reproducers ({n_vs} torch-comparable, rest emmy-only).",
+        subtitle=f"{len(rows)} kernels benched from frontend provenance slices ({n_vs} torch-comparable, rest emmy-only).",
         orientation="horizontal",
     )
     out_html = Path(out_html)

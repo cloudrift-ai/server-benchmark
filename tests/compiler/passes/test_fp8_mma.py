@@ -36,8 +36,7 @@ from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 K32 = "mma_m16n8k32_e4m3_f32"
 
@@ -268,13 +267,13 @@ def test_k32_mma_matches_lut_reference_cuda():
     numpy reference. Two bit regimes: an EXACT one (A in {0, ±1}, B in one exponent band — every
     partial sum exactly representable, so even sm_89's reduced-precision accumulate and the f16
     store round nothing) and a random-bits one under the loose arch-covering gate."""
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 32, 64, 64
     rng = np.random.default_rng(11)
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": f"{K32}/f2x2/k1", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k1", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)
@@ -345,9 +344,9 @@ def test_w8a8_static_act_quant_e2e_cuda():
     k32 mma, and the epilogue composes ``act_scale ⊗ weight_scale`` on the f32 accumulator.
     Compared against (a) the f32 reference of the SAME quantized computation (tight) and (b) the
     unquantized reference (the activation-quantization error, loose documented gate)."""
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(7)
@@ -359,7 +358,7 @@ def test_w8a8_static_act_quant_e2e_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"
@@ -434,9 +433,9 @@ def test_w8a8_dynamic_per_token_amax_cuda():
     Verified against the DEVICE's own encoded bits (tight — isolates the mma path from host/device
     encode boundary-tie divergence at x/s values landing exactly between e4m3 codes) and the host
     quantized reference (loose)."""
-    from emmy.commands.run import _pinned_knobs
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(9)
@@ -447,7 +446,7 @@ def test_w8a8_dynamic_per_token_amax_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with _pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_dyn_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32" in s), None)

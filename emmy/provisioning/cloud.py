@@ -37,6 +37,7 @@ from emmy.provisioning import cloudrift as cr_provider
 from emmy.provisioning import gcp as gcp_provider
 from emmy.provisioning.candidates import VmCandidate, iter_candidates
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
+from emmy.provisioning.types import AllocationObserver
 from emmy.redact import register_secret
 
 # How many times to retry the *same* candidate on a transient (non-capacity,
@@ -129,6 +130,8 @@ async def provision_cloud_vm(
     provider=None,
     extra_authorized_keys=None,
     provisioning_model=None,
+    allocation_observer: AllocationObserver | None = None,
+    exact_gpu_count: bool = False,
 ):
     """Provision a cloud VM for the given GPU requirements.
 
@@ -147,6 +150,10 @@ async def provision_cloud_vm(
         provisioning_model: GCP-only override for the hardware-table
             provisioning model (FLEX_START / SPOT / STANDARD). ``None`` keeps
             the per-GPU default; ignored for CloudRift candidates.
+        allocation_observer: optional durable allocation recorder. It is
+            notified before allocation, immediately after the provider returns
+            a deletion handle, and once the VM is ready.
+        exact_gpu_count: reject candidates that contain more GPUs than requested.
 
     Returns:
         VMConnectionInfo on success, None when every candidate is exhausted.
@@ -158,7 +165,7 @@ async def provision_cloud_vm(
     """
     logger = logger or logging.getLogger(__name__)
 
-    candidates = iter_candidates(gpu_name, gpu_count, provider)
+    candidates = iter_candidates(gpu_name, gpu_count, provider, exact_gpu_count=exact_gpu_count)
     logger.info(f"GPU: {gpu_name} x{gpu_count} -> {len(candidates)} candidate(s): " + ", ".join(c.describe() for c in candidates))
 
     last_err: Exception | None = None
@@ -166,6 +173,8 @@ async def provision_cloud_vm(
         logger.info(f"Trying candidate: {cand.describe()}")
         for attempt in range(1, SAME_CANDIDATE_RETRIES + 1):
             try:
+                if allocation_observer is not None:
+                    await allocation_observer.before_allocate(cand.provider)
                 conn = await _provision_candidate(
                     cand,
                     gpu_name,
@@ -177,6 +186,7 @@ async def provision_cloud_vm(
                     logger,
                     extra_authorized_keys,
                     provisioning_model,
+                    allocation_observer,
                 )
             except CapacityExhausted as exc:
                 logger.warning(f"{cand.describe()}: capacity exhausted ({exc}); advancing to next candidate.")
@@ -200,6 +210,8 @@ async def provision_cloud_vm(
                 break
             else:
                 if conn is not None or dry_run:
+                    if conn is not None and allocation_observer is not None:
+                        await allocation_observer.ready(conn)
                     return conn
                 # Soft None — treat like capacity exhaustion, advance immediately.
                 logger.warning(f"{cand.describe()}: provider returned None; advancing to next candidate.")
@@ -220,6 +232,7 @@ async def _provision_candidate(
     logger,
     extra_authorized_keys=None,
     provisioning_model=None,
+    allocation_observer: AllocationObserver | None = None,
 ):
     """Single provisioning attempt for one resolved candidate.
 
@@ -229,15 +242,40 @@ async def _provision_candidate(
     failures are raised, not returned.
     """
     if cand.provider == "cloudrift":
-        return await _provision_cloudrift(cand, ssh_key, providers_config, dry_run, logger, extra_authorized_keys)
+        return await _provision_cloudrift(
+            cand,
+            ssh_key,
+            providers_config,
+            dry_run,
+            logger,
+            extra_authorized_keys,
+            allocation_observer,
+        )
     if cand.provider == "gcp":
         return await _provision_gcp(
-            cand, gpu_name, ssh_key, providers_config, server_name, dry_run, logger, extra_authorized_keys, provisioning_model
+            cand,
+            gpu_name,
+            ssh_key,
+            providers_config,
+            server_name,
+            dry_run,
+            logger,
+            extra_authorized_keys,
+            provisioning_model,
+            allocation_observer,
         )
     raise ValueError(f"Unknown provider: {cand.provider}")
 
 
-async def _provision_cloudrift(cand: VmCandidate, ssh_key, providers_config, dry_run, logger, extra_authorized_keys=None):
+async def _provision_cloudrift(
+    cand: VmCandidate,
+    ssh_key,
+    providers_config,
+    dry_run,
+    logger,
+    extra_authorized_keys=None,
+    allocation_observer: AllocationObserver | None = None,
+):
     api_key = os.environ.get("CLOUDRIFT_API_KEY")
     if not api_key and not dry_run:
         raise TerminalProvisionError("CLOUDRIFT_API_KEY env var required for CloudRift provisioning")
@@ -267,6 +305,7 @@ async def _provision_cloudrift(cand: VmCandidate, ssh_key, providers_config, dry
         billing_exempt=billing_exempt,
         network=network,
         extra_public_keys=extra_authorized_keys,
+        allocation_observer=allocation_observer,
     )
 
 
@@ -280,6 +319,7 @@ async def _provision_gcp(
     logger,
     extra_authorized_keys=None,
     provisioning_model=None,
+    allocation_observer: AllocationObserver | None = None,
 ):
     gcp_config = (providers_config or {}).get("gcp", {})
     provisioning_model = provisioning_model or GPU_GCP_PROVISIONING_MODEL.get(gpu_name, DEFAULT_GCP_PROVISIONING_MODEL)
@@ -351,6 +391,7 @@ async def _provision_gcp(
         timeout=create_timeout,
         wait_ssh=True,
         dry_run=dry_run,
+        allocation_observer=allocation_observer,
     )
     if conn and conn.username == "":
         conn.username = ssh_user
@@ -365,12 +406,14 @@ async def delete_cloud_vm(delete_info, dry_run=False):
         instance_id = delete_info[1]
         if dry_run:
             logger.info(f"[dry-run] cloudrift: terminate instance {instance_id}")
-            return
+            return True
         api_key = os.environ.get("CLOUDRIFT_API_KEY", "")
         register_secret(api_key)
-        await cr_provider.delete_instance(api_key, instance_id)
+        return await cr_provider.delete_instance(api_key, instance_id)
 
     elif provider == "gcp":
         instance_name = delete_info[1]
         zone = delete_info[2]
-        await gcp_provider.delete_instance(instance_name, zone, dry_run=dry_run)
+        return await gcp_provider.delete_instance(instance_name, zone, dry_run=dry_run)
+
+    raise ValueError(f"Unknown VM provider in deletion handle: {provider}")

@@ -80,6 +80,11 @@ class SearchNode:
     # keeps the leaf's variance / n_samples and its failure outcome.
     bench_stats: PerfStats | None = field(default=None, repr=False)
     bench_status: str | None = field(default=None, repr=False)
+    # Number of CudaOps in the directly-benched terminal. Usually one for an
+    # inner kernel search, but lowering can legitimately materialize several
+    # CUDA kernels (for example a split reduction + combine). A candidate-file
+    # annotation is only unambiguous in the one-CudaOp case.
+    realized_cuda_ops: int | None = field(default=None, repr=False)
     # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
     # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
     # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
@@ -129,6 +134,7 @@ class TuningSearch(Search):
         explore_eps: float = 0.0,
         seed: int = 0,
         max_visits: int | None = None,
+        max_measurements: int | None = None,
         prior_model: Prior | None = None,
         base_knobs: dict | None = None,
     ) -> None:
@@ -150,6 +156,8 @@ class TuningSearch(Search):
         self._rng = random.Random(seed)
         self._patience = patience
         self._max_visits = max_visits
+        self._max_measurements = max_measurements
+        self.measurements = 0
         # Online prior driving PUCT selection — a fixed global model for the run
         # (it refits in batches between ops, not within one). ``None`` for a
         # single-shot compile (no benching) → uniform PUCT → emission-order pick.
@@ -193,6 +201,16 @@ class TuningSearch(Search):
         # in its OWN band; with no gate every row is standard and this equals the global best.
         self._best_std_lat: float | None = None
 
+    def note_bench(self, *, measured: bool) -> None:
+        """Count only terminals that reached the live backend.
+
+        A DB cache hit remains useful evidence and is observed by the tree, but
+        does not spend ``max_measurements``. This keeps a resumed tune's candidate
+        budget about new measurements rather than replay work.
+        """
+        if measured:
+            self.measurements += 1
+
     def observe(self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None) -> None:
         self.last_stats = stats
         self.last_status = status
@@ -202,6 +220,7 @@ class TuningSearch(Search):
         # steps (FK / BK / STAGE / …) reach the prior. Falls back to the
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
+        token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -277,6 +296,40 @@ class TuningSearch(Search):
                 if knobs:
                     merged.update(knobs)
         return merged
+
+    @staticmethod
+    def _realized_cuda_op_count(candidate: object | None) -> int | None:
+        """Number of CUDA kernels in a directly observed terminal."""
+        graph = getattr(candidate, "graph", None)
+        if graph is None:
+            return None
+        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+
+        return sum(isinstance(node.op, CudaOp) for node in graph.nodes.values())
+
+    def best_realized(self) -> tuple[dict, float, int | None] | None:
+        """Return the fastest directly observed successful terminal.
+
+        Unlike ``tree.best_reward``, this preserves the knobs and direct cost as
+        one indivisible observation. Callers must not reconstruct the knobs from
+        a later greedy/deploy replay, whose evidence hierarchy can select a
+        different configuration. Equal medians break deterministically by the
+        canonical knob row.
+        """
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+        best: tuple[dict, float, int | None] | None = None
+        stack = list(self.tree.root.children)
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children)
+            stats = node.bench_stats
+            if node.bench_status != "ok" or node.realized_knobs is None or stats is None or stats.median <= 0:
+                continue
+            candidate = (dict(node.realized_knobs), float(stats.median), node.realized_cuda_ops)
+            if best is None or (candidate[1], canonical_row_key(candidate[0])) < (best[1], canonical_row_key(best[0])):
+                best = candidate
+        return best
 
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;
@@ -564,6 +617,10 @@ class TuningSearch(Search):
 
     def _should_stop(self) -> bool:
         if self.stop_reason is not None:
+            return True
+        if self._max_measurements is not None and self.measurements >= self._max_measurements:
+            best_us = 1.0 / self._best_reward if self._best_reward > 0 else float("inf")
+            self.stop_reason = f"max_measurements ({self.measurements} reached, best {best_us:.2f} us)"
             return True
         visits = self.tree.root.visits
         if visits == 0:

@@ -88,6 +88,25 @@ def device_arch(uses_tma: bool) -> str:
     return f"sm_{cap}" + ("a" if uses_tma else "")
 
 
+def _launchable_arch(uses_tma: bool) -> str:
+    """The arch for a cubin THIS process is about to launch — the LIVE device's, not the target's.
+
+    ``--target`` means "make every lowering decision as if on that GPU" (TMA / cp.async gating,
+    atom family, goldens), and :func:`device_arch` follows it because an ahead-of-time bake really
+    is building for that card. A cubin the current process then launches has a harder constraint:
+    a cubin is not forward-compatible, so one assembled for a lower target will not load here at
+    all (``CUDA_ERROR_NO_BINARY_FOR_GPU``). Only the ISA the ALREADY-CHOSEN instructions are
+    assembled into follows the live device; nothing about the lowering changes. Falls back to the
+    target when no device answers (there is nothing to launch on anyway)."""
+    import cupy as cp  # noqa: PLC0415
+
+    try:
+        cap = str(cp.cuda.Device().compute_capability)
+    except Exception:  # noqa: BLE001 — no device to probe; the target is the only answer left
+        return device_arch(uses_tma)
+    return f"sm_{cap}" + ("a" if uses_tma else "")
+
+
 @functools.cache
 def _toolkit_tag() -> str:
     """Short digest of the ``nvcc`` toolchain (``nvcc --version``), folded into
@@ -167,7 +186,7 @@ def load_function(source: str, name: str, options, *, uses_tma: bool):  # noqa: 
             "dropped for faster, GPU-free, cubin-cacheable compiles)"
         )
     try:
-        cubin = compile_to_cubin(source, name, arch=device_arch(uses_tma))
+        cubin = compile_to_cubin(source, name, arch=_launchable_arch(uses_tma))
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.decode(errors="replace") if exc.stderr else "(no stderr)"
         logger.error("nvcc compile failed for kernel %r:\n%s", name, detail)

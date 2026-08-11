@@ -134,8 +134,9 @@ jobs:
 
           Also select zero to three new models with no recipe, all suitable for the exact target
           {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}. These will become untested onboarding recipe
-          shells; do not claim they have been deployed or benchmarked. Do not edit the repository, rent hardware, or
-          deploy anything.
+          shells. Keep at most three onboarding shells total: every existing onboarding/untested recipe consumes one
+          slot, so select no new model when three already exist. Do not claim shells have been deployed or benchmarked.
+          Do not edit the repository, rent hardware, or deploy anything.
 
           Before your final response, call write_file once with path {os.environ['AGENT_MANIFEST']} and content equal
           to exactly one JSON object without a Markdown fence:
@@ -220,9 +221,6 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - name: Refresh GitHub App token
-        if: >-
-          steps.lifecycle.outputs.changed == 'true' ||
-          (steps.rolling.outputs.exists != 'true' && steps.rolling.outputs.branch != '')
         id: app-token-refresh
         uses: actions/create-github-app-token@v1
         with:
@@ -231,9 +229,6 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Create or update rolling discovery pull request
-        if: >-
-          steps.lifecycle.outputs.changed == 'true' ||
-          (steps.rolling.outputs.exists != 'true' && steps.rolling.outputs.branch != '')
         uses: actions/github-script@v7
         env:
           PR_NUMBER: ${{ steps.rolling.outputs.number }}

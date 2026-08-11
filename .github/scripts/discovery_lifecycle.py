@@ -15,7 +15,7 @@ import yaml
 from emmy.recipe.lifecycle import LIFECYCLE_TAGS, ONBOARDING_TAG, UNTESTED_TAG, validate_recipe_tags
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-MAX_NEW_MODELS = 3
+MAX_ONBOARDING_MODELS = 3
 
 
 def _extract_object(text: str) -> dict:
@@ -88,9 +88,14 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
     if unfinished:
         raise ValueError(f"Untested onboarding shells cannot be maintained: {', '.join(unfinished)}")
 
+    existing_onboarding = sorted(model_id for model_id, record in records.items() if ONBOARDING_TAG in record["tags"])
+    if len(existing_onboarding) > MAX_ONBOARDING_MODELS:
+        raise ValueError(f"Existing onboarding shells exceed the limit of {MAX_ONBOARDING_MODELS}")
+
     candidates = manifest.get("onboarding_models", [])
-    if not isinstance(candidates, list) or len(candidates) > MAX_NEW_MODELS:
-        raise ValueError(f"onboarding_models must be a list of at most {MAX_NEW_MODELS} models")
+    available_onboarding = MAX_ONBOARDING_MODELS - len(existing_onboarding)
+    if not isinstance(candidates, list) or len(candidates) > available_onboarding:
+        raise ValueError(f"onboarding_models must leave at most {MAX_ONBOARDING_MODELS} total onboarding shells")
     normalized_candidates = []
     candidate_ids: set[str] = set()
     expected_keys = {"model_id", "task", "gpu", "gpu_count", "rationale"}
@@ -114,7 +119,6 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
         candidate_ids.add(model_id)
         normalized_candidates.append({**candidate, "rationale": rationale.strip()})
 
-    existing_onboarding = sorted(model_id for model_id, record in records.items() if ONBOARDING_TAG in record["tags"])
     obsolete = sorted(
         model_id for model_id, record in records.items() if model_id not in maintained and ONBOARDING_TAG not in record["tags"]
     )

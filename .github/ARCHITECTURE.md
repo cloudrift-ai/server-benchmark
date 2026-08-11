@@ -57,8 +57,9 @@ detector constructs the supported Emmy command from validated experiment paths a
 ## Model discovery and onboarding
 
 All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
-recipes for the maintained set and up to three open-weight Hugging Face models without recipes for one exact GPU name
-and count. Discovery remains read-only: the workflow checks that the agent did not modify the checkout, then
+recipes for the maintained set and keeps at most three total onboarding shells for open-weight Hugging Face models on
+one exact GPU name and count. Existing shells consume those slots. Discovery remains read-only: the workflow checks
+that the agent did not modify the checkout, then
 `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
 reasoning wrapper around the JSON object, but requires exactly the two expected top-level fields before validating
 their contents. The agent writes that manifest through the runner to one explicitly allowed temporary path; it cannot
@@ -99,11 +100,11 @@ discovery PR exists. It also adopts one unpaired discovery branch left by an int
 failing closed if multiple such branches would make ownership ambiguous.
 
 The validated manifest tags the ten selected complete recipes `maintained`, tags other complete recipes `obsolete`,
-and creates up to three `onboarding`/`untested` recipe shells. Obsolete recipes remain in git but cannot be deployed,
-benchmarked, published, or bundled. A current demand spike may return an obsolete recipe to the maintained set. The
-workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and creates
-or refreshes its `model-discovery` and `model-onboarding` labels through the GitHub API. It never rents a VM and does
-not require the GitHub CLI on the self-hosted runner.
+and creates `onboarding`/`untested` recipe shells up to the three-shell total. Obsolete recipes remain in git but
+cannot be deployed, benchmarked, published, or bundled. A current demand spike may return an obsolete recipe to the
+maintained set. The workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling
+branch, and creates or refreshes its body, `model-discovery` label, and `model-onboarding` label through the GitHub API
+on every run. It never rents a VM and does not require the GitHub CLI on the self-hosted runner.
 
 ## Credentials, VM ownership, and cleanup
 

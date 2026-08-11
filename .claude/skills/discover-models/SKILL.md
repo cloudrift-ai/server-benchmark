@@ -118,7 +118,8 @@ In lifecycle mode:
 - choose exactly the requested number of existing, fully configured recipes as maintained;
 - treat every other fully configured recipe as obsolete; the workflow derives this complement, so do not return a
   separate obsolete list;
-- choose at most three genuinely new models for onboarding shells on the prompt's exact target;
+- choose only enough genuinely new models to keep at most three total onboarding shells on the prompt's exact target;
+  existing onboarding/untested shells consume the available slots;
 - use exact `model.huggingface` IDs from recipe YAML for maintained entries;
 - prefer current demand and serving value, while keeping a useful mix of sizes, modalities, and architectures.
 

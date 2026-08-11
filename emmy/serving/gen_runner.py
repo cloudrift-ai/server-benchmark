@@ -32,6 +32,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
+
+
+def _generation_precision_contract(model_type, expert_store):
+    """Pack-key component for architecture precision rewrites that run only on cold trace."""
+    if model_type == "laguna" and (expert_store or {}).get("fmt") == "exl3":
+        return _LAGUNA_EXL3_PRECISION_CONTRACT
+    return None
+
 
 class _Program:
     """One compiled dynamic-``num_tokens`` split subgraph, run via the host ``rebind`` path."""
@@ -156,22 +165,45 @@ class _Program:
             return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
 
 
-def combine_routed_experts(xn, gated, run_expert):
+def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``; each HIT expert
     gets one ``run_expert(e, rows)`` call on its routed rows and the partials weighted-scatter
     into a fresh ``[T, H]``. Scores cast to the activation dtype — some HF routers (Mixtral)
-    return fp32 scores, and ``index_add_`` requires matching dtypes."""
+    return fp32 scores, and ``index_add_`` requires matching dtypes. A router whose scaled
+    weights can overflow individual fp16 partials requests ``accumulate_float32``; that lane
+    returns the float32 weighted sum so its caller can combine every marked MoE contribution
+    before one final model-dtype cast. Ordinary routers keep the fp16 hot path."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
-    scores = scores.to(xn.dtype)
-    out = torch.zeros_like(xn)
+    accumulate_dtype = torch.float32 if accumulate_float32 else xn.dtype
+    scores = scores.to(accumulate_dtype)
+    out = torch.zeros_like(xn, dtype=accumulate_dtype)
     for e in indices.unique().tolist():
         tok, pos = torch.where(indices == e)
-        out.index_add_(0, tok, run_expert(e, xn[tok]) * scores[tok, pos, None])
+        partial = run_expert(e, xn[tok]).to(accumulate_dtype)
+        out.index_add_(0, tok, partial * scores[tok, pos, None])
     return out
+
+
+def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
+    """Weighted fixed-slot sum with the same optional precision contract as the routed path."""
+    if accumulate_float32:
+        return scores.float() @ partials.float()
+    return scores.to(output_dtype) @ partials
+
+
+def _combine_moe_output(h, routed, shared=None):
+    """Finish one MoE block without narrowing a marked float32 residual stream."""
+    import torch
+
+    if shared is None:
+        return h + routed
+    if shared.dtype != torch.float32 or routed.dtype != torch.float32:
+        raise RuntimeError("separate shared and routed MoE outputs must both use float32")
+    return (h.float() + shared + routed).to(h.dtype)
 
 
 def _pad_rows(arr, bucket):
@@ -376,10 +408,19 @@ def _compile_split(
 
         n_fwd = len(example_args) - (len(quant_specs) if quant_specs else 0)
         graph = trace_split(wrapper, example_args[:n_fwd], argnames)
+        if getattr(wrapper, "_emmy_output_float32", False):
+            from emmy.compiler.trace.huggingface import promote_expert_output_float32
+
+            promote_expert_output_float32(graph)
         if ckpt is not None:
             from emmy.compiler.loader.quant import spell_trellis_constants
+            from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
 
             _retarget_constants(graph, wrapper, ckpt[1])
+            if kind := getattr(wrapper, "_emmy_laguna_exl3_post", None):
+                promote_laguna_exl3_post_float32(graph, kind)
+            if getattr(wrapper, "_emmy_shared_expert_float32", False):
+                promote_shared_expert_float32(graph)
             spell_trellis_constants(graph, ckpt[0])
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs
@@ -520,6 +561,8 @@ class EmmyGenRunner:
         prefill_bucket=0,
         moe=None,
         expert_tiers=None,
+        residual_float32=False,
+        activation_dtype=None,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
@@ -566,6 +609,8 @@ class EmmyGenRunner:
         # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
         self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta[0]
         self._np_dtype = np_dtype
+        self._residual_float32 = residual_float32
+        self._activation_dtype = activation_dtype
         self._sym_decode_warned: set[int] = set()  # widths already reported by _warn_symbolic_decode
 
     def _warn_symbolic_decode(self, t: int) -> None:
@@ -620,6 +665,15 @@ class EmmyGenRunner:
         in ``EmmyGenModel`` keys the MoE capture decision on this. Every shape group must have
         its slots (see ``_slots_ok``)."""
         return self._moe is not None and self._slots_ok
+
+    @property
+    def residual_dtype(self):
+        """Torch dtype transported between decoder layers (and across a pipeline boundary)."""
+        if self._residual_float32:
+            import torch  # noqa: PLC0415
+
+            return torch.float32
+        return self._activation_dtype
 
     # Group-0 views of the expert tiers: the shapes an introspecting caller (tests, the boot
     # audit) means when a model has one group, which is every homogeneous MoE.
@@ -752,6 +806,9 @@ class EmmyGenRunner:
         layers = trunk.layers
         text_config = getattr(model.config, "text_config", model.config)
         hidden = text_config.hidden_size
+        precision_contract = _generation_precision_contract(getattr(text_config, "model_type", None), expert_store)
+        residual_float32 = precision_contract is not None
+        residual_dtype = torch.float32 if residual_float32 else dtype
 
         def _meta(attn):
             # Per-layer attention dims. Gemma-4's global layers use a larger head_dim
@@ -812,6 +869,8 @@ class EmmyGenRunner:
             "max_tokens": int(max_tokens or 0),
             "prefill_bucket": int(prefill_bucket or 0),
         }
+        if precision_contract is not None:
+            pack_key["precision_contract"] = precision_contract
         # The config hash alone does NOT identify a compressed checkpoint: the twin is built from a
         # config the loader band strips of its compression scheme, so two rungs of one repo — same
         # architecture, different per-tensor rates and therefore different coded extents and
@@ -1064,7 +1123,11 @@ class EmmyGenRunner:
                 gate, experts = moe_parts
                 expert_fmt = (expert_store or {}).get("fmt")
                 trellis = expert_fmt == "exl3"
-                pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=trellis)
+                pre_w, post_w, expert_w = build_moe_split_wrapper(
+                    block,
+                    split_gate_up=trellis,
+                    float32_residual=residual_float32,
+                )
                 transposed, interleaved, has_bias = moe_expert_layout(experts)
                 # The per-layer expert INPUT tensors, keyed by the expert program's input
                 # names. A quantized checkpoint supplies them from the shard stream (fp8 bits
@@ -1087,6 +1150,7 @@ class EmmyGenRunner:
                         "inputs": einputs,
                         # k routed experts per token — the fixed-slot tier's slot count.
                         "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
+                        "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
                     }
                 )
                 # ONE expert program serves every MoE layer, so the expert shape and activation
@@ -1113,7 +1177,7 @@ class EmmyGenRunner:
                     expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, i))
                 moe_meta[-1]["group"] = g
             else:
-                pre_w, post_w = build_attention_split_wrapper(block)
+                pre_w, post_w = build_attention_split_wrapper(block, float32_residual=residual_float32)
                 moe_meta.append(None)
             # Per-wrapper device-constant caches: the symbolic program and its static
             # decode-bucket twin bind the SAME weights — share one upload, not two.
@@ -1125,7 +1189,7 @@ class EmmyGenRunner:
                         build(
                             f"L{i:02d}.pre.sym",
                             pre_w,
-                            [torch.zeros(8, hidden, dtype=dtype)],
+                            [torch.zeros(8, hidden, dtype=residual_dtype)],
                             ["hidden"],
                             np_dtype,
                             dev_consts=pre_consts,
@@ -1138,7 +1202,7 @@ class EmmyGenRunner:
                         build(
                             f"L{i:02d}.post.sym",
                             post_w,
-                            [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=dtype)],
+                            [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=residual_dtype)],
                             ["attn_out", "residual"],
                             np_dtype,
                             dev_consts=post_consts,
@@ -1156,7 +1220,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.decode",
                                 pre_w,
-                                [torch.zeros(decode_bucket, hidden, dtype=dtype)],
+                                [torch.zeros(decode_bucket, hidden, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=pre_consts,
@@ -1168,7 +1232,10 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.decode",
                                 post_w,
-                                [torch.zeros(decode_bucket, attn_width, dtype=dtype), torch.zeros(decode_bucket, hidden, dtype=dtype)],
+                                [
+                                    torch.zeros(decode_bucket, attn_width, dtype=dtype),
+                                    torch.zeros(decode_bucket, hidden, dtype=residual_dtype),
+                                ],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1195,7 +1262,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.m1",
                                 pre_w,
-                                [torch.zeros(1, hidden, dtype=dtype)],
+                                [torch.zeros(1, hidden, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=pre_consts,
@@ -1207,7 +1274,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.m1",
                                 post_w,
-                                [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, hidden, dtype=dtype)],
+                                [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, hidden, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1227,7 +1294,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.prefill",
                                 pre_w,
-                                [torch.zeros(prefill_bucket, hidden, dtype=dtype)],
+                                [torch.zeros(prefill_bucket, hidden, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=pre_consts,
@@ -1239,7 +1306,10 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.prefill",
                                 post_w,
-                                [torch.zeros(prefill_bucket, attn_width, dtype=dtype), torch.zeros(prefill_bucket, hidden, dtype=dtype)],
+                                [
+                                    torch.zeros(prefill_bucket, attn_width, dtype=dtype),
+                                    torch.zeros(prefill_bucket, hidden, dtype=residual_dtype),
+                                ],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1371,6 +1441,8 @@ class EmmyGenRunner:
             prefill_bucket=prefill_bucket,
             moe=moe_meta if any(m is not None for m in moe_meta) else None,
             expert_tiers=expert_tiers or None,
+            residual_float32=residual_float32,
+            activation_dtype=dtype,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
@@ -1417,14 +1489,15 @@ class EmmyGenRunner:
         """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype."""
         import numpy as np
 
-        return self._embed_weight[np.asarray(input_ids, dtype=np.int64)]
+        rows = self._embed_weight[np.asarray(input_ids, dtype=np.int64)]
+        return rows.astype(np.float32) if self._residual_float32 else rows
 
     def forward_layer_pre(self, layer, hidden, positions=None):
         """``hidden[T, H]`` numpy → un-rotated ``(q[T,Hq·D], k[T,Hkv·D], v[T,Hkv·D])``.
         ``positions`` is unused under A2 (RoPE applied downstream); kept for signature parity.
         Uses the static decode-bucket program when ``T <= decode_bucket`` (pad → run → slice)."""
         del positions
-        h = hidden.astype(self._np_dtype, copy=False)
+        h = hidden.astype("float32" if self._residual_float32 else self._np_dtype, copy=False)
         t = h.shape[0]
         if self._pre_decode is not None and t <= self._decode_bucket:
             q, k, v = self._pre_decode[layer].run([_pad_rows(h, self._decode_bucket)])
@@ -1442,7 +1515,7 @@ class EmmyGenRunner:
                 "serve within the compiled programs' token capacity"
             )
         a = attn_out.astype(self._np_dtype, copy=False)
-        r = residual.astype(self._np_dtype, copy=False)
+        r = residual.astype("float32" if self._residual_float32 else self._np_dtype, copy=False)
         t = a.shape[0]
         if self._post_decode is not None and t <= self._decode_bucket:
             out = self._post_decode[layer].run([_pad_rows(a, self._decode_bucket), _pad_rows(r, self._decode_bucket)])[0]
@@ -1458,6 +1531,8 @@ class EmmyGenRunner:
 
         with torch.no_grad():
             out = self._norm(torch.from_numpy(np.ascontiguousarray(hidden)))
+            if self._residual_float32:
+                out = out.to(self._activation_dtype)
         return out.numpy()
 
     # --- Device-resident decode path (Phase A) ---
@@ -1537,7 +1612,11 @@ class EmmyGenRunner:
                     h = self._embed_weight.shape[1]
                     self._slot_sel = torch.zeros(k, dtype=torch.int32, device="cuda")
                     act_dtype = torch.from_numpy(np.empty(0, dtype=self._np_dtype)).dtype
-                    self._slot_partials = torch.empty(k, h, dtype=act_dtype, device="cuda")
+                    slot_precision = {m["accumulate_float32"] for m in self._moe if m is not None}
+                    if len(slot_precision) != 1:
+                        raise RuntimeError("fixed-slot expert groups must agree on their output precision")
+                    partial_dtype = torch.float32 if slot_precision.pop() else act_dtype
+                    self._slot_partials = torch.empty(k, h, dtype=partial_dtype, device="cuda")
                     sel_cp = cp.from_dlpack(self._slot_sel)
                     self._slot_tables = []
                     for g, tiers in enumerate(self._expert_tiers):
@@ -1628,12 +1707,16 @@ class EmmyGenRunner:
         rows = self._embed_weight_dev[input_ids.long()]
         scale = getattr(self, "_embed_dev_scale", 1.0)
         if scale != 1.0:
-            rows = (rows.float() * scale).to(rows.dtype)
+            rows = rows.float() * scale
+            if not self._residual_float32:
+                rows = rows.to(self._embed_weight_dev.dtype)
+        elif self._residual_float32:
+            rows = rows.float()
         return rows
 
-    def _rider_dest(self, name, rows, cols, ref):
+    def _rider_dest(self, name, rows, cols, ref, *, dtype=None):
         """A3: the shared joint destination for a rider step's combined result — one persistent
-        tensor per ``(name, cols)`` sized ``[prefill_bucket + rider_width, cols]``, sliced to the
+        tensor per ``(name, cols, dtype)`` sized ``[prefill_bucket + rider_width, cols]``, sliced to the
         step's rows. Shared across layers: q/k/v are consumed within their layer (RoPE + paged
         attention + KV-cache write), and the hidden dest's residual read happens at the NEXT
         post's upload, before that post's rider halves overwrite the dest. Cached per column
@@ -1644,9 +1727,10 @@ class EmmyGenRunner:
         if dests is None:
             dests = self._rider_dests = {}
         cap = self._prefill_bucket + self.rider_width
-        d = dests.get((name, cols))
+        dtype = ref.dtype if dtype is None else dtype
+        d = dests.get((name, cols, dtype))
         if d is None:
-            d = dests[(name, cols)] = torch.empty(cap, cols, dtype=ref.dtype, device=ref.device)
+            d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
 
     def forward_layer_pre_device(self, layer, hidden):
@@ -1678,7 +1762,9 @@ class EmmyGenRunner:
             pb = self._prefill_bucket
             hd, nh, nkv, _ = self._attn_meta[layer]
             widths = (nh * hd, nkv * hd, nkv * hd)
-            dests = [self._rider_dest(nm, t, w, hidden) for nm, w in zip(("q", "k", "v"), widths, strict=True)]
+            dests = [
+                self._rider_dest(nm, t, w, hidden, dtype=self._activation_dtype) for nm, w in zip(("q", "k", "v"), widths, strict=True)
+            ]
             self._pre_prefill[layer].run_device([hidden[:pb]], out=[d[:pb] for d in dests])
             self._pre_decode[layer].run_device([hidden[pb:]], out=[d[pb:] for d in dests])
             return tuple(dests)
@@ -1697,17 +1783,29 @@ class EmmyGenRunner:
         moe = self._moe[layer] if self._moe is not None else None
         if moe is None:
             return outs[0]
-        h, xn = outs
+        if len(outs) == 3:
+            h, xn, shared = outs
+        else:
+            h, xn = outs
+            shared = None
         # Single-token decode rides the FIXED-SLOT combine (capture-legal — no host sync, a
         # fixed launch set); every wider step keeps the routed dispatch, whose launch set
         # varies with the routing (eager only).
         if self._slots_ok and xn.shape[0] == 1:
-            return h + self._moe_combine_slots(moe, xn)
-        return h + self._moe_combine(moe, xn)
+            combined = self._moe_combine_slots(moe, xn)
+        else:
+            combined = self._moe_combine(moe, xn)
+        if shared is not None:
+            if not moe.get("accumulate_float32", False):
+                raise RuntimeError("a separate float32 shared-expert output requires float32 routed accumulation")
+        return _combine_moe_output(h, combined, shared)
 
     def _route_post_device(self, layer, attn_out, residual):
         """Tier-route one post program launch; returns the full output list (1 output for a
-        dense layer's post, 2 — ``h, xn`` — for a MoE layer's post_attn)."""
+        dense layer's post, 2 — ``h, xn`` — for an ordinary MoE post, or 3 — ``h, xn,
+        shared`` — for the marked float32 shared-expert path)."""
+        import torch
+
         t = attn_out.shape[0]
         if t == 1 and self._post_m1 is not None:
             return self._post_m1[layer].run_device([attn_out, residual])
@@ -1721,8 +1819,16 @@ class EmmyGenRunner:
             # the program's own buffer before that half's kernels run, and the NEXT layer's
             # post uploads its residual (this dest) before its own halves overwrite it.
             pb = self._prefill_bucket
-            names = ("hidden",) if len(self._post_prefill[layer].output_names) == 1 else ("hidden", "moe_xn")
-            dests = [self._rider_dest(nm, t, residual.shape[1], residual) for nm in names]
+            output_count = len(self._post_prefill[layer].output_names)
+            if output_count == 1:
+                specs = (("hidden", residual.dtype),)
+            elif output_count == 2:
+                specs = (("hidden", residual.dtype), ("moe_xn", residual.dtype))
+            elif output_count == 3:
+                specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype), ("shared_expert", torch.float32))
+            else:
+                raise RuntimeError(f"unexpected post program output count {output_count}")
+            dests = [self._rider_dest(nm, t, residual.shape[1], residual, dtype=dt) for nm, dt in specs]
             self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[d[:pb] for d in dests])
             self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[d[pb:] for d in dests])
             return dests
@@ -1746,7 +1852,12 @@ class EmmyGenRunner:
         self._ensure_device()
         gated = moe["gate"](xn)
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
-            return combine_routed_experts(xn, gated, lambda e, rows: self._launch_expert(moe, e, rows))
+            return combine_routed_experts(
+                xn,
+                gated,
+                lambda e, rows: self._launch_expert(moe, e, rows),
+                accumulate_float32=moe.get("accumulate_float32", False),
+            )
 
     def _moe_combine_slots(self, moe, xn):
         """Fixed-slot combine for single-token decode (``T == 1``) — the capture-legal twin of
@@ -1768,7 +1879,6 @@ class EmmyGenRunner:
         self._ensure_device()
         gated = moe["gate"](xn)
         scores, indices = gated[-2], gated[-1]  # [1, k] each
-        scores = scores.to(xn.dtype)
         self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
         capturing = torch.cuda.is_current_stream_capturing()
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
@@ -1781,7 +1891,13 @@ class EmmyGenRunner:
                 else:
                     p.capture_program_graph()  # static program → one cached graph per slot
                     p.replay_program_graph()
-        return scores @ self._slot_partials  # [1, k] @ [k, H] — the fixed-shape weighted combine
+        # [1, k] @ [k, H] — the fixed-shape weighted combine.
+        return _combine_slot_partials(
+            scores,
+            self._slot_partials,
+            xn.dtype,
+            accumulate_float32=moe.get("accumulate_float32", False),
+        )
 
     def _launch_expert(self, moe, e, rows):
         """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock + the
@@ -1887,4 +2003,5 @@ class EmmyGenRunner:
 
         self._ensure_device()
         with torch.no_grad():
-            return self._norm_dev(hidden)
+            out = self._norm_dev(hidden)
+            return out.to(self._activation_dtype) if self._residual_float32 else out

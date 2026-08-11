@@ -197,8 +197,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture boot
   is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
   `--enforce-eager` then).
-  When the model declares `routed_scaling_factor`, the expert program applies it to each routed expert result;
-  an always-on dense shared expert remains unscaled and folds into `h` before the routed combine.
+  When the model declares `routed_scaling_factor`, the expert program ordinarily applies it to each routed expert
+  result; an always-on dense shared expert remains unscaled and folds into `h` before the routed combine. Laguna
+  EXL3 instead folds its base factor and the format's `interm_div=128` inverse into router weights. Its embedding and
+  residual stream stay fp32 through every block, while norms, q/k/v, paged-attention output, and gate/up intermediates
+  stay fp16. Checkpoint-provenanced attention, dense, routed, and shared down outputs return fp32; routed and fixed-slot
+  combines accumulate fp32, and the final norm returns fp16 for the head. The marked post program returns the fp32
+  base residual, fp16 normalized activation, and fp32 shared result separately; the runner adds base + shared + routed
+  without a narrowing cast. Ordinary routers and non-Laguna checkpoints retain their existing hot paths.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
   static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
@@ -474,7 +480,8 @@ Recorded follow-ups, in impact order:
   declaration. That entry is load-bearing, not defensive: the twin is built from a config **stripped** of its
   compression scheme, so two rungs of one coded conversion — same architecture, different per-tensor rates and
   therefore different coded extents — hash identically on `config_sha` alone and would share one pack, each warm
-  overwriting the other's plans.
+  overwriting the other's plans. A marked architecture precision rewrite that runs before trellis spelling also adds
+  an explicit semantic-contract field; this keeps pre-contract packs from bypassing the cold-trace rewrite.
   On a generative pack **miss**, one session-scoped `PlanTemplateCache` also collapses repeated layer profiles within
   that same boot. Its exact graph key retains names, node order, shapes/dtypes, scalar fields, aliases and every hint,
   but replaces checkpoint `source_path` / ordered `source_parts` addresses with binding slots. A hit instantiates a

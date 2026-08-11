@@ -26,6 +26,28 @@ def _tiny_olmoe_config(transformers):
     )
 
 
+def _tiny_laguna_config(transformers):
+    return transformers.LagunaConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_attention_heads_per_layer=[4, 4],
+        num_key_value_heads=2,
+        head_dim=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["full_attention", "full_attention"],
+        mlp_layer_types=["dense", "sparse"],
+        moe_routed_scaling_factor=2.5,
+        max_position_embeddings=64,
+        gating=True,
+    )
+
+
 def _combine(gate, experts, expert, xn):
     """The runner's torch half with the eager expert wrapper in place of the compiled program —
     the routing math itself is the SHARED ``combine_routed_experts`` serving runs."""
@@ -196,25 +218,7 @@ def test_laguna_moe_split_preserves_attention_gate_and_routed_scale():
 
     from emmy.compiler.trace.huggingface import build_moe_split_wrapper, moe_block_parts
 
-    cfg = transformers.LagunaConfig(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        moe_intermediate_size=32,
-        shared_expert_intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_attention_heads_per_layer=[4, 4],
-        num_key_value_heads=2,
-        head_dim=16,
-        num_experts=4,
-        num_experts_per_tok=2,
-        layer_types=["full_attention", "full_attention"],
-        mlp_layer_types=["dense", "sparse"],
-        moe_routed_scaling_factor=2.5,
-        max_position_embeddings=64,
-        gating=True,
-    )
+    cfg = _tiny_laguna_config(transformers)
     torch.manual_seed(0)
     block = LagunaDecoderLayer(cfg, layer_idx=1).eval()
     for parameter in block.parameters():
@@ -237,6 +241,332 @@ def test_laguna_moe_split_preserves_attention_gate_and_routed_scale():
     torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-5)
 
 
+def test_exl3_laguna_routed_scale_matches_reference_architecture():
+    """Laguna EXL3 stores routed up projections with the reference runtime's 1/128 scale."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.trace.huggingface import _apply_exl3_laguna_routed_scale, build_moe_split_wrapper, moe_block_parts
+    from emmy.serving.gen_runner import combine_routed_experts
+
+    cfg = _tiny_laguna_config(transformers)
+    torch.manual_seed(0)
+    model = AutoModelForCausalLM.from_config(cfg).eval()
+
+    dense = model.model.layers[0].mlp
+    sparse = model.model.layers[1].mlp
+    hidden = torch.randn(5, cfg.hidden_size)
+    routed = sparse.gate(hidden)
+    original_gate = sparse.gate
+    _pre, _post, original_expert = build_moe_split_wrapper(model.model.layers[1], split_gate_up=True)
+    _gate, experts = moe_block_parts(sparse)
+    reference = combine_routed_experts(
+        hidden,
+        routed,
+        lambda e, rows: original_expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e]),
+    )
+    assert moe_block_parts(dense) is None
+    assert sparse.routed_scaling_factor == 2.5
+
+    _apply_exl3_laguna_routed_scale(model, exl3=False)
+    assert sparse.gate is original_gate
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+
+    assert moe_block_parts(dense) is None
+    assert sparse.routed_scaling_factor == 2.5
+    scaled_gate = sparse.gate
+    assert scaled_gate._emmy_routed_accumulate_float32 is True
+    assert scaled_gate._emmy_routed_base_scale_folded is True
+    assert scaled_gate._emmy_exl3_laguna_scale == 320.0
+    scaled = scaled_gate(hidden)
+    torch.testing.assert_close(scaled[-2], routed[-2] * 320.0, rtol=0, atol=0)
+    torch.testing.assert_close(scaled[-1], routed[-1], rtol=0, atol=0)
+    assert scaled[-2].dtype == routed[-2].dtype
+
+    _pre, _post, expert = build_moe_split_wrapper(model.model.layers[1], split_gate_up=True)
+    assert expert._emmy_output_float32 is True
+    combined = combine_routed_experts(
+        hidden,
+        scaled_gate(hidden),
+        lambda e, rows: expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e]),
+    )
+    assert torch.isfinite(combined).all()
+    torch.testing.assert_close(combined, reference * 128.0, rtol=1e-5, atol=1e-5)
+
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+
+    assert sparse.gate is scaled_gate
+    assert sparse.gate.router is original_gate
+
+
+def test_exl3_laguna_shared_expert_uses_marked_float32_cone():
+    """The late-layer shared activation can overflow in fp16; the marked graph keeps only
+    that checkpoint-provenanced cone in fp32 and returns the residual in model dtype."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.trace.huggingface import (
+        _apply_exl3_laguna_routed_scale,
+        build_moe_split_wrapper,
+        promote_shared_expert_float32,
+    )
+    from emmy.serving.gen_runner import trace_split
+
+    cfg = _tiny_laguna_config(transformers)
+    model = AutoModelForCausalLM.from_config(cfg).half().eval()
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+    _pre, post, _expert = build_moe_split_wrapper(
+        model.model.layers[1],
+        split_gate_up=True,
+        float32_residual=True,
+    )
+    assert post._emmy_shared_expert_float32 is True
+    with torch.no_grad():
+        post_outputs = post(
+            torch.zeros(2, cfg.hidden_size, dtype=torch.float16),
+            torch.zeros(2, cfg.hidden_size, dtype=torch.float32),
+        )
+    assert len(post_outputs) == 3
+
+    args = [
+        torch.zeros(2, cfg.hidden_size, dtype=torch.float16),
+        torch.zeros(2, cfg.hidden_size, dtype=torch.float32),
+    ]
+    graph = trace_split(post, args, None)
+    shared = {}
+    for node in graph.nodes.values():
+        source = getattr(node.op, "source_path", "") or ""
+        if "shared_experts" not in source:
+            continue
+        kind = next(name for name in ("gate", "up", "down") if source.endswith(f".{name}_proj.weight"))
+        users = [graph.nodes[uid] for uid in graph.consumers(node.id) if isinstance(graph.nodes[uid].op, LinearOp)]
+        assert len(users) == 1
+        shared[kind] = users[0]
+    assert set(shared) == {"gate", "up", "down"}
+    assert {node.output.dtype.name for node in shared.values()} == {"f16"}
+
+    promote_shared_expert_float32(graph)
+
+    assert {node.output.dtype.name for node in shared.values()} == {"f32"}
+    cone = set()
+    queue = [shared["gate"].id, shared["up"].id]
+    while queue:
+        nid = queue.pop()
+        if nid in cone or nid == shared["down"].id:
+            continue
+        cone.add(nid)
+        queue.extend(graph.consumers(nid))
+    assert cone
+    assert {graph.nodes[nid].output.dtype.name for nid in cone} == {"f32"}
+    assert graph.nodes[graph.outputs[0]].output.dtype.name == "f32"
+    assert graph.nodes[graph.outputs[1]].output.dtype.name == "f16"
+    assert graph.nodes[graph.outputs[2]].output.dtype.name == "f32"
+    non_shared = [node for node in graph.nodes.values() if isinstance(node.op, LinearOp) and node not in shared.values()]
+    assert non_shared
+    assert {node.output.dtype.name for node in non_shared} == {"f16"}
+
+    gate = torch.full((1,), 300.0, dtype=torch.float16)
+    up = torch.full((1,), 300.0, dtype=torch.float16)
+    assert not torch.isfinite(torch.nn.functional.silu(gate) * up).all()
+    assert torch.isfinite(torch.nn.functional.silu(gate.float()) * up.float()).all()
+
+
+def test_exl3_laguna_routed_down_uses_marked_float32_output():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.trace.huggingface import (
+        _apply_exl3_laguna_routed_scale,
+        build_moe_split_wrapper,
+        moe_block_parts,
+        promote_expert_output_float32,
+    )
+    from emmy.serving.gen_runner import trace_split
+
+    cfg = _tiny_laguna_config(transformers)
+    model = AutoModelForCausalLM.from_config(cfg).half().eval()
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+    _pre, _post, expert = build_moe_split_wrapper(model.model.layers[1], split_gate_up=True)
+    assert expert._emmy_output_float32 is True
+    _gate, experts = moe_block_parts(model.model.layers[1].mlp)
+    w_gate, w_up = experts.gate_up_proj[0].chunk(2, dim=0)
+    args = [torch.zeros(2, cfg.hidden_size, dtype=torch.float16), w_gate, w_up, experts.down_proj[0]]
+    graph = trace_split(expert, args, None)
+
+    weight = graph.nodes["w_down"]
+    down = [graph.nodes[uid] for uid in graph.consumers(weight.id) if isinstance(graph.nodes[uid].op, LinearOp)]
+    assert len(down) == 1
+    assert graph.outputs == [down[0].id]
+    assert down[0].output.dtype.name == "f16"
+
+    promote_expert_output_float32(graph)
+    assert down[0].output.dtype.name == "f32"
+
+    graph.inputs.remove("w_down")
+    with pytest.raises(RuntimeError, match="w_down graph input"):
+        promote_expert_output_float32(graph)
+
+
+def test_exl3_laguna_dense_and_sparse_blocks_preserve_float32_residuals():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.trace.huggingface import (
+        _apply_exl3_laguna_routed_scale,
+        build_attention_split_wrapper,
+        build_moe_split_wrapper,
+        promote_laguna_exl3_post_float32,
+        promote_shared_expert_float32,
+    )
+    from emmy.serving.gen_runner import _retarget_constants, trace_split
+
+    cfg = _tiny_laguna_config(transformers)
+    model = AutoModelForCausalLM.from_config(cfg).half().eval()
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+    id_to_key = {
+        id(tensor): path
+        for path, tensor in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
+    }
+
+    def trace_block(layer, *, sparse):
+        block = model.model.layers[layer]
+        wrappers = (
+            build_moe_split_wrapper(block, split_gate_up=True, float32_residual=True)
+            if sparse
+            else (*build_attention_split_wrapper(block, float32_residual=True), None)
+        )
+        pre, post = wrappers[:2]
+        pre_graph = trace_split(pre, [torch.zeros(2, cfg.hidden_size, dtype=torch.float32)], None)
+        assert pre_graph.nodes[pre_graph.inputs[0]].output.dtype.name == "f32"
+        assert {pre_graph.nodes[nid].output.dtype.name for nid in pre_graph.outputs} == {"f16"}
+
+        post_graph = trace_split(
+            post,
+            [
+                torch.zeros(2, cfg.num_attention_heads * cfg.head_dim, dtype=torch.float16),
+                torch.zeros(2, cfg.hidden_size, dtype=torch.float32),
+            ],
+            None,
+        )
+        _retarget_constants(post_graph, post, id_to_key)
+        promote_laguna_exl3_post_float32(post_graph, "sparse" if sparse else "dense")
+        if sparse:
+            promote_shared_expert_float32(post_graph)
+        return post_graph
+
+    dense = trace_block(0, sparse=False)
+    sparse = trace_block(1, sparse=True)
+
+    def linear_dtype(graph, suffix):
+        weight = next(node for node in graph.nodes.values() if (getattr(node.op, "source_path", "") or "").endswith(suffix))
+        users = [graph.nodes[uid] for uid in graph.consumers(weight.id) if isinstance(graph.nodes[uid].op, LinearOp)]
+        assert len(users) == 1
+        return users[0].output.dtype.name
+
+    assert linear_dtype(dense, ".self_attn.o_proj.weight") == "f32"
+    assert linear_dtype(dense, ".mlp.down_proj.weight") == "f32"
+    assert [dense.nodes[nid].output.dtype.name for nid in dense.outputs] == ["f32"]
+    assert linear_dtype(sparse, ".self_attn.o_proj.weight") == "f32"
+    assert linear_dtype(sparse, ".mlp.shared_experts.down_proj.weight") == "f32"
+    assert [sparse.nodes[nid].output.dtype.name for nid in sparse.outputs] == ["f32", "f16", "f32"]
+
+
+def test_float32_residual_final_norm_returns_activation_dtype():
+    import numpy as np
+
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    runner = object.__new__(EmmyGenRunner)
+    runner._norm = torch.nn.Identity()
+    runner._residual_float32 = True
+    runner._activation_dtype = torch.float16
+    assert runner.residual_dtype == torch.float32
+    result = runner.final_norm(np.ones((2, 4), dtype=np.float32))
+    assert result.dtype == np.float16
+
+
+def test_marked_shared_expert_requires_exact_checkpoint_provenance():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.trace.huggingface import (
+        _apply_exl3_laguna_routed_scale,
+        build_moe_split_wrapper,
+        promote_shared_expert_float32,
+    )
+    from emmy.serving.gen_runner import trace_split
+
+    cfg = _tiny_laguna_config(transformers)
+    model = AutoModelForCausalLM.from_config(cfg).half().eval()
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+    _pre, post, _expert = build_moe_split_wrapper(model.model.layers[1], split_gate_up=True)
+    graph = trace_split(post, [torch.zeros(2, cfg.hidden_size, dtype=torch.float16)] * 2, None)
+    down = next(
+        node for node in graph.nodes.values() if (getattr(node.op, "source_path", "") or "").endswith("shared_experts.down_proj.weight")
+    )
+    down.op.source_path = "shared_experts.missing.weight"
+    with pytest.raises(RuntimeError, match="gate/up/down checkpoint provenance"):
+        promote_shared_expert_float32(graph)
+
+
+def test_unmarked_shared_expert_retains_model_dtype():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
+    from emmy.serving.gen_runner import trace_split
+
+    cfg = _tiny_laguna_config(transformers)
+    model = AutoModelForCausalLM.from_config(cfg).half().eval()
+    _pre, post, expert = build_moe_split_wrapper(model.model.layers[1], split_gate_up=True)
+    assert post._emmy_shared_expert_float32 is False
+    assert expert._emmy_output_float32 is False
+    graph = trace_split(post, [torch.zeros(2, cfg.hidden_size, dtype=torch.float16)] * 2, None)
+    shared_linears = [
+        graph.nodes[uid]
+        for node in graph.nodes.values()
+        if "shared_experts" in (getattr(node.op, "source_path", "") or "")
+        for uid in graph.consumers(node.id)
+    ]
+    assert len(shared_linears) == 3
+    assert {node.output.dtype.name for node in shared_linears} == {"f16"}
+
+
+def test_exl3_routed_scale_leaves_other_architectures_untouched():
+    from types import SimpleNamespace
+
+    from emmy.compiler.trace.huggingface import _apply_exl3_laguna_routed_scale
+
+    model = SimpleNamespace(config=SimpleNamespace(model_type="glm4_moe"), marker=object())
+    marker = model.marker
+    _apply_exl3_laguna_routed_scale(model, exl3=True)
+    assert model.marker is marker
+
+
+def test_laguna_exl3_precision_contract_invalidates_old_pack_key(tmp_path, monkeypatch):
+    from emmy.compiler.backend import pack
+    from emmy.serving.gen_runner import _generation_precision_contract
+
+    monkeypatch.setattr(pack, "_environment", lambda: {})
+    old_key = {"kind": "gen-split", "model": "laguna", "quant_sha": "same-checkpoint"}
+    contract = _generation_precision_contract("laguna", {"fmt": "exl3"})
+    assert contract == "laguna-exl3-precision-v4"
+    assert pack.pack_path(tmp_path, old_key) != pack.pack_path(tmp_path, {**old_key, "precision_contract": contract})
+    assert _generation_precision_contract("laguna", {"fmt": "fp8"}) is None
+    assert _generation_precision_contract("glm4_moe", {"fmt": "exl3"}) is None
+
+
 def test_combine_casts_fp32_router_scores():
     """Mixtral-family routers return fp32 scores; the combine must cast them to the activation
     dtype or ``index_add_`` crashes under the forced-fp16 serving lane."""
@@ -255,6 +585,36 @@ def test_combine_casts_fp32_router_scores():
         for j in range(2):
             ref[t] += (xn[t] * (indices[t, j].item() + 1)) * scores[t, j].to(torch.float16)
     assert torch.allclose(out, ref, atol=1e-2)
+
+
+def test_marked_moe_contributions_preserve_the_float32_residual():
+    """Large routed and shared terms remain finite in Laguna's float32 residual stream."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import _combine_moe_output, _combine_slot_partials, combine_routed_experts
+
+    xn = torch.zeros(1, 1, dtype=torch.float16)
+    scores = torch.tensor([[128.0, 128.0]], dtype=torch.float32)
+    indices = torch.tensor([[0, 1]])
+    partials = torch.tensor([[1024.0], [-1024.0]], dtype=torch.float16)
+    gated = (None, scores, indices)
+
+    def run_expert(expert, rows):
+        return partials[expert].expand_as(rows)
+
+    assert not torch.isfinite(combine_routed_experts(xn, gated, run_expert)).all()
+    routed = combine_routed_experts(xn, gated, run_expert, accumulate_float32=True)
+    slots = _combine_slot_partials(scores, partials, xn.dtype, accumulate_float32=True)
+
+    torch.testing.assert_close(routed, torch.zeros_like(xn, dtype=torch.float32), rtol=0, atol=0)
+    torch.testing.assert_close(slots, torch.zeros_like(xn, dtype=torch.float32), rtol=0, atol=0)
+
+    h = torch.tensor([[1000.0]], dtype=torch.float32)
+    shared = torch.tensor([[73000.0]], dtype=torch.float32)
+    routed = torch.tensor([[-1000.0]], dtype=torch.float32)
+    result = _combine_moe_output(h, routed, shared)
+    assert result.dtype == torch.float32
+    torch.testing.assert_close(result, torch.tensor([[73000.0]], dtype=torch.float32), rtol=0, atol=0)
 
 
 def test_moe_block_parts_rejects_dense_mlp():

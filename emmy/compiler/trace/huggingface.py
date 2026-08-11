@@ -467,7 +467,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
     return graph, (block, (x,), kwargs)
 
 
-def _build_pre_wrapper(block):
+def _build_pre_wrapper(block, *, float32_residual: bool = False):
     """The shared q/k/v carve of one HF decoder layer: ``pre(hidden[T, H]) -> (q, k, v)`` runs
     ``input_layernorm`` → separate projections → reshape-into-heads → q/k(/v) norm, returning
     **un-rotated** q,k,v in the 2-D seam ABI. Used by both the dense and the MoE split builders;
@@ -509,6 +509,8 @@ def _build_pre_wrapper(block):
 
         def forward(self, hidden):
             h = self.input_layernorm(hidden)  # [T, H]
+            if float32_residual:
+                h = h.to(self.q_proj.weight.dtype)
             t = h.shape[0]
             if flat_qk_norm:  # OLMoE: RMSNorm over the flat projection, before the head reshape
                 q = self.q_norm(self.q_proj(h)).view(t, num_heads, head_dim)
@@ -558,7 +560,7 @@ def _attention_gate_layout(attn):
     )
 
 
-def build_attention_split_wrapper(block):
+def build_attention_split_wrapper(block, *, float32_residual: bool = False):
     """Carve SDPA out of one HF decoder layer (Phase 1). Returns ``(pre, post)`` ``nn.Module``s over
     the flattened **``[num_tokens, H]``** per-token layout:
 
@@ -588,7 +590,7 @@ def build_attention_split_wrapper(block):
     them, corrupting outputs."""
     import torch.nn as nn
 
-    pre = _build_pre_wrapper(block)  # carries the PLE / clip_qkv rejects — before any attribute reads
+    pre = _build_pre_wrapper(block, float32_residual=float32_residual)  # carries PLE / clip_qkv rejects before attribute reads
     attn = block.self_attn
 
     class Post(nn.Module):
@@ -613,10 +615,14 @@ def build_attention_split_wrapper(block):
             # which is why parity tests must set it explicitly to stay sensitive. register_buffer
             # (it is a buffer on the block) so the compile's constant binding picks it up.
             self.register_buffer("layer_scalar", getattr(block, "layer_scalar", None))
+            self._emmy_laguna_exl3_post = "dense" if float32_residual else None
 
         def forward(self, attn_out, residual):
             if self.g_proj is not None:
-                gate = nn.functional.softplus(self.g_proj(self.gate_input_layernorm(residual)).float()).to(attn_out.dtype)
+                gate_input = self.gate_input_layernorm(residual)
+                if float32_residual:
+                    gate_input = gate_input.to(attn_out.dtype)
+                gate = nn.functional.softplus(self.g_proj(gate_input).float()).to(attn_out.dtype)
                 if self.gate_per_head:
                     attn_out = (attn_out.view(attn_out.shape[0], -1, self.gate_head_dim) * gate.unsqueeze(-1)).view(attn_out.shape[0], -1)
                 else:
@@ -626,7 +632,10 @@ def build_attention_split_wrapper(block):
                 h = h + self.post_feedforward_layernorm(self.mlp(self.pre_feedforward_layernorm(h)))
                 return h if self.layer_scalar is None else h * self.layer_scalar
             h = residual + self.o_proj(attn_out)  # Llama/Qwen: residual1 + o_proj(SDPA)
-            return h + self.mlp(self.post_attention_layernorm(h))  # residual2 + MLP
+            xn = self.post_attention_layernorm(h)
+            if float32_residual:
+                xn = xn.to(attn_out.dtype)
+            return h + self.mlp(xn)  # residual2 + MLP
 
     return pre, Post()
 
@@ -773,7 +782,7 @@ def retarget_constants_to_model(graph, wrapper, model) -> None:
             op.source_parts = tuple((key_map.get(path, path), shape) for path, shape in op.source_parts)
 
 
-def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
+def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
     - ``pre`` — the same q/k/v carve as :func:`build_attention_split_wrapper`.
@@ -781,10 +790,12 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
       then the post-attention norm. BOTH come out: the router and the expert programs consume the
       normed ``xn``, and the layer output is ``h + combine(expert outputs)`` — the norm output must
       materialize at the seam because it is shared across the k routed experts. A DeepSeek/GLM-style
-      always-on ``shared_experts`` module (a plain dense MLP over the same ``xn``) folds INTO the
-      returned ``h`` (``h = residual + o_proj(attn) + shared_experts(xn)``), so the runner's
-      route-and-combine half needs no seam change for it. Laguna's softplus attention gate is
-      applied before ``o_proj`` from a reconstructed normalized residual.
+      always-on ``shared_experts`` module (a plain dense MLP over the same ``xn``) ordinarily
+      folds INTO the returned ``h`` (``h = residual + o_proj(attn) + shared_experts(xn)``).
+      A marked Laguna EXL3 block instead returns ``(h, xn, shared)`` with an fp32 residual and
+      shared term plus an fp16 normalized activation. The runner adds the fp32 routed term without
+      narrowing the architecture's residual stream. Laguna's softplus attention gate is applied
+      before ``o_proj`` from a reconstructed normalized residual.
     - ``expert(x[T_e, H], w_gate_up, w_down [, b_gate_up, b_down]) -> y[T_e, H]`` — one expert's
       gated MLP with the weights as FORWARD ARGUMENTS (they trace as graph inputs, not constants),
       so ONE compiled program serves every expert of every same-shaped layer; the caller passes
@@ -798,9 +809,10 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
       strided in-graph. ``split_gate_up`` takes gate and up as SEPARATE forward args instead
       (``expert(x, w_gate, w_up, w_down)``) — the EXL3 form, where each coded linear carries its
       own input-side channel vector, so the merged weight has no single basis to restore and the
-      merged spelling would only add a concat the activation split undoes. A model's
+      merged spelling would only add a concat the activation split undoes. Ordinarily a model's
       ``routed_scaling_factor`` multiplies each routed expert result here (and never its shared
-      expert), which is algebraically identical to scaling the weighted sum.
+      expert). A marked EXL3 architecture can instead fold it into router weights when fp16
+      partials cannot safely carry the factor.
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
@@ -813,7 +825,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
     parts = moe_block_parts(block.mlp)
     if parts is None:
         raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
-    _, experts = parts
+    gate, experts = parts
     if getattr(block.mlp, "shared_expert_gate", None) is not None:
         raise NotImplementedError(
             "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
@@ -822,9 +834,11 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
     shared_experts = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(block.mlp, a, None)) is not None), None)
     raw_routed_scale = getattr(block.mlp, "routed_scaling_factor", 1.0)
     routed_scaling_factor = float(1.0 if raw_routed_scale is None else raw_routed_scale)
+    routed_scale_folded = bool(getattr(gate, "_emmy_routed_base_scale_folded", False))
+    expert_scaling_factor = 1.0 if routed_scale_folded else routed_scaling_factor
     if getattr(block, "pre_feedforward_layernorm", None) is not None:
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
-    pre = _build_pre_wrapper(block)
+    pre = _build_pre_wrapper(block, float32_residual=float32_residual)
     attn = block.self_attn
 
     class PostAttn(nn.Module):
@@ -838,18 +852,28 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
             # consuming the same normed xn. Folding it into h keeps the runner's
             # route-and-combine half seam-free: layer_out = h + Σ w_e · expert_e(xn).
             self.shared_experts = shared_experts
+            self._emmy_shared_expert_float32 = shared_experts is not None and routed_scale_folded and float32_residual
+            self._emmy_laguna_exl3_post = "sparse" if float32_residual else None
 
         def forward(self, attn_out, residual):
             if self.g_proj is not None:
-                gate = nn.functional.softplus(self.g_proj(self.gate_input_layernorm(residual)).float()).to(attn_out.dtype)
+                gate_input = self.gate_input_layernorm(residual)
+                if float32_residual:
+                    gate_input = gate_input.to(attn_out.dtype)
+                gate = nn.functional.softplus(self.g_proj(gate_input).float()).to(attn_out.dtype)
                 if self.gate_per_head:
                     attn_out = (attn_out.view(attn_out.shape[0], -1, self.gate_head_dim) * gate.unsqueeze(-1)).view(attn_out.shape[0], -1)
                 else:
                     attn_out = attn_out * gate
             h = residual + self.o_proj(attn_out)
             xn = self.post_attention_layernorm(h)
+            if float32_residual:
+                xn = xn.to(attn_out.dtype)
             if self.shared_experts is not None:
-                h = h + self.shared_experts(xn)
+                shared = self.shared_experts(xn)
+                if self._emmy_shared_expert_float32:
+                    return h, xn, shared
+                h = h + shared
             return h, xn
 
     transposed, _interleaved, has_bias = moe_expert_layout(experts)
@@ -873,11 +897,13 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
             def __init__(self) -> None:
                 super().__init__()
                 self.act_fn = act_fn
+                self._emmy_output_float32 = routed_scale_folded
 
             def forward(self, x, w_gate, w_up, w_down):
                 gate = nn.functional.linear(x, w_gate)
                 up = nn.functional.linear(x, w_up)
-                return nn.functional.linear(self.act_fn(gate) * up, w_down) * routed_scaling_factor
+                output = nn.functional.linear(self.act_fn(gate) * up, w_down)
+                return output if expert_scaling_factor == 1.0 else output * expert_scaling_factor
 
     elif transposed and has_bias and clamped:
         alpha, limit = float(experts.alpha), float(experts.limit)
@@ -890,7 +916,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
                 gate = gate.clamp(max=limit)
                 up = up.clamp(min=-limit, max=limit)
                 glu = gate * torch.sigmoid(gate * alpha)
-                return (((up + 1) * glu) @ w_down + b_down) * routed_scaling_factor
+                return (((up + 1) * glu) @ w_down + b_down) * expert_scaling_factor
 
     elif not transposed and not has_bias and act_fn is not None:
 
@@ -902,7 +928,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
 
             def forward(self, x, w_gate_up, w_down):
                 gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
-                return nn.functional.linear(self.act_fn(gate) * up, w_down) * routed_scaling_factor
+                return nn.functional.linear(self.act_fn(gate) * up, w_down) * expert_scaling_factor
 
     else:
         raise NotImplementedError(
@@ -912,6 +938,124 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
         )
 
     return pre, PostAttn(), ExpertFFN()
+
+
+def promote_shared_expert_float32(graph) -> None:
+    """Give one marked Laguna EXL3 shared expert the reference float32 compute cone.
+
+    The checkpoint provenance is the guardrail: exactly one gate, up, and down coded linear
+    must be present under ``shared_expert``. Gate/up outputs, the activation/product path into
+    down, and down's result become float32; the surrounding marked residual stays float32 and the
+    normalized activation stays float16. Trellis spelling preserves compressed operands while
+    realizing the widened activation/result contract directly in the factorized contractions.
+    """
+    from emmy.compiler.dtype import F32  # noqa: PLC0415
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+
+    linears = {}
+    suffixes = {f".{name}_proj.weight": name for name in ("gate", "up", "down")}
+    for node in graph.nodes.values():
+        if not isinstance(node.op, ConstantOp):
+            continue
+        source = node.op.source_path or ""
+        if not any(part in f".{source}" for part in (".shared_expert.", ".shared_experts.")):
+            continue
+        kind = next((kind for suffix, kind in suffixes.items() if source.endswith(suffix)), None)
+        if kind is None:
+            continue
+        users = [graph.nodes[uid] for uid in graph.consumers(node.id)]
+        users = [user for user in users if isinstance(user.op, LinearOp) and len(user.inputs) >= 2 and user.inputs[1] == node.id]
+        if len(users) != 1 or kind in linears:
+            raise RuntimeError(f"marked shared expert needs one checkpoint-provenanced {kind}_proj linear, found {len(users)}")
+        linears[kind] = users[0]
+    if set(linears) != set(suffixes.values()):
+        raise RuntimeError(f"marked shared expert needs gate/up/down checkpoint provenance, found {sorted(linears)}")
+
+    down = linears["down"]
+    reached = set()
+    queue = [linears["gate"].id, linears["up"].id]
+    while queue:
+        nid = queue.pop()
+        if nid in reached:
+            continue
+        reached.add(nid)
+        graph.nodes[nid].output.dtype = F32
+        for uid in graph.consumers(nid):
+            if uid == down.id:
+                reached.add(uid)
+                continue
+            queue.append(uid)
+    if down.id not in reached:
+        raise RuntimeError("marked shared-expert gate/up cone does not feed its checkpoint-provenanced down_proj")
+    down.output.dtype = F32
+
+
+def promote_expert_output_float32(graph) -> None:
+    """Give one marked routed expert the reference float32 down reduction and output.
+
+    The EXL3 expert graph receives ``w_down`` as a graph input. Exactly one linear must consume
+    that input and directly produce the graph output; this provenance/cardinality check keeps
+    the rewrite off gate/up and off ordinary expert programs. Trellis input spelling runs only
+    after this rewrite, so the coded operand stays compressed while the contraction result uses
+    float32.
+    """
+    from emmy.compiler.dtype import F32  # noqa: PLC0415
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+
+    weight = graph.nodes.get("w_down")
+    if weight is None or not isinstance(weight.op, InputOp) or weight.id not in graph.inputs:
+        raise RuntimeError("marked expert output needs a w_down graph input")
+    users = [
+        graph.nodes[uid]
+        for uid in graph.consumers(weight.id)
+        if isinstance(graph.nodes[uid].op, LinearOp) and len(graph.nodes[uid].inputs) >= 2 and graph.nodes[uid].inputs[1] == weight.id
+    ]
+    if len(users) != 1:
+        raise RuntimeError(f"marked expert output needs one w_down-provenanced linear, found {len(users)}")
+    down = users[0]
+    if graph.outputs != [down.id]:
+        raise RuntimeError(f"marked expert w_down linear must directly produce the graph output, found {graph.outputs}")
+    down.output.dtype = F32
+
+
+def promote_laguna_exl3_post_float32(graph, kind: str) -> None:
+    """Preserve the reference Laguna EXL3 float32 block outputs.
+
+    The split attention ABI remains float16. Exactly one checkpoint-provenanced ``o_proj``
+    converts that attention result into the float32 residual stream. The dense first block also
+    has exactly one non-shared ``mlp.down_proj`` whose reduction returns float32. Sparse routed
+    and shared down projections are widened by their dedicated helpers.
+    """
+    from emmy.compiler.dtype import F32  # noqa: PLC0415
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+
+    if kind not in {"dense", "sparse"}:
+        raise ValueError(f"unknown Laguna EXL3 post kind {kind!r}")
+
+    def one_linear(suffix: str, *, exclude_shared: bool = False):
+        matches = []
+        for node in graph.nodes.values():
+            if not isinstance(node.op, ConstantOp):
+                continue
+            source = node.op.source_path or ""
+            if not source.endswith(suffix) or (exclude_shared and ".shared_expert" in source):
+                continue
+            users = [
+                graph.nodes[uid]
+                for uid in graph.consumers(node.id)
+                if isinstance(graph.nodes[uid].op, LinearOp) and len(graph.nodes[uid].inputs) >= 2 and graph.nodes[uid].inputs[1] == node.id
+            ]
+            matches.extend(users)
+        if len(matches) != 1:
+            raise RuntimeError(f"marked Laguna EXL3 post needs one checkpoint-provenanced {suffix}, found {len(matches)}")
+        return matches[0]
+
+    one_linear(".self_attn.o_proj.weight").output.dtype = F32
+    if kind == "dense":
+        one_linear(".mlp.down_proj.weight", exclude_shared=True).output.dtype = F32
 
 
 def stamp_sliding_windows(
@@ -1140,6 +1284,54 @@ def _checkpoint_to_model_key(key: str) -> str:
     return key
 
 
+def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
+    """Fold Laguna EXL3's routed-up inverse scale into the router weights.
+
+    Laguna's EXL3 architecture uses ``interm_div=128``: routed ``up_proj`` weights are stored
+    after division by 128, and the reference runtime folds both the inverse factor and the
+    model's base expert multiplier into selected routing weights. Wrap each sparse router with
+    that complete factor after checkpoint state loading. Keeping it on routing weights avoids
+    materializing scaled expert outputs in fp16. Dense blocks and always-on shared experts are
+    intentionally unchanged. The checkpoint has no field for ``interm_div``; 128 is the
+    official Laguna EXL3 architecture invariant.
+    """
+    import torch.nn as nn  # noqa: PLC0415
+
+    config = getattr(model, "config", None)
+    if not exl3 or getattr(config, "model_type", None) != "laguna":
+        return
+
+    class RoutedScoreScale(nn.Module):
+        def __init__(self, router, scale) -> None:
+            super().__init__()
+            self.router = router
+            self._emmy_exl3_laguna_scale = scale
+            self._emmy_routed_base_scale_folded = True
+            self._emmy_routed_accumulate_float32 = True
+
+        def forward(self, hidden_states):
+            routed = self.router(hidden_states)
+            return (*routed[:-2], routed[-2] * self._emmy_exl3_laguna_scale, routed[-1])
+
+    trunk = getattr(model, "model", model)
+    trunk = getattr(trunk, "language_model", trunk)
+    for block in trunk.layers:
+        mlp = getattr(block, "mlp", None)
+        parts = moe_block_parts(mlp) if mlp is not None else None
+        if parts is None:
+            continue
+        router, _experts = parts
+        raw_scale = getattr(mlp, "routed_scaling_factor", 1.0)
+        total_scale = 128.0 * float(1.0 if raw_scale is None else raw_scale)
+        applied = getattr(router, "_emmy_exl3_laguna_scale", None)
+        if applied == total_scale:
+            continue
+        if applied is not None:
+            raise RuntimeError(f"Laguna EXL3 routed scale is already {applied}, expected {total_scale}")
+        name = "gate" if getattr(mlp, "gate", None) is router else "router"
+        setattr(mlp, name, RoutedScoreScale(router, total_scale))
+
+
 def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -1339,6 +1531,7 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
     missing_dense = [m for m in missing if _expert_slot(m) is None]
     if missing_dense:
         logger.info("quantized split load: %d module tensors not in checkpoint (e.g. %s)", len(missing_dense), missing_dense[0])
+    _apply_exl3_laguna_routed_scale(model, exl3=exl3)
     model.tie_weights()
     model.eval()
     return model, {

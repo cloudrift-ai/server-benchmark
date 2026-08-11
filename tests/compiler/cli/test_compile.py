@@ -174,25 +174,6 @@ def test_compile_golden_substring_resolves_dynamic(run_cli, monkeypatch):
     assert "int seq_len" in stdout, f"expected masked-tile ``int seq_len`` from the dynamic golden, got:\n{stdout[:500]}"
 
 
-def test_compile_golden_ambiguous_substring_lists_shapes(run_cli, monkeypatch):
-    """A ``--golden`` substring spanning several shapes can't select one graph — it
-    exits 2 listing the matched shapes so the user can narrow it."""
-    # Hide CUDA from the subprocess: the asserted shape pair only co-exists in the
-    # off-GPU multi-card union, not necessarily in one card's own recordings.
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    rc, stdout, stderr = run_cli("compile", "--golden", "mlp_down", "--ir", "tile")
-    assert rc == 2, f"expected exit 2, got {rc}: {stdout}{stderr}"
-    out = stdout + stderr
-    assert "ambiguous" in out and "matmul.mlp_down.h4096" in out and "matmul.mlp_down.h4096.dynM" in out
-
-
-def test_compile_golden_unknown_lists_available(run_cli):
-    """An unknown ``--golden`` name exits 2 and lists the available golden names."""
-    rc, stdout, stderr = run_cli("compile", "--golden", "no_such_shape", "--ir", "tile")
-    assert rc == 2, f"expected exit 2, got {rc}"
-    assert "unknown golden config" in stdout + stderr
-
-
 def test_compile_code_fp32_stat_free_cone_demotes(run_cli):
     """An fp32 pointwise cone fused into a matmul A operand (the stat-free computed-A shape)
     has NO legal contraction row — no fp32 mma atoms — and unlike the MONOID composition no

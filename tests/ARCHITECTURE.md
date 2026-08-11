@@ -93,6 +93,11 @@ directly; they never import from another test module or from `conftest.py`.
   serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
   model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
   synthetic input cannot.
+- **Do not load the repository golden corpus for unrelated tests.** The index is lazy so ordinary CLI startup and
+  commands that never consult deploy evidence do not parse every checked-in program. Golden format tests load one
+  file at a time and perform all per-file schema assertions in that pass.
+- **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
+  records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
 - **No mocking** — dry-run mode is the primary strategy for testing command orchestration without side effects.
 - **Real recipes** — CLI dry-run tests use recipes from the `recipes/` directory to catch config drift.

@@ -161,7 +161,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
-| `search/golden.py` | Generic program-backed records, repository indexing, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
+| `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
 | `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and serving-image release qualification (see Part 7). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -479,6 +479,10 @@ still picked up.
 machine-local caches written by local tunes, so a fresh machine — every rented box — used to deploy on pure model
 extrapolation, with misdeploys up to 29× (HISTORY.md: "The saturated-score plateau").
 
+The repository index is materialized on first evidence access, not when the module is imported. Commands that never
+consult the golden tier therefore do not parse the corpus; when it is needed, the loader uses PyYAML's safe C loader
+when available and falls back to the safe Python loader.
+
 At a fork, `greedy_decide` joins the op by `ShapeKey` against the goldens recorded for the GPU being compiled for, and
 picks the offered candidate that agrees with the fastest recorded entry. Every **kind** of golden takes part — an
 entry's kind is which standard shape it describes: matmul, attention (flash), rms_norm, softmax, reduce, pointwise,
@@ -670,8 +674,8 @@ sorted tuning-knob rendering): the model argmin (`Prior.pick` and the greedy fal
 measured-evidence argmins, and the golden realization pick. An order-broken tie is a per-boot coin flip — leaf order
 can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image with a bimodal boot-time cubin set
 (HISTORY.md: "The bimodal boot-time kernel set").
-Pinned by `tests/compiler/pipeline/search/test_deploy_pick_determinism.py` (tier-level permutation invariance plus a
-cross-subprocess selected-kernel-set pin, the resolution counterpart of `test_source_determinism.py`).
+Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py` at every evidence tier; rendered
+bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
 **Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
 `_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only

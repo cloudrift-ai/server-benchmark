@@ -10,22 +10,39 @@ them and steals the fp16 latency for the fp32 row.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from emmy.compiler.pipeline.search import golden as golden_mod
-from emmy.compiler.pipeline.search.golden import goldens_by_name
+from emmy.compiler.pipeline.search.data import ShapeKey
 from emmy.compiler.pipeline.search.prior import diagnostics
+
+_FP32_US = 10.0
+_FP16_US = 20.0
 
 
 @pytest.fixture(autouse=True)
 def _single_gpu_goldens(monkeypatch):
-    """Pin the golden set to one card (RTX 5090). With multiple per-GPU files a name
-    recurs once per card and the GPU-blind ``ShapeKey`` join would mix their
-    latencies (5090 / PRO 6000 even share ``compute_cap (12, 0)``), making these
-    shape-keyed assertions depend on which goldens dir is checked in. Off-GPU here,
-    so ``goldens_for_live_gpu`` can't auto-scope — inject the single-card set."""
-    one = [g for g in golden_mod.GOLDEN_RECORDS if g.gpu_name == "NVIDIA GeForce RTX 5090"]
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", one)
+    """Install the three shape records needed by these join tests."""
+    records = [
+        SimpleNamespace(
+            name=name,
+            gpu_name="NVIDIA GeForce RTX 5090",
+            compute_cap=(12, 0),
+            shape_key=ShapeKey.from_matmul(size, size, size, dtype),
+            emmy_us=latency,
+            fast_math=False,
+            is_matmul=True,
+        )
+        for name, size, dtype, latency in (
+            ("matmul.square.512", 512, "fp32", _FP32_US),
+            ("matmul.square.512.fp16", 512, "fp16", _FP16_US),
+            ("matmul.square.1024", 1024, "fp32", 30.0),
+        )
+    ]
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "live_recorded_goldens", lambda: None)
 
 
 class _FakePrior:
@@ -63,15 +80,13 @@ def _row(free_prod, reduce_max, *, fp32, h_opt, latency):
 
 
 def test_dtype_separation_and_o3_filter():
-    g32 = goldens_by_name("matmul.square.512")[0].emmy_us  # fp32 golden latency (-O3)
-    g16 = goldens_by_name("matmul.square.512.fp16")[0].emmy_us
     fp = 512 * 512  # both square.512 and .fp16 share (free_prod, reduce)
 
     prior = _FakePrior(
         [
-            _row(fp, 512, fp32=True, h_opt=3, latency=g32 * 2.0),  # fp32 -O3 winner → ratio 2.0
-            _row(fp, 512, fp32=False, h_opt=3, latency=g16 * 0.5),  # fp16 -O3 winner → ratio 0.5
-            _row(fp, 512, fp32=True, h_opt=1, latency=g32 * 9.0),  # -O1 row must be IGNORED
+            _row(fp, 512, fp32=True, h_opt=3, latency=_FP32_US * 2.0),  # fp32 -O3 winner → ratio 2.0
+            _row(fp, 512, fp32=False, h_opt=3, latency=_FP16_US * 0.5),  # fp16 -O3 winner → ratio 0.5
+            _row(fp, 512, fp32=True, h_opt=1, latency=_FP32_US * 9.0),  # -O1 row must be IGNORED
         ]
     )
     perf = diagnostics.golden_deploy_perf(prior)
@@ -90,8 +105,7 @@ def test_shape_without_o3_is_omitted():
 
 
 def test_kernel_filter_restricts_shapes():
-    g32 = goldens_by_name("matmul.square.512")[0].emmy_us
-    prior = _FakePrior([_row(512 * 512, 512, fp32=True, h_opt=3, latency=g32)])
+    prior = _FakePrior([_row(512 * 512, 512, fp32=True, h_opt=3, latency=_FP32_US)])
     assert set(diagnostics.golden_deploy_perf(prior, "matmul.square.512")) <= {"matmul.square.512"}
 
 
@@ -99,7 +113,6 @@ def test_non_matmul_group_with_colliding_extents_is_excluded():
     """A reduce-shaped op group that happens to share a matmul golden's
     (free_prod, reduce_max, dtype) must not satisfy the join — the index admits
     only matmul-histogram groups (``_matmul_sig``)."""
-    g32 = goldens_by_name("matmul.square.512")[0].emmy_us
-    knobs, latency = _row(512 * 512, 512, fp32=True, h_opt=3, latency=g32 * 0.1)
+    knobs, latency = _row(512 * 512, 512, fp32=True, h_opt=3, latency=_FP32_US * 0.1)
     knobs.pop("S_pw_multiply")  # no product feeding the reduce → not a matmul body
     assert "matmul.square.512" not in diagnostics.golden_deploy_perf(_FakePrior([(knobs, latency)]))

@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.pipeline.search.golden import (
-    GOLDEN_RECORDS,
     GoldenEntryState,
     GoldenFileValidation,
+    _LazyGoldenRecords,
     golden_entry_state,
     load_golden_file,
     load_golden_records,
@@ -19,6 +19,15 @@ from emmy.compiler.pipeline.search.golden import (
 
 _GOLDENS = Path(__file__).parents[2] / "emmy/compiler/pipeline/search/goldens"
 _FILES = sorted(_GOLDENS.rglob("*.yaml"))
+_FORBIDDEN_ENTRY_FIELDS = {
+    "cublas_us",
+    "emmy_us",
+    "kernel",
+    "provisional",
+    "reproducer",
+    "shape_key",
+    "structural_features",
+}
 
 
 @pytest.mark.parametrize("path", _FILES, ids=lambda path: path.name)
@@ -29,6 +38,9 @@ def test_repository_golden_deserializes(path: Path) -> None:
     assert "format_version" not in document
     assert isinstance(document["programs"], list)
     assert all("ir_version" not in program for program in document["programs"])
+    for entry in document["configs"]:
+        assert not (_FORBIDDEN_ENTRY_FIELDS & set(entry)), path
+        assert set(entry["target"]) in ({"origins"}, {"loop"}), path
     for record in records:
         assert record.program.nodes
         assert bool(record.origins) != (record.loop_wire is not None)
@@ -37,21 +49,6 @@ def test_repository_golden_deserializes(path: Path) -> None:
             assert record.target_program.outputs
         else:
             assert set(record.origins) <= set(record.program.nodes)
-
-
-def test_repository_index_is_the_flat_corpus() -> None:
-    count = sum(len(load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)["configs"]) for path in _FILES)
-    assert len(GOLDEN_RECORDS) == count
-    assert count > 0
-
-
-def test_repository_format_has_no_legacy_or_derived_target_fields() -> None:
-    forbidden = {"kernel", "reproducer", "emmy_us", "cublas_us", "provisional", "shape_key", "structural_features"}
-    for path in _FILES:
-        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
-        for entry in document["configs"]:
-            assert not (forbidden & set(entry)), path
-            assert set(entry["target"]) in ({"origins"}, {"loop"}), path
 
 
 def test_production_tree_has_no_retired_golden_surfaces() -> None:
@@ -64,11 +61,28 @@ def test_production_tree_has_no_retired_golden_surfaces() -> None:
 
 
 def test_record_derived_measurement_properties() -> None:
-    record = GOLDEN_RECORDS[0]
+    document = load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY)
+    record = load_golden_records(document)[0]
     assert record.emmy_us > 0
     assert record.reference_us > 0
     assert record.ratio == record.reference_us / record.emmy_us
     assert record.dynamic == record.shape_key.is_dyn
+
+
+def test_repository_index_loads_once_on_first_access() -> None:
+    calls = 0
+
+    def load() -> list:
+        nonlocal calls
+        calls += 1
+        return ["record"]
+
+    records = _LazyGoldenRecords(load)
+    assert calls == 0
+    assert len(records) == 1
+    assert records[0] == "record"
+    assert list(records) == ["record"]
+    assert calls == 1
 
 
 def test_working_states_and_repository_requires_measurements() -> None:

@@ -26,7 +26,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
-from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
+from emmy.compiler.pipeline.search.golden import GoldenRecord
 
 
 def _compile(graph, knobs_env: str | None, monkeypatch, ctx: Context | None = None):
@@ -72,7 +72,18 @@ def _norm_linear_graph(S: int = 32, H: int = 1024, inter: int = 3072) -> Graph:
 
 
 def test_is_routing_reads_place_only_knob_dicts() -> None:
-    base = GOLDEN_RECORDS[0]
+    base = GoldenRecord(
+        name="test",
+        gpu_name="TESTGPU",
+        compute_cap=(12, 0),
+        model=None,
+        program_index=0,
+        program_wire={"inputs": [], "outputs": [], "nodes": []},
+        origins=(),
+        knobs={},
+        measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "test"},
+        ranking=None,
+    )
     routing = replace(base, knobs={"PLACE@a": "cut"})
     sched = replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"})
     assert routing.is_routing and not sched.is_routing

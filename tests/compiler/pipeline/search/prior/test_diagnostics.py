@@ -13,9 +13,19 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from emmy.compiler.pipeline.search.data import ShapeKey
-from emmy.compiler.pipeline.search.golden import fast_math_knobs, goldens_by_name
+from emmy.compiler.pipeline.search.golden import fast_math_knobs
 from emmy.compiler.pipeline.search.prior import diagnostics
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_golden_index(monkeypatch):
+    """Diagnostics unit tests install only the records their scenario needs."""
+    from emmy.compiler.pipeline.search import golden as golden_mod
+
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [])
 
 
 def _sig(free_prod, reduce_max, *, fp32=True, matmul=True):
@@ -44,11 +54,32 @@ def test_op_label_recognizes_stamped_matmuls():
     assert diagnostics._op_label(_sig(512, 4096, matmul=False)).startswith("reduce")
 
 
-def test_golden_coverage_counts_dtype_twins_separately():
+def _install_square_goldens(monkeypatch):
+    from emmy.compiler.pipeline.search import golden as golden_mod
+    from emmy.compiler.pipeline.search import golden_eval
+
+    records = [
+        SimpleNamespace(
+            name=f"matmul.square.512{suffix}",
+            gpu_name="NVIDIA GeForce RTX 5090",
+            compute_cap=(12, 0),
+            is_matmul=True,
+            shape_key=ShapeKey.from_matmul(512, 512, 512, dtype),
+        )
+        for suffix, dtype in (("", "fp32"), (".fp16", "fp16"))
+    ]
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "live_recorded_goldens", lambda: None)
+    monkeypatch.setattr(golden_eval, "evaluate_record", lambda *_args, **_kwargs: (None, 0, 1, None))
+    return records
+
+
+def test_golden_coverage_counts_dtype_twins_separately(monkeypatch):
     """Coverage joins on ShapeKey: an fp32 group at square.512's extents covers the
     fp32 golden only — its ``.fp16`` twin needs its own group; a reduce-shaped group
     at the same extents counts nothing. (The old ``S_n_mma > 0`` gate made coverage
     permanently 0/N.)"""
+    _install_square_goldens(monkeypatch)
     fp = 512 * 512
     base = diagnostics._golden_coverage({})[0]
     assert base == 0
@@ -95,11 +126,11 @@ class _FakePrior:
         return 0.0
 
 
-def test_golden_prior_eval_joins_fp16_goldens():
+def test_golden_prior_eval_joins_fp16_goldens(monkeypatch):
     """An fp16-tuned op group must rank its ``.fp16`` golden (under the old
     ``S_n_mma``-keyed join the op side was always ``False``, so fp16 goldens
     silently dropped while fp32 goldens could steal the fp16 group's histogram)."""
-    g16 = goldens_by_name("matmul.square.512.fp16")[0]
+    _, g16 = _install_square_goldens(monkeypatch)
     rows = [({**dict(_sig(g16.shape_key.free_prod, g16.shape_key.reduce_max, fp32=False)), "WM": 4}, 5.0)]
     out = diagnostics.golden_prior_eval(_FakePrior(rows), kernel_filter="matmul.square.512")
     assert "matmul.square.512.fp16" in out and "rank" in out
@@ -108,9 +139,10 @@ def test_golden_prior_eval_joins_fp16_goldens():
     assert any(line.strip().startswith("matmul.square.512 ") and "no tuned rows" in line for line in skip_lines)
 
 
-def test_golden_prior_eval_warns_per_unjoinable_shape():
+def test_golden_prior_eval_warns_per_unjoinable_shape(monkeypatch):
     """Shapes with no tuned rows must each print a SKIPPED line — the silent drop
     hid the fp16 lockout in the 2026-06-12 sweep."""
+    _install_square_goldens(monkeypatch)
     out = diagnostics.golden_prior_eval(_FakePrior([]), kernel_filter="matmul.square.512")
     skip_lines = [line for line in out.splitlines() if "SKIPPED" in line and "no tuned rows" in line]
     # square.512 and its .fp16 twin (one line per recorded config name, deduped by name set)

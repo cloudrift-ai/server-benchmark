@@ -143,13 +143,13 @@ serve-config: serve-config-guard
 	@echo "image tag  = $(SERVE_TAG)"
 	@echo "base image = $(VLLM_EMMY_TAG)"
 	@echo "target GPU = $(SERVE_GPU_NAME)"
+	@echo "goldens    = $(SERVE_GOLDEN_FILE)"
 	@echo "revision   = $(if $(SERVE_REVISION),$(SERVE_REVISION),unpinned - the repo default branch)"
 	@echo "serve      = --max-model-len $(SERVE_MAX_MODEL_LEN) --max-num-batched-tokens $(SERVE_MAX_NUM_BATCHED_TOKENS) --gpu-memory-utilization $(SERVE_GPU_MEM_UTIL) (decode bucket $(SERVE_DECODE_BUCKET))"
 	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
 	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
 	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
 	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
-	@echo "golden src = $(if $(CHECKPOINT),$(CHECKPOINT),Hub model/revision)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
 
 serve-models:
@@ -167,21 +167,17 @@ serve-config-guard:
 		echo "ERROR: $(SERVE_CONFIG) still contains __FILL_FINAL_ release placeholders."; \
 		echo "  Fill every measured checkpoint, serving, and revision value before warming or baking."; \
 		exit 1)
+	@test -n "$(SERVE_GOLDEN_FILE)" -a -f "$(SERVE_GOLDEN_FILE)" || ( \
+		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden YAML."; \
+		exit 1)
 
-# The goldens are the top tier of the fork-resolution evidence hierarchy — without them the
-# warm bakes cold-greedy picks (catastrophic on unseeded projection shapes) into cubins and
-# the pack, where nothing downstream revisits them. Gate the warm on coverage existing.
-# SERVE_REVISION is forwarded because a repo's revisions do NOT share kernel shapes (an EXL3
-# rung differs in exactly the per-tensor bit allocation the shape keys carry), so a
-# revision-tagged golden set can only be evaluated against the revision being released.
+# The goldens are the top tier of the fork-resolution evidence hierarchy. Validate the exact
+# config-derived realization matrix on the target GPU before warming; the pinned config owns
+# model, revision, GPU, canonical file, widths, and precision regimes together.
 serve-goldens: serve-config-guard
-	./venv/bin/python scripts/check_serving_goldens.py --model "$(SERVE_MODEL)" --gpu "$(SERVE_GPU_NAME)" \
-		$(if $(SERVE_REVISION),--revision "$(SERVE_REVISION)") \
-		$(if $(CHECKPOINT),--checkpoint "$(CHECKPOINT)") \
-		$(if $(filter 1,$(SERVE_STATIC_ONLY)),--static-only-release) \
-		--strict-major-gaps --release-config "$(SERVE_CONFIG)"
+	./venv/bin/emmy eval golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
 
-serve-warm: serve-config-guard
+serve-warm: serve-goldens
 	BASE_IMAGE=$(VLLM_EMMY_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/warm.sh
 
 serve-image: git-sha-guard serve-config-guard

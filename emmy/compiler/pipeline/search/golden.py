@@ -130,6 +130,12 @@ def fast_math_knobs(knobs: Mapping) -> bool:
     return False
 
 
+def precision_trading_pins(pins: Mapping) -> bool:
+    """Whether input pins enable any precision-trading enumeration path."""
+    umbrella = bool(pins.get("FAST_MATH", False))
+    return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
+
+
 def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
     """Derive a record key through the same offer-aware classifier as deployment.
 
@@ -173,6 +179,8 @@ class GoldenRecord:
     program_index: int
     program_wire: dict
     origins: tuple[str, ...]
+    bindings: tuple[tuple[str, int], ...]
+    pins: tuple[tuple[str, object], ...]
     knobs: dict
     measurements: dict | None
     ranking: dict | None
@@ -193,6 +201,8 @@ class GoldenRecord:
     @cached_property
     def target_program(self):
         """Derive the disposable standalone program selected by this record."""
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
+
         if self.loop_wire is not None:
             key = id(self.loop_wire)
             cached = _LOOP_GRAPH_CACHE.get(key)
@@ -201,16 +211,25 @@ class GoldenRecord:
                 _LOOP_GRAPH_CACHE[key] = (self.loop_wire, graph)
             else:
                 graph = cached[1]
-            return graph.copy()
+            return specialize_program(graph, dict(self.bindings), loop=True)
 
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
 
-        return CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
+        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
+        return specialize_program(graph, dict(self.bindings))
 
     @property
     def target_key(self) -> tuple:
         """Document-local identity shared by candidate rows for one target."""
         return ("loop", self.loop_index) if self.loop_index is not None else ("origins", *self.origins)
+
+    @property
+    def binding_map(self) -> dict[str, int]:
+        return dict(self.bindings)
+
+    @property
+    def pin_map(self) -> dict[str, object]:
+        return dict(self.pins)
 
     @cached_property
     def shape_key(self) -> ShapeKey:
@@ -269,10 +288,6 @@ class GoldenRecord:
     @property
     def golden(self) -> bool:
         return self.ratio >= 0.95
-
-    @property
-    def fast_math(self) -> bool:
-        return fast_math_knobs(self.knobs)
 
     @property
     def is_routing(self) -> bool:
@@ -357,9 +372,7 @@ def validate_golden_file(
         where = f"configs[{index}]"
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where} must be a mapping")
-        _require_keys(entry, {"name", "model", "program", "target", "knobs", "measurements", "ranking"}, where)
-        if not isinstance(entry.get("name"), str) or not entry["name"]:
-            raise ValueError(f"{where}.name must be a non-empty string")
+        _require_keys(entry, {"model", "program", "target", "realizations"}, where)
         if entry.get("model") is not None and not isinstance(entry["model"], str):
             raise ValueError(f"{where}.model must be a string")
         program_ref = entry.get("program")
@@ -370,37 +383,81 @@ def validate_golden_file(
         except ValueError as exc:
             raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
-        if "knobs" in entry and not isinstance(entry["knobs"], Mapping):
-            raise ValueError(f"{where}.knobs must be a mapping")
-        if "knobs" in entry:
-            families = {str(key).split("@", 1)[0] for key in entry["knobs"]}
-            if "PLACE" in families and families != {"PLACE"}:
-                raise ValueError(f"{where} mixes PLACE routing knobs with schedule knobs")
-            if strict:
-                for family in families:
-                    scoped = [str(key) for key in entry["knobs"] if str(key).split("@", 1)[0] == family]
-                    if family in scoped and any("@" in key for key in scoped):
-                        raise ValueError(
-                            f"{where}.knobs mixes bare and axis-scoped {family} keys; "
-                            "repository goldens must store one schedule spelling per family"
-                        )
-        if "ranking" in entry and not isinstance(entry["ranking"], Mapping):
-            raise ValueError(f"{where}.ranking must be a mapping")
-        if strict and "ranking" in entry:
-            raise ValueError(f"{where} working ranking metadata cannot be promoted")
-        try:
-            state = golden_entry_state(entry)
-        except ValueError as exc:
-            raise ValueError(f"{where} ({entry.get('name', '?')}): {exc}") from exc
-        if strict and state != GoldenEntryState.VERIFIED:
-            raise ValueError(f"{where} repository promotion requires knobs and paired positive timings")
-        if state == GoldenEntryState.VERIFIED:
-            measurements = entry["measurements"]
-            _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{where}.measurements")
-            _positive_number(measurements["emmy_us"], f"{where}.measurements.emmy_us")
-            _positive_number(measurements["reference_us"], f"{where}.measurements.reference_us")
-            if not isinstance(measurements["reference_backend"], str) or not measurements["reference_backend"]:
-                raise ValueError(f"{where}.measurements.reference_backend must be a non-empty string")
+        realizations = entry.get("realizations")
+        if not isinstance(realizations, list) or not realizations:
+            raise ValueError(f"{where}.realizations must be a non-empty list")
+        for realization_index, realization in enumerate(realizations):
+            realization_where = f"{where}.realizations[{realization_index}]"
+            if not isinstance(realization, Mapping):
+                raise ValueError(f"{realization_where} must be a mapping")
+            _require_keys(realization, {"name", "bindings", "pins", "knobs", "measurements", "ranking"}, realization_where)
+            if not isinstance(realization.get("name"), str) or not realization["name"]:
+                raise ValueError(f"{realization_where}.name must be a non-empty string")
+            bindings = realization.get("bindings")
+            if not isinstance(bindings, Mapping):
+                raise ValueError(f"{realization_where}.bindings must be a mapping")
+            for name, size in bindings.items():
+                if not isinstance(name, str) or not name or type(size) is not int or size <= 0:
+                    raise ValueError(f"{realization_where}.bindings must map non-empty names to positive integers")
+            pins = realization.get("pins")
+            if not isinstance(pins, Mapping):
+                raise ValueError(f"{realization_where}.pins must be a mapping")
+            from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
+
+            for name, value in pins.items():
+                descriptor = get(family_of(name)) if isinstance(name, str) and name else None
+                if descriptor is None:
+                    raise ValueError(f"{realization_where}.pins names unknown knob {name!r}")
+                valid = {
+                    KnobType.BOOL: type(value) is bool,
+                    KnobType.INT: type(value) is int,
+                    KnobType.STR: isinstance(value, str),
+                    KnobType.BINMASK: type(value) is int or isinstance(value, str),
+                }[descriptor.type]
+                if not valid:
+                    raise ValueError(f"{realization_where}.pins.{name} must be a {descriptor.type.value} value, got {value!r}")
+            if "knobs" in realization and not isinstance(realization["knobs"], Mapping):
+                raise ValueError(f"{realization_where}.knobs must be a mapping")
+            if "knobs" in realization:
+                from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+
+                conflicts = [
+                    name
+                    for name, value in pins.items()
+                    if name in realization["knobs"] and not values_equal(name, value, realization["knobs"][name])
+                ]
+                if conflicts:
+                    raise ValueError(
+                        f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
+                    )
+                families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
+                if "PLACE" in families and families != {"PLACE"}:
+                    raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
+                if strict:
+                    for family in families:
+                        scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
+                        if family in scoped and any("@" in key for key in scoped):
+                            raise ValueError(
+                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys; "
+                                "repository goldens must store one schedule spelling per family"
+                            )
+            if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
+                raise ValueError(f"{realization_where}.ranking must be a mapping")
+            if strict and "ranking" in realization:
+                raise ValueError(f"{realization_where} working ranking metadata cannot be promoted")
+            try:
+                state = golden_entry_state(realization)
+            except ValueError as exc:
+                raise ValueError(f"{realization_where} ({realization.get('name', '?')}): {exc}") from exc
+            if strict and state != GoldenEntryState.VERIFIED:
+                raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
+            if state == GoldenEntryState.VERIFIED:
+                measurements = realization["measurements"]
+                _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
+                _positive_number(measurements["emmy_us"], f"{realization_where}.measurements.emmy_us")
+                _positive_number(measurements["reference_us"], f"{realization_where}.measurements.reference_us")
+                if not isinstance(measurements["reference_backend"], str) or not measurements["reference_backend"]:
+                    raise ValueError(f"{realization_where}.measurements.reference_backend must be a non-empty string")
 
 
 def load_golden_file(
@@ -417,32 +474,36 @@ def load_golden_file(
     return document
 
 
-def golden_record_from_entry(document: Mapping, entry: Mapping) -> GoldenRecord:
+def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Mapping) -> GoldenRecord:
     target = entry["target"]
     loop_index = target.get("loop")
     return GoldenRecord(
-        name=entry["name"],
+        name=realization["name"],
         gpu_name=document.get("gpu_name") or "",
         compute_cap=tuple(document["compute_cap"]),
         model=entry.get("model", document.get("model")),
         program_index=entry["program"],
         program_wire=document["programs"][entry["program"]],
         origins=tuple(target.get("origins", ())),
+        bindings=tuple(sorted(realization["bindings"].items())),
+        pins=tuple(sorted(realization["pins"].items())),
         loop_index=loop_index,
         loop_wire=document.get("loops", [])[loop_index] if loop_index is not None else None,
-        knobs=dict(entry.get("knobs") or {}),
-        measurements=dict(entry["measurements"]) if entry.get("measurements") is not None else None,
-        ranking=dict(entry["ranking"]) if entry.get("ranking") is not None else None,
+        knobs=dict(realization.get("knobs") or {}),
+        measurements=dict(realization["measurements"]) if realization.get("measurements") is not None else None,
+        ranking=dict(realization["ranking"]) if realization.get("ranking") is not None else None,
     )
 
 
 def load_golden_records(document: Mapping) -> list[GoldenRecord]:
-    return [golden_record_from_entry(document, entry) for entry in document["configs"]]
+    return [
+        golden_record_from_entry(document, entry, realization) for entry in document["configs"] for realization in entry["realizations"]
+    ]
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
 _PROGRAM_TARGET_CACHE: dict[
-    tuple[int, tuple[int, int], str],
+    tuple[int, tuple[int, int], str, tuple[tuple[str, int], ...]],
     dict[frozenset[str], set[tuple[tuple[str, float], ...]]],
 ] = {}
 
@@ -450,7 +511,7 @@ _PROGRAM_TARGET_CACHE: dict[
 def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
     """Lower one persisted frontend target and recover its unique ``S_*`` row."""
     payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
-    key = (payload_id, record.target_key, record.compute_cap)
+    key = (payload_id, record.target_key, record.compute_cap, record.bindings)
     cached = _STRUCTURAL_CACHE.get(key)
     if cached is not None:
         return cached
@@ -487,10 +548,12 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
 
     wanted = set(record.origins)
-    program_key = (id(record.program_wire), record.compute_cap, record.gpu_name)
+    program_key = (id(record.program_wire), record.compute_cap, record.gpu_name, record.bindings)
     target_index = _PROGRAM_TARGET_CACHE.get(program_key)
     if target_index is None:
-        graph = record.program.copy()
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
+
+        graph = specialize_program(record.program, record.binding_map)
         provenance.seed(graph)
         ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
         lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
@@ -637,6 +700,7 @@ __all__ = [
     "GoldenRecord",
     "dump_golden_file",
     "fast_math_knobs",
+    "precision_trading_pins",
     "golden_entry_state",
     "golden_record_from_entry",
     "goldens_by_name",

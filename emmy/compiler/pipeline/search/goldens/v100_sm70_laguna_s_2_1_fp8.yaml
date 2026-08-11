@@ -7560,543 +7560,687 @@ loops:
     inputs: [linear_wt, hidden_states]
     outputs: [[linear, f16, [1, 1, 100352]]]
 configs:
-- name: k_linear_mean_reduce_a2b51c.e03f442905ba
-  program: 0
+- program: 0
   target:
     loop: 0
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 119876.60789489746
-    reference_backend: emmy-greedy
-    reference_us: 119877.37655639648
-- name: k_linear_pointwise_12bdb1.463485b20461
-  program: 0
+  realizations:
+  - name: k_linear_mean_reduce_a2b51c.e03f442905ba
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 119876.60789489746
+      reference_backend: emmy-greedy
+      reference_us: 119877.37655639648
+- program: 0
   target:
     loop: 1
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 1.380262030770771
-    reference_backend: emmy-greedy
-    reference_us: 1.3811445976462262
-- name: k_linear_pointwise_738b4a.bc9808ef15fa
-  program: 0
+  realizations:
+  - name: k_linear_pointwise_12bdb1.463485b20461
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 1.380262030770771
+      reference_backend: emmy-greedy
+      reference_us: 1.3811445976462262
+- program: 0
   target:
     loop: 2
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 21.231659549347896
-    reference_backend: emmy-greedy
-    reference_us: 21.20987278349856
-- name: k_softplus_one_plus_exp_pointwise.a0fc62898f94
-  program: 0
+  realizations:
+  - name: k_linear_pointwise_738b4a.bc9808ef15fa
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 21.231659549347896
+      reference_backend: emmy-greedy
+      reference_us: 21.20987278349856
+- program: 0
   target:
     loop: 3
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 1.4434857059896027
-    reference_backend: emmy-greedy
-    reference_us: 1.5451053738923193
-- name: k_linear_pointwise_25d4f6.90cb4c87bd1f
-  program: 0
+  realizations:
+  - name: k_softplus_one_plus_exp_pointwise.a0fc62898f94
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 1.4434857059896027
+      reference_backend: emmy-greedy
+      reference_us: 1.5451053738923193
+- program: 0
   target:
     loop: 4
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 24.288780805541247
-    reference_backend: emmy-greedy
-    reference_us: 24.25756105562536
-- name: k_linear_pointwise_f05358.461ba56f2b7e
-  program: 0
+  realizations:
+  - name: k_linear_pointwise_25d4f6.90cb4c87bd1f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 24.288780805541247
+      reference_backend: emmy-greedy
+      reference_us: 24.25756105562536
+- program: 0
   target:
     loop: 5
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 2.797579971002084
-    reference_backend: emmy-greedy
-    reference_us: 2.803775241200844
-- name: k_mean_e177bd.2f569559b48d
-  program: 0
+  realizations:
+  - name: k_linear_pointwise_f05358.461ba56f2b7e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 2.797579971002084
+      reference_backend: emmy-greedy
+      reference_us: 2.803775241200844
+- program: 0
   target:
     loop: 6
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t64
-  measurements:
-    emmy_us: 36.54162972061722
-    reference_backend: emmy-greedy
-    reference_us: 36.150855677468435
-- name: k_mean_6ed3fb.dc41c1a2cbfa
-  program: 0
+  realizations:
+  - name: k_mean_e177bd.2f569559b48d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t64
+    measurements:
+      emmy_us: 36.54162972061722
+      reference_backend: emmy-greedy
+      reference_us: 36.150855677468435
+- program: 0
   target:
     loop: 7
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t64
-  measurements:
-    emmy_us: 7.535230824170012
-    reference_backend: emmy-greedy
-    reference_us: 7.466029765000984
-- name: k_cat_slice_transpose_unsqueeze_pointwise_fd3183.fee9bafdd620
-  program: 0
+  realizations:
+  - name: k_mean_6ed3fb.dc41c1a2cbfa
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t64
+    measurements:
+      emmy_us: 7.535230824170012
+      reference_backend: emmy-greedy
+      reference_us: 7.466029765000984
+- program: 0
   target:
     loop: 8
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 2.832679927517942
-    reference_backend: emmy-greedy
-    reference_us: 2.8312855862724486
-- name: k_cat_slice_transpose_unsqueeze_pointwise_976b5a.b5c7dcd71934
-  program: 0
+  realizations:
+  - name: k_cat_slice_transpose_unsqueeze_pointwise_fd3183.fee9bafdd620
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 2.832679927517942
+      reference_backend: emmy-greedy
+      reference_us: 2.8312855862724486
+- program: 0
   target:
     loop: 9
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 12.139049389591435
-    reference_backend: emmy-greedy
-    reference_us: 12.150634352753801
-- name: k_sdpa_reduce_0a924c.74f03b84bbf2
-  program: 0
+  realizations:
+  - name: k_cat_slice_transpose_unsqueeze_pointwise_976b5a.b5c7dcd71934
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 12.139049389591435
+      reference_backend: emmy-greedy
+      reference_us: 12.150634352753801
+- program: 0
   target:
     loop: 10
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 16929.280281066895
-    reference_backend: emmy-greedy
-    reference_us: 16926.20849609375
-- name: k_sdpa_linear_reduce_dd9153.833d5ed4119c
-  program: 0
+  realizations:
+  - name: k_sdpa_reduce_0a924c.74f03b84bbf2
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 16929.280281066895
+      reference_backend: emmy-greedy
+      reference_us: 16926.20849609375
+- program: 0
   target:
     loop: 11
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 26873.855590820312
-    reference_backend: emmy-greedy
-    reference_us: 26866.432189941406
-- name: k_linear_2be9f7.8c5bda2fc9b0
-  program: 0
+  realizations:
+  - name: k_sdpa_linear_reduce_dd9153.833d5ed4119c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 26873.855590820312
+      reference_backend: emmy-greedy
+      reference_us: 26866.432189941406
+- program: 0
   target:
     loop: 12
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: mma_m8n8k4_f16_f32/f1x8/k8
-    WORK: w16x1
-  measurements:
-    emmy_us: 9012.736320495605
-    reference_backend: emmy-greedy
-    reference_us: 9013.248443603516
-- name: k_linear_mean_reduce_4425bf.0b4325f6d5d4
-  program: 0
+  realizations:
+  - name: k_linear_2be9f7.8c5bda2fc9b0
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f1x8/k8
+      WORK: w16x1
+    measurements:
+      emmy_us: 9012.736320495605
+      reference_backend: emmy-greedy
+      reference_us: 9013.248443603516
+- program: 0
   target:
     loop: 13
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 358027.5192260742
-    reference_backend: emmy-greedy
-    reference_us: 357847.54943847656
-- name: k_linear_reduce_093b9a.731834dc09a4
-  program: 0
+  realizations:
+  - name: k_linear_mean_reduce_4425bf.0b4325f6d5d4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 358027.5192260742
+      reference_backend: emmy-greedy
+      reference_us: 357847.54943847656
+- program: 0
   target:
     loop: 14
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 55763.19980621338
-    reference_backend: emmy-greedy
-    reference_us: 55764.99080657959
-- name: k_to_cast_pointwise.0485ab6e28c1
-  program: 1
+  realizations:
+  - name: k_linear_reduce_093b9a.731834dc09a4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 55763.19980621338
+      reference_backend: emmy-greedy
+      reference_us: 55764.99080657959
+- program: 1
   target:
     loop: 15
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 12.42793109037994
-    reference_backend: emmy-greedy
-    reference_us: 12.427852077432622
-- name: k_linear_mean_reduce_6f21a4.43d9071bdb56
-  program: 1
+  realizations:
+  - name: k_to_cast_pointwise.0485ab6e28c1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 12.42793109037994
+      reference_backend: emmy-greedy
+      reference_us: 12.427852077432622
+- program: 1
   target:
     loop: 16
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 164320.5108642578
-    reference_backend: emmy-greedy
-    reference_us: 164318.46618652344
-- name: k_linear_pointwise_f87d0f.08c8e79a6715
-  program: 1
+  realizations:
+  - name: k_linear_mean_reduce_6f21a4.43d9071bdb56
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 164320.5108642578
+      reference_backend: emmy-greedy
+      reference_us: 164318.46618652344
+- program: 1
   target:
     loop: 17
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 28.584228243146622
-    reference_backend: emmy-greedy
-    reference_us: 28.56959956032889
-- name: k_linear_pointwise_41ac3b.8e4907353657
-  program: 1
+  realizations:
+  - name: k_linear_pointwise_f87d0f.08c8e79a6715
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 28.584228243146622
+      reference_backend: emmy-greedy
+      reference_us: 28.56959956032889
+- program: 1
   target:
     loop: 18
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 1.4044273589204788
-    reference_backend: emmy-greedy
-    reference_us: 1.406276067479611
-- name: k_mean_linear_reduce_1fe47c.ca03d332b65c
-  program: 1
+  realizations:
+  - name: k_linear_pointwise_41ac3b.8e4907353657
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 1.4044273589204788
+      reference_backend: emmy-greedy
+      reference_us: 1.406276067479611
+- program: 1
   target:
     loop: 19
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 53.180631838346784
-    reference_backend: emmy-greedy
-    reference_us: 52.76294758445338
-- name: k_softplus_one_plus_exp_pointwise.b0ad7b17f2f3
-  program: 1
+  realizations:
+  - name: k_mean_linear_reduce_1fe47c.ca03d332b65c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 53.180631838346784
+      reference_backend: emmy-greedy
+      reference_us: 52.76294758445338
+- program: 1
   target:
     loop: 20
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 1.5270439974993755
-    reference_backend: emmy-greedy
-    reference_us: 1.5336441399693412
-- name: k_mean_linear_reduce_913808.78fb70e94b97
-  program: 1
+  realizations:
+  - name: k_softplus_one_plus_exp_pointwise.b0ad7b17f2f3
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 1.5270439974993755
+      reference_backend: emmy-greedy
+      reference_us: 1.5336441399693412
+- program: 1
   target:
     loop: 21
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 7.4469253643235165
-    reference_backend: emmy-greedy
-    reference_us: 7.445878358820382
-- name: k_cat_slice_transpose_unsqueeze_pointwise_3b4e49.a794252862bf
-  program: 1
+  realizations:
+  - name: k_mean_linear_reduce_913808.78fb70e94b97
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 7.4469253643235165
+      reference_backend: emmy-greedy
+      reference_us: 7.445878358820382
+- program: 1
   target:
     loop: 22
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 34.69241487568823
-    reference_backend: emmy-greedy
-    reference_us: 34.68358722226374
-- name: k_transpose_2bf8a2.3d35779477b2
-  program: 1
+  realizations:
+  - name: k_cat_slice_transpose_unsqueeze_pointwise_3b4e49.a794252862bf
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 34.69241487568823
+      reference_backend: emmy-greedy
+      reference_us: 34.68358722226374
+- program: 1
   target:
     loop: 23
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f2
-    WORK: ''
-  measurements:
-    emmy_us: 26.66514895718603
-    reference_backend: emmy-greedy
-    reference_us: 31.247999519109726
-- name: k_cat_slice_transpose_unsqueeze_pointwise_a7c637.efa0ca9a7529
-  program: 1
+  realizations:
+  - name: k_transpose_2bf8a2.3d35779477b2
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f2
+      WORK: ''
+    measurements:
+      emmy_us: 26.66514895718603
+      reference_backend: emmy-greedy
+      reference_us: 31.247999519109726
+- program: 1
   target:
     loop: 24
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 4.031866261475513
-    reference_backend: emmy-greedy
-    reference_us: 4.013224383831631
-- name: k_transpose_903a46.7d77c9d81a46
-  program: 1
+  realizations:
+  - name: k_cat_slice_transpose_unsqueeze_pointwise_a7c637.efa0ca9a7529
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 4.031866261475513
+      reference_backend: emmy-greedy
+      reference_us: 4.013224383831631
+- program: 1
   target:
     loop: 25
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f2
-    WORK: ''
-  measurements:
-    emmy_us: 2.7546445857066426
-    reference_backend: emmy-greedy
-    reference_us: 3.0470623239345693
-- name: k_cat_slice_transpose_unsqueeze_pointwise_6aa4b1.9eeb77fd17b1
-  program: 1
+  realizations:
+  - name: k_transpose_903a46.7d77c9d81a46
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f2
+      WORK: ''
+    measurements:
+      emmy_us: 2.7546445857066426
+      reference_backend: emmy-greedy
+      reference_us: 3.0470623239345693
+- program: 1
   target:
     loop: 26
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 43.87617629507314
-    reference_backend: emmy-greedy
-    reference_us: 43.87617629507314
-- name: k_cat_slice_transpose_unsqueeze_pointwise_2392f4.f76d85592b0d
-  program: 1
+  realizations:
+  - name: k_cat_slice_transpose_unsqueeze_pointwise_6aa4b1.9eeb77fd17b1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 43.87617629507314
+      reference_backend: emmy-greedy
+      reference_us: 43.87617629507314
+- program: 1
   target:
     loop: 27
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 4.090842730937964
-    reference_backend: emmy-greedy
-    reference_us: 4.065292336166676
-- name: k_sdpa_reduce_184077.6c21da16f5bf
-  program: 1
+  realizations:
+  - name: k_cat_slice_transpose_unsqueeze_pointwise_2392f4.f76d85592b0d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 4.090842730937964
+      reference_backend: emmy-greedy
+      reference_us: 4.065292336166676
+- program: 1
   target:
     loop: 28
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: mma_m8n8k4_f16_f32/f1x8/k8
-    WORK: w16x1
-  measurements:
-    emmy_us: 1675.2640008926392
-    reference_backend: emmy-greedy
-    reference_us: 1675.7760047912598
-- name: k_sdpa_linear_reduce_ad1b68.877dd64f8e79
-  program: 1
+  realizations:
+  - name: k_sdpa_reduce_184077.6c21da16f5bf
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f1x8/k8
+      WORK: w16x1
+    measurements:
+      emmy_us: 1675.2640008926392
+      reference_backend: emmy-greedy
+      reference_us: 1675.7760047912598
+- program: 1
   target:
     loop: 29
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 30145.536422729492
-    reference_backend: emmy-greedy
-    reference_us: 30155.51996231079
-- name: k_linear_29ca57.22e3be98fc3f
-  program: 1
+  realizations:
+  - name: k_sdpa_linear_reduce_ad1b68.877dd64f8e79
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 30145.536422729492
+      reference_backend: emmy-greedy
+      reference_us: 30155.51996231079
+- program: 1
   target:
     loop: 30
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: mma_m8n8k4_f16_f32/f1x8/k8
-    WORK: w16x1
-  measurements:
-    emmy_us: 13461.503982543945
-    reference_backend: emmy-greedy
-    reference_us: 13462.528228759766
-- name: k_linear_mean_reduce_01ee55.d6c7274b8c30
-  program: 1
+  realizations:
+  - name: k_linear_29ca57.22e3be98fc3f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f1x8/k8
+      WORK: w16x1
+    measurements:
+      emmy_us: 13461.503982543945
+      reference_backend: emmy-greedy
+      reference_us: 13462.528228759766
+- program: 1
   target:
     loop: 31
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 59529.7269821167
-    reference_backend: emmy-greedy
-    reference_us: 59520.76721191406
-- name: k_linear_reduce_96af47.d5e7b9a68629
-  program: 1
+  realizations:
+  - name: k_linear_mean_reduce_01ee55.d6c7274b8c30
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 59529.7269821167
+      reference_backend: emmy-greedy
+      reference_us: 59520.76721191406
+- program: 1
   target:
     loop: 32
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 28756.991863250732
-    reference_backend: emmy-greedy
-    reference_us: 28791.552543640137
-- name: k_embedding_pointwise.04e90a27ac94
-  program: 2
+  realizations:
+  - name: k_linear_reduce_96af47.d5e7b9a68629
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 28756.991863250732
+      reference_backend: emmy-greedy
+      reference_us: 28791.552543640137
+- program: 2
   target:
     loop: 33
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: f4
-    WORK: ''
-  measurements:
-    emmy_us: 3.9371971607441028
-    reference_backend: emmy-greedy
-    reference_us: 3.9506711216419808
-- name: k_mean_4d9ec0.42adf006b7e9
-  program: 3
+  realizations:
+  - name: k_embedding_pointwise.04e90a27ac94
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 3.9371971607441028
+      reference_backend: emmy-greedy
+      reference_us: 3.9506711216419808
+- program: 3
   target:
     loop: 34
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: coop
-    STAGE: ''
-    TILE: ''
-    WORK: t128
-  measurements:
-    emmy_us: 8.576000045085776
-    reference_backend: torch-eager
-    reference_us: 805.082320881033
-- name: k_linear_81d59b.df47bf0fe266
-  program: 4
+  realizations:
+  - name: k_mean_4d9ec0.42adf006b7e9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 8.576000045085776
+      reference_backend: torch-eager
+      reference_us: 805.082320881033
+- program: 4
   target:
     loop: 35
-  knobs:
-    LOOPIFY: '0'
-    RASTER: ''
-    REDUCE: ''
-    STAGE: ''
-    TILE: ''
-    WORK: ''
-  measurements:
-    emmy_us: 925.6959855556488
-    reference_backend: torch-eager
-    reference_us: 905.7280123233795
+  realizations:
+  - name: k_linear_81d59b.df47bf0fe266
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: ''
+      WORK: ''
+    measurements:
+      emmy_us: 925.6959855556488
+      reference_backend: torch-eager
+      reference_us: 905.7280123233795

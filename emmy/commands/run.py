@@ -617,12 +617,18 @@ def _ab_samples(specs, dynamic=None):
     return [SimpleNamespace(name=f"ab {raw}", knobs=parse_knob_spec(raw), shape=None, dynamic=dyn) for raw in specs]
 
 
+def _sample_replay_knobs(sample) -> dict:
+    """All knob pins needed to reproduce a golden winner or explicit A/B row."""
+    return {**getattr(sample, "pins", {}), **sample.knobs}
+
+
 async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
     row beside the greedy pick. ``golden_configs`` are
-    :class:`~emmy.compiler.pipeline.search.data.Sample`s, whose ``knobs`` are
-    already the tunable-only set to pin (``S_*`` / ``H_*`` features are not knobs) —
+    :class:`~emmy.compiler.pipeline.search.data.Sample`s, whose ``pins`` hold the
+    input regime and whose ``knobs`` hold the tunable-only measured winner
+    (``S_*`` / ``H_*`` features are not knobs) —
     or the shapeless ``--ab`` pseudo-samples from :func:`_ab_samples` (same duck
     type). Each config re-traces a **fresh** graph from ``code`` — a frontend graph
     can't be re-compiled (the first lowering mutates it in place, so a reused graph
@@ -659,13 +665,14 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
     for sample in golden_configs or []:
+        replay_knobs = _sample_replay_knobs(sample)
         # String sources must be retraced at the recorded symbolic shape. An
         # embedded stable program already carries its symbolic dimensions.
         dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
         flags = []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
-            with pinned_knobs(sample.knobs):
+            with pinned_knobs(replay_knobs):
                 # Fresh graph; lowering mutates it and bakes the pins into the kernel.
                 if isinstance(source, str):
                     graph, _, _ = graph_from_code(source, dynamic_shapes=dynamic_shapes)
@@ -676,7 +683,7 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
+        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -942,7 +949,8 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
     ``--golden`` / ``--ab`` pinned row with its recorded reference latencies and integrity
-    flags. This is the golden-sweep workflow's parse target (it retires the ad-hoc stdout
+    flags. ``pinned_knobs`` is the exact input-regime-plus-winner map used for replay. This is
+    the golden-sweep workflow's parse target (it retires the ad-hoc stdout
     table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
     the confirm-twice rule diffs two of these files instead of two terminal scrollbacks.
 
@@ -1003,7 +1011,7 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
                 "kind": "golden" if sample.shape is not None else "ab",
                 "lane": _lane(sample.knobs),
                 "status": gb.status,
-                "pinned_knobs": {k: str(v) for k, v in sample.knobs.items()},
+                "pinned_knobs": {k: str(v) for k, v in _sample_replay_knobs(sample).items()},
                 "total_us": _total_us(gb.bench),
                 "kernels": _kernel_rows(gb.graph, gb.bench),
                 "flags": list(gb.flags),

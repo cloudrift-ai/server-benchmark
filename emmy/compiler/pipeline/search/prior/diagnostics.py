@@ -190,7 +190,11 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
     goldens dir doesn't make a name's per-card entries collide on the GPU-blind
     ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import fast_math_knobs, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import (  # noqa: PLC0415
+        fast_math_knobs,
+        goldens_for_live_gpu,
+        precision_trading_pins,
+    )
 
     GOLDEN_RECORDS = goldens_for_live_gpu()
 
@@ -222,7 +226,7 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
         # BESIDE its standard one, and each regime is judged against its own): a gate-off pick
         # must not be measured against an [fm] golden it cannot reach — and vice versa. Skip
         # cross-regime pairs; the pick's regime derives from its knobs like the golden's.
-        if fast_math_knobs(leaves[best_i].knobs) != g.fast_math:
+        if fast_math_knobs(leaves[best_i].knobs) != precision_trading_pins(g.pin_map):
             continue
         ratio = leaves[best_i].latency_us / g.emmy_us
         # A shape may record several parity entries under one name — compare against the BEST
@@ -677,7 +681,11 @@ def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | Non
     it enters only the -O3 endpoint: the prior's pick over the op's ``H_opt=3`` regime
     rows vs ``emmy_us``, same-regime by construction (and skipped on a fast-math
     regime mismatch, the ``golden_deploy_perf`` convention)."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, fast_math_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import (  # noqa: PLC0415
+        GOLDEN_RECORDS,
+        fast_math_knobs,
+        precision_trading_pins,
+    )
 
     if goldens is None:
         goldens = [g for g in GOLDEN_RECORDS if g.is_matmul and g.gpu_name == gpu]
@@ -693,7 +701,8 @@ def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | Non
     no_data = 0
     w = max(30, *(len(g.name) + 5 for g in goldens))
     for g in goldens:
-        name = g.name + (" [fm]" if g.fast_math else "")
+        pin_suffix = "" if g.pin_map == {"FAST_MATH": False} else f" [{dict(g.pins)}]"
+        name = g.name + pin_suffix
         op_nodes = [n for n in gnodes if _matmul_sig(n.features) and ShapeKey.from_s_features(n.features) == g.shape_key]
         if not op_nodes:
             no_data += 1
@@ -714,7 +723,7 @@ def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | Non
             picker = getattr(prior, "pick", None)
             best_i = picker(rows)[0] if picker is not None else min(range(len(o3)), key=lambda i: prior.mean_score(rows[i]))
             tunables = {k: v for k, v in rows[best_i].items() if not k.startswith(("S_", "H_"))}
-            if fast_math_knobs(tunables) == g.fast_math:
+            if fast_math_knobs(tunables) == precision_trading_pins(g.pin_map):
                 parts.append(f"-O3 pick/golden {o3[best_i].value_us / g.emmy_us:.2f}x")
         lines.append(f"      {name:{w}}  " + "; ".join(parts))
     lines.append(f"      summary: {no_data}/{len(goldens)} golden(s) have no tree data on this card")

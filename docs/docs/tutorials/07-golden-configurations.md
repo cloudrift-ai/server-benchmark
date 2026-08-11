@@ -7,10 +7,11 @@ keywords: [Emmy, golden configuration, evidence, audit, benchmark, pin, realize]
 
 # 7. Golden Configurations
 
-A **golden configuration** is a reviewed measurement of a standard problem shape on a specific GPU: the schedule that
-was fastest, and how fast it was. They matter more than their modest description suggests, because as [the stores
-page](./04-measuring-and-recalling.md) noted, **they are the only measured data that travels with the repository**. On a
-freshly rented machine they are the difference between deploying on evidence and deploying on a guess.
+A **golden configuration** is one persisted symbolic program target. Its **realizations** are the dimension bindings
+and precision regimes measured for that target on a specific GPU. They matter more than their modest description
+suggests, because as [the stores page](./04-measuring-and-recalling.md) noted, **they are the only measured data that
+travels with the repository**. On a freshly rented machine they are the difference between deploying on evidence and
+deploying on a guess.
 
 They do three jobs at once:
 
@@ -21,34 +22,33 @@ They do three jobs at once:
 
 ## What one looks like
 
-Golden configurations live in one file per GPU. A file names the card it was measured on and then lists entries:
+Golden configurations live in one file per GPU. A file embeds its program pool, then lists structural targets whose
+realization arrays hold bindings, regimes, schedules, and paired measurements:
 
 ```yaml
 gpu_name: NVIDIA GeForce RTX 5090
 compute_cap: [12, 0]
+model: google/gemma-4-12B-it
+programs:
+  - {inputs: [...], outputs: [...], nodes: [...]}
 configs:
-  - kernel: norm_linear
-    name: gemma4_12b.norm_q_proj.m32
-    M: 32
-    H: 3840
-    N: 4096
-    dtype: 'fp16'
-    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
-    emmy_us: 26.7
-    cublas_us: 19.8
+  - program: 0
+    target: {origins: [linear_7]}
+    realizations:
+      - name: gemma4_12b.norm_q_proj.m32
+        bindings: {num_tokens: 32}
+        pins: {FAST_MATH: false}
+        knobs: {WORK: w1x16, TILE: mma_m16n8k16_f16_f32/f2x2/k2, REDUCE: g8k, RASTER: '', STAGE: d2/sync}
+        measurements: {emmy_us: 26.7, reference_us: 19.8, reference_backend: cublas}
 ```
 
-Everything above the `knobs` line identifies the shape; the `knobs` line is the schedule, in the exact spelling from
-[the forks page](./03-forks-and-knobs.md); the last two lines are what it measured, beside a reference implementation.
-
-`kernel:` says which standard shape this is. The kinds are matrix multiplication, attention, RMSNorm, softmax,
-reduction, elementwise, the fused RMSNorm-and-linear kernel, and its multi-output sibling in the feed-forward block.
-Two more kinds — rotary position embedding, and embedding lookup — are recorded as memory-bound reference points only:
-their lowering has no fork in it, so there is nothing for a compile to decide and they serve purely as regression
-checks.
-
-Each kind comes with a small PyTorch program that reproduces its shape. That is what makes a golden runnable: the
-recorded shape can be traced and compiled on its own, without the model it came from.
+The program and target identify the structural kernel. Empty `bindings` keep the program symbolic; a mapping such as
+`num_tokens: 32` specializes that symbolic dimension before lowering. `pins` applies registered knob values before
+enumeration; `knobs` records the configuration selected and measured inside that regime. The knobs use the exact
+spelling from [the forks page](./03-forks-and-knobs.md), and `measurements` records the candidate beside a named
+reference. `FAST_MATH` follows this same rule and appears under `pins`; it has no dedicated realization field. Keeping
+all realizations below one target makes it explicit which input dimension changes and prevents static copies of the
+same program from drifting apart.
 
 Names repeat across files — every GPU has its own `matmul.square.512` — with different shapes, different data types
 and different measured times. So a compile only ever consults the file for the GPU it is targeting. Pooling them would
@@ -117,15 +117,11 @@ Two ways to record one by accident, both worth knowing:
   is a real cut entry, recorded for the same shape as the fused one above:
 
   ```yaml
-  - kernel: norm_linear
-    name: gemma4_12b.norm_q_proj.m32.cut
-    M: 32
-    H: 3840
-    N: 4096
-    dtype: 'fp16'
-    knobs: {PLACE: 'cut'}
-    emmy_us: 16.0
-    cublas_us: 19.0
+  - name: gemma4_12b.norm_q_proj.m32.cut
+    bindings: {num_tokens: 32}
+    pins: {FAST_MATH: false}
+    knobs: {PLACE@cone: cut}
+    measurements: {emmy_us: 16.0, reference_us: 19.0, reference_backend: cublas}
   ```
 
   It stores the split and nothing else. Each resulting piece is recognized on its own afterwards and finds its own
@@ -137,22 +133,19 @@ Two ways to record one by accident, both worth knowing:
   never offer on its own, so a recording that only works when pinned still looks healthy in an isolated check. Only
   the in-model audit catches it.
 
-## The two audits
+## The release audit
 
-**Against the shape's own program** — `emmy eval golden`. For every entry that decides a fork, the shape's own small
-program is re-compiled with nothing pinned. The report has two halves: a knob-by-knob comparison of what the compiler
-chose against what was recorded, and then the check that matters here — whether the recorded values are among the
-options the compiler offers at all. Neither half runs a kernel, because once the shape and the target card are known
-the set of offered options is fixed, so the whole audit works with no GPU present. An
-entry that only a hand-forced pin can produce is reported as `PIN-ONLY`. That is legal — a pin is a documented lever —
-as long as some other entry for the same shape still gives a deployment something good. A shape whose entries are
-*all* pin-only is reported as `FALL-THROUGH`, and the audit exits with a failure, because a deployment there will log
-"nothing on offer matches" and fall past the golden tier with nothing to catch it.
+One command checks the own-program and served-model views together:
 
-**Inside the real model** — `emmy eval golden --in-model`. An entry may record which model its shape came from. Those
-entries are audited by rebuilding the model as a weight-free stand-in from its configuration file alone — no
-checkpoint download, since tracing never reads a weight value — and compiling it with the golden tier as the only
-evidence available. Every consultation yields one of:
+```bash
+emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
+```
+
+The serving config names that exact file and supplies the model, revision, GPU, and reachable realization matrix.
+The command must run on that GPU. It validates the schema and provenance, proves every structural target contains
+every expected static/symbolic precision realization, reproduces the recorded rows, runs the pin-only offer check in
+each input pin regime, and then rebuilds the model as a weight-free stand-in to audit the exact serving widths. Every
+consultation yields:
 
 | Verdict | Meaning |
 | --- | --- |
@@ -160,9 +153,9 @@ evidence available. Every consultation yields one of:
 | `DRIFT` | the shape matched but none of its entries did — always a defect, since the recording claims a time the deployment can no longer produce |
 | `GAP` | there is no recording for this shape |
 
-The two views genuinely differ, which is why both exist. Isolated checks have passed 68 out of 68 while the same
-configurations drifted inside the model, where the kernel is fused with its neighbours and the offered options are not
-the same set.
+The two views genuinely differ, which is why the command runs both. Isolated checks have passed 68 out of 68 while
+the same configurations drifted inside the model, where fusion changed the offered set. For release, any missing
+realization, all-pin-only target, DRIFT, GAP, or compile failure is fatal.
 
 Coverage is gated in continuous integration so that it can only improve: each GPU's set of gaps is pinned exactly, a
 new gap fails until a configuration is recorded, and a gap that has been closed fails until its line is removed from
@@ -190,12 +183,12 @@ ls emmy/compiler/pipeline/search/goldens/
 grep -n -A9 "kernel: norm_linear" emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml | head -30
 ```
 
-Then run the audits. The first needs no GPU at all; the second needs the modeling library installed, but no
-checkpoint download:
+Then run the file-scoped audit on the GPU named by the serving config. It needs model configuration and allocation
+metadata, but no weight payload:
 
 ```bash
-emmy eval golden --kernel matmul.square.512
-emmy eval golden --in-model
+emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \
+  --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 
 Next: [8. Inside the prior](./08-inside-the-prior.md).

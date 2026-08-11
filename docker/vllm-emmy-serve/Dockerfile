@@ -3,8 +3,8 @@
 # (no HF_TOKEN needed). One built image serves exactly one (model, GPU, config) triple.
 #
 # Build (the Makefile drives it; MODEL picks the pinned models/<slug>.env):
-#   0. `make serve-goldens MODEL=<id>` — assert recorded goldens cover this model on this
-#      card, so the warm bakes tuned fork picks rather than cold-greedy ones.
+#   0. `make serve-goldens MODEL=<id>` on the target GPU — validate that the pinned
+#      canonical file has every serving realization and that all freshly traced twins match.
 #   1. `make serve-warm MODEL=<id>` on a machine with the target GPU — serves once from
 #      the plain vllm-emmy image with ./warm mounted at /opt/emmy, populating
 #      warm/cubin (compiled kernels) + warm/hf (the model snapshot).

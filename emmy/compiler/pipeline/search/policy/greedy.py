@@ -701,8 +701,8 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str, base: dict | None 
         _audit_record(node_id, key, "GAP", None, None, len(rows))
         return None
     # Per-entry realizability, computed only under an active audit sink: the ``eval golden``
-    # offer audit reads which recorded entries the un-pinned enumeration never offers
-    # (pin-only rows); the deploy hot path below still stops at the first realizing golden.
+    # offer audit reads which recorded entries the input-regime enumeration never offers
+    # without additional winner pins; the deploy hot path below still stops at the first realizing golden.
     unrealized = None
     if _AUDIT_SINK is not None:
         unrealized = [g for g in goldens if not any(_golden_matches_row(dict(tuning_knob_items(g.knobs)), row) for row in rows)]

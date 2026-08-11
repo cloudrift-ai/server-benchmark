@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -654,18 +655,22 @@ def handle_tune(args):
 
     run_id = _mint_run_id()
 
-    if working_document is not None and len(backends) > 1 and len(targets) > 1:
+    one_pin_set = len({tuple(sorted(target.pins.items())) for target in targets}) == 1
+    if working_document is not None and len(backends) > 1 and len(targets) > 1 and one_pin_set:
         sys.stderr.write(f"[tune] target-parallel working-golden sweep: {len(targets)} target(s) across {len(backends)} GPUs\n")
         try:
-            _tune_working_multi(
-                args,
-                targets,
-                working_document,
-                backends=backends,
-                db=db,
-                ctx=ctx,
-                run_id=run_id,
-            )
+            from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+            with pinned_knobs(targets[0].pins):
+                _tune_working_multi(
+                    args,
+                    targets,
+                    working_document,
+                    backends=backends,
+                    db=db,
+                    ctx=ctx,
+                    run_id=run_id,
+                )
         except KeyboardInterrupt:
             sys.stderr.write("\n[tune] interrupted — partial measured results are preserved in the DB\n")
             _exit_flushed(0)
@@ -688,20 +693,24 @@ def handle_tune(args):
         target_dir = _target_artifact_name(i, label) if multi else None
         dump, tmp_dump = _bench_dump(args, target_dir=target_dir)
         try:
-            result, bench_bundle = _tune_one(
-                args,
-                backends=backends,
-                db=db,
-                ctx=ctx,
-                dump=dump,
-                run_id=run_id,
-                proposals=target.proposals,
-                proposal_ranking_callback=(
-                    (lambda measured, target=target: persist_proposal_rankings(args.golden_file, working_document, target, measured))
-                    if working_document is not None and target.proposals
-                    else None
-                ),
-            )
+            from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+            regime = pinned_knobs(target.pins) if working_document is not None else nullcontext()
+            with regime:
+                result, bench_bundle = _tune_one(
+                    args,
+                    backends=backends,
+                    db=db,
+                    ctx=ctx,
+                    dump=dump,
+                    run_id=run_id,
+                    proposals=target.proposals,
+                    proposal_ranking_callback=(
+                        (lambda measured, target=target: persist_proposal_rankings(args.golden_file, working_document, target, measured))
+                        if working_document is not None and target.proposals
+                        else None
+                    ),
+                )
         except KeyboardInterrupt:
             # Per-op bests already landed in the DB as they were measured, so a re-run resumes.
             sys.stderr.write(f"\n[tune] interrupted{f' at {label}' if multi else ''} — partial per-op results are in the DB\n")

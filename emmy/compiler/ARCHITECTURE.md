@@ -75,6 +75,7 @@ autotuning cache doesn't bust on cosmetic edits.
 | `pipeline/search/`    | Autotune DB + MCTS tree (see below)     | `pipeline/ARCHITECTURE.md`   |
 | `structural.py`       | `Structural` protocol + `digest()` fold | —                            |
 | `provenance.py`       | Op provenance — map fused kernels back to original frontend ops | — (see below) |
+| `specialize.py`       | Bind named symbolic dimensions in persisted Torch/Loop programs before lowering | — |
 
 ## Per-layer rules
 

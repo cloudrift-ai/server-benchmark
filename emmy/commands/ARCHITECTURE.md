@@ -20,6 +20,8 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 - `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
 - `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
   runner
+- `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
+  trace and eval
 - `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
   INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
@@ -130,26 +132,26 @@ Loop IR slice in `loops` and selects that fallback by index. Flash score produce
 stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
 refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
 
-`emmy trace LOCAL_CHECKPOINT --serving-twins --model-provenance REPO@REVISION -o PATH` is the release inventory
-variant. It calls the same config/allocation-metadata-only `serving.twins.capture_twin_graphs` path as the in-model
-audit, combines every distinct pre/post/expert and coded rate-profile kernel into one document, and forces exact Loop
-IR targets. `--decode-bucket`, `--prefill-bucket`, and repeatable `--serving-width` add the deployed shape matrix.
-`--static-only-release` deliberately replaces that standard matrix with only M=1 and no symbolic graph, but requires
-the exact `--decode-bucket 1 --prefill-bucket 0` spelling and rejects extra widths. Release audits accept the same
-scope only after their pinned env proves the runtime and scheduler cannot reach anything wider.
-The explicit provenance lets a local pre-upload checkpoint produce rows that can later be promoted under the exact
-HF snapshot identity; the resulting file is consumed directly by `tune --golden-file` and verified by explicit
-`run --golden-file --golden NAME` calls.
+`emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
+calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct
+pre/post/expert and coded rate-profile kernel into one document, and stores each structural target once as symbolic
+Loop IR. The pinned env supplies the model provenance and complete realization matrix: decode, prefill, M=1, extra
+warm shapes, symbolic fallbacks, and standard/precision-trading input pin regimes. Each target receives a
+`realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
+independent serving-shape surface. A static-only release is accepted
+only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
+directly by `tune --golden-file` and verified by `run --golden-file --golden NAME`.
 
 The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
 dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
 per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
 This provider is audit-only; `emmy trace --serving-twins` does not claim a DeepSeek serving split it cannot execute,
-and strict audits reject additional `--serving-width` values because the fixed full-layer provider cannot claim those
-serving shapes.
+and the file-scoped audit rejects a serving matrix the fixed full-layer provider cannot represent.
 
-`emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance or Loop IR target are grouped as candidate knob
-sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
+`emmy tune --golden-file PATH` consumes embedded programs directly. Realizations sharing one symbolic target are
+specialized from their named bindings and grouped by target, bindings, and input pins. Knob-bearing
+realizations are measured in file order before MCTS and written back as working-only `ranking` metadata.
+`--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
 remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize
 several CudaOps; conflicting multi-CudaOp knob rows are reported as ambiguous instead of being assigned an invented
@@ -170,6 +172,12 @@ with paired measurements auto-pin, while a proposal is tested explicitly with `r
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
+
+`emmy eval golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact canonical
+file. The command validates the nested schema and model provenance, requires the live GPU to match both the config
+and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
+and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
+a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU

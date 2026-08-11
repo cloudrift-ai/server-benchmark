@@ -10,12 +10,17 @@ description: >-
 
 Use one golden YAML format throughout the workflow. Keep its two trust levels separate:
 
-- A **working golden** is an untracked experiment artifact. It may contain kernel inventory, unmeasured knob
-  proposals, verified entries copied from a canonical golden, and `ranking` feedback written by `emmy tune`.
+- A **working golden** is an untracked experiment artifact. Each structural target contains a `realizations` array;
+  each realization has named dimension `bindings`, explicit registered input `pins`, and optional knob proposals,
+  measurements, or `ranking` feedback written by `emmy tune`.
 - A **canonical golden** is reviewed deploy evidence under
-  `emmy/compiler/pipeline/search/goldens/`. New rows require a recognized kernel kind, an explicit knobs mapping
-  (empty for a forkless anchor), and paired positive deployable `emmy_us` / `reference_us` measurements with a named
+  `emmy/compiler/pipeline/search/goldens/`. Every realization requires an explicit knobs mapping (empty for a
+  forkless anchor) and paired positive deployable `emmy_us` / `reference_us` measurements with a named
   `reference_backend`. Never write search feedback into a canonical file.
+
+`pins` and `knobs` are both registered knob mappings with different times of application: `pins` constrains candidate
+enumeration, while `knobs` records the winner measured inside that regime. `FAST_MATH` has no special YAML field; write
+it under `pins` exactly like any other input knob.
 
 `emmy tune --golden-file` rejects canonical repository paths because it updates its input. Copy a canonical file to
 a fresh `_tune/<run>/working.yaml` first. Do not commit a trace-created working golden automatically; leave that
@@ -34,7 +39,7 @@ Create a task-owned remote scratch directory and source tree:
 3. check out the captured revision, then rsync the local tracked-file list so reviewed uncommitted source changes are
    represented; remove the exact tracked paths deleted locally, and add only explicitly enumerated task-owned
    untracked source files to that list;
-4. rsync the selected working golden and its relative reproducer sidecars into `_tune/<run>/`;
+4. rsync the selected self-contained working golden into `_tune/<run>/`;
 5. run `make setup` remotely and verify `./venv/bin/emmy trace --help` and `./venv/bin/emmy tune --help` match the
    local workflow.
 
@@ -60,8 +65,7 @@ git ls-files -z | while IFS= read -r -d '' tracked_path; do
   fi
 done > "$LOCAL_MANIFEST"
 rsync -a --from0 --files-from="$LOCAL_MANIFEST" ./ "$REMOTE:$REMOTE_ROOT/repo/"
-rsync -a --relative _tune/<run>/working.yaml _tune/<run>/working.kernels/ \
-  "$REMOTE:$REMOTE_ROOT/repo/"
+rsync -a --relative _tune/<run>/working.yaml "$REMOTE:$REMOTE_ROOT/repo/"
 ssh "$REMOTE" "cd '$REMOTE_ROOT/repo' && make setup"
 ```
 
@@ -75,7 +79,7 @@ Run long remote commands in a task-named `tmux` session or detached process, rec
 caller deadline, and poll logs. Scope Hugging Face or other required credentials to the command without printing
 them; remove any task-owned temporary credential file during cleanup.
 
-On success and failure, rsync back working YAML files, reproducer sidecars, logs, DB/prior snapshots, O3 JSON, and
+On success and failure, rsync back working YAML files, logs, DB/prior snapshots, O3 JSON, and
 reports before cleanup. Stop only the recorded task-owned session/process, tear down any skill-created serving
 workload through Emmy, then remove only the recorded scratch directory after validating its task-specific prefix.
 Leave the VM running and return cleanup ownership to the caller.
@@ -91,28 +95,28 @@ expanding to a whole model. Never describe a single-layer result as whole-model 
 
 Choose the input:
 
-1. **Existing golden YAML:** copy it to the work directory, including relative reproducer sidecars.
+1. **Existing golden YAML:** copy it to the work directory. It is self-contained.
 2. **Hugging Face model with no working golden:** create the inventory once:
 
    ```bash
-   emmy trace <model> [--layer N] \
-     --golden-output _tune/<run>/working.yaml
+   emmy trace <model> [--layer N] -o _tune/<run>/working.yaml
    ```
 
-   The command refuses replacement and emits every distinct post-fusion kernel with a relative `.torch.json`
-   reproducer, but no knobs or measurements. On a supplied host, run it from the remote checkout, rsync the YAML and
-   sidecar directory back before proposing candidates, then rsync the completed arm files to the same remote paths.
+   The command refuses replacement and embeds every distinct post-fusion target, with one inventory realization and
+   no knobs or measurements. On a supplied host, run it from the remote checkout, rsync the YAML back before
+   proposing candidates, then rsync the completed arm files to the same remote paths.
    Preserve that skeleton even if tuning later fails.
-3. **Existing Graph/Torch IR:** copy the IR into the work directory and create a minimal working inventory whose
-   `reproducer` is relative to the YAML. Do not claim that generic traced entries are promotable:
+3. **Existing Graph/Torch IR:** pass it through `emmy trace <ir.json> -o _tune/<run>/working.yaml`; do not hand-write
+   a second persistence format.
 
-   ```yaml
-   format_version: 1
-   configs:
-     - kernel: traced
-       name: target-name
-       reproducer: kernels/target-name.torch.json
-   ```
+For a serving release, derive the entire matrix from the pinned env and capture every structural target once:
+
+```bash
+emmy trace <checkpoint> --serving-twins --serving-config <models/slug.env> -o _tune/<run>/working.yaml
+```
+
+Do not add or remove serving widths or pin regimes by hand. The config is authoritative for decode, prefill, M=1,
+warm-shape, symbolic, and precision-trading realizations.
 
 Run `emmy tune --help` and `emmy trace --help` before a remote run so the commands and the checked-out revision agree.
 
@@ -121,19 +125,19 @@ Run `emmy tune --help` and `emmy trace --help` before a remote run so the comman
 Inspect, in this order:
 
 1. canonical goldens for the exact GPU;
-2. entries with the same kernel kind, dtype, layout, dynamic/static status, fast-math lane, and nearby shapes;
+2. entries with the same kernel kind, dtype, layout, dynamic/static status, input pins, and nearby shapes;
 3. relevant goldens from GPUs with the same compute capability or closest architecture;
-4. the traced reproducer and emitted operation structure;
+4. the embedded target program and emitted operation structure;
 5. the scheduler/lowering code and nearby `ARCHITECTURE.md` files that define offered knobs and eligibility gates.
 
-Use this context to add several distinct knob-bearing entries for important targets. Duplicate the target's identity
-fields or `reproducer`, then add only a `knobs` map. Do not invent timings, copy a latency from another GPU, or add a
-knob value that the target cannot offer. Prefer candidates that test materially different schedule choices; omit
-low-confidence proposals so MCTS receives the remaining measurement budget.
+Use this context to add several distinct knob proposals inside the relevant realization. Duplicate that realization's
+`name`, `bindings`, and `pins`, then add only a `knobs` map. Do not duplicate the structural config, invent
+timings, copy latency from another GPU, or add a knob value that target/regime cannot offer. Prefer candidates that
+test materially different schedule choices; omit low-confidence proposals so MCTS receives the remaining budget.
 
 Keep every schedule family emitted in `record_knobs`, including explicit off values, when copying a known realized
-configuration. Treat dynamic and static kernels as different targets. Keep standard and fast-math candidates in
-separate lanes; a fast-math candidate never replaces the standard deploy path.
+configuration. Treat dynamic and static kernels as different targets. Keep different input pin regimes separate;
+a precision-trading candidate never replaces the standard deploy path.
 
 ## 4. Run equal-budget hybrid and MCTS-only searches
 
@@ -191,13 +195,14 @@ additional budget and deadline. Record which first-round evidence motivated each
 ## 6. Verify deployable winners and promote cautiously
 
 Shortlist the best hybrid proposal, MCTS-searched, and incumbent configurations from their exact measured knobs.
-Re-run each with the same inputs at deployable O3 via the target's `.torch.json` reproducer or specialized snippet,
+Re-run each with the same embedded target at deployable O3, selecting its working file and realization name and
 pinning the exact fully realized knobs with `--ab`.
 Use `EMMY_NVCC_FLAGS=` if necessary to prevent an inherited O1 override:
 
 ```bash
 CUDA_VISIBLE_DEVICES=<selected-ordinal> EMMY_NVCC_FLAGS= \
-  emmy run --ir <target>.torch.json --bench --bench-backends eager,emmy \
+  emmy run --golden-file _tune/<run>/working.yaml --golden <realization-name> \
+  --bench --bench-backends eager,emmy \
   --ab "<fully realized knobs>" --json _tune/<run>/verification/<candidate>.json
 ```
 
@@ -210,10 +215,10 @@ physical GPU becomes the command's ordinal 0; never pass an invented `--device` 
 - a win that exceeds observed run-to-run noise.
 
 Treat statistically indistinguishable configurations as ties and retain multiple candidates when their realized
-knobs differ. Promote only specialized kernel entries with paired positive O3 `emmy_us` / `reference_us` measurements
-and a live `reference_backend`. Never promote a `ranking` block, an O1 latency, an absolute/traversing reproducer path,
-a generic `kernel: traced` entry, or a timing copied from another run/GPU. Let the author or agent decide whether to
-update and commit the canonical golden.
+knobs differ. Promote only specialized realizations with paired positive O3 `emmy_us` / `reference_us` measurements
+and a live `reference_backend`. Never promote a `ranking` block, an O1 latency, an incomplete serving realization
+matrix, or a timing copied from another run/GPU. Let the author or agent decide whether to update and commit the
+canonical golden.
 
 When the calling workflow has proved that its model inventory covers every required path, canonical promotion is a
 required output, including a correct measured greedy fallback for every search miss. Withhold the repository golden
@@ -237,10 +242,11 @@ emmy eval online --dataset nodes --kernel <substring>
 emmy eval online --dataset nodes --blame --ablate --kernel <substring>
 ```
 
-For a specialized golden target, also run:
+For a serving golden, run the unified release audit on the pinned GPU; it validates that every structural target has
+the exact config-derived realization matrix before reproducing and auditing it:
 
 ```bash
-emmy eval golden --kernel <substring>
+emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
 emmy eval offline --kernel <substring>
 emmy eval online --dataset golden --kernel <substring>
 ```
@@ -257,7 +263,8 @@ Classify every meaningful loss:
 4. **Benchmark failure:** use the recorded error and shared failed knobs. Reproduce compile-only before spending
    another search budget.
 
-Confirm a suspected search shortfall by tuning only the reproducer with more patience without clearing useful state.
+Confirm a suspected search shortfall by tuning only the selected realization with more patience without clearing
+useful state.
 Diff before and after dumps with `emmy compare`; do not infer structural changes from log text.
 
 For a deeper independent check, include `torch.compile` in the O3 comparison:
@@ -300,7 +307,7 @@ report. Include:
 - a per-target A/B table with both arms' O3 latency, reference latency, correctness, repeated-run range, and decision;
 - whole-model and serving tables when applicable;
 - one finding per root cause, ordered by deployable latency at stake, with symptom, evidence, root cause or
-  distinguishing diagnostic, reproducer, and recommended fix;
+  distinguishing diagnostic, embedded program target, and recommended fix;
 - an offline-prior versus online-prior table for fork sibling regret, reachability, calibration, and labeled blame
   whenever search steering is implicated;
 - promoted, tied, rejected, and unresolved candidates, plus exact working and canonical artifact paths;

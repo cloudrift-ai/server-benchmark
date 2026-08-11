@@ -3,7 +3,7 @@ name: release-serving-image
 description: >-
   Use this skill when the user asks to release, build, warm, bake, qualify, or publish a per-model serving image,
   including requests to run `emmy publish RECIPE`. Runs the documented vllm-emmy release workflow on the model's
-  target GPU, covering golden coverage, toolchain and memory gates, HF parity, warm and bake, offline zero-recompile
+  target GPU, covering golden realization and memory gates, HF parity, warm and bake, offline zero-recompile
   verification, canonical image naming, a distinct human approval before registry publication, and guaranteed
   teardown.
 ---
@@ -53,8 +53,9 @@ these numbers.
 Ask only for what the user hasn't already given:
 
 1. **Recipe** — required; there is no publication default worth guessing. Resolve its singleton HF id, engine image,
-   runtime family/version/revision, serving shape, and target GPU. Run `make serve-config MODEL=<resolved-id>` and
-   show the slug, config path, image tag, and target GPU before anything else happens.
+   runtime family/version/revision, serving shape, and target GPU. When its release config exists, run
+   `make serve-config MODEL=<resolved-id>` and show the slug, config path, image tag, target GPU, and canonical golden
+   before anything else happens. For a new release, show the intended paths and make clear that Step 3 must seal them.
 2. **Mode** — rental (default) or local. Local requires the config's `SERVE_GPU` in `nvidia-smi` on this machine; if
    the box is multi-GPU, resolve that card's index and export `GPU_DEVICE=<index>` for every warm/verify
    invocation. Check ≥100 GB free disk for a 12B-class model (base image + `warm/` + baked weight layer +
@@ -69,41 +70,15 @@ the baked image passes every gate, the publish dry-run succeeds, and the user se
 publication. A PAT authenticates its owning account, normally a personal user with push rights to `cloudriftai`, not
 the organization name itself.
 
-## Step 0 — Golden coverage (GATE, and it comes first)
+## Step 0 — Resolve the serving contract
 
-```bash
-make serve-goldens MODEL=<id>      # -> scripts/check_serving_goldens.py against the config's SERVE_GPU
-```
+For an existing release, run `make serve-config MODEL=<id>`. The config must name an existing
+`SERVE_GOLDEN_FILE` in addition to model, revision, GPU, and serving shape. Record all of them before provisioning.
+They are one contract: do not accept separate model, GPU, revision, or width arguments later in the workflow.
 
-**Why this gates everything, before a single GPU-hour is spent.** Emmy's greedy compile resolves every fork through
-the deploy evidence hierarchy, and the live card's **recorded goldens are its top tier** — they are what seeds the
-picks with tuned kernel schedules. Warm a model with no goldens for its shapes and cold greedy chooses instead,
-which on unseeded projection shapes is not "a bit slower": it deploys a scalar tile ~770× off cuBLAS, and on some
-shapes picks a kernel that hangs outright. Those picks then get frozen into the shipped cubins **and the
-execution-plan pack**, where no later boot revisits them. A golden-less release ships that permanently.
-
-**On FAIL, stop and ask the user.** Do not decide this alone. Report which case it is — the script distinguishes
-them — and offer the real options:
-
-- *the card has no goldens at all* → the card is untuned; releasing from it is not sensible. Record goldens first
-  (the `tune-kernels` skill), or release on a card that has them.
-- *the card is tuned, but not for this model* → the script lists which models it IS tuned for. Options: run a golden
-  sweep for this model's shapes first (the honest fix, hours of tuning); release anyway and accept cold-greedy picks
-  (only defensible for a throwaway or experimental image, and it must be said out loud in the release notes); or
-  release on a different card.
-- *a related checkpoint is covered but the slug missed* — e.g. a quantized variant whose base has goldens. The
-  matcher deliberately refuses to guess, because a quantized or resized model does not share the base's kernel
-  shapes. If the user knows the shapes really are identical, adding this model to the golden file's `model:`
-  provenance is the fix — not a bypass flag.
-- *the goldens are revision-tagged and the release named no revision* → coverage cannot be evaluated. Pin
-  `SERVE_REVISION` in `models/<slug>.env` (step 4 requires it anyway) and re-run; `make serve-goldens` forwards it.
-- *the goldens are recorded against ANOTHER revision of this repo* — e.g. a different EXL3 rung. The rungs differ in
-  exactly the per-tensor bit allocation the shape keys carry, so those entries are not coverage. Sweep this
-  revision, or release the revision that is covered. Re-tagging the golden's `model:` header is right only when the
-  two spellings genuinely name one checkpoint (a branch name vs its commit sha) — never to make the gate green.
-
-Whichever the user chooses, **carry it into the release notes**. "Released without golden coverage" is a property of
-the artifact, not a detail of the session.
+For a new release with no config yet, resolve the model and GPU from the singleton recipe, record the intended config
+and canonical-golden paths, and let the headroom sweep in Step 3 create the config. The realization contract is not
+sealed until then; do not invent interim widths or run the golden audit against them.
 
 ## Step 1 — Provision (rental mode; skip in local mode)
 
@@ -151,23 +126,7 @@ xtrace prints the expanded secret into the log; wrap secret reads in `set +x` �
 `make wheel && make vllm-emmy-image` (~20 min, detached). A pulled `cloudriftai/vllm-emmy:TAG` is acceptable only if
 pushed from the same commit (the wheel is part of the cubin cache key) — when in doubt, build.
 
-## Step 3 — Toolchain preflight (GATE)
-
-```bash
-MODEL=<id> ARCH=<target arch> REVISION=<config SERVE_REVISION> scripts/preflight_serving_kernels.sh
-```
-
-Run it **inside the freshly built image** so it uses the image's exact nvcc (exact command in ARCHITECTURE.md). It
-renders every golden shape recorded for this model and `nvcc --cubin`s each one — the golden set is the enumeration
-precisely because those are the picks the warm will deploy.
-
-**Gate: the output must end `== preflight done: <N> OK, 0 FAIL` with `<N>` nonzero.** `<N>` is this model's golden
-count and grows as goldens land — the gate is **0 FAIL and at least one OK**, not a specific N (the script
-hard-fails an empty enumeration, so `0 OK, 0 FAIL` cannot exit 0). Anything else → capture the failing `*.log`s from
-the preflight out dir, abort, teardown, report. Do not attempt to fix compiler or toolchain bugs inside the release
-session.
-
-## Step 4 — Headroom sweep → pin the model config
+## Step 3 — Headroom sweep → pin the model config
 
 For a **new model** this step *creates* `docker/vllm-emmy-serve/models/<slug>.env`; for an existing one it
 re-validates it. Policy (decode bucket stays at the model's tuned default): try
@@ -191,8 +150,9 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
 - **Any value containing spaces must be double-quoted**, or bash runs its second word as a command (`SERVE_GPU`
   is the one that bites: unquoted, it dies with `GeForce: command not found`). Make keeps the quotes in the value,
   which is why the Makefile strips them once into `SERVE_GPU_NAME` rather than at each use site.
-- Required keys: `SERVE_MODEL`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_BATCHED_TOKENS`, `SERVE_GPU_MEM_UTIL`,
-  `SERVE_DECODE_BUCKET`, `SERVE_GPU`. A test asserts all six are present and that `SERVE_MODEL`'s slug equals the
+- Required keys: `SERVE_MODEL`, `SERVE_GOLDEN_FILE`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_BATCHED_TOKENS`,
+  `SERVE_GPU_MEM_UTIL`, `SERVE_DECODE_BUCKET`, `SERVE_GPU`. A test asserts all seven are present and that
+  `SERVE_MODEL`'s slug equals the
   filename — a file named for a different slug is simply unreachable from `make serve-* MODEL=`.
 - `SERVE_GPU` is the card actually swept. `warm.sh` and `verify.sh` compare the live card against it and refuse a
   mismatch (`GPU_DEVICE=<index>` selects the card on a multi-GPU box; `SKIP_GPU_CHECK=1` overrides, and wanting to
@@ -206,12 +166,32 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
   `--revision <sha>` so `emmy serve` derives the same arms from the same checkpoint.
 
 After writing it, run `make serve-config MODEL=<id>` and confirm every line reads back as intended — that is the
-cheap check that both readers agree before a multi-hour warm depends on it.
+cheap check that both readers agree before a multi-hour warm depends on it. For a new release whose canonical file
+does not exist yet, use the `tune-kernels` skill with this sealed config to create, tune, verify, and promote it first;
+then rerun `make serve-config` and continue to Step 4.
 
-**The config is sealed from here on** — any later change invalidates the warm. For a new or changed config, this is
-also the point to commit the config and canonical recipe reference, update the pinned release commit on the remote,
-and rerun `make serve-config` from that clean checkout before Step 5. Headroom measurement may discover the values,
-but correctness, warm, bake, verify, and publication must all use one committed source snapshot.
+**The config is sealed from here on** — any later change invalidates its realizations and the warm. For a new or
+changed config, this is also the point to commit the config and canonical recipe reference, update the pinned release
+commit on the remote, and rerun `make serve-config` from that clean checkout before Step 4. Headroom measurement may
+discover the values, but the golden audit, correctness, warm, bake, verify, and publication must all use one committed
+source snapshot.
+
+## Step 4 — Golden realization audit (GATE)
+
+```bash
+make serve-goldens MODEL=<id>
+```
+
+Run it on the config's target GPU after the headroom sweep has sealed the realization matrix. Make invokes
+`emmy eval golden <SERVE_GOLDEN_FILE> --serving-config <config>`; the command extracts model/revision/GPU and the
+realization matrix from that config. It validates the canonical schema and provenance, requires the live GPU and
+compute capability to match, proves every structural target contains every expected static/symbolic precision
+realization, reproduces every row, and audits freshly traced serving twins.
+
+**Gate: zero missing realizations, FALL-THROUGH, DRIFT, GAP, or compile failures.** Any failure means the image would
+freeze an incomplete or stale evidence set. Stop and use the `tune-kernels` skill to regenerate a symbolic serving
+inventory from the same config, tune all realizations on this GPU, perform deployable verification, and promote the
+complete canonical file. There is no release-without-coverage path.
 
 ## Step 5 — Correctness gate (GATE + human pause)
 
@@ -286,7 +266,7 @@ After a push, require the registry digest to match the local digest before decla
    Report the total rental time. A declined publication leaves the local image and evidence intact but does not keep
    the rental running.
 3. Report: published target and registry digest, recipe/config digest, checkpoint and runtime revisions, target GPU,
-   cache manifests, **the Step 0 golden coverage status**, validate summary, zero-recompile verify line, teardown
+   cache manifests, **the Step 4 golden realization status**, validate summary, zero-recompile verify line, teardown
    audit, and any findings.
 
 ## Failure handling

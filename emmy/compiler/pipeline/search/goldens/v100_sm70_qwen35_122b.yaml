@@ -620,707 +620,916 @@ programs:
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 248320]]]
 configs:
-- name: qwen35_122b.attn_q.m32.lin
-  program: 0
+- program: 0
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 950.272
-    reference_us: 201.728
-    reference_backend: cublas
-- name: qwen35_122b.attn_q.m128.lin
-  program: 1
+  realizations:
+  - name: qwen35_122b.attn_q.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 950.272
+      reference_us: 201.728
+      reference_backend: cublas
+- program: 1
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 1938.432
-    reference_us: 386.56
-    reference_backend: cublas
-- name: qwen35_122b.attn_q.m512.lin
-  program: 2
+  realizations:
+  - name: qwen35_122b.attn_q.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1938.432
+      reference_us: 386.56
+      reference_backend: cublas
+- program: 2
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 8181.76
-    reference_us: 656.896
-    reference_backend: cublas
-- name: qwen35_122b.attn_q.lin.dynM
-  program: 3
+  realizations:
+  - name: qwen35_122b.attn_q.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 8181.76
+      reference_us: 656.896
+      reference_backend: cublas
+- program: 3
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k2
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 7615.488
-    reference_us: 668.16
-    reference_backend: cublas
-- name: qwen35_122b.attn_kv.m32.lin
-  program: 4
+  realizations:
+  - name: qwen35_122b.attn_q.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k2
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 7615.488
+      reference_us: 668.16
+      reference_backend: cublas
+- program: 4
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x4
-    TILE: mma_m8n8k4_f16_f32/f2x1/k8
-    REDUCE: g8a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 78.297
-    reference_us: 12.53
-    reference_backend: cublas
-- name: qwen35_122b.attn_kv.m128.lin
-  program: 5
+  realizations:
+  - name: qwen35_122b.attn_kv.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f2x1/k8
+      REDUCE: g8a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 78.297
+      reference_us: 12.53
+      reference_backend: cublas
+- program: 5
   target:
     origins:
     - linear
-  knobs:
-    WORK: w8x1
-    TILE: mma_m8n8k4_f16_f32/f1x4/k8
-    REDUCE: g8a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 214.835
-    reference_us: 20.864
-    reference_backend: cublas
-- name: qwen35_122b.attn_kv.m512.lin
-  program: 6
+  realizations:
+  - name: qwen35_122b.attn_kv.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w8x1
+      TILE: mma_m8n8k4_f16_f32/f1x4/k8
+      REDUCE: g8a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 214.835
+      reference_us: 20.864
+      reference_backend: cublas
+- program: 6
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m8n8k4_f16_f32/f2x2/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 604.672
-    reference_us: 47.36
-    reference_backend: cublas
-- name: qwen35_122b.attn_kv.lin.dynM
-  program: 7
+  realizations:
+  - name: qwen35_122b.attn_kv.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 604.672
+      reference_us: 47.36
+      reference_backend: cublas
+- program: 7
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x2
-    TILE: mma_m8n8k4_f16_f32/f4x2/k2
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 720.896
-    reference_us: 49.664
-    reference_backend: cublas
-- name: qwen35_122b.attn_gdn_out.m32.lin
-  program: 8
+  realizations:
+  - name: qwen35_122b.attn_kv.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f4x2/k2
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 720.896
+      reference_us: 49.664
+      reference_backend: cublas
+- program: 8
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 984.064
-    reference_us: 90.624
-    reference_backend: cublas
-- name: qwen35_122b.attn_gdn_out.m128.lin
-  program: 9
+  realizations:
+  - name: qwen35_122b.attn_gdn_out.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 984.064
+      reference_us: 90.624
+      reference_backend: cublas
+- program: 9
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 1110.016
-    reference_us: 140.8
-    reference_backend: cublas
-- name: qwen35_122b.attn_gdn_out.m512.lin
-  program: 10
+  realizations:
+  - name: qwen35_122b.attn_gdn_out.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1110.016
+      reference_us: 140.8
+      reference_backend: cublas
+- program: 10
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 4080.64
-    reference_us: 317.44
-    reference_backend: cublas
-- name: qwen35_122b.attn_gdn_out.lin.dynM
-  program: 11
+  realizations:
+  - name: qwen35_122b.attn_gdn_out.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 4080.64
+      reference_us: 317.44
+      reference_backend: cublas
+- program: 11
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k2
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 5706.752
-    reference_us: 326.144
-    reference_backend: cublas
-- name: qwen35_122b.gdn_qkv.m32.lin
-  program: 12
+  realizations:
+  - name: qwen35_122b.attn_gdn_out.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k2
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 5706.752
+      reference_us: 326.144
+      reference_backend: cublas
+- program: 12
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f2x2/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 777.216
-    reference_us: 127.488
-    reference_backend: cublas
-- name: qwen35_122b.gdn_qkv.m128.lin
-  program: 13
+  realizations:
+  - name: qwen35_122b.gdn_qkv.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 777.216
+      reference_us: 127.488
+      reference_backend: cublas
+- program: 13
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: gm8
-  measurements:
-    emmy_us: 2586.624
-    reference_us: 311.296
-    reference_backend: cublas
-- name: qwen35_122b.gdn_qkv.m512.lin
-  program: 14
+  realizations:
+  - name: qwen35_122b.gdn_qkv.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: gm8
+    measurements:
+      emmy_us: 2586.624
+      reference_us: 311.296
+      reference_backend: cublas
+- program: 14
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 6203.392
-    reference_us: 486.4
-    reference_backend: cublas
-- name: qwen35_122b.gdn_qkv.lin.dynM
-  program: 15
+  realizations:
+  - name: qwen35_122b.gdn_qkv.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 6203.392
+      reference_us: 486.4
+      reference_backend: cublas
+- program: 15
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k4
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 6154.24
-    reference_us: 485.888
-    reference_backend: cublas
-- name: qwen35_122b.gdn_z.m32.lin
-  program: 16
+  realizations:
+  - name: qwen35_122b.gdn_qkv.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 6154.24
+      reference_us: 485.888
+      reference_backend: cublas
+- program: 16
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x2/k4
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: gm8
-  measurements:
-    emmy_us: 813.056
-    reference_us: 121.344
-    reference_backend: cublas
-- name: qwen35_122b.gdn_z.m128.lin
-  program: 17
+  realizations:
+  - name: qwen35_122b.gdn_z.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x2/k4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: gm8
+    measurements:
+      emmy_us: 813.056
+      reference_us: 121.344
+      reference_backend: cublas
+- program: 17
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x8/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 2098.176
-    reference_us: 234.496
-    reference_backend: cublas
-- name: qwen35_122b.gdn_z.m512.lin
-  program: 18
+  realizations:
+  - name: qwen35_122b.gdn_z.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x8/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2098.176
+      reference_us: 234.496
+      reference_backend: cublas
+- program: 18
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 13952.0
-    reference_us: 351.744
-    reference_backend: cublas
-- name: qwen35_122b.gdn_z.lin.dynM
-  program: 19
+  realizations:
+  - name: qwen35_122b.gdn_z.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 13952.0
+      reference_us: 351.744
+      reference_backend: cublas
+- program: 19
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 4360.192
-    reference_us: 361.984
-    reference_backend: cublas
-- name: qwen35_122b.gdn_ba.m32.lin
-  program: 20
+  realizations:
+  - name: qwen35_122b.gdn_z.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 4360.192
+      reference_us: 361.984
+      reference_backend: cublas
+- program: 20
   target:
     origins:
     - linear
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 12.48
-    reference_us: 7.332
-    reference_backend: cublas
-- name: qwen35_122b.gdn_ba.m128.lin
-  program: 21
+  realizations:
+  - name: qwen35_122b.gdn_ba.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 12.48
+      reference_us: 7.332
+      reference_backend: cublas
+- program: 21
   target:
     origins:
     - linear
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 38.321
-    reference_us: 9.183
-    reference_backend: cublas
-- name: qwen35_122b.gdn_ba.m512.lin
-  program: 22
+  realizations:
+  - name: qwen35_122b.gdn_ba.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 38.321
+      reference_us: 9.183
+      reference_backend: cublas
+- program: 22
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f2x2/k8
-    REDUCE: g8a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 96.461
-    reference_us: 13.163
-    reference_backend: cublas
-- name: qwen35_122b.gdn_ba.lin.dynM
-  program: 23
+  realizations:
+  - name: qwen35_122b.gdn_ba.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: g8a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 96.461
+      reference_us: 13.163
+      reference_backend: cublas
+- program: 23
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 159.232
-    reference_us: 14.643
-    reference_backend: cublas
-- name: qwen35_122b.router.m32.lin
-  program: 24
+  realizations:
+  - name: qwen35_122b.gdn_ba.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 159.232
+      reference_us: 14.643
+      reference_backend: cublas
+- program: 24
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1/k8
-    REDUCE: g8a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 46.127
-    reference_us: 9.194
-    reference_backend: cublas
-- name: qwen35_122b.router.m128.lin
-  program: 25
+  realizations:
+  - name: qwen35_122b.router.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1/k8
+      REDUCE: g8a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 46.127
+      reference_us: 9.194
+      reference_backend: cublas
+- program: 25
   target:
     origins:
     - linear
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 144.677
-    reference_us: 17.566
-    reference_backend: cublas
-- name: qwen35_122b.router.m512.lin
-  program: 26
+  realizations:
+  - name: qwen35_122b.router.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 144.677
+      reference_us: 17.566
+      reference_backend: cublas
+- program: 26
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1/k4
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 531.968
-    reference_us: 39.168
-    reference_backend: cublas
-- name: qwen35_122b.router.lin.dynM
-  program: 27
+  realizations:
+  - name: qwen35_122b.router.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1/k4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 531.968
+      reference_us: 39.168
+      reference_backend: cublas
+- program: 27
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 529.92
-    reference_us: 44.288
-    reference_backend: cublas
-- name: qwen35_122b.gate_up.m32.lin
-  program: 28
+  realizations:
+  - name: qwen35_122b.router.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 529.92
+      reference_us: 44.288
+      reference_backend: cublas
+- program: 28
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m8n8k4_f16_f32/f4x2/k8
-    REDUCE: g8a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 180.053
-    reference_us: 40.875
-    reference_backend: cublas
-- name: qwen35_122b.gate_up.m128.lin
-  program: 29
+  realizations:
+  - name: qwen35_122b.gate_up.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: g8a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 180.053
+      reference_us: 40.875
+      reference_backend: cublas
+- program: 29
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: g4a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 365.909
-    reference_us: 63.829
-    reference_backend: cublas
-- name: qwen35_122b.gate_up.m512.lin
-  program: 30
+  realizations:
+  - name: qwen35_122b.gate_up.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: g4a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 365.909
+      reference_us: 63.829
+      reference_backend: cublas
+- program: 30
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k4
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 999.424
-    reference_us: 135.68
-    reference_backend: cublas
-- name: qwen35_122b.gate_up.lin.dynM
-  program: 31
+  realizations:
+  - name: qwen35_122b.gate_up.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 999.424
+      reference_us: 135.68
+      reference_backend: cublas
+- program: 31
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: g2a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 1141.76
-    reference_us: 138.752
-    reference_backend: cublas
-- name: qwen35_122b.down.m32.lin
-  program: 32
+  realizations:
+  - name: qwen35_122b.gate_up.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: g2a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1141.76
+      reference_us: 138.752
+      reference_backend: cublas
+- program: 32
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 125.952
-    reference_us: 18.432
-    reference_backend: cublas
-- name: qwen35_122b.down.m128.lin
-  program: 33
+  realizations:
+  - name: qwen35_122b.down.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 125.952
+      reference_us: 18.432
+      reference_backend: cublas
+- program: 33
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f2x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 234.752
-    reference_us: 32.256
-    reference_backend: cublas
-- name: qwen35_122b.down.m512.lin
-  program: 34
+  realizations:
+  - name: qwen35_122b.down.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 234.752
+      reference_us: 32.256
+      reference_backend: cublas
+- program: 34
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 500.736
-    reference_us: 73.728
-    reference_backend: cublas
-- name: qwen35_122b.down.lin.dynM
-  program: 35
+  realizations:
+  - name: qwen35_122b.down.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 500.736
+      reference_us: 73.728
+      reference_backend: cublas
+- program: 35
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k2
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 503.296
-    reference_us: 73.472
-    reference_backend: cublas
-- name: qwen35_122b.shared_gate_or_up.m32.lin
-  program: 36
+  realizations:
+  - name: qwen35_122b.down.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k2
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 503.296
+      reference_us: 73.472
+      reference_backend: cublas
+- program: 36
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f1x1
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 164.352
-    reference_us: 20.147
-    reference_backend: cublas
-- name: qwen35_122b.shared_gate_or_up.m128.lin
-  program: 37
+  realizations:
+  - name: qwen35_122b.shared_gate_or_up.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 164.352
+      reference_us: 20.147
+      reference_backend: cublas
+- program: 37
   target:
     origins:
     - linear
-  knobs:
-    WORK: t16x16
-    TILE: f4x8
-    REDUCE: g8a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 385.707
-    reference_us: 31.744
-    reference_backend: cublas
-- name: qwen35_122b.shared_gate_or_up.m512.lin
-  program: 38
+  realizations:
+  - name: qwen35_122b.shared_gate_or_up.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x16
+      TILE: f4x8
+      REDUCE: g8a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 385.707
+      reference_us: 31.744
+      reference_backend: cublas
+- program: 38
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f8x2
-    REDUCE: g4a
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 746.496
-    reference_us: 83.456
-    reference_backend: cublas
-- name: qwen35_122b.shared_gate_or_up.lin.dynM
-  program: 39
+  realizations:
+  - name: qwen35_122b.shared_gate_or_up.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f8x2
+      REDUCE: g4a
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 746.496
+      reference_us: 83.456
+      reference_backend: cublas
+- program: 39
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 624.128
-    reference_us: 77.824
-    reference_backend: cublas
-- name: qwen35_122b.lm_head.m32.lin
-  program: 40
+  realizations:
+  - name: qwen35_122b.shared_gate_or_up.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 624.128
+      reference_us: 77.824
+      reference_backend: cublas
+- program: 40
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 10541.056
-    reference_us: 2369.024
-    reference_backend: cublas
-- name: qwen35_122b.lm_head.m128.lin
-  program: 41
+  realizations:
+  - name: qwen35_122b.lm_head.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 10541.056
+      reference_us: 2369.024
+      reference_backend: cublas
+- program: 41
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x1
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 26258.432
-    reference_us: 4995.072
-    reference_backend: cublas
-- name: qwen35_122b.lm_head.m512.lin
-  program: 42
+  realizations:
+  - name: qwen35_122b.lm_head.m128.lin
+    bindings:
+      num_tokens: 128
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 26258.432
+      reference_us: 4995.072
+      reference_backend: cublas
+- program: 42
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 100307.968
-    reference_us: 8044.544
-    reference_backend: cublas
-- name: qwen35_122b.lm_head.lin.dynM
-  program: 43
+  realizations:
+  - name: qwen35_122b.lm_head.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 100307.968
+      reference_us: 8044.544
+      reference_backend: cublas
+- program: 43
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m8n8k4_f16_f32/f4x4/k8
-    REDUCE: ''
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 100302.849
-    reference_us: 8079.36
-    reference_backend: cublas
+  realizations:
+  - name: qwen35_122b.lm_head.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 100302.849
+      reference_us: 8079.36
+      reference_backend: cublas

@@ -576,8 +576,20 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     # Greedy deployed a std kernel; the stub stands in for every kernel-node walk.
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda g: [_node({"TILE": "f2x8", "WORK": "t32x8"})])
 
-    fm = Sample(knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"}, latency_us=100.0, name="mlp_gate_up", shape=object())
-    std = Sample(knobs={"TILE": "f2x8", "WORK": "t32x8"}, latency_us=140.0, name="mlp_gate_up", shape=object())
+    fm = Sample(
+        knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
+        pins={"FAST_MATH": True},
+        latency_us=100.0,
+        name="mlp_gate_up",
+        shape=object(),
+    )
+    std = Sample(
+        knobs={"TILE": "f2x8", "WORK": "t32x8"},
+        pins={"FAST_MATH": False},
+        latency_us=140.0,
+        name="mlp_gate_up",
+        shape=object(),
+    )
     golden_benches = [run_mod._GoldenBench(s, object(), None, (), "ok") for s in (fm, std)]
 
     out = tmp_path / "ab.json"
@@ -588,6 +600,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     assert rec["greedy"]["lane"] == "std"
     lanes = {p["name"] + p["lane"]: p["lane"] for p in rec["pinned"]}  # both rows share the name
     assert sorted(lanes.values()) == ["fm", "std"]
+    assert {p["pinned_knobs"]["FAST_MATH"] for p in rec["pinned"]} == {"True", "False"}
     # The filter a sweep applies: only same-lane rows are comparable to the greedy.
     same_lane = [p for p in rec["pinned"] if p["lane"] == rec["greedy"]["lane"]]
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"

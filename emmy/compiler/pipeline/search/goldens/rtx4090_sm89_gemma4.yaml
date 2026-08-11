@@ -2516,1579 +2516,1834 @@ programs:
     inputs: [x0, x1]
     outputs: [[matmul, f16, [1, 3840]]]
 configs:
-- name: gemma4_12b.q_proj
-  program: 0
+- program: 0
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 102.3
-    reference_us: 104.0
-    reference_backend: cublas
-- name: gemma4_12b.q_proj
-  program: 0
+  realizations:
+  - name: gemma4_12b.q_proj
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 102.3
+      reference_us: 104.0
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 84.5
+      reference_us: 104.0
+      reference_backend: cublas
+- program: 1
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 84.5
-    reference_us: 104.0
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.dynM
-  program: 1
+  realizations:
+  - name: gemma4_12b.q_proj.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 101.9
+      reference_us: 103.0
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 84.0
+      reference_us: 103.0
+      reference_backend: cublas
+- program: 2
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 101.9
-    reference_us: 103.0
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.dynM
-  program: 1
+  realizations:
+  - name: gemma4_12b.kv_proj
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 57.2
+      reference_us: 49.0
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 48.0
+      reference_us: 49.0
+      reference_backend: cublas
+- program: 3
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 84.0
-    reference_us: 103.0
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj
-  program: 2
+  realizations:
+  - name: gemma4_12b.kv_proj.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 58.4
+      reference_us: 49.0
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 47.8
+      reference_us: 49.0
+      reference_backend: cublas
+- program: 4
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 57.2
-    reference_us: 49.0
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj
-  program: 2
+  realizations:
+  - name: gemma4_12b.o_proj
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 109.3
+      reference_us: 115.0
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 85.8
+      reference_us: 115.0
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 109.0
+      reference_us: 115.0
+      reference_backend: cublas
+- program: 5
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 48.0
-    reference_us: 49.0
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.dynM
-  program: 3
+  realizations:
+  - name: gemma4_12b.o_proj.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 108.8
+      reference_us: 115.0
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 88.8
+      reference_us: 115.0
+      reference_backend: cublas
+- program: 6
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 58.4
-    reference_us: 49.0
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.dynM
-  program: 3
+  realizations:
+  - name: gemma4_12b.mlp_gate_up
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 810.0
+      reference_us: 801.0
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_gate_up
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 719.9
+      reference_us: 801.0
+      reference_backend: cublas
+- program: 7
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 47.8
-    reference_us: 49.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj
-  program: 4
+  realizations:
+  - name: gemma4_12b.mlp_gate_up.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 879.6
+      reference_us: 799.0
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_gate_up.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 718.8
+      reference_us: 799.0
+      reference_backend: cublas
+- program: 8
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 109.3
-    reference_us: 115.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj
-  program: 4
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 85.8
-    reference_us: 115.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj
-  program: 4
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f4x4
-    REDUCE: ''
-    RASTER: gm8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 109.0
-    reference_us: 115.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.dynM
-  program: 5
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 108.8
-    reference_us: 115.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.dynM
-  program: 5
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 88.8
-    reference_us: 115.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up
-  program: 6
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x8/k2
-    REDUCE: ''
-    RASTER: gm8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 810.0
-    reference_us: 801.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up
-  program: 6
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 719.9
-    reference_us: 801.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up.dynM
-  program: 7
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 879.6
-    reference_us: 799.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up.dynM
-  program: 7
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 718.8
-    reference_us: 799.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down
-  program: 8
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 395.3
-    reference_us: 392.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down
-  program: 8
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 291.7
-    reference_us: 392.0
-    reference_backend: cublas
-- name: gemma4_12b.attention.hd256
-  program: 9
+  realizations:
+  - name: gemma4_12b.mlp_down
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 395.3
+      reference_us: 392.0
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 291.7
+      reference_us: 392.0
+      reference_backend: cublas
+- program: 9
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d2/cp
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k16
-    TILE@pj: mma_m16n8k16_f16_f32/f1x32
-  measurements:
-    emmy_us: 41.1
-    reference_us: 41.0
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd256
-  program: 9
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-    TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
-  measurements:
-    emmy_us: 37.1
-    reference_us: 41.0
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd256
-  program: 9
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-    TILE@pj: mma_m16n8k16_f16_f16/f1x32/k4
-  measurements:
-    emmy_us: 33.8
-    reference_us: 41.0
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd256
-  program: 9
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d2/cp
-    TILE@dd: mma_m16n8k16_f16_f32/f1x4/k16
-    TILE@pj: mma_m16n8k16_f16_f32/f1x32/k2
-  measurements:
-    emmy_us: 38.3
-    reference_us: 41.0
-    reference_backend: torch-eager
-- name: gemma4_12b.rms_norm.k3840
-  program: 10
+  realizations:
+  - name: gemma4_12b.attention.hd256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      STAGE: d2/cp
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k16
+      TILE@pj: mma_m16n8k16_f16_f32/f1x32
+    measurements:
+      emmy_us: 41.1
+      reference_us: 41.0
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
+      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
+    measurements:
+      emmy_us: 37.1
+      reference_us: 41.0
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd256
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
+      TILE@pj: mma_m16n8k16_f16_f16/f1x32/k4
+    measurements:
+      emmy_us: 33.8
+      reference_us: 41.0
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      STAGE: d2/cp
+      TILE@dd: mma_m16n8k16_f16_f32/f1x4/k16
+      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k2
+    measurements:
+      emmy_us: 38.3
+      reference_us: 41.0
+      reference_backend: torch-eager
+- program: 10
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 6.9
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: gemma4_12b.rms_norm.k3840.dynM
-  program: 11
+  realizations:
+  - name: gemma4_12b.rms_norm.k3840
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 6.9
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 11
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 6.9
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: gemma4_12b.qknorm.k256
-  program: 12
+  realizations:
+  - name: gemma4_12b.rms_norm.k3840.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 6.9
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 12
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t64
-    REDUCE: coop
-  measurements:
-    emmy_us: 3.6
-    reference_us: 4.8
-    reference_backend: torch-eager
-- name: gemma4_12b.q_proj.s2048
-  program: 13
+  realizations:
+  - name: gemma4_12b.qknorm.k256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.6
+      reference_us: 4.8
+      reference_backend: torch-eager
+- program: 13
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 430.1
-    reference_us: 398.6
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.s2048
-  program: 13
+  realizations:
+  - name: gemma4_12b.q_proj.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 430.1
+      reference_us: 398.6
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 277.7
+      reference_us: 398.6
+      reference_backend: cublas
+- program: 14
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 277.7
-    reference_us: 398.6
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.s2048
-  program: 14
+  realizations:
+  - name: gemma4_12b.kv_proj.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 225.0
+      reference_us: 209.3
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f16/f2x4/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 171.2
+      reference_us: 209.3
+      reference_backend: cublas
+- program: 15
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 225.0
-    reference_us: 209.3
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.s2048
-  program: 14
+  realizations:
+  - name: gemma4_12b.o_proj.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 455.7
+      reference_us: 446.8
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 325.6
+      reference_us: 446.8
+      reference_backend: cublas
+- program: 16
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x4/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 171.2
-    reference_us: 209.3
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.s2048
-  program: 15
+  realizations:
+  - name: gemma4_12b.mlp_gate_up.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 4347.0
+      reference_us: 2945.0
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_gate_up.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2316.0
+      reference_us: 2945.0
+      reference_backend: cublas
+- program: 17
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 455.7
-    reference_us: 446.8
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.s2048
-  program: 15
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 325.6
-    reference_us: 446.8
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up.s2048
-  program: 16
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 4347.0
-    reference_us: 2945.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up.s2048
-  program: 16
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 2316.0
-    reference_us: 2945.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.s2048
-  program: 17
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1580.0
-    reference_us: 1493.7
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.s2048
-  program: 17
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1100.0
-    reference_us: 1493.7
-    reference_backend: cublas
-- name: gemma4_12b.attention.hd256.s2048
-  program: 18
+  realizations:
+  - name: gemma4_12b.mlp_down.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1580.0
+      reference_us: 1493.7
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1100.0
+      reference_us: 1493.7
+      reference_backend: cublas
+- program: 18
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-    TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
-  measurements:
-    emmy_us: 346.8
-    reference_us: 314.6
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd256.s2048
-  program: 18
+  realizations:
+  - name: gemma4_12b.attention.hd256.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
+      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
+    measurements:
+      emmy_us: 346.8
+      reference_us: 314.6
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd256.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      STAGE: d2/cp
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k16
+      TILE@pj: mma_m16n8k16_f16_f16/f1x32
+    measurements:
+      emmy_us: 288.8
+      reference_us: 314.6
+      reference_backend: torch-eager
+- program: 19
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: gemma4_12b.q_proj_global
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 220.8
+      reference_us: 211.7
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 144.2
+      reference_us: 211.7
+      reference_backend: cublas
+- program: 20
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: gemma4_12b.k_proj_global
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 19.6
+      reference_us: 16.6
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f16/f2x4/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 17.9
+      reference_us: 16.6
+      reference_backend: cublas
+- program: 21
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: gemma4_12b.o_proj_global
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 223.5
+      reference_us: 227.6
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 162.1
+      reference_us: 227.6
+      reference_backend: cublas
+- program: 22
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d2/cp
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k16
-    TILE@pj: mma_m16n8k16_f16_f16/f1x32
-  measurements:
-    emmy_us: 288.8
-    reference_us: 314.6
-    reference_backend: torch-eager
-- name: gemma4_12b.q_proj_global
-  program: 19
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 220.8
-    reference_us: 211.7
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global
-  program: 19
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 144.2
-    reference_us: 211.7
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global
-  program: 20
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 19.6
-    reference_us: 16.6
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global
-  program: 20
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x4/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 17.9
-    reference_us: 16.6
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global
-  program: 21
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 223.5
-    reference_us: 227.6
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global
-  program: 21
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 162.1
-    reference_us: 227.6
-    reference_backend: cublas
-- name: gemma4_12b.attention.hd512
-  program: 22
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: g2k
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f32/f1x64
-  measurements:
-    emmy_us: 116.1
-    reference_us: 95.6
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd512
-  program: 22
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: ''
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f32/f1x64
-  measurements:
-    emmy_us: 129.5
-    reference_us: 95.6
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd512
-  program: 22
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: ''
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f16/f1x64
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 104.1
-    reference_us: 95.6
-    reference_backend: torch-eager
-- name: gemma4_12b.qknorm.k512
-  program: 23
+  realizations:
+  - name: gemma4_12b.attention.hd512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: g2k
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f32/f1x64
+    measurements:
+      emmy_us: 116.1
+      reference_us: 95.6
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: ''
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f32/f1x64
+    measurements:
+      emmy_us: 129.5
+      reference_us: 95.6
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd512
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      REDUCE: ''
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f16/f1x64
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 104.1
+      reference_us: 95.6
+      reference_backend: torch-eager
+- program: 23
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    REDUCE: coop
-  measurements:
-    emmy_us: 9.9
-    reference_us: 10.4
-    reference_backend: torch-eager
-- name: gemma4_12b.q_proj_global.dynM
-  program: 24
+  realizations:
+  - name: gemma4_12b.qknorm.k512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 9.9
+      reference_us: 10.4
+      reference_backend: torch-eager
+- program: 24
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 222.9
-    reference_us: 195.4
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.dynM
-  program: 24
+  realizations:
+  - name: gemma4_12b.q_proj_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 222.9
+      reference_us: 195.4
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 144.5
+      reference_us: 195.4
+      reference_backend: cublas
+- program: 25
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 144.5
-    reference_us: 195.4
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.dynM
-  program: 25
+  realizations:
+  - name: gemma4_12b.k_proj_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 19.7
+      reference_us: 16.6
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f16/f2x4/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 18.3
+      reference_us: 16.6
+      reference_backend: cublas
+- program: 26
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 19.7
-    reference_us: 16.6
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.dynM
-  program: 25
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x4/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 18.3
-    reference_us: 16.6
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.dynM
-  program: 26
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 233.7
-    reference_us: 226.2
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.dynM
-  program: 26
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 168.1
-    reference_us: 226.2
-    reference_backend: cublas
-- name: gemma4_12b.attention.hd512.dynM
-  program: 27
+  realizations:
+  - name: gemma4_12b.o_proj_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 233.7
+      reference_us: 226.2
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 168.1
+      reference_us: 226.2
+      reference_backend: cublas
+- program: 27
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: g2k
-    STAGE: d1/cp/split
-    TILE: mma_m16n8k16_f16_f32/f1x2/k32
-  measurements:
-    emmy_us: 123.7
-    reference_us: 110.6
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd512.dynM
-  program: 27
+  realizations:
+  - name: gemma4_12b.attention.hd512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: g2k
+      STAGE: d1/cp/split
+      TILE: mma_m16n8k16_f16_f32/f1x2/k32
+    measurements:
+      emmy_us: 123.7
+      reference_us: 110.6
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      STAGE: d1/cp/split
+      TILE: mma_m16n8k16_f16_f32/f1x2/k32
+    measurements:
+      emmy_us: 139.6
+      reference_us: 109.6
+      reference_backend: torch-eager
+- program: 28
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: gemma4_12b.q_proj_global.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 801.8
+      reference_us: 751.2
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 583.2
+      reference_us: 751.2
+      reference_backend: cublas
+- program: 29
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: gemma4_12b.k_proj_global.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 57.9
+      reference_us: 48.7
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 47.9
+      reference_us: 48.7
+      reference_backend: cublas
+- program: 30
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: gemma4_12b.o_proj_global.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 831.5
+      reference_us: 790.3
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 589.3
+      reference_us: 790.3
+      reference_backend: cublas
+- program: 31
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d1/cp/split
-    TILE: mma_m16n8k16_f16_f32/f1x2/k32
-  measurements:
-    emmy_us: 139.6
-    reference_us: 109.6
-    reference_backend: torch-eager
-- name: gemma4_12b.q_proj_global.s2048
-  program: 28
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 801.8
-    reference_us: 751.2
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.s2048
-  program: 28
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 583.2
-    reference_us: 751.2
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.s2048
-  program: 29
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 57.9
-    reference_us: 48.7
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.s2048
-  program: 29
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 47.9
-    reference_us: 48.7
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.s2048
-  program: 30
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 831.5
-    reference_us: 790.3
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.s2048
-  program: 30
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 589.3
-    reference_us: 790.3
-    reference_backend: cublas
-- name: gemma4_12b.attention.hd512.s2048
-  program: 31
+  realizations:
+  - name: gemma4_12b.attention.hd512.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: g2k
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f32/f1x64
+    measurements:
+      emmy_us: 1069.0
+      reference_us: 926.5
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd512.s2048
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: ''
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f32/f1x64
+    measurements:
+      emmy_us: 1310.8
+      reference_us: 926.5
+      reference_backend: torch-eager
+- program: 32
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: g2k
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f32/f1x64
-  measurements:
-    emmy_us: 1069.0
-    reference_us: 926.5
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd512.s2048
-  program: 31
+  realizations:
+  - name: gemma4_12b.attention.hd256.s4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: ''
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
+      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
+    measurements:
+      emmy_us: 1205.2
+      reference_us: 1068.8
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd256.s4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      REDUCE: ''
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
+      TILE@pj: mma_m16n8k16_f16_f16/f1x32/k4
+    measurements:
+      emmy_us: 1077.2
+      reference_us: 1068.8
+      reference_backend: torch-eager
+- program: 33
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: ''
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f32/f1x64
-  measurements:
-    emmy_us: 1310.8
-    reference_us: 926.5
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd256.s4096
-  program: 32
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: ''
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-    TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
-  measurements:
-    emmy_us: 1205.2
-    reference_us: 1068.8
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd256.s4096
-  program: 32
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: ''
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-    TILE@pj: mma_m16n8k16_f16_f16/f1x32/k4
-  measurements:
-    emmy_us: 1077.2
-    reference_us: 1068.8
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd512.s4096
-  program: 33
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: g2k
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f32/f1x64
-  measurements:
-    emmy_us: 3514.0
-    reference_us: 3457.0
-    reference_backend: torch-eager
-- name: gemma4_12b.attention.hd512.s4096
-  program: 33
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    REDUCE: ''
-    STAGE: d1/cp/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-    TILE@pj: mma_m16n8k16_f16_f32/f1x64
-  measurements:
-    emmy_us: 4587.5
-    reference_us: 3457.0
-    reference_backend: torch-eager
-- name: gemma4_12b.q_proj.m4096
-  program: 34
+  realizations:
+  - name: gemma4_12b.attention.hd512.s4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: g2k
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f32/f1x64
+    measurements:
+      emmy_us: 3514.0
+      reference_us: 3457.0
+      reference_backend: torch-eager
+  - name: gemma4_12b.attention.hd512.s4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      REDUCE: ''
+      STAGE: d1/cp/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
+      TILE@pj: mma_m16n8k16_f16_f32/f1x64
+    measurements:
+      emmy_us: 4587.5
+      reference_us: 3457.0
+      reference_backend: torch-eager
+- program: 34
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 912.4
-    reference_us: 811.0
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m4096
-  program: 34
+  realizations:
+  - name: gemma4_12b.q_proj.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 912.4
+      reference_us: 811.0
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 591.9
+      reference_us: 811.0
+      reference_backend: cublas
+- program: 35
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: gemma4_12b.q_proj.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 912.4
+      reference_us: 813.1
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 580.1
+      reference_us: 813.1
+      reference_backend: cublas
+- program: 36
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 591.9
-    reference_us: 811.0
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m4096.lin
-  program: 35
+  realizations:
+  - name: gemma4_12b.kv_proj.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 467.5
+      reference_us: 414.2
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 300.4
+      reference_us: 414.2
+      reference_backend: cublas
+- program: 37
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 912.4
-    reference_us: 813.1
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m4096.lin
-  program: 35
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 580.1
-    reference_us: 813.1
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m4096
-  program: 36
+  realizations:
+  - name: gemma4_12b.kv_proj.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 466.9
+      reference_us: 413.2
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 294.6
+      reference_us: 413.2
+      reference_backend: cublas
+- program: 38
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 467.5
-    reference_us: 414.2
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m4096
-  program: 36
+  realizations:
+  - name: gemma4_12b.o_proj.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 915.5
+      reference_us: 824.3
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 638.0
+      reference_us: 824.3
+      reference_backend: cublas
+- program: 39
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: gemma4_12b.o_proj.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 912.4
+      reference_us: 815.1
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 622.1
+      reference_us: 815.1
+      reference_backend: cublas
+- program: 40
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 300.4
-    reference_us: 414.2
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m4096.lin
-  program: 37
+  realizations:
+  - name: gemma4_12b.mlp_gate_up_split.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 4230.1
+      reference_us: 3006.5
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_gate_up_split.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2183.2
+      reference_us: 3006.5
+      reference_backend: cublas
+- program: 41
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 466.9
-    reference_us: 413.2
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m4096.lin
-  program: 37
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 294.6
-    reference_us: 413.2
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m4096
-  program: 38
+  realizations:
+  - name: gemma4_12b.mlp_gate_up_split.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 4910.1
+      reference_us: 2888.7
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_gate_up_split.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2103.3
+      reference_us: 2888.7
+      reference_backend: cublas
+- program: 42
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 915.5
-    reference_us: 824.3
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m4096
-  program: 38
+  realizations:
+  - name: gemma4_12b.mlp_down.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 3638.3
+      reference_us: 2915.3
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2221.1
+      reference_us: 2915.3
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 3324.9
+      reference_us: 2915.3
+      reference_backend: cublas
+- program: 43
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: gemma4_12b.mlp_down.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 3638.3
+      reference_us: 2989.0
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2154.5
+      reference_us: 2922.5
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 3415.8
+      reference_us: 2922.5
+      reference_backend: cublas
+- program: 44
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 638.0
-    reference_us: 824.3
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m4096.lin
-  program: 39
+  realizations:
+  - name: gemma4_12b.q_proj_global.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1795.1
+      reference_us: 1609.8
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1166.3
+      reference_us: 1609.8
+      reference_backend: cublas
+- program: 45
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 912.4
-    reference_us: 815.1
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m4096.lin
-  program: 39
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 622.1
-    reference_us: 815.1
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m4096
-  program: 40
+  realizations:
+  - name: gemma4_12b.q_proj_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1798.1
+      reference_us: 1610.8
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1142.8
+      reference_us: 1610.8
+      reference_backend: cublas
+  - name: gemma4_12b.qkv_cat.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1720.3
+      reference_us: 1549.3
+      reference_backend: cublas
+  - name: gemma4_12b.qkv_cat.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1147.9
+      reference_us: 1549.3
+      reference_backend: cublas
+- program: 46
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 4230.1
-    reference_us: 3006.5
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m4096
-  program: 40
+  realizations:
+  - name: gemma4_12b.k_proj_global.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 133.0
+      reference_us: 110.0
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 91.0
+      reference_us: 110.0
+      reference_backend: cublas
+- program: 47
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: gemma4_12b.k_proj_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 132.2
+      reference_us: 110.9
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 86.7
+      reference_us: 110.9
+      reference_backend: cublas
+- program: 48
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: gm8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 2183.2
-    reference_us: 3006.5
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m4096.lin
-  program: 41
+  realizations:
+  - name: gemma4_12b.o_proj_global.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1801.2
+      reference_us: 1613.8
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1225.7
+      reference_us: 1613.8
+      reference_backend: cublas
+- program: 49
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 4910.1
-    reference_us: 2888.7
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m4096.lin
-  program: 41
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: gm8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 2103.3
-    reference_us: 2888.7
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m4096
-  program: 42
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 3638.3
-    reference_us: 2915.3
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m4096
-  program: 42
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 2221.1
-    reference_us: 2915.3
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m4096
-  program: 42
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 3324.9
-    reference_us: 2915.3
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m4096.lin
-  program: 43
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 3638.3
-    reference_us: 2989.0
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m4096.lin
-  program: 43
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 2154.5
-    reference_us: 2922.5
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m4096.lin
-  program: 43
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 3415.8
-    reference_us: 2922.5
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m4096
-  program: 44
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1795.1
-    reference_us: 1609.8
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m4096
-  program: 44
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1166.3
-    reference_us: 1609.8
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m4096.lin
-  program: 45
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1798.1
-    reference_us: 1610.8
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m4096.lin
-  program: 45
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1142.8
-    reference_us: 1610.8
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m4096
-  program: 46
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 133.0
-    reference_us: 110.0
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m4096
-  program: 46
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 91.0
-    reference_us: 110.0
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m4096.lin
-  program: 47
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 132.2
-    reference_us: 110.9
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m4096.lin
-  program: 47
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 86.7
-    reference_us: 110.9
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m4096
-  program: 48
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1801.2
-    reference_us: 1613.8
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m4096
-  program: 48
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1225.7
-    reference_us: 1613.8
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m4096.lin
-  program: 49
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1792.0
-    reference_us: 1604.6
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m4096.lin
-  program: 49
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1191.9
-    reference_us: 1604.6
-    reference_backend: cublas
-- name: gemma4_12b.rms_norm.k3840.m4096
-  program: 50
+  realizations:
+  - name: gemma4_12b.o_proj_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1792.0
+      reference_us: 1604.6
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1191.9
+      reference_us: 1604.6
+      reference_backend: cublas
+- program: 50
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 24.4
-    reference_us: 23.4
-    reference_backend: torch-eager
-- name: gemma4_12b.qknorm.k256.m65536
-  program: 51
+  realizations:
+  - name: gemma4_12b.rms_norm.k3840.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 24.4
+      reference_us: 23.4
+      reference_backend: torch-eager
+- program: 51
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 34.9
-    reference_us: 41.8
-    reference_backend: torch-eager
-- name: gemma4_12b.qknorm.k512.m4096
-  program: 52
+  realizations:
+  - name: gemma4_12b.qknorm.k256.m65536
+    bindings:
+      num_tokens: 65536
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 34.9
+      reference_us: 41.8
+      reference_backend: torch-eager
+- program: 52
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 5.1
-    reference_us: 4.8
-    reference_backend: torch-eager
-- name: gemma4_12b.qknorm.k512.m65536
-  program: 53
+  realizations:
+  - name: gemma4_12b.qknorm.k512.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 5.1
+      reference_us: 4.8
+      reference_backend: torch-eager
+- program: 53
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 145.8
-    reference_us: 146.6
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_geglu.m4096
-  program: 54
+  realizations:
+  - name: gemma4_12b.qknorm.k512.m65536
+    bindings:
+      num_tokens: 65536
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 145.8
+      reference_us: 146.6
+      reference_backend: torch-eager
+- program: 54
   target:
     origins:
     - gelu
@@ -4096,18 +4351,23 @@ configs:
     - matmul_1
     - mul
     - rms_norm
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 12131.3
-    reference_us: 6424.6
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_geglu.m4096.lin
-  program: 55
+  realizations:
+  - name: gemma4_12b.mlp_geglu.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 12131.3
+      reference_us: 6424.6
+      reference_backend: torch-eager
+- program: 55
   target:
     origins:
     - gelu
@@ -4115,1060 +4375,1283 @@ configs:
     - linear_1
     - mul
     - rms_norm
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 16152.6
-    reference_us: 6486.0
-    reference_backend: torch-eager
-- name: gemma4_12b.q_proj.lin.dynM
-  program: 56
+  realizations:
+  - name: gemma4_12b.mlp_geglu.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 16152.6
+      reference_us: 6486.0
+      reference_backend: torch-eager
+- program: 56
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    STAGE: d2/cp/p2
-    RASTER: ''
-  measurements:
-    emmy_us: 104.7
-    reference_us: 105.4
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.lin.dynM
-  program: 56
+  realizations:
+  - name: gemma4_12b.q_proj.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      STAGE: d2/cp/p2
+      RASTER: ''
+    measurements:
+      emmy_us: 104.7
+      reference_us: 105.4
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 80.8
+      reference_us: 105.4
+      reference_backend: cublas
+- program: 57
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 80.8
-    reference_us: 105.4
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.lin.dynM
-  program: 57
+  realizations:
+  - name: gemma4_12b.kv_proj.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 57.1
+      reference_us: 49.8
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g4k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 44.7
+      reference_us: 49.8
+      reference_backend: cublas
+- program: 58
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 57.1
-    reference_us: 49.8
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.lin.dynM
-  program: 57
+  realizations:
+  - name: gemma4_12b.o_proj.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      STAGE: d2/cp/p2
+      RASTER: ''
+    measurements:
+      emmy_us: 111.0
+      reference_us: 107.9
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 81.9
+      reference_us: 107.9
+      reference_backend: cublas
+- program: 59
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g4k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 44.7
-    reference_us: 49.8
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.lin.dynM
-  program: 58
+  realizations:
+  - name: gemma4_12b.q_proj_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 225.5
+      reference_us: 202.6
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 151.9
+      reference_us: 202.6
+      reference_backend: cublas
+- program: 60
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    STAGE: d2/cp/p2
-    RASTER: ''
-  measurements:
-    emmy_us: 111.0
-    reference_us: 107.9
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.lin.dynM
-  program: 58
+  realizations:
+  - name: gemma4_12b.k_proj_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 21.0
+      reference_us: 17.6
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f16/f2x4/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 17.8
+      reference_us: 17.6
+      reference_backend: cublas
+- program: 61
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 81.9
-    reference_us: 107.9
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.lin.dynM
-  program: 59
+  realizations:
+  - name: gemma4_12b.o_proj_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 239.1
+      reference_us: 206.0
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 195.3
+      reference_us: 206.0
+      reference_backend: cublas
+- program: 62
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k4
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 225.5
-    reference_us: 202.6
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.lin.dynM
-  program: 59
+  realizations:
+  - name: gemma4_12b.q_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 12.5
+      reference_us: 19.4
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 12.5
+      reference_us: 19.4
+      reference_backend: cublas
+- program: 63
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 151.9
-    reference_us: 202.6
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.lin.dynM
-  program: 60
+  realizations:
+  - name: gemma4_12b.q_proj.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 77.5
+      reference_us: 55.1
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 58.3
+      reference_us: 55.1
+      reference_backend: cublas
+- program: 64
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 21.0
-    reference_us: 17.6
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.lin.dynM
-  program: 60
+  realizations:
+  - name: gemma4_12b.kv_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 8.9
+      reference_us: 11.6
+      reference_backend: cublas
+  - name: gemma4_12b.kv_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 7.8
+      reference_us: 11.6
+      reference_backend: cublas
+- program: 65
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x4/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 17.8
-    reference_us: 17.6
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.lin.dynM
-  program: 61
+  realizations:
+  - name: gemma4_12b.kv_proj.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g4k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 41.3
+      reference_us: 31.1
+      reference_backend: cublas
+- program: 66
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k4
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 239.1
-    reference_us: 206.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.lin.dynM
-  program: 61
+  realizations:
+  - name: gemma4_12b.o_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 12.8
+      reference_us: 20.4
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 12.6
+      reference_us: 20.4
+      reference_backend: cublas
+- program: 67
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 195.3
-    reference_us: 206.0
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m32.lin
-  program: 62
+  realizations:
+  - name: gemma4_12b.o_proj.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 80.7
+      reference_us: 52.7
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 61.2
+      reference_us: 52.7
+      reference_backend: cublas
+- program: 68
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 12.5
-    reference_us: 19.4
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m32.lin
-  program: 62
+  realizations:
+  - name: gemma4_12b.mlp_down.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f4x1/k4
+      REDUCE: g4a
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 137.9
+      reference_us: 141.7
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f4x1/k4
+      REDUCE: g4a
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 137.5
+      reference_us: 141.7
+      reference_backend: cublas
+- program: 69
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 12.5
-    reference_us: 19.4
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m256.lin
-  program: 63
+  realizations:
+  - name: gemma4_12b.mlp_gate_up_split.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 130.2
+      reference_us: 133.9
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_gate_up_split.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k8
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 130.0
+      reference_us: 133.9
+      reference_backend: cublas
+- program: 70
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 77.5
-    reference_us: 55.1
-    reference_backend: cublas
-- name: gemma4_12b.q_proj.m256.lin
-  program: 63
+  realizations:
+  - name: gemma4_12b.mlp_gate_up_split.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: g4a
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 141.0
+      reference_us: 144.9
+      reference_backend: cublas
+- program: 71
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 58.3
-    reference_us: 55.1
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m32.lin
-  program: 64
+  realizations:
+  - name: gemma4_12b.mlp_down.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g4k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 310.3
+      reference_us: 217.1
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_down.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 303.0
+      reference_us: 217.1
+      reference_backend: cublas
+- program: 72
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 8.9
-    reference_us: 11.6
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m32.lin
-  program: 64
+  realizations:
+  - name: gemma4_12b.q_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 25.9
+      reference_us: 36.1
+      reference_backend: cublas
+  - name: gemma4_12b.q_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 25.8
+      reference_us: 36.1
+      reference_backend: cublas
+- program: 73
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 7.8
-    reference_us: 11.6
-    reference_backend: cublas
-- name: gemma4_12b.kv_proj.m256.lin
-  program: 65
+  realizations:
+  - name: gemma4_12b.q_proj_global.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 127.0
+      reference_us: 107.1
+      reference_backend: cublas
+- program: 74
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g4k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 41.3
-    reference_us: 31.1
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m32.lin
-  program: 66
+  realizations:
+  - name: gemma4_12b.k_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f1x4/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 5.9
+      reference_us: 5.7
+      reference_backend: cublas
+  - name: gemma4_12b.k_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f16/f1x4/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 5.5
+      reference_us: 5.7
+      reference_backend: cublas
+- program: 75
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 12.8
-    reference_us: 20.4
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m32.lin
-  program: 66
+  realizations:
+  - name: gemma4_12b.k_proj_global.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g4k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 16.9
+      reference_us: 11.1
+      reference_backend: cublas
+- program: 76
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 12.6
-    reference_us: 20.4
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m256.lin
-  program: 67
+  realizations:
+  - name: gemma4_12b.o_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 22.0
+      reference_us: 47.9
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 21.9
+      reference_us: 47.9
+      reference_backend: cublas
+- program: 77
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 80.7
-    reference_us: 52.7
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m256.lin
-  program: 67
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 61.2
-    reference_us: 52.7
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m32.lin
-  program: 68
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f4x1/k4
-    REDUCE: g4a
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 137.9
-    reference_us: 141.7
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m32.lin
-  program: 68
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f4x1/k4
-    REDUCE: g4a
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 137.5
-    reference_us: 141.7
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m32.lin
-  program: 69
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k8
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 130.2
-    reference_us: 133.9
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m32.lin
-  program: 69
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k8
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 130.0
-    reference_us: 133.9
-    reference_backend: cublas
-- name: gemma4_12b.mlp_gate_up_split.m64.lin
-  program: 70
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k4
-    REDUCE: g4a
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 141.0
-    reference_us: 144.9
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m256.lin
-  program: 71
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: g4k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 310.3
-    reference_us: 217.1
-    reference_backend: cublas
-- name: gemma4_12b.mlp_down.m256.lin
-  program: 71
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 303.0
-    reference_us: 217.1
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m32.lin
-  program: 72
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 25.9
-    reference_us: 36.1
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m32.lin
-  program: 72
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 25.8
-    reference_us: 36.1
-    reference_backend: cublas
-- name: gemma4_12b.q_proj_global.m256.lin
-  program: 73
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 127.0
-    reference_us: 107.1
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m32.lin
-  program: 74
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f1x4/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 5.9
-    reference_us: 5.7
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m32.lin
-  program: 74
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f16/f1x4/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 5.5
-    reference_us: 5.7
-    reference_backend: cublas
-- name: gemma4_12b.k_proj_global.m256.lin
-  program: 75
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g4k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 16.9
-    reference_us: 11.1
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m32.lin
-  program: 76
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 22.0
-    reference_us: 47.9
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m32.lin
-  program: 76
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: g8k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 21.9
-    reference_us: 47.9
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m256.lin
-  program: 77
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g4k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 162.1
-    reference_us: 102.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m256.lin
-  program: 77
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 107.3
-    reference_us: 102.0
-    reference_backend: cublas
-- name: gemma4_12b.rms_norm.k3840.m32
-  program: 78
+  realizations:
+  - name: gemma4_12b.o_proj_global.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g4k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 162.1
+      reference_us: 102.0
+      reference_backend: cublas
+  - name: gemma4_12b.o_proj_global.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 107.3
+      reference_us: 102.0
+      reference_backend: cublas
+- program: 78
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 5.4
-    reference_us: 4.6
-    reference_backend: torch-eager
-- name: gemma4_12b.rms_norm.k3840.m256
-  program: 79
+  realizations:
+  - name: gemma4_12b.rms_norm.k3840.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 5.4
+      reference_us: 4.6
+      reference_backend: torch-eager
+- program: 79
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 6.1
-    reference_us: 5.1
-    reference_backend: torch-eager
-- name: gemma4_12b.q_norm.m32
-  program: 80
+  realizations:
+  - name: gemma4_12b.rms_norm.k3840.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 6.1
+      reference_us: 5.1
+      reference_backend: torch-eager
+- program: 80
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.7
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.k_norm.m32
-  program: 81
+  realizations:
+  - name: gemma4_12b.q_norm.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.7
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 81
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.7
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.k_norm.m256
-  program: 82
+  realizations:
+  - name: gemma4_12b.k_norm.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.7
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 82
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.7
-    reference_us: 4.5
-    reference_backend: torch-eager
-- name: gemma4_12b.q_norm_global.m32
-  program: 83
+  realizations:
+  - name: gemma4_12b.k_norm.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.7
+      reference_us: 4.5
+      reference_backend: torch-eager
+- program: 83
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.2
-    reference_us: 4.3
-    reference_backend: torch-eager
-- name: gemma4_12b.q_norm_global.m256
-  program: 84
+  realizations:
+  - name: gemma4_12b.q_norm_global.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.2
+      reference_us: 4.3
+      reference_backend: torch-eager
+- program: 84
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 6.0
-    reference_us: 6.7
-    reference_backend: torch-eager
-- name: gemma4_12b.kv_norm_global.m32
-  program: 85
+  realizations:
+  - name: gemma4_12b.q_norm_global.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 6.0
+      reference_us: 6.7
+      reference_backend: torch-eager
+- program: 85
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.6
-    reference_us: 4.6
-    reference_backend: torch-eager
-- name: gemma4_12b.kv_norm_global.m256
-  program: 86
+  realizations:
+  - name: gemma4_12b.kv_norm_global.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.6
+      reference_us: 4.6
+      reference_backend: torch-eager
+- program: 86
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.0
-    reference_us: 4.3
-    reference_backend: torch-eager
-- name: gemma4_12b.q_norm.dynM
-  program: 87
+  realizations:
+  - name: gemma4_12b.kv_norm_global.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.0
+      reference_us: 4.3
+      reference_backend: torch-eager
+- program: 87
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 5.8
-    reference_us: 8.4
-    reference_backend: torch-eager
-- name: gemma4_12b.k_norm.dynM
-  program: 88
+  realizations:
+  - name: gemma4_12b.q_norm.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 5.8
+      reference_us: 8.4
+      reference_backend: torch-eager
+- program: 88
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 3.7
-    reference_us: 5.2
-    reference_backend: torch-eager
-- name: gemma4_12b.q_norm_global.dynM
-  program: 89
+  realizations:
+  - name: gemma4_12b.k_norm.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 3.7
+      reference_us: 5.2
+      reference_backend: torch-eager
+- program: 89
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 10.2
-    reference_us: 10.6
-    reference_backend: torch-eager
-- name: gemma4_12b.kv_norm_global.dynM
-  program: 90
+  realizations:
+  - name: gemma4_12b.q_norm_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 10.2
+      reference_us: 10.6
+      reference_backend: torch-eager
+- program: 90
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.2
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n4096.m32
-  program: 91
+  realizations:
+  - name: gemma4_12b.kv_norm_global.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.2
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 91
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.0
-    reference_us: 4.3
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n4096.m256
-  program: 92
+  realizations:
+  - name: gemma4_12b.pw.n4096.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.0
+      reference_us: 4.3
+      reference_backend: torch-eager
+- program: 92
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.8
-    reference_us: 4.3
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n8192.m32
-  program: 93
+  realizations:
+  - name: gemma4_12b.pw.n4096.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.8
+      reference_us: 4.3
+      reference_backend: torch-eager
+- program: 93
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.1
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n8192.m256
-  program: 94
+  realizations:
+  - name: gemma4_12b.pw.n8192.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.1
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 94
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.8
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n2048.m32
-  program: 95
+  realizations:
+  - name: gemma4_12b.pw.n8192.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.8
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 95
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 0.9
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n2048.m256
-  program: 96
+  realizations:
+  - name: gemma4_12b.pw.n2048.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 0.9
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 96
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.3
-    reference_us: 4.6
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n2048.dynM
-  program: 97
+  realizations:
+  - name: gemma4_12b.pw.n2048.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.3
+      reference_us: 4.6
+      reference_backend: torch-eager
+- program: 97
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: ''
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 3.0
-    reference_us: 4.6
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n4096.dynM
-  program: 98
+  realizations:
+  - name: gemma4_12b.pw.n2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 3.0
+      reference_us: 4.6
+      reference_backend: torch-eager
+- program: 98
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: ''
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 4.9
-    reference_us: 4.3
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n8192.dynM
-  program: 99
+  realizations:
+  - name: gemma4_12b.pw.n4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 4.9
+      reference_us: 4.3
+      reference_backend: torch-eager
+- program: 99
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: ''
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 8.7
-    reference_us: 5.5
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_q_proj.m32.lin
-  program: 100
+  realizations:
+  - name: gemma4_12b.pw.n8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 8.7
+      reference_us: 5.5
+      reference_backend: torch-eager
+- program: 100
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/sync
-  measurements:
-    emmy_us: 26.4
-    reference_us: 22.3
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_kv_proj.m32.lin
-  program: 101
+  realizations:
+  - name: gemma4_12b.norm_q_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/sync
+    measurements:
+      emmy_us: 26.4
+      reference_us: 22.3
+      reference_backend: torch-eager
+- program: 101
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f1x1/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/sync
-  measurements:
-    emmy_us: 18.2
-    reference_us: 16.4
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_kv_proj.m32.lin
-  program: 101
+  realizations:
+  - name: gemma4_12b.norm_kv_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f1x1/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/sync
+    measurements:
+      emmy_us: 18.2
+      reference_us: 16.4
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_kv_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f1x1/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/sync
+    measurements:
+      emmy_us: 17.2
+      reference_us: 16.4
+      reference_backend: torch-eager
+- program: 102
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f16/f1x1/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/sync
-  measurements:
-    emmy_us: 17.2
-    reference_us: 16.4
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_q_proj_global.m32.lin
-  program: 102
+  realizations:
+  - name: gemma4_12b.norm_q_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 40.7
+      reference_us: 45.3
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_q_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 36.3
+      reference_us: 45.3
+      reference_backend: torch-eager
+- program: 103
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 40.7
-    reference_us: 45.3
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_q_proj_global.m32.lin
-  program: 102
-  target:
-    origins:
-    - linear
-    - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f16/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 36.3
-    reference_us: 45.3
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_kv_proj_global.m32.lin
-  program: 103
-  target:
-    origins:
-    - linear
-    - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f1x1/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/sync
-  measurements:
-    emmy_us: 12.7
-    reference_us: 9.0
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_kv_proj_global.m32.lin
-  program: 103
-  target:
-    origins:
-    - linear
-    - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f16/f1x1/k2
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/sync
-  measurements:
-    emmy_us: 12.6
-    reference_us: 9.0
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_geglu.m32.lin
-  program: 104
+  realizations:
+  - name: gemma4_12b.norm_kv_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f1x1/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/sync
+    measurements:
+      emmy_us: 12.7
+      reference_us: 9.0
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_kv_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f1x1/k2
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/sync
+    measurements:
+      emmy_us: 12.6
+      reference_us: 9.0
+      reference_backend: torch-eager
+- program: 104
   target:
     origins:
     - gelu
@@ -5176,817 +5659,1000 @@ configs:
     - linear_1
     - mul
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k8
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 285.0
-    reference_us: 281.6
-    reference_backend: torch-eager
-- name: gemma4_12b.cut_cone_stat.m32
-  program: 105
+  realizations:
+  - name: gemma4_12b.mlp_geglu.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 285.0
+      reference_us: 281.6
+      reference_backend: torch-eager
+- program: 105
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t128
-    REDUCE: coop
-  measurements:
-    emmy_us: 1.7
-    reference_us: 8.7
-    reference_backend: torch-eager
-- name: gemma4_12b.cut_cone_scale.m32
-  program: 106
+  realizations:
+  - name: gemma4_12b.cut_cone_stat.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 1.7
+      reference_us: 8.7
+      reference_backend: torch-eager
+- program: 106
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-  measurements:
-    emmy_us: 1.0
-    reference_us: 4.4
-    reference_backend: torch-eager
-- name: gemma4_12b.cut_combine.m32
-  program: 107
+  realizations:
+  - name: gemma4_12b.cut_cone_scale.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+    measurements:
+      emmy_us: 1.0
+      reference_us: 4.4
+      reference_backend: torch-eager
+- program: 107
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-  measurements:
-    emmy_us: 1.6
-    reference_us: 4.6
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_ch.m256
-  program: 108
+  realizations:
+  - name: gemma4_12b.cut_combine.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+    measurements:
+      emmy_us: 1.6
+      reference_us: 4.6
+      reference_backend: torch-eager
+- program: 108
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 219.7
-    reference_us: 237.8
-    reference_backend: cublas
-- name: gemma4_12b.mlp_ch.m256
-  program: 108
+  realizations:
+  - name: gemma4_12b.mlp_ch.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 219.7
+      reference_us: 237.8
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_ch.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 157.9
+      reference_us: 237.8
+      reference_backend: cublas
+- program: 109
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 157.9
-    reference_us: 237.8
-    reference_backend: cublas
-- name: gemma4_12b.mlp_ch.dynM
-  program: 109
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 439.8
-    reference_us: 410.9
-    reference_backend: cublas
-- name: gemma4_12b.mlp_ch.dynM
-  program: 109
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 312.0
-    reference_us: 410.9
-    reference_backend: cublas
-- name: gemma4_12b.reduce.k3840.m256
-  program: 110
+  realizations:
+  - name: gemma4_12b.mlp_ch.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 439.8
+      reference_us: 410.9
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_ch.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 312.0
+      reference_us: 410.9
+      reference_backend: cublas
+- program: 110
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.2
-    reference_us: 6.0
-    reference_backend: torch-eager
-- name: gemma4_12b.reduce.k3840.dynM
-  program: 111
+  realizations:
+  - name: gemma4_12b.reduce.k3840.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.2
+      reference_us: 6.0
+      reference_backend: torch-eager
+- program: 111
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.9
-    reference_us: 6.4
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n15360.m256.fp32
-  program: 112
+  realizations:
+  - name: gemma4_12b.reduce.k3840.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.9
+      reference_us: 6.4
+      reference_backend: torch-eager
+- program: 112
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 7.9
-    reference_us: 9.2
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n15360.dynM.fp32
-  program: 113
+  realizations:
+  - name: gemma4_12b.pw.n15360.m256.fp32
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 7.9
+      reference_us: 9.2
+      reference_backend: torch-eager
+- program: 113
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: ''
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 15.5
-    reference_us: 16.5
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n3840.m256.fp32
-  program: 114
+  realizations:
+  - name: gemma4_12b.pw.n15360.dynM.fp32
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 15.5
+      reference_us: 16.5
+      reference_backend: torch-eager
+- program: 114
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.7
-    reference_us: 4.5
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n3840.dynM.fp32
-  program: 115
+  realizations:
+  - name: gemma4_12b.pw.n3840.m256.fp32
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.7
+      reference_us: 4.5
+      reference_backend: torch-eager
+- program: 115
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: ''
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 4.7
-    reference_us: 5.4
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_ch.m256.lin
-  program: 116
+  realizations:
+  - name: gemma4_12b.pw.n3840.dynM.fp32
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 4.7
+      reference_us: 5.4
+      reference_backend: torch-eager
+- program: 116
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k4
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 243.5
-    reference_us: 219.6
-    reference_backend: cublas
-- name: gemma4_12b.mlp_ch.dynM.lin
-  program: 117
+  realizations:
+  - name: gemma4_12b.mlp_ch.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 243.5
+      reference_us: 219.6
+      reference_backend: cublas
+- program: 117
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 515.1
-    reference_us: 389.4
-    reference_backend: cublas
-- name: gemma4_12b.mlp_ch.dynM.lin
-  program: 117
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    STAGE: d2/cp
-    RASTER: ''
-  measurements:
-    emmy_us: 513.0
-    reference_us: 389.4
-    reference_backend: cublas
-- name: gemma4_12b.norm_gate_up.m32.lin
-  program: 118
-  target:
-    origins:
-    - linear
-    - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 280.1
-    reference_us: 269.3
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_gate_up.m256.lin
-  program: 119
+  realizations:
+  - name: gemma4_12b.mlp_ch.dynM.lin
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 515.1
+      reference_us: 389.4
+      reference_backend: cublas
+  - name: gemma4_12b.mlp_ch.dynM.lin
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/cp
+      RASTER: ''
+    measurements:
+      emmy_us: 513.0
+      reference_us: 389.4
+      reference_backend: cublas
+- program: 118
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w2x8
-    TILE: mma_m16n8k16_f16_f32/f4x4/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 628.2
-    reference_us: 443.4
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_gate_up.lin.dynM
-  program: 120
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 280.1
+      reference_us: 269.3
+      reference_backend: torch-eager
+- program: 119
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w2x8
-    TILE: mma_m16n8k16_f16_f32/f4x4/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 1212.4
-    reference_us: 774.1
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qkv.m256.lin
-  program: 121
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x8
+      TILE: mma_m16n8k16_f16_f32/f4x4/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 628.2
+      reference_us: 443.4
+      reference_backend: torch-eager
+- program: 120
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 150.5
-    reference_us: 127.5
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qkv.lin.dynM
-  program: 122
+  realizations:
+  - name: gemma4_12b.norm_gate_up.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x8
+      TILE: mma_m16n8k16_f16_f32/f4x4/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 1212.4
+      reference_us: 774.1
+      reference_backend: torch-eager
+- program: 121
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 287.1
-    reference_us: 226.8
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qk_global.m32.lin
-  program: 123
+  realizations:
+  - name: gemma4_12b.norm_qkv.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 150.5
+      reference_us: 127.5
+      reference_backend: torch-eager
+- program: 122
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 61.4
-    reference_us: 44.9
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qk_global.m256.lin
-  program: 124
+  realizations:
+  - name: gemma4_12b.norm_qkv.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 287.1
+      reference_us: 226.8
+      reference_backend: torch-eager
+- program: 123
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 254.5
-    reference_us: 141.3
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qk_global.lin.dynM
-  program: 125
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 61.4
+      reference_us: 44.9
+      reference_backend: torch-eager
+- program: 124
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x16
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 361.8
-    reference_us: 250.9
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_down_fused.m32.lin
-  program: 126
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 254.5
+      reference_us: 141.3
+      reference_backend: torch-eager
+- program: 125
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 147.4
-    reference_us: 151.0
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_down_fused.m256.lin
-  program: 127
+  realizations:
+  - name: gemma4_12b.norm_qk_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 361.8
+      reference_us: 250.9
+      reference_backend: torch-eager
+- program: 126
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    STAGE: d1/sync
-    RASTER: ''
-  measurements:
-    emmy_us: 358.5
-    reference_us: 252.8
-    reference_backend: torch-eager
-- name: gemma4_12b.mlp_down.lin.dynM
-  program: 128
+  realizations:
+  - name: gemma4_12b.mlp_down_fused.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 147.4
+      reference_us: 151.0
+      reference_backend: torch-eager
+- program: 127
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-  measurements:
-    emmy_us: 641.8
-    reference_us: 447.5
-    reference_backend: cublas
-- name: gemma4_12b.pw.n8704.m32
-  program: 129
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.mlp_down_fused.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      STAGE: d1/sync
+      RASTER: ''
+    measurements:
+      emmy_us: 358.5
+      reference_us: 252.8
+      reference_backend: torch-eager
+- program: 128
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: gemma4_12b.mlp_down.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+    measurements:
+      emmy_us: 641.8
+      reference_us: 447.5
+      reference_backend: cublas
+- program: 129
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 1.1
-    reference_us: 4.5
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n8704.m256
-  program: 130
+  realizations:
+  - name: gemma4_12b.pw.n8704.m32
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 1.1
+      reference_us: 4.5
+      reference_backend: torch-eager
+- program: 130
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 2.9
-    reference_us: 4.7
-    reference_backend: torch-eager
-- name: gemma4_12b.pw.n8704.dynM
-  program: 131
+  realizations:
+  - name: gemma4_12b.pw.n8704.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 2.9
+      reference_us: 4.7
+      reference_backend: torch-eager
+- program: 131
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-    REDUCE: ''
-    STAGE: ''
-    RASTER: ''
-  measurements:
-    emmy_us: 4.9
-    reference_us: 5.4
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qkv.m64.lin
-  program: 132
+  realizations:
+  - name: gemma4_12b.pw.n8704.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 4.9
+      reference_us: 5.4
+      reference_backend: torch-eager
+- program: 132
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 70.8
-    reference_us: 50.4
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qk_global.m64.lin
-  program: 133
+  realizations:
+  - name: gemma4_12b.norm_qkv.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 70.8
+      reference_us: 50.4
+      reference_backend: torch-eager
+- program: 133
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 78.3
-    reference_us: 58.6
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_gate_up.m64.lin
-  program: 134
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 78.3
+      reference_us: 58.6
+      reference_backend: torch-eager
+- program: 134
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 400.8
-    reference_us: 298.0
-    reference_backend: torch-eager
-- name: gemma4_12b.qkv_cat.m64.lin
-  program: 135
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 400.8
+      reference_us: 298.0
+      reference_backend: torch-eager
+- program: 135
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 44.7
-    reference_us: 37.5
-    reference_backend: cublas
-- name: gemma4_12b.qk_global_cat.m64.lin
-  program: 136
+  realizations:
+  - name: gemma4_12b.qkv_cat.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 44.7
+      reference_us: 37.5
+      reference_backend: cublas
+- program: 136
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 54.5
-    reference_us: 47.4
-    reference_backend: cublas
-- name: gemma4_12b.gate_up_cat.m64.lin
-  program: 137
+  realizations:
+  - name: gemma4_12b.qk_global_cat.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 54.5
+      reference_us: 47.4
+      reference_backend: cublas
+- program: 137
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 512.5
-    reference_us: 297.0
-    reference_backend: cublas
-- name: gemma4_12b.gate_up_cat.m64.lin
-  program: 137
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f2x2/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 492.0
-    reference_us: 297.0
-    reference_backend: cublas
-- name: gemma4_12b.norm_qk_global.m4096.lin
-  program: 138
-  target:
-    origins:
-    - linear
-    - rms_norm
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 3281.9
-    reference_us: 1694.7
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_qk_global.m4096.lin
-  program: 138
-  target:
-    origins:
-    - linear
-    - rms_norm
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 2505.7
-    reference_us: 1694.7
-    reference_backend: torch-eager
-- name: gemma4_12b.norm_gate_up.m4096.lin
-  program: 139
+  realizations:
+  - name: gemma4_12b.gate_up_cat.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 512.5
+      reference_us: 297.0
+      reference_backend: cublas
+  - name: gemma4_12b.gate_up_cat.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 492.0
+      reference_us: 297.0
+      reference_backend: cublas
+- program: 138
   target:
     origins:
     - linear
     - rms_norm
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/sync
-  measurements:
-    emmy_us: 17140.7
-    reference_us: 5600.3
-    reference_backend: torch-eager
-- name: gemma4_12b.qkv_cat.m4096.lin
-  program: 45
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 3281.9
+      reference_us: 1694.7
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_qk_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 2505.7
+      reference_us: 1694.7
+      reference_backend: torch-eager
+- program: 139
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1720.3
-    reference_us: 1549.3
-    reference_backend: cublas
-- name: gemma4_12b.qkv_cat.m4096.lin
-  program: 45
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/sync
+    measurements:
+      emmy_us: 17140.7
+      reference_us: 5600.3
+      reference_backend: torch-eager
+- program: 140
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1147.9
-    reference_us: 1549.3
-    reference_backend: cublas
-- name: gemma4_12b.qk_global_cat.m4096.lin
-  program: 140
+  realizations:
+  - name: gemma4_12b.qk_global_cat.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1837.1
+      reference_us: 1639.4
+      reference_backend: cublas
+  - name: gemma4_12b.qk_global_cat.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 1268.7
+      reference_us: 1639.4
+      reference_backend: cublas
+- program: 141
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1837.1
-    reference_us: 1639.4
-    reference_backend: cublas
-- name: gemma4_12b.qk_global_cat.m4096.lin
-  program: 140
+  realizations:
+  - name: gemma4_12b.gate_up_cat.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 15838.3
+      reference_us: 5600.3
+      reference_backend: cublas
+  - name: gemma4_12b.gate_up_cat.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 4754.4
+      reference_us: 5600.3
+      reference_backend: cublas
+- program: 142
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 1268.7
-    reference_us: 1639.4
-    reference_backend: cublas
-- name: gemma4_12b.gate_up_cat.m4096.lin
-  program: 141
+  realizations:
+  - name: gemma4_12b.o_proj.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 23.3
+      reference_us: 19.0
+      reference_backend: cublas
+- program: 143
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 15838.3
-    reference_us: 5600.3
-    reference_backend: cublas
-- name: gemma4_12b.gate_up_cat.m4096.lin
-  program: 141
+  realizations:
+  - name: gemma4_12b.o_proj_global.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 39.2
+      reference_us: 37.4
+      reference_backend: cublas
+- program: 144
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 4754.4
-    reference_us: 5600.3
-    reference_backend: cublas
-- name: gemma4_12b.o_proj.m64.lin
-  program: 142
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 23.3
-    reference_us: 19.0
-    reference_backend: cublas
-- name: gemma4_12b.o_proj_global.m64.lin
-  program: 143
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 39.2
-    reference_us: 37.4
-    reference_backend: cublas
-- name: gemma4_12b.down_cat.m64.lin
-  program: 144
-  target:
-    origins:
-    - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 145.4
-    reference_us: 146.0
-    reference_backend: cublas
-- name: gemma4_12b.gate_up_cat.m1.t
-  program: 145
+  realizations:
+  - name: gemma4_12b.down_cat.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 145.4
+      reference_us: 146.0
+      reference_backend: cublas
+- program: 145
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: g16k/coop-t
-    RASTER: ''
-    STAGE: ''
-  measurements:
-    emmy_us: 258.4
-    reference_us: 264.2
-    reference_backend: cublas
-- name: gemma4_12b.qkv_cat.m1.t
-  program: 146
+  realizations:
+  - name: gemma4_12b.gate_up_cat.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g16k/coop-t
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 258.4
+      reference_us: 264.2
+      reference_backend: cublas
+- program: 146
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: g8k/coop-t
-    RASTER: ''
-    STAGE: ''
-  measurements:
-    emmy_us: 17.0
-    reference_us: 74.2
-    reference_backend: cublas
-- name: gemma4_12b.qk_global_cat.m1.t
-  program: 147
+  realizations:
+  - name: gemma4_12b.qkv_cat.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: g8k/coop-t
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 17.0
+      reference_us: 74.2
+      reference_backend: cublas
+- program: 147
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: g8k/coop-t
-    RASTER: ''
-    STAGE: ''
-  measurements:
-    emmy_us: 17.3
-    reference_us: 78.8
-    reference_backend: cublas
-- name: gemma4_12b.down_proj.m1.t
-  program: 148
+  realizations:
+  - name: gemma4_12b.qk_global_cat.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: g8k/coop-t
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 17.3
+      reference_us: 78.8
+      reference_backend: cublas
+- program: 148
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: g16k/coop-t
-    RASTER: ''
-    STAGE: ''
-  measurements:
-    emmy_us: 129.0
-    reference_us: 138.2
-    reference_backend: cublas
+  realizations:
+  - name: gemma4_12b.down_proj.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g16k/coop-t
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 129.0
+      reference_us: 138.2
+      reference_backend: cublas

@@ -45,8 +45,8 @@ def test_trace_serving_twins_requires_a_model_input() -> None:
     assert exc.value.code == 2
 
 
-def test_trace_serving_twins_rejects_invalid_release_width() -> None:
-    args = _parser().parse_args(["trace", "org/model", "--serving-twins", "--serving-width", "0"])
+def test_trace_serving_twins_requires_serving_config() -> None:
+    args = _parser().parse_args(["trace", "org/model", "--serving-twins"])
     with pytest.raises(SystemExit) as exc:
         handle_trace(args)
     assert exc.value.code == 2
@@ -67,18 +67,20 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
     output = tmp_path / "serving.yaml"
+    config = tmp_path / "release.env"
+    config.write_text(
+        f"SERVE_MODEL=cloudriftai/model-exl3\nSERVE_REVISION=0123456789abcdef0123456789abcdef01234567\n"
+        f"SERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={output}\nSERVE_DECODE_BUCKET=64\n"
+        'SERVE_MAX_NUM_BATCHED_TOKENS=1088\nSERVE_PREFILL_BUCKET=512\nSERVE_WARM_SHAPES=":: :1024:1088:fm"\n'.replace(":: ", "::1088 ")
+    )
     handle_trace(
         _parser().parse_args(
             [
                 "trace",
                 str(tmp_path / "local-checkpoint"),
                 "--serving-twins",
-                "--decode-bucket",
-                "64",
-                "--prefill-bucket",
-                "512",
-                "--serving-width",
-                "1024",
+                "--serving-config",
+                str(config),
                 "--model-provenance",
                 "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567",
                 "-o",
@@ -91,14 +93,18 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     records = load_golden_records(document)
     assert captured == {
         "model": str(tmp_path / "local-checkpoint"),
-        "decode_bucket": 64,
-        "prefill_bucket": 512,
-        "extra_widths": (1024,),
-        "static_only": False,
+        "decode_bucket": 0,
+        "prefill_bucket": 0,
     }
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None and not record.origins for record in records)
+    assert {(record.bindings, record.pins) for record in records} >= {
+        ((("num_tokens", 64),), (("FAST_MATH", False),)),
+        ((("num_tokens", 1024),), (("FAST_MATH", True),)),
+        ((), (("FAST_MATH", False),)),
+        ((), (("FAST_MATH", True),)),
+    }
 
 
 def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatch, tmp_path) -> None:
@@ -113,17 +119,20 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
     output = tmp_path / "static.yaml"
+    config = tmp_path / "static.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={output}\nSERVE_STATIC_ONLY=1\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=1\nSERVE_DECODE_BUCKET=1\nSERVE_PREFILL_CAPACITY=1\n"
+        "SERVE_PREFILL_BUCKET=0\nSERVE_M1_TIER=1\nSERVE_CAPTURE_SIZES=[1]\n"
+    )
     handle_trace(
         _parser().parse_args(
             [
                 "trace",
                 "org/model",
                 "--serving-twins",
-                "--static-only-release",
-                "--decode-bucket",
-                "1",
-                "--prefill-bucket",
-                "0",
+                "--serving-config",
+                str(config),
                 "-o",
                 str(output),
             ]
@@ -132,15 +141,20 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
 
     assert captured == {
         "model": "org/model",
-        "decode_bucket": 1,
+        "decode_bucket": 0,
         "prefill_bucket": 0,
-        "extra_widths": (),
-        "static_only": True,
     }
+    records = load_golden_records(load_golden_file(output))
+    assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
 
 
-def test_trace_static_only_release_rejects_non_m1_scope() -> None:
-    args = _parser().parse_args(["trace", "org/model", "--serving-twins", "--static-only-release"])
+def test_trace_static_only_release_rejects_unsafe_config(tmp_path) -> None:
+    config = tmp_path / "bad.env"
+    config.write_text(
+        "SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE=golden.yaml\nSERVE_STATIC_ONLY=1\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=8\nSERVE_DECODE_BUCKET=1\n"
+    )
+    args = _parser().parse_args(["trace", "org/model", "--serving-twins", "--serving-config", str(config)])
     with pytest.raises(SystemExit) as exc:
         handle_trace(args)
     assert exc.value.code == 2
@@ -177,7 +191,8 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     first_doc, second_doc = load_golden_file(first), load_golden_file(second)
     assert first_doc == second_doc
     assert first_doc["programs"] and first_doc["configs"]
-    assert all(set(entry) == {"name", "program", "target"} for entry in first_doc["configs"])
+    assert all(set(entry) == {"program", "target", "realizations"} for entry in first_doc["configs"])
+    assert all(set(entry["realizations"][0]) == {"name", "bindings", "pins"} for entry in first_doc["configs"])
     assert all(set(entry["target"]) == {"origins"} for entry in first_doc["configs"])
 
 

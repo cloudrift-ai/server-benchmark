@@ -162,7 +162,7 @@ def resolve_golden_arg(args) -> None:
 
     ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
     golden name first, else a name **substring** — so the identifier used to inspect
-    a golden (``eval golden --kernel <substr>``) can be reused verbatim to run /
+    a golden (selected through ``--golden-file``) can be reused verbatim to run /
     compile it. Because compile/run build a single graph, the substring
     must name **one** shape: a match spanning several shapes exits 2 listing them.
     Exits 2 on an unknown name (listing the available names) or a conflict with
@@ -189,8 +189,6 @@ def resolve_golden_arg(args) -> None:
         sys.exit(2)
     from emmy.compiler.pipeline.search.golden import (
         GOLDEN_RECORDS,
-        GoldenEntryState,
-        golden_entry_state,
         goldens_for_live_gpu,
         load_golden_file,
         load_golden_records,
@@ -237,7 +235,7 @@ def resolve_golden_arg(args) -> None:
 
     pinned = matches
     if document is not None:
-        pinned = [records[index] for index in match_indexes if golden_entry_state(document["configs"][index]) == GoldenEntryState.VERIFIED]
+        pinned = [record for record in matches if record.measurements is not None]
     args.golden_configs = [Sample.from_golden(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",

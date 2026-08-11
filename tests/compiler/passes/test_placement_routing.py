@@ -80,6 +80,8 @@ def test_is_routing_reads_place_only_knob_dicts() -> None:
         program_index=0,
         program_wire={"inputs": [], "outputs": [], "nodes": []},
         origins=(),
+        bindings=(),
+        pins=(("FAST_MATH", False),),
         knobs={},
         measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "test"},
         ranking=None,

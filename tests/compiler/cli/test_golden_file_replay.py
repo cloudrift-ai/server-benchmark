@@ -25,11 +25,12 @@ def _working_loop(path, *, state="inventory"):
     )
     document = load_golden_file(path)
     entry = document["configs"][0]
-    entry["name"] = "working.relu"
+    realization = entry["realizations"][0]
+    realization["name"] = "working.relu"
     if state in {"proposal", "verified"}:
-        entry["knobs"] = {"WORK": "w1x1"}
+        realization["knobs"] = {"WORK": "w1x1"}
     if state == "verified":
-        entry["measurements"] = {
+        realization["measurements"] = {
             "emmy_us": 1.0,
             "reference_us": 2.0,
             "reference_backend": "torch",
@@ -126,6 +127,7 @@ def test_working_proposal_supplies_graph_but_is_not_automatically_pinned(tmp_pat
 
 def test_working_verified_row_is_automatically_pinned(tmp_path):
     from emmy.commands.compile import resolve_golden_arg
+    from emmy.commands.run import _sample_replay_knobs
 
     path = tmp_path / "working.yaml"
     _working_loop(path, state="verified")
@@ -135,3 +137,5 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
 
     assert len(args.golden_configs) == 1
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
+    assert args.golden_configs[0].pins == {"FAST_MATH": False}
+    assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": False, "WORK": "w1x1"}

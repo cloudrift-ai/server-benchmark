@@ -38,10 +38,11 @@ def _args(path, **over):
     return SimpleNamespace(**values)
 
 
-def _matmul(name: str, *, knobs=None, emmy_us=None, cublas_us=None):
+def _matmul(name: str, *, pins=None, knobs=None, emmy_us=None, cublas_us=None):
     entry = {
         "name": name,
-        "target": {"origins": ["matmul"]},
+        "bindings": {},
+        "pins": {"FAST_MATH": False} if pins is None else pins,
     }
     if knobs is not None:
         entry["knobs"] = knobs
@@ -62,12 +63,12 @@ def _document(*entries):
     graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
     programs = []
     program_index = intern_program(programs, graph)
-    rows = []
-    for entry in entries:
-        row = dict(entry)
-        row["program"] = program_index
-        rows.append(row)
-    return {"compute_cap": [8, 9], "programs": programs, "configs": rows}
+    config = {
+        "program": program_index,
+        "target": {"origins": ["matmul"]},
+        "realizations": [dict(entry) for entry in entries],
+    }
+    return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
 
 
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
@@ -76,12 +77,27 @@ def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_pa
 
     document, targets = load_working_targets(path)
 
-    assert document["configs"][0]["name"] == "mm"
+    assert document["configs"][0]["realizations"][0]["name"] == "mm"
     assert len(targets) == 1
     mm = targets[0]
     assert mm.code is None and mm.input is None and isinstance(mm.program.nodes["matmul"].op, MatmulOp)
-    assert mm.entry_indexes == [0, 1]
-    assert mm.proposals == [(1, {"TILE": "f2x2"})]
+    assert mm.entry_indexes == [(0, 0), (0, 1)]
+    assert mm.proposals == [((0, 1), {"TILE": "f2x2"})]
+
+
+def test_working_file_keeps_distinct_input_pin_regimes_separate(tmp_path):
+    path = tmp_path / "trace.yaml"
+    dump_golden_file(
+        _document(
+            _matmul("mm", pins={"FAST_MATH": False}),
+            _matmul("mm", pins={"FAST_MATH": True}),
+        ),
+        path,
+    )
+
+    _, targets = load_working_targets(path)
+
+    assert [target.pins for target in targets] == [{"FAST_MATH": False}, {"FAST_MATH": True}]
 
 
 def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
@@ -90,8 +106,8 @@ def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
 
     loaded_document, targets = load_working_targets(path)
 
-    assert targets[0].entry_indexes == [0, 1]
-    assert targets[0].proposals == [(1, {})]
+    assert targets[0].entry_indexes == [(0, 0), (0, 1)]
+    assert targets[0].proposals == [((0, 1), {})]
     assert set(loaded_document) == {"compute_cap", "programs", "configs"}
 
 
@@ -153,11 +169,12 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     )
 
     got = load_golden_file(path)
-    assert "ranking" not in got["configs"][0]
-    assert got["configs"][0]["measurements"]["emmy_us"] == 9.0
-    assert got["configs"][1]["ranking"]["source"] == "proposal"
-    assert got["configs"][1]["ranking"]["latency_us"] == 8.0
-    winner = got["configs"][2]
+    realizations = got["configs"][0]["realizations"]
+    assert "ranking" not in realizations[0]
+    assert realizations[0]["measurements"]["emmy_us"] == 9.0
+    assert realizations[1]["ranking"]["source"] == "proposal"
+    assert realizations[1]["ranking"]["latency_us"] == 8.0
+    winner = realizations[2]
     assert winner["knobs"] == {"TILE": "f8x2"}
     assert winner["ranking"]["source"] == "tune"
     assert winner["ranking"]["tune_winner"] is True
@@ -174,7 +191,7 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
 
     got = load_golden_file(path)
     assert len(got["configs"]) == 1
-    assert got["configs"][0]["name"] == "mm"
+    assert got["configs"][0]["realizations"][0]["name"] == "mm"
     assert got["configs"][0]["target"] == {"origins": ["matmul"]}
 
 
@@ -199,8 +216,13 @@ def test_copied_repository_rows_resolve_as_working_candidates(tmp_path):
 
     _loaded, targets = load_working_targets(copied)
 
-    proposal_indexes = {i for target in targets for i, _knobs in target.proposals}
-    assert proposal_indexes == set(range(len(document["configs"])))
+    proposal_indexes = {path for target in targets for path, _knobs in target.proposals}
+    expected = {
+        (config_index, realization_index)
+        for config_index, config in enumerate(document["configs"])
+        for realization_index, _realization in enumerate(config["realizations"])
+    }
+    assert proposal_indexes == expected
 
 
 def test_working_gpu_guard_allows_portable_trace_and_rejects_mismatch():
@@ -265,7 +287,7 @@ def test_tune_one_measures_proposals_before_mcts_and_deducts_reserved_slots(monk
         db=object(),
         ctx=SimpleNamespace(compile_flags="-O1"),
         dump=None,
-        proposals=[(0, {"TILE": "a"}), (1, {"TILE": "b"})],
+        proposals=[((0, 0), {"TILE": "a"}), ((0, 1), {"TILE": "b"})],
         proposal_ranking_callback=persist,
     )
 

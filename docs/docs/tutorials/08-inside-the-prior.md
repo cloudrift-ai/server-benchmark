@@ -180,7 +180,7 @@ emmy eval online
 Print the feature row the model actually sees for each golden:
 
 ```bash
-emmy eval golden --features
+emmy eval online --features
 ```
 
 And refit the offline half from the golden configurations, with cross-validation, no GPU required:

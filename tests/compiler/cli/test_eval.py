@@ -69,60 +69,150 @@ def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> N
     con.close()
 
 
-def test_strict_serving_golden_flags_are_in_model_only_and_validate_widths(run_cli):
-    rc, stdout, stderr = run_cli("eval", "golden", "--strict-major-gaps")
+def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
+    rc, stdout, stderr = run_cli("eval", "golden")
     assert rc == 2
-    assert "require --in-model" in stdout + stderr
+    assert "GOLDEN_YAML" in stdout + stderr
 
-    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--serving-width", "0")
-    assert rc == 2
-    assert "must be positive" in stdout + stderr
-
-    rc, stdout, stderr = run_cli("eval", "golden", "--checkpoint", "/local/checkpoint")
-    assert rc == 2
-    assert "require --in-model" in stdout + stderr
-
-    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--checkpoint", "/local/checkpoint")
-    assert rc == 2
-    assert "requires --model" in stdout + stderr
-
-    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--static-only-release")
-    assert rc == 2
-    assert "requires --release-config" in stdout + stderr
-
-    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--release-config", "/tmp/release.env")
-    assert rc == 2
-    assert "only valid with --static-only-release" in stdout + stderr
-
-    rc, stdout, stderr = run_cli(
-        "eval",
-        "golden",
-        "--in-model",
-        "--static-only-release",
-        "--release-config",
-        "/tmp/release.env",
-        "--serving-width",
-        "8",
+    golden = tmp_path / "given.yaml"
+    configured = tmp_path / "configured.yaml"
+    config = tmp_path / "release.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={configured}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
     )
+    rc, stdout, stderr = run_cli("eval", "golden", str(golden), "--serving-config", str(config))
     assert rc == 2
-    assert "cannot include additional" in stdout + stderr
+    assert "serving config names" in stdout + stderr
 
 
-def test_in_model_audit_fails_cleanly_when_provider_rejects_shape(monkeypatch, caplog):
+def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
+    from emmy.serving.release import load_serving_config
+
+    golden = tmp_path / "golden.yaml"
+    config = tmp_path / "release.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={golden}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=72\nSERVE_DECODE_BUCKET=8\nSERVE_PREFILL_CAPACITY=64\n"
+        'SERVE_WARM_SHAPES="32:64:96:fm"\n'
+    )
+
+    serving = load_serving_config(config)
+
+    got = {(dict(row.bindings).get("num_tokens"), row.pins) for row in serving.realizations}
+    assert got == {
+        *((width, (("FAST_MATH", False),)) for width in (None, 1, 8, 64)),
+        *((width, (("FAST_MATH", True),)) for width in (None, 1, 32, 64)),
+    }
+
+
+def _write_release_golden(path: Path, realizations: list[dict]) -> None:
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    terminal = graph.producer(graph.outputs[0])
+    dump_golden_file(
+        {
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": [8, 9],
+            "model": "org/model",
+            "programs": [graph_to_wire(graph)],
+            "configs": [{"program": 0, "target": {"origins": [terminal.id]}, "realizations": realizations}],
+        },
+        path,
+        validation=GoldenFileValidation.REPOSITORY,
+    )
+
+
+def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.compiler.pipeline.search.audit as audit
+    import emmy.serving.twins as twins
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.yaml"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "relu.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_STATIC_ONLY=1\nSERVE_MAX_NUM_BATCHED_TOKENS=1\nSERVE_DECODE_BUCKET=1\n"
+        "SERVE_PREFILL_CAPACITY=1\nSERVE_PREFILL_BUCKET=0\nSERVE_M1_TIER=1\nSERVE_CAPTURE_SIZES=[1]\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    captured = {}
+
+    def fake_capture(source, **kwargs):
+        captured["capture"] = (source, kwargs)
+        return {"pre1": object()}
+
+    def fake_audit(graphs, gpu_name, compute_cap, *, goldens):
+        captured["audit"] = (graphs, gpu_name, compute_cap, goldens)
+        return {"pre1": [{"verdict": "MATCH"}]}
+
+    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(audit, "audit_card", fake_audit)
+    monkeypatch.setattr(audit, "summarize", lambda _results: {"MATCH": 1, "DRIFT": 0, "GAP": 0, audit.COMPILE_FAIL: 0})
+    monkeypatch.setattr(audit, "gap_keys", lambda _results: set())
+
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+
+    assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
+    _, gpu_name, compute_cap, records = captured["audit"]
+    assert (gpu_name, compute_cap) == ("NVIDIA GeForce RTX 4090", (8, 9))
+    assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
+
+
+def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     import pytest
 
-    import emmy.compiler.pipeline.search.golden as golden
-    import emmy.serving.twins as twins
-    from emmy.commands.eval import _in_model_audit
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.context import Context
 
-    model = "deepseek-ai/DeepSeek-V4-Flash-0731"
-    monkeypatch.setattr(golden, "GOLDEN_RECORDS", [SimpleNamespace(model=model, gpu_name="Tesla V100-SXM3-32GB", compute_cap=(7, 0))])
-    monkeypatch.setattr(twins, "capture_in_model_graphs", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("fixed width")))
-    with pytest.raises(SystemExit, match="1"):
-        _in_model_audit(model, extra_widths=(64,))
-    assert f"in-model audit cannot represent {model}: fixed width" in caplog.text
+    golden = tmp_path / "golden.yaml"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "relu.m8",
+                "bindings": {"num_tokens": 8},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
+        "SERVE_PREFILL_CAPACITY=32\nSERVE_PREFILL_BUCKET=0\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+
+    with pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+    assert exc.value.code == 1
 
 
 def test_knobs_missing_db(run_cli, tmp_path):
@@ -613,6 +703,8 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
             program_index=0,
             program_wire=graph_to_wire(graph),
             origins=("matmul",),
+            bindings=(),
+            pins=(("FAST_MATH", False),),
             knobs=knobs,
             measurements={"emmy_us": us, "reference_us": us, "reference_backend": "torch"},
             ranking=None,
@@ -638,11 +730,11 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
     assert any("FALL-THROUGH" in m and "audit.orphan" in m for m in msgs)
     assert not any("FALL-THROUGH" in m and "audit.floored" in m for m in msgs)
 
-    # A set whose every entry realizes un-pinned is clean: no flags, audit returns False.
+    # A set whose every entry realizes without additional winner pins is clean.
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit([floored[1]])
     assert fell is False
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("realize un-pinned" in m for m in msgs)
+    assert any("realize in their input regimes" in m for m in msgs)
     assert not any("PIN-ONLY" in m or "FALL-THROUGH" in m for m in msgs)

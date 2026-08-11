@@ -215,7 +215,7 @@ def test_every_stored_golden_spelling_is_canonical(trees):
             # persisted algebra is the authoritative tree for path-key spelling. Cooperative
             # reductions lower to a partial and finalize kernel, so a target may contribute
             # more than one recognized tree.
-            with pinned_knobs(cfg.knobs):
+            with pinned_knobs({**cfg.pin_map, **cfg.knobs}):
                 roots = _trees(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
             assert roots, f"{fname}:{cfg.name}: Loop target lowered to no TileOps"
             kind = "loop"

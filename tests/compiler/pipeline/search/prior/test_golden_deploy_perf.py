@@ -32,7 +32,8 @@ def _single_gpu_goldens(monkeypatch):
             compute_cap=(12, 0),
             shape_key=ShapeKey.from_matmul(size, size, size, dtype),
             emmy_us=latency,
-            fast_math=False,
+            pins=(("FAST_MATH", False),),
+            pin_map={"FAST_MATH": False},
             is_matmul=True,
         )
         for name, size, dtype, latency in (

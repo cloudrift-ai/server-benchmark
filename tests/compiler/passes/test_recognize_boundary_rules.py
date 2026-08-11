@@ -391,13 +391,10 @@ def _normed_sdpa_graph():
 
 
 def test_normed_gqa_sdpa_certifies_flash():
-    """The fused flash form must certify when Q/K/V ride computed (RMSNorm) cones — the
-    fusion-boundary guards keep the cones materialized (flash streams plain buffers) instead
-    of letting them de-certify the unit: the P@V product merges with its sum-reduce FIRST
-    (`_pending_contraction_half`), nothing compute-bearing fuses into the (future) offer site
-    (`_sum_contracts_exp_producer` / `is_fold_offer_site`), and the score producer keeps
-    plain-Load Q/K (`_feeds_softmax`). Pre-guards this graph lowered to a fragmented sdpa
-    whose P@V wrote its full [b,h,m,n,d] outer product (Gemma finding 2)."""
+    """The fused flash form must certify when gate-free loop fusion moves RMSNorm'd Q/K
+    cones into the repeated score contractions. The existing flash recognizer recovers those
+    cones as computed operand ``Fold`` edges while V remains materialized, so it neither loses
+    normalization semantics nor fragments SDPA into a full [b,h,m,n,d] outer product."""
     pytest.importorskip("torch")
 
     def decide(fp):
@@ -416,6 +413,7 @@ def test_normed_gqa_sdpa_certifies_flash():
     src = flash[0].op.operands[0]
     first = src.step_stmts()[0]
     assert getattr(first, "role", None) is AxisRole.CONTRACTION, "flash did not absorb the score contraction (fold stayed cut)"
+    assert not isinstance(first.a, Load) and not isinstance(first.b, Load), "normalized Q/K cones were reduced to raw loads"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():

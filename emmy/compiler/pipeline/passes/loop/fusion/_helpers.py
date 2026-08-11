@@ -2,10 +2,10 @@
 
 Lives in a ``_``-prefixed module so the pass loader skips it (only
 ``NNN_<name>.py`` files are loaded as rules — see ``Pass.load``). Both
-``010_merge_loop_ops`` and ``005_split_shared_indexmap`` import from here,
-so the pure-indexmap predicate and the Write-output renamer stay defined
-once. The splice/fragment plumbing for a one- or multi-consumer region
-also lives here, keeping graph assembly separate from fusion policy.
+``010_merge_loop_ops`` and ``005_split_shared_indexmap`` import the shared
+splice/fragment plumbing from here, keeping graph assembly separate from
+fusion policy. The fan-out splitter also owns its dtype-preserving index-map
+predicate here.
 """
 
 from __future__ import annotations
@@ -38,8 +38,7 @@ def is_castfree_indexmap(graph: Graph, producer) -> bool:
     ``005_split_cast_from_indexmap``) lifts to the same Assign-free load→write body as a re-index,
     but dissolving it erases the dtype boundary the operand-staging gates key on — and a consumer
     reading the wide buffer through the narrow declared dtype decodes garbage (the fan-out cast on
-    a merged sibling-linear projection: fp32 bytes read as fp16 denormals). Shared by
-    ``010_merge_loop_ops`` and ``005_split_shared_indexmap``."""
+    a merged sibling-linear projection: fp32 bytes read as fp16 denormals)."""
     if not is_pure_indexmap(producer.op):
         return False
     out_dt = producer.output.dtype.name

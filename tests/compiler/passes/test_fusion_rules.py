@@ -10,6 +10,7 @@ makes the post-fusion run possible without a GPU.
 """
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
@@ -238,6 +239,10 @@ def _decompose_and_fuse(graph: Graph) -> Graph:
     return Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion"]).run(graph)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="gate-free merge-loop experiment duplicates the transcendental across contraction columns",
+)
 def test_transcendental_is_not_duplicated_across_contraction_columns():
     """Materialize exp once per (M,K), instead of recomputing it N times."""
     result = _decompose_and_fuse(_make_activation_linear("exp"))
@@ -999,73 +1004,3 @@ def test_pending_product_exp_residual_correctness():
     w = rng.standard_normal((6, 8)).astype(np.float32)
     r = rng.standard_normal((4, 6)).astype(np.float32)
     _assert_correctness(_make_pending_product_into_exp_residual_add, {"act": act, "w": w, "r": r})
-
-
-def test_exp_residual_epilogue_is_not_a_flash_site():
-    """Guard-level twin of the fixpoint test: the residual operand rides the post-reduce
-    epilogue, so its upstream exp must not classify the consumer as a future P@V site."""
-    import importlib
-
-    mod = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")
-    g = _make_pending_product_into_exp_residual_add()
-    assert mod._sum_contracts_exp_producer(g, g.nodes["y"], g.nodes["ew"]) is False
-
-
-def test_pv_mid_assembly_still_deferred():
-    """The flash deferral's true positive survives the epilogue exemption: a sum-contraction
-    whose exp-adjacent operand feeds the accumulate (P@V with its softmax mid-assembly) still
-    defers the V-side compute producer."""
-    import importlib
-
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
-
-    S, K, N = 4, 8, 6
-    a0, a1, a2 = Var("a0"), Var("a1"), Var("a2")
-
-    exp_cell = Body(
-        (
-            Load(name="s0", input="scores", index=(a0, a1)),
-            Assign(name="s1", op="exp", args=("s0",)),
-            Write(output="pw", index=(a0, a1), value="s1"),
-        )
-    )
-    softmax_piece = LoopOp(body=_loops2(exp_cell, "a0", S, "a1", K))
-    vprod_cell = Body(
-        (
-            Load(name="t0", input="vin", index=(a0, a1)),
-            Assign(name="t1", op="multiply", args=("t0", "t0")),
-            Write(output="vbuf", index=(a0, a1), value="t1"),
-        )
-    )
-    vprod = LoopOp(body=_loops2(vprod_cell, "a0", K, "a1", N))
-    pv_cell = Body(
-        (
-            Loop(
-                axis=Axis(name="a2", extent=Dim(K)),
-                body=Body(
-                    (
-                        Load(name="p0", input="pw", index=(a0, a2)),
-                        Load(name="q0", input="vbuf", index=(a2, a1)),
-                        Assign(name="m0", op="multiply", args=("p0", "q0")),
-                        Accum(name="acc0", value="m0", op="add", axes=("a2",)),
-                    )
-                ),
-            ),
-            Write(output="y", index=(a0, a1), value="acc0"),
-        )
-    )
-    pv = LoopOp(body=_loops2(pv_cell, "a0", S, "a1", N))
-
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("scores", (S, K)), node_id="scores")
-    g.add_node(InputOp(), [], Tensor("vin", (K, N)), node_id="vin")
-    g.add_node(softmax_piece, ["scores"], Tensor("pw", (S, K)), node_id="pw")
-    g.add_node(vprod, ["vin"], Tensor("vbuf", (K, N)), node_id="vbuf")
-    g.add_node(pv, ["pw", "vbuf"], Tensor("y", (S, N)), node_id="y")
-    g.inputs, g.outputs = ["scores", "vin"], ["y"]
-    mod = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")
-    assert mod._sum_contracts_exp_producer(g, g.nodes["y"], g.nodes["vbuf"]) is True

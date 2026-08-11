@@ -136,13 +136,22 @@ jobs:
           printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
           chmod 600 "$AGENT_KEY_FILE"
           unset CLOUDRIFT_API_KEY
-          exec env -u CLOUDRIFT_API_KEY ./venv/bin/emmy agent run \
+          set +e
+          env -u CLOUDRIFT_API_KEY ./venv/bin/emmy agent run \
             --api-key-file "$AGENT_KEY_FILE" \
             --skill .claude/skills/discover-models/SKILL.md \
             --prompt "$AGENT_PROMPT" \
             --model "$AGENT_MODEL" \
             --output "$AGENT_TRANSCRIPT" \
             --allow-write "$AGENT_MANIFEST"
+          agent_status=$?
+          set -e
+          if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_MANIFEST" ]; then
+            exit "$agent_status"
+          fi
+          if [ "$agent_status" -ne 0 ]; then
+            echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
+          fi
 
       - name: Verify discovery was read-only
         run: test -z "$(git status --porcelain)"

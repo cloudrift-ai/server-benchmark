@@ -14,9 +14,10 @@ import numpy as np
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline import Pipeline
 
 rng = np.random.default_rng(0)
@@ -200,8 +201,8 @@ def test_reconvergent_indexmap_is_owned_by_shared_region_merge():
     assert sum(isinstance(stmt, Load) and stmt.input == "one" for stmt in kernel.op.body.iter()) == 1
 
 
-def test_typed_copy_fanout_stays_outside_pending_contraction():
-    """A fan-out cannot bypass the same typed contraction boundary as a pair."""
+def test_typed_copy_fanout_fuses_after_contraction_halves_join():
+    """A fan-out retains its precision copy inside the complete contraction."""
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (2, 4), "f32"), node_id="x")
     g.add_node(ElementwiseOp("copy"), ["x"], Tensor("narrow", (2, 4), "f16"), node_id="narrow")
@@ -211,7 +212,9 @@ def test_typed_copy_fanout_stays_outside_pending_contraction():
     g.inputs, g.outputs = ["x"], ["out"]
 
     result = _fuse(g)
-    assert any(node.output.dtype.name == "f16" and _assign_fns(node.op.body) == ["copy"] for node in _kernel_nodes(result))
+    (kernel,) = _kernel_nodes(result)
+    assert "copy" in _assign_fns(kernel.op.body)
+    assert any(isinstance(stmt, Accum) for stmt in kernel.op.body.iter())
 
 
 # ===================================================================
@@ -261,6 +264,42 @@ def test_multisource_gated_activation_still_fuses_into_contraction():
 
     result = _decompose_and_fuse(g)
     assert len(_kernel_nodes(result)) == 1
+
+
+def test_packed_gated_activation_still_fuses_into_contraction():
+    """SSA fusion must retain the two lanes of a packed gate/up projection."""
+    m, k, n = 2, 16, 16
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("packed", (m, 2 * k)), node_id="packed")
+    g.add_node(InputOp(), [], Tensor("w", (n, k)), node_id="w")
+    g.add_node(
+        IndexMapOp(out_shape=(m, k), sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1))),)),
+        ["packed"],
+        Tensor("gate", (m, k)),
+        node_id="gate",
+    )
+    g.add_node(
+        IndexMapOp(
+            out_shape=(m, k),
+            sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1) + Literal(k, "int"))),),
+        ),
+        ["packed"],
+        Tensor("up", (m, k)),
+        node_id="up",
+    )
+    g.add_node(ElementwiseOp("tanh"), ["gate"], Tensor("activated", (m, k)), node_id="activated")
+    g.add_node(ElementwiseOp("multiply"), ["activated", "up"], Tensor("gated", (m, k)), node_id="gated")
+    g.add_node(LinearOp(), ["gated", "w"], Tensor("out", (m, n)), node_id="out")
+    g.inputs, g.outputs = ["packed", "w"], ["out"]
+
+    inputs = {
+        "packed": rng.standard_normal((m, 2 * k)).astype(np.float32),
+        "w": rng.standard_normal((n, k)).astype(np.float32),
+    }
+    before = _run(g, inputs)
+    result = _decompose_and_fuse(g)
+    assert len(_kernel_nodes(result)) == 1
+    _assert_close(before, _run(result, inputs))
 
 
 # ===================================================================

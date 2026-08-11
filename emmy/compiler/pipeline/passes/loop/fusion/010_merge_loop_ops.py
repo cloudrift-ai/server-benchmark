@@ -170,9 +170,25 @@ def _has_peer_activation_input(graph: Graph, producer: Node, consumer: Node) -> 
     """Whether the consumer combines the activation with a peer value.
 
     A merged sibling-linear may expose gate and up as two slices of one
-    packed buffer, so the peer can have a different declared shape while
-    still being an ancestor shared by the activation and its consumer.
+    packed buffer. Once the complete gated activation has fused into one
+    LoopOp those slices are no longer separate graph inputs: they are distinct
+    coordinate reads of the same packed input. Preserve that information so
+    region fusion does not misclassify GeGLU/SwiGLU as a unary activation and
+    materialize a serving kernel that already has measured fused goldens.
+
+    Before the activation itself is fused, the peer can instead have a
+    different declared shape while still being an ancestor shared by the
+    activation and its consumer. Keep that established graph-level check too.
     """
+    load_sites: dict[str, set[tuple]] = {}
+    for load in producer.op.body.loads:
+        tensor = graph.buffer(load.input)
+        if tensor is None or not tensor.shape or all(dim.is_static and dim.as_static() == 1 for dim in tensor.shape):
+            continue
+        load_sites.setdefault(load.input, set()).add(load.index)
+    if any(len(indices) > 1 for indices in load_sites.values()):
+        return True
+
     shape = producer.output.shape
     ancestors: set[str] = set()
     pending = list(producer.inputs)
@@ -272,22 +288,6 @@ def _is_castfree_indexmap(graph: Graph, producer: Node) -> bool:
     materialized at the traced cast boundary. Shared logic in ``_helpers`` — the fan-out
     splitter needs the same gate."""
     return _is_castfree_indexmap_shared(graph, producer)
-
-
-def _is_typed_copy_boundary(graph: Graph, producer: Node) -> bool:
-    """A scalar-copy Loop whose declared output dtype narrows an input.
-
-    Keep this boundary on the contraction input buffer. Fusing it into the
-    contraction leaves a wide gmem source with an inline narrow copy, which is
-    numerically valid but hides the actual MMA operand dtype from staging.
-    Fusing the preceding producer into this copy remains allowed, so the copy
-    becomes that producer's epilogue rather than a standalone kernel.
-    """
-    assigns = [stmt for stmt in producer.op.body.iter() if isinstance(stmt, Assign)]
-    if not assigns or any(stmt.op.name != "copy" for stmt in assigns) or any(isinstance(stmt, Accum) for stmt in producer.op.body.iter()):
-        return False
-    out_dtype = producer.output.dtype.name
-    return any((tensor := graph.buffer(inp)) is not None and tensor.dtype.name != out_dtype for inp in producer.inputs)
 
 
 def _is_softmax_shaped(op) -> bool:
@@ -451,9 +451,6 @@ def _guard_region_member(graph: Graph, member: Node, sink: Node) -> None:
 
     if _is_pure_indexmap(member.op) and not _is_castfree_indexmap(graph, member) and _is_pure_indexmap(sink.op):
         raise RuleSkipped("cast copy feeding indexmap plumbing — the cast stays at the traced dtype boundary")
-
-    if _is_typed_copy_boundary(graph, member) and any(isinstance(stmt, Accum) for stmt in sink.op.body.iter()):
-        raise RuleSkipped("typed copy stays on the contraction input buffer")
 
     if not _is_castfree_indexmap(graph, member) and _pending_contraction_half(graph, sink):
         raise RuleSkipped("sink is an unfused contraction half — the product merges with its reduce first")

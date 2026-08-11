@@ -857,7 +857,7 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int 
             "dynamic": getattr(args, "dynamic", None),
         }
         try:
-            full, _, _, full_captured = asyncio.run(
+            full, _, _, full_captured, _ = asyncio.run(
                 benchmark_compare_isolated_async(
                     lowered=assembled,
                     torch_spec=("trace_args", trace_args),
@@ -921,7 +921,7 @@ def _bench_per_kernel(args, dump, db, *, device_id: int | None = None, ctx=None)
             tail = _passes_after_stage(_detect_stage(g))
             # No dump here — re-creating a CompilerDump on the repro dir would rmtree it.
             lowered = Pipeline.build(tail).run(g, ctx=ctx, db=db) if tail else g
-            results, _, _, captured = asyncio.run(
+            results, _, reference_available, captured, accuracy_error = asyncio.run(
                 benchmark_compare_isolated_async(
                     lowered=lowered,
                     torch_spec=("frontend_graph", fe),
@@ -938,9 +938,20 @@ def _bench_per_kernel(args, dump, db, *, device_id: int | None = None, ctx=None)
             sys.stderr.write(f"[tune]   {label}: skipped ({exc})\n")
             continue
         rows.append((label, results))
-        records.append({"kernel": name, "label": label, "captured": captured, "backends": results})
+        records.append(
+            {
+                "kernel": name,
+                "label": label,
+                "captured": captured,
+                "reference_available": reference_available,
+                "accuracy_error": accuracy_error,
+                "backends": results,
+            }
+        )
         if not captured:
             fallback.append(label)
+        if accuracy_error is not None:
+            sys.stderr.write(f"[tune]   {label}: accuracy failed ({accuracy_error})\n")
         dp = results.get("Emmy")
         sys.stderr.write(f"[tune]   {label}: emmy={dp:.0f}us\n" if dp is not None else f"[tune]   {label}: (no result)\n")
     if records:

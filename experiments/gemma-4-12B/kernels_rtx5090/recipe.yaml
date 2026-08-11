@@ -30,7 +30,8 @@ command:
   result_files:
     - "std/*"
     - "fm/*"
-  # ~70 golden cases x 2 lanes at -O3; a cold cubin cache pays every nvcc compile.
+  # All matching card-local realizations x 2 lanes at -O3 (309 per lane in the current inventory); a cold cubin cache
+  # pays every nvcc compile.
   timeout: 21600
 
 matrices:

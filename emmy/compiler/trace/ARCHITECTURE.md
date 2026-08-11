@@ -30,6 +30,15 @@ or a view created before the write still fails closed; those forms need general 
 functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
 instead of becoming NaN through arithmetic selection.
 
+A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
+`fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
+slice/select chain rooted at a local value can also reassemble that base with the filled rectangle. Multidimensional
+roll, dynamic or strided views, input/parameter mutation, used mutation returns, and aliases created before the write
+fail closed.
+
+Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
+instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
+
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
 `operator.getitem` resolves an integer tuple index to the matching slice, so no multi-output Graph IR is introduced.
@@ -132,6 +141,8 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   A model's `routed_scaling_factor` multiplies only the routed expert result before that shared-expert addition.
   Laguna's optional softplus `g_proj` attention gate is likewise retained in both dense and MoE post-attention
   programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
+  The split reads an explicit gate layout when the Transformers module provides one and otherwise derives it from the
+  gate, query-projection, and head widths, covering older built-in Laguna modules without a model-name special case.
   Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
   DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
   above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
@@ -177,7 +188,7 @@ deliberately retains every mutating ATen schema as impure, including mutations o
 escape the function. Reverse reachability removes those local branches; ATen schema aliases additionally retain a
 write through a view of a returned tensor. An unsupported operation on an observable path remains live and fails
 loudly, so the filter is not an operator-support fallback. Retaining a write does not itself functionalize storage:
-`copy_` handles the bounded local-allocation slice form above and separately rejects aliases that cannot be versioned.
+`copy_` and `fill_` handle the bounded local view forms above and separately reject aliases that cannot be versioned.
 
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —

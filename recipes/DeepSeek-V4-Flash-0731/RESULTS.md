@@ -1,55 +1,66 @@
-# DeepSeek V4 Flash 0731 on 16x V100 SXM3 32GB
+# DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
-Status: serving-qualified under the canonical local image name; Docker Hub publication still requires separate
-approval and namespace credentials.
+Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Emmy serving is ineligible because the
+DeepSeek V4 compressor and hyper-connection path has no executable external-attention serving ABI.
 
-Measured on 2026-08-10 with model revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062`, sixteen 32 GB V100
-SXM3 GPUs, and 1Cat commit `d76126608155c334df7c2fb9b75096f879624859`. The baked native-SM70 cache image is
-`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608`, with local image ID
-`sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6b03d6df188e5c65bc1`. The supporting 1Cat changes are in
-[cloudrift-ai/1Cat-vLLM pull request 2](https://github.com/cloudrift-ai/1Cat-vLLM/pull/2).
+## Qualified deployment
 
-## Recommended configuration
+| Item | Value |
+| --- | --- |
+| Model | `deepseek-ai/DeepSeek-V4-Flash-0731` |
+| Model revision | `7872f01b1d1fe23eabc4c98b48bffcef5a386062` |
+| Hardware | 16× Tesla V100-SXM3-32GB, compute capability 7.0 |
+| Driver / CUDA | 580.173.02 / 13.0 |
+| Engine | 1Cat/vLLM `d76126608155c334df7c2fb9b75096f879624859` |
+| Image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` |
+| Serving shape | TP8, PP2, context 4,096, concurrency 8, FP8 KV cache |
 
-The checkpoint loaded all 48 weight shards with TP8 and PP2. Pipeline stages held 22 and 21 model layers. The
-qualified lane uses FP16 activations, FP8 KV cache, the SM70 sparse MLA route, TurboMind W8A16 dense and grouped-BMM
-paths, and the TurboMind MXFP4 MoE path. Model loading took 19.83 seconds and engine profiling, KV-cache creation,
-and warmup took 84.05 seconds. The healthy service used about 27.0 GiB per GPU on PP0 and 28.5 GiB per GPU on PP1.
+`EMMY_FAST_MATH` is not set because this is not an Emmy serving engine.
 
-The recipe keeps the tested 4096-token context and eight-request concurrency. It removes `--enforce-eager`; vLLM
-selected `FULL_AND_PIECEWISE` graph mode and captured decode sizes 1, 2, 4, 8, and 16. Graph mode improved TPOT by
-1.41–4.24x across the 16-cell qualification matrix.
+## Best recipe performance
 
-## Accuracy and capability checks
+Measured 2026-08-11 with three repeats. Each repeat used eight unique 1,024-token prompts at concurrency 8 and
+requested 64 output tokens with greedy decoding and ignored EOS. All 24 requests completed with exact token counts.
 
-Deterministic chat probes returned `Paris`, `4`, `323`, and `OK` for terse factual and arithmetic requests. A tool
-probe emitted an OpenAI-compatible `multiply` call with arguments `{"a": 17, "b": 19}` and finish reason
-`tool_calls`. Repeating the direct 17-by-19 prompt produced the correct answer first, but then repeated malformed
-reasoning markup until the 32-token limit. This is a response-formatting caveat, not a numerical mismatch; concise
-answer-only prompts stopped normally.
+| Metric | Three-repeat mean |
+| --- | ---: |
+| Successful / failed requests | 24 / 0 |
+| Benchmark duration | 16.4633 s |
+| Request throughput | 0.4933 requests/s |
+| Output throughput | 31.71 tokens/s |
+| Total token throughput | 539.0533 tokens/s |
+| Mean TTFT | 3,857.82 ms |
+| Mean TPOT / ITL | 198.7433 / 198.7433 ms |
 
-Request-time warming reached 19 Triton functions across prefill, decode, batching, and tool-call shapes. Greedy
-logprobs and sampling added two more functions plus six specializations of existing functions. The rebuilt active-off
-image passed the complete 16-cell matrix, 3968-token boundary cases, greedy and sampling probes, and the structured
-tool call from a fresh container while fail-closed compiler guards stayed empty and all cache manifests remained
-unchanged. An active-expert B1 route cut TPOT by 39–58%, but changed the second-token ranking and is therefore not
-enabled in the recipe. Exact probes, route evidence, and artifact locations are in the
-[serving experiment](../../experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3/RESULTS.md).
-Compiler coverage and tuning evidence are documented separately in the
-[compiler experiment](../../experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/RESULTS.md).
+The same deployment passed completion, chat, 4,096-token-boundary, and structured tool-call probes. Tool calling
+returned `multiply(a=17, b=19)` correctly. Fully separated reasoning output remains unqualified because one direct
+probe left a stray `</think>` marker in assistant content.
 
-## Image publication
+## Compiler qualification
 
-An earlier source-image push failed with `insufficient_scope`; no Docker credential was created or left on the VM.
-The canonical image and checkpoint remain on `riftuser@185.165.50.61`. Publication now goes only through the recipe
-gate. First run its read-only check and show the exact image ID, destination, labels, and collision result:
+The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml)
+contains 279 exact Loop realizations across 13 programs. Every retained realization has positive deployable O3 and
+reference timings. The schema-migrated file passed 279/279 stored-record and offer checks, but its final cold-deploy
+in-model replay did not finish before the 106-minute cutoff; the complete qualification predates that schema rewrite.
+This compiler evidence does not establish an Emmy serving path for the checkpoint.
+
+## Reproduce
 
 ```bash
-emmy publish recipes/DeepSeek-V4-Flash-0731 \
-  --source-image cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608 \
-  --dry-run
+emmy bench experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3 --ssh riftuser@185.165.50.61
 ```
 
-Only after a separate human approval should an operator obtain a short-lived Docker Hub token, log in with tracing
-disabled, replace `--dry-run` with `--yes`, verify the registry digest, and log out. Use a Docker Hub token for this
-operation, not `HF_TOKEN`.
+The command uses the retained experiment YAML and writes ignored local output; do not use `--commit-results`.
+
+## Limits
+
+- The qualified lane is the recipe's 1Cat/vLLM engine, not Emmy.
+- Context beyond 4,096 tokens and fully parsed reasoning output are not qualified.
+- The workload is a serving qualification, not a broad concurrency or context sweep.
+
+## Current regression
+
+Against the prior comparable complete run, the selected 2026-08-11 result improved output throughput from 29.09 to
+31.71 tokens/s (+9.0%) and mean TPOT from 222.34 to 198.74 ms (-10.6%), but mean TTFT regressed from 3,528.52 to
+3,857.82 ms (+9.3%). The newer complete run remains the main result because its sustained generation metrics are
+better; the TTFT regression remains open.

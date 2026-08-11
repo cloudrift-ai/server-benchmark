@@ -36,12 +36,10 @@ _test_data
 
 # Experiment outputs
 /experiments/
-# Benchmark run dirs: keep result files (*.txt / *.json) + the run's recipe.yaml snapshot,
-# but drop generated logs/state. (Ignore the dir *contents*, not the dir itself, so the
-# negations below can re-include specific files.)
+# Benchmark output is local. The only committed benchmark artifact is
+# recipes/<model>/RESULTS.md; experiment recipe.yaml files are force-added inputs.
+/results/
 recipes/*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/*
-!recipes/*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/*.txt
-!recipes/*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/*.json
 recipes/*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/recipe.yaml
 recipes/**/benchmark*.log
 recipes/**/instances.json

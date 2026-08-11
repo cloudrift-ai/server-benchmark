@@ -6,7 +6,7 @@ import contextlib
 import os
 
 from emmy import config
-from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal
+from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
 
 
 def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
@@ -51,13 +51,25 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | Non
 
 @contextlib.contextmanager
 def pinned_knobs(knobs: dict):
-    """Temporarily publish ``knobs`` as authoritative ``EMMY_<KNOB>`` pins."""
+    """Temporarily publish ``knobs`` as authoritative environment pins.
+
+    Axis-scoped keys ride both their programmatic ``EMMY_<KNOB@site>`` splat and the raw
+    ``EMMY_KNOBS`` aggregate. Schedule readers consume the splat after import, while placement
+    routing reads the aggregate directly because ``@`` is not a portable shell-variable name.
+    """
     saved: dict[str, str | None] = {}
     try:
+        scoped = []
         for name, value in knobs.items():
             key = config.knob_var(name)
             saved[key] = os.environ.get(key)
             os.environ[key] = str(value)
+            if axis_of(name) is not None:
+                scoped.append(f"{name}={value}")
+        if scoped:
+            saved[config.KNOBS] = os.environ.get(config.KNOBS)
+            aggregate = config.knobs_aggregate()
+            os.environ[config.KNOBS] = ",".join(part for part in (aggregate, *scoped) if part)
         yield
     finally:
         for key, previous in saved.items():

@@ -453,6 +453,14 @@ def test_golden_shape_key_replays_offer_signals_without_serializing_kind():
     assert flash.kind == "flash"
 
 
+def test_stat_free_place_a_golden_uses_the_fused_key():
+    routed = _golden_shape_key(_CONE_SIG, {"PLACE@a": "cut"})
+    assert routed == ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096)
+
+    other_seam = _golden_shape_key(_CONE_SIG, {"PLACE@b": "cut"})
+    assert other_seam == ShapeKey.from_s_features(_CONE_SIG)
+
+
 def test_fused_key_separates_aspect_equal_free_prod_cones():
     """Two gemma-4 computed-A cones collide on every other key field: the M=32 LOCAL norm→q
     (32x4096) and the M=256 GLOBAL norm→kv (256x512) share free_prod=131072 AND reduce_max=3840.

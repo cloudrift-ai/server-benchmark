@@ -279,9 +279,10 @@ jobs:
 
           {plan}
           Do not provision or delete the VM, commit, push, or open/update a pull request. Always write the required
-          atomic summary, including experiment_artifacts with the experiment recipe and every successful raw result
-          file that must be force-added. Also include artifacts listing every intended created, modified, or deleted
-          repository file (including a removed onboarding plan) and no exploratory output. Allowed areas are
+          atomic summary, including experiment_artifacts with retained experiment recipe.yaml files only. Put the
+          selected benchmark numbers in the final recipe's RESULTS.md; do not retain raw results, experiment reports,
+          dated run snapshots, or onboarding summaries. Also include artifacts listing every intended created,
+          modified, or deleted repository file (including a removed onboarding plan) and no exploratory output. Allowed areas are
           recipes/, experiments/, docker/vllm-emmy-serve/models/, canonical golden YAML files, and deletion of the
           matching plans/onboard-*.md file.
           """

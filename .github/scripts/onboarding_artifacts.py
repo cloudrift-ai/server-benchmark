@@ -27,6 +27,13 @@ def _relative_file(workspace: Path, raw_path: str, prefixes: tuple[str, ...]) ->
     return path
 
 
+def _relative_experiment_recipe(workspace: Path, raw_path: str) -> Path:
+    path = _relative_file(workspace, raw_path, ("experiments/",))
+    if path.name != "recipe.yaml":
+        raise ValueError(f"Only experiment recipe.yaml files may be retained: {raw_path}")
+    return path
+
+
 def _relative_artifact(workspace: Path, raw_path: str) -> Path:
     path = Path(raw_path)
     normalized = path.as_posix()
@@ -44,6 +51,15 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
         if tracked.returncode == 0:
             return path
     raise ValueError(f"Artifact path is outside the allowed onboarding areas or does not exist: {raw_path}")
+
+
+def _invalid_result_artifacts(artifacts: list[Path]) -> list[Path]:
+    return [
+        path
+        for path in artifacts
+        if (path.parts[0] == "experiments" and path.name != "recipe.yaml")
+        or (path.parts[0] == "recipes" and path.name not in {"recipe.yaml", "RESULTS.md"})
+    ]
 
 
 def validate_summary(
@@ -69,10 +85,12 @@ def validate_summary(
 
     recipe = _relative_file(workspace, summary.get("recipe") or "", ("recipes/",))
     report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
+    if report != recipe.with_name("RESULTS.md"):
+        raise ValueError(f"Report must be RESULTS.md beside the final recipe: {report}")
     raw_experiment_artifacts = summary.get("experiment_artifacts")
     if not isinstance(raw_experiment_artifacts, list) or not raw_experiment_artifacts:
-        raise ValueError("Summary must list every successful experiment artifact in experiment_artifacts")
-    experiment_artifacts = [_relative_file(workspace, raw_path, ("experiments/",)) for raw_path in raw_experiment_artifacts]
+        raise ValueError("Summary must list the retained experiment recipe in experiment_artifacts")
+    experiment_artifacts = [_relative_experiment_recipe(workspace, raw_path) for raw_path in raw_experiment_artifacts]
     experiment_recipe = Path(summary.get("experiment") or "")
     if experiment_recipe not in experiment_artifacts:
         raise ValueError("The experiment recipe must be included in experiment_artifacts")
@@ -80,12 +98,18 @@ def validate_summary(
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
         raise ValueError("Summary must list every intended repository file in artifacts")
     artifacts = [_relative_artifact(workspace, raw_path) for raw_path in raw_artifacts]
+    invalid_result_artifacts = _invalid_result_artifacts(artifacts)
+    if invalid_result_artifacts:
+        raise ValueError(f"Only recipe.yaml and final recipe RESULTS.md artifacts may be retained: {invalid_result_artifacts}")
     if not {recipe, report, *experiment_artifacts}.issubset(set(artifacts)):
         raise ValueError("artifacts must include the recipe, report, and every experiment_artifacts entry")
     return summary, artifacts
 
 
 def stage_artifacts(workspace: Path, artifacts: list[Path]) -> None:
+    invalid_result_artifacts = _invalid_result_artifacts(artifacts)
+    if invalid_result_artifacts:
+        raise ValueError(f"Only recipe.yaml and final recipe RESULTS.md artifacts may be retained: {invalid_result_artifacts}")
     tracked_changes = subprocess.run(
         ["git", "diff", "--name-only", "HEAD"],
         cwd=workspace,

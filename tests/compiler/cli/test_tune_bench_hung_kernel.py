@@ -11,6 +11,7 @@ sweep stubbed — no CUDA. The real-GPU recovery is covered in
 
 from __future__ import annotations
 
+import json
 import types
 
 import emmy.commands.run as run_mod
@@ -58,7 +59,7 @@ def _patch_common(
             seen_devices.append(_kw.get("device_id"))
         if compare_raises is not None:
             raise compare_raises
-        return {"Emmy": 1.0}, object(), True, False  # (results, bench, torch_available, captured)
+        return {"Emmy": 1.0}, object(), True, False, None  # results, bench, torch_available, captured, accuracy_error
 
     def _fake_per_kernel(*_a, **_k):
         if seen_devices is not None:
@@ -120,3 +121,29 @@ def test_run_bench_pins_full_and_per_kernel_workers(monkeypatch) -> None:
 
     assert seen_devices == [3, 3]
     assert seen_contexts == ["selected-o3-context"]
+
+
+def test_per_kernel_bench_persists_and_surfaces_accuracy_error(monkeypatch, tmp_path, capsys) -> None:
+    """The deployable artifact must retain the correctness verdict returned by its worker."""
+
+    class _Graph:
+        def copy(self):
+            return self
+
+    async def _fake_compare(**_kwargs):
+        return {"Eager PyTorch": 4.0, "Emmy": 2.0}, object(), True, True, "wrong-answer: rel err 1.000"
+
+    dump = types.SimpleNamespace(dir=tmp_path, frontend_reproducers=lambda: {"k_test_abc123": _Graph()})
+    monkeypatch.setattr(program_mod, "benchmark_compare_isolated_async", _fake_compare)
+    monkeypatch.setattr("emmy.compiler.backend.torch_ref.is_runnable", lambda _graph: True)
+    monkeypatch.setattr(run_mod, "_detect_stage", lambda _graph: "frontend")
+    monkeypatch.setattr(run_mod, "_passes_after_stage", lambda _stage: [])
+
+    rows, fallback = tune_mod._bench_per_kernel(_args(), dump, db=None)
+
+    assert rows == [("k_test", {"Eager PyTorch": 4.0, "Emmy": 2.0})]
+    assert fallback == []
+    [record] = json.loads((tmp_path / "62_kernel_bench.json").read_text())
+    assert record["reference_available"] is True
+    assert record["accuracy_error"] == "wrong-answer: rel err 1.000"
+    assert "accuracy failed (wrong-answer: rel err 1.000)" in capsys.readouterr().err

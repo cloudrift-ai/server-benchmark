@@ -67,6 +67,9 @@ engine:
   llm:
     tensor_parallel_size: 1
     context_length: 16384
+    # The supplied desktop has 941 MiB held by its graphical session. Bound sampler
+    # warm-up to the protocol's actual maximum concurrency rather than vLLM's default 256.
+    max_concurrent_requests: 64
     vllm:
       extra_args: "--dtype float16 --no-enable-prefix-caching"
 
@@ -79,7 +82,7 @@ matrices:
   # ---- stock vLLM: all six points ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.96
+    engine.llm.gpu_memory_utilization: 0.95
     engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
     zip:
       benchmark.random_input_len: [256, 256, 4096, 4096, 4096, 8192]
@@ -91,7 +94,7 @@ matrices:
   # ---- emmy lanes: c=1 points (decode bucket 32; default chunk width 4096 + rider headroom) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.96
+    engine.llm.gpu_memory_utilization: 0.95
     engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
     cross:
@@ -106,7 +109,7 @@ matrices:
   # ---- emmy lanes: the mixed 4K/4K c=4 and c=8 points (bucket 8 + the 2048 chunk quantum) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.96
+    engine.llm.gpu_memory_utilization: 0.95
     engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
     cross:
@@ -121,7 +124,7 @@ matrices:
   # ---- emmy lanes: the RAG 8192/256 c=4 point (bucket 8; chunk width 4096 + rider headroom) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.96
+    engine.llm.gpu_memory_utilization: 0.95
     engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
     cross:
@@ -149,7 +152,7 @@ matrices:
   # than a knob. TPOT at this point is already at parity (26.7 vs stock 26.9).
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.96
+    engine.llm.gpu_memory_utilization: 0.95
     engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2112 --no-enable-prefix-caching"
     cross:

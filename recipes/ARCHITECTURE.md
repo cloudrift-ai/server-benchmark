@@ -16,7 +16,7 @@ validation, `docker_options`, command recipes — is documented in
 
 Every `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without a
 checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
-that. Only the recipe files travel — the committed benchmark results beside them do not.
+that. Only the recipe files travel — `RESULTS.md` and local benchmark output do not.
 
 ## recipes/ vs experiments/
 
@@ -30,7 +30,7 @@ where a file belongs:
 | `benchmark:` block | none | required; it defines the measurement |
 | lanes | the winner only | the winner *and* the baselines it beat |
 | consumed by | `emmy deploy` | `emmy bench` |
-| lifetime | updated when a better config is found | frozen once published; results committed beside it |
+| lifetime | updated when a better config is found | configuration retained while it remains useful; output stays local |
 
 This boundary erodes in one direction: a recipe grows a `matrices:` sweep "just to compare two settings", and stops
 being a deployment config. That is what happened to the gemma-4-12B recipes — three of them (stock, emmy,
@@ -52,7 +52,9 @@ compare configurations, add an experiment; then fold the winner back into the re
   image**, not just editing a flag. Treat the recipe and `docker/vllm-emmy-serve/models/<slug>.env` as two halves of
   one decision; a test asserts they agree.
 - **Tuning knobs as `extra_env`** (`EMMY_FAST_MATH`, `EMMY_GEN_DECODE_BUCKET`, …). These reach the container as real
-  environment variables in the generated compose.
+  environment variables in the generated compose. An Emmy-backed recipe uses `EMMY_FAST_MATH: "1"` by default after
+  exact-shape accuracy checks show no quality regression; retain standard Emmy when they do. Mainstream-only vLLM or
+  SGLang recipes do not set Emmy knobs.
 - **The target hardware**, as a single-entry `matrices:` block. `deploy` resolves it against the detected GPU and
   aborts early if the host cannot satisfy it.
 
@@ -86,6 +88,11 @@ sweep rather than guessing (`release-serving-image` skill, Step 4).
 2. Add `recipes/<model>/recipe.yaml` pinning that image and that shape, one variant, no `benchmark:` block.
 3. If a configuration choice needs justifying, put the A/B in `experiments/<model>/<name>/` and reference the
    finding from the recipe's header comment — not the grid itself.
+
+Every qualified final recipe has one compact, self-contained `RESULTS.md` beside it. It embeds the best complete
+measurement for the recipe's selected engine and exact configuration, not a comparison table or a link to raw output.
+If a newer complete run regresses, keep the best result in the main section and add one final `## Current regression`
+section; remove that section on recovery. Models without a valid final recipe do not get a repository `RESULTS.md`.
 
 Models without emmy kernels are still perfectly good recipes: they pin a stock vLLM or SGLang image and its flags.
 `recipes/gemma-4-31B-it` is one — the per-model emmy image serves 12B only.

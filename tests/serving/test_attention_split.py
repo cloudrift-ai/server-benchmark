@@ -256,6 +256,9 @@ def test_laguna_post_applies_softplus_attention_gate_before_o_proj():
     block = LagunaDecoderLayer(cfg, layer_idx=0).eval()
     for parameter in block.parameters():
         torch.nn.init.normal_(parameter, std=0.2)
+    # Transformers 5.12 did not expose this declaration. The checkpoint still
+    # spells the layout unambiguously as one gate projection output per head.
+    del block.self_attn.gate_per_head
     _, post = build_attention_split_wrapper(block)
 
     residual = torch.randn(5, cfg.hidden_size)

@@ -1430,6 +1430,21 @@ def _passes_after_stage(stage: str) -> list[str]:
     return [p for p in CUDA_PASSES if p not in completed]
 
 
+def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list[str]]:
+    """The input label and pass list for an IR replay.
+
+    A persisted golden Loop target stores stable algebra, not the derived ``LoopOp.knobs`` from
+    the structural stamp. Replay it through the full pipeline so deploy evidence can see those
+    features. A direct ``--ir`` input keeps its declared-stage tail semantics.
+    """
+    if embedded_golden:
+        from emmy.compiler.pipeline import CUDA_PASSES  # noqa: PLC0415
+
+        return "golden Loop", CUDA_PASSES
+    stage = _detect_stage(graph)
+    return stage, _passes_after_stage(stage)
+
+
 async def bench_lowered_vs_torch(frontend, lowered, backend, *, seed, do_bench, warmup, iters, bench_backends, capture_graphs=True):
     """Run + (optionally) benchmark a lowered graph against its torch reference on
     shared random inputs. The common bench primitive behind ``run --ir`` and
@@ -1628,8 +1643,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         logger.error("--dynamic is incompatible with --ir (the trace is already complete)")
         sys.exit(2)
 
-    stage = _detect_stage(graph)
-    tail = _passes_after_stage(stage)
+    stage, tail = _replay_stage_and_passes(graph, embedded_golden=embedded is not None)
     logger.info("Loaded %s IR; running tail passes: %s", stage, tail or "(none)")
 
     dump = CompilerDump.resolve(args.dump_dir)

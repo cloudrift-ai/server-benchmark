@@ -2,7 +2,7 @@
 
 from emmy.benchmark.results import parse_benchmark_metrics
 from emmy.benchmark.workload import build_bench_command
-from emmy.deploy.orchestrate import _check_chat_response, _check_embedding_response
+from emmy.deploy.orchestrate import _check_chat_response, _check_completion_response, _check_embedding_response
 from emmy.recipe.types import Recipe
 
 
@@ -79,3 +79,10 @@ def test_check_chat_response():
     assert _check_chat_response('{"choices": [{"message": {"content": "five"}}]}')[0] == "fail"
     assert _check_chat_response("oops")[0] == "retry"
     assert _check_chat_response('{"choices": [{"message": {}}]}')[0] == "retry"
+
+
+def test_check_completion_response():
+    assert _check_completion_response('{"choices": [{"text": " 4\\n"}]}')[0] == "pass"
+    assert _check_completion_response('{"choices": [{"text": " five"}]}')[0] == "fail"
+    assert _check_completion_response("oops")[0] == "retry"
+    assert _check_completion_response('{"choices": [{}]}')[0] == "retry"

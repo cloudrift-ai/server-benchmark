@@ -79,6 +79,66 @@ def test_load_recipe_accepts_embed_task(tmp_path):
     assert load_recipe(str(recipe_dir)).is_embedding
 
 
+def test_load_recipe_accepts_completion_smoke_test(tmp_path):
+    recipe_dir = tmp_path / "r"
+    recipe_dir.mkdir()
+    config = {
+        "model": {"huggingface": "org/base-model", "smoke_test": "completion"},
+        "engine": {"llm": {}},
+    }
+    (recipe_dir / "recipe.yaml").write_text(yaml.dump(config))
+    assert load_recipe(str(recipe_dir)).model.smoke_test == "completion"
+
+
+def test_load_recipe_accepts_named_model_revision(tmp_path):
+    recipe_dir = tmp_path / "revision"
+    recipe_dir.mkdir()
+    config = {
+        "model": {"huggingface": "org/model", "revision": "refs/pr/7"},
+        "engine": {"llm": {}},
+    }
+    (recipe_dir / "recipe.yaml").write_text(yaml.dump(config))
+    assert load_recipe(str(recipe_dir)).model.revision == "refs/pr/7"
+
+
+@pytest.mark.parametrize("revision", ["", "bad revision", 123])
+def test_load_recipe_rejects_invalid_model_revision(tmp_path, revision):
+    recipe_dir = tmp_path / f"revision-{revision!s}"
+    recipe_dir.mkdir()
+    config = {
+        "model": {"huggingface": "org/model", "revision": revision},
+        "engine": {"llm": {}},
+    }
+    (recipe_dir / "recipe.yaml").write_text(yaml.dump(config))
+    with pytest.raises(ValueError, match="model.revision"):
+        load_recipe(str(recipe_dir))
+
+
+@pytest.mark.parametrize("smoke_test", ["none", "health"])
+def test_load_recipe_rejects_unknown_smoke_test(tmp_path, smoke_test):
+    recipe_dir = tmp_path / smoke_test
+    recipe_dir.mkdir()
+    config = {
+        "model": {"huggingface": "org/model", "smoke_test": smoke_test},
+        "engine": {"llm": {}},
+    }
+    (recipe_dir / "recipe.yaml").write_text(yaml.dump(config))
+    with pytest.raises(ValueError, match="model.smoke_test"):
+        load_recipe(str(recipe_dir))
+
+
+def test_load_recipe_rejects_completion_smoke_test_for_embedding(tmp_path):
+    recipe_dir = tmp_path / "r"
+    recipe_dir.mkdir()
+    config = {
+        "model": {"huggingface": "org/embedding", "task": "embed", "smoke_test": "completion"},
+        "engine": {"llm": {}},
+    }
+    (recipe_dir / "recipe.yaml").write_text(yaml.dump(config))
+    with pytest.raises(ValueError, match="only configurable"):
+        load_recipe(str(recipe_dir))
+
+
 def test_load_recipe_no_deploy_gpu(tmp_recipe_dir):
     """Base recipe has no deploy.gpu (it comes from matrices)."""
     recipe = load_recipe(tmp_recipe_dir)

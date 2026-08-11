@@ -20,6 +20,7 @@ re-spelled by hand, never silently re-keyed."""
 from __future__ import annotations
 
 import glob
+import importlib
 import os
 
 import pytest
@@ -30,6 +31,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import PATH_FAMILIES, canonical, resolve, sites
@@ -150,6 +152,19 @@ def _tree(build, pick=None, *, target=(12, 0)):
     return roots[0]
 
 
+def _routing_tree(record):
+    """Rebuild the pre-schedule tree that placement routing resolves against."""
+    recognize = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    graph = record.target_program.copy()
+    roots = [n for n in graph.nodes.values() if isinstance(n.op, LoopOp)]
+    assert len(roots) == 1, f"{record.name}: expected one persisted LoopOp, got {len(roots)}"
+    root = roots[0]
+    fused, _ = recognize._fuse(root.op.body)
+    node, free, stores = recognize._lift(list(fused), root.output.name)
+    prologue = recognize.bind_prologue_contraction(node, free)
+    return prologue[0] if prologue is not None else node
+
+
 def _is_warp_row(row: dict) -> bool:
     # F1 site grammar: the tier discriminator is the row's ONE WORK entry, not an ``a:`` token.
     return str(row.get("WORK", "")).startswith("w")
@@ -215,8 +230,14 @@ def test_every_stored_golden_spelling_is_canonical(trees):
             # persisted algebra is the authoritative tree for path-key spelling. Cooperative
             # reductions lower to a partial and finalize kernel, so a target may contribute
             # more than one recognized tree.
-            with pinned_knobs({**cfg.pin_map, **cfg.knobs}):
-                roots = _trees(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
+            # Schedule rows need their recorded fork selected before inspecting the tree. A
+            # routing row names the computed-A reference tree before that tree is cut or the
+            # scheduler chooses another reading, so rebuild the same reference used by 010.
+            if cfg.is_routing:
+                roots = [_routing_tree(cfg)]
+            else:
+                with pinned_knobs({**cfg.pin_map, **cfg.knobs}):
+                    roots = _trees(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
             assert roots, f"{fname}:{cfg.name}: Loop target lowered to no TileOps"
             kind = "loop"
         elif kind in trees:

@@ -3,6 +3,7 @@
 # The tag was validated locally; Docker Hub publication is pending cloudriftai namespace access.
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
+  revision: 9e0b8ba630080b0e6f20a7b43294a9f2232fd247
   task: generate
 
 engine:
@@ -15,7 +16,6 @@ engine:
     vllm:
       image: "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
       extra_args: >-
-        --revision 9e0b8ba630080b0e6f20a7b43294a9f2232fd247
         --dtype half
         --attention-backend FLASH_ATTN_V100
         --max-num-batched-tokens 1024

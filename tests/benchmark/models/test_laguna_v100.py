@@ -30,7 +30,8 @@ def test_laguna_v100_recipe_pins_the_qualified_dequant_fallback(project_root) ->
     vllm = recipe["engine"]["llm"]["vllm"]
 
     assert vllm["image"] == "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
-    assert "--revision 9e0b8ba630080b0e6f20a7b43294a9f2232fd247" in vllm["extra_args"]
+    assert recipe["model"]["revision"] == "9e0b8ba630080b0e6f20a7b43294a9f2232fd247"
+    assert "--revision" not in vllm["extra_args"]
     assert vllm["extra_env"] == {
         "VLLM_SM70_FLASH_ATTN_V100": "1",
         "VLLM_SM70_FP8_TURBOMIND": "0",

@@ -66,13 +66,13 @@ def test_qwen_serving_recipe_is_one_exact_fp16_pp8_tp2_variant(project_root) -> 
     source = Path(project_root, relative, "recipe.yaml").read_text()
     assert "benchmark:" not in "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
     assert recipe.model.huggingface == "Qwen/Qwen3.5-122B-A10B"
+    assert recipe.model.revision == "dc4d348443bc740c68e2d77492492c11606384d5"
     assert recipe.engine.llm.pipeline_parallel_size == 8
     assert recipe.engine.llm.tensor_parallel_size == 2
     assert recipe.deploy.gpu_count == 16
     args = recipe.engine.llm.vllm.extra_args
     for flag in (
         "--dtype half",
-        "--revision dc4d348443bc740c68e2d77492492c11606384d5",
         "--language-model-only",
         "--enforce-eager",
         "--attention-backend FLASH_ATTN_V100",

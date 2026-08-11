@@ -465,6 +465,176 @@ def test_trace_rejects_copy_mutation_through_nonunit_slice():
         trace_module(StridedCopy(), (torch.randn(1), torch.randn(1, 2, 8)))
 
 
+@pytest.mark.parametrize(
+    ("shape", "shift", "dim"),
+    [
+        ((3, 4), 2, 0),
+        ((2, 5), -1, 1),
+        ((2, 1), 3, 1),
+    ],
+)
+def test_trace_roll_lowers_to_index_map_and_matches_eager(shape, shift, dim):
+    """Static roll is finite-domain coordinate remapping for either shift direction."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Roll(nn.Module):
+        def forward(self, x):
+            return torch.roll(x, shift, dim)
+
+    x = torch.arange(np.prod(shape), dtype=torch.float32).reshape(shape)
+    graph = trace_module(Roll(), (x,))
+    assert isinstance(graph.nodes[graph.outputs[0]].op, IndexMapOp)
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Roll()(x).numpy())
+
+
+def test_trace_rejects_multidimensional_roll_until_its_regions_are_bounded():
+    """The affine lowering stays fail-closed instead of admitting a non-affine modulo map."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class MultiRoll(nn.Module):
+        def forward(self, x):
+            return torch.roll(x, shifts=(1, 2), dims=(0, 1))
+
+    with pytest.raises(NotImplementedError, match="exactly one dimension"):
+        trace_module(MultiRoll(), (torch.randn(3, 4),))
+
+
+def test_trace_select_lowers_rank_reducing_view_and_matches_eager():
+    """Select fixes one input coordinate while removing that axis from the output."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Select(nn.Module):
+        def forward(self, x):
+            return x.select(1, -1)
+
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    graph = trace_module(Select(), (x,))
+    assert isinstance(graph.nodes[graph.outputs[0]].op, IndexMapOp)
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Select()(x).numpy())
+
+
+def test_trace_static_arange_uses_range_op_and_replays_as_a_constant_source():
+    """Static arange is value construction, not elementwise np.arange over a broadcast stop."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.tensor.ir import RangeOp
+    from emmy.compiler.loader.binder import evaluate_source_graph
+    from emmy.compiler.pipeline import TENSOR_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class Positions(nn.Module):
+        def forward(self, x):
+            return torch.arange(x.shape[-1], device=x.device)
+
+    x = torch.arange(8, dtype=torch.int64).reshape(2, 4)
+    graph = trace_module(Positions(), (x,))
+    assert any(isinstance(node.op, RangeOp) for node in graph.nodes.values())
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Positions()(x).numpy())
+
+    folded = Pipeline.build(TENSOR_PASSES).run(graph)
+    [positions] = [
+        node.op.source_graph for node in folded.nodes.values() if isinstance(node.op, ConstantOp) and node.op.source_graph is not None
+    ]
+    np.testing.assert_array_equal(evaluate_source_graph(positions, {}), np.arange(4))
+
+
+def test_trace_rejects_noninteger_arange():
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class FloatRange(nn.Module):
+        def forward(self, x):
+            return x + torch.arange(0.0, 2.0, 0.5, device=x.device)
+
+    with pytest.raises(NotImplementedError, match="static integer start, stop, and step"):
+        trace_module(FloatRange(), (torch.randn(4),))
+
+
+def test_trace_reassembles_ling_mtp_roll_select_fill_observed_through_base():
+    """Ling's exact MTP token shift versions the rolled base through its selected view."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class TokenShift(nn.Module):
+        def forward(self, input_ids):
+            shifted = torch.roll(input_ids, shifts=-1, dims=-1)
+            shifted.select(-1, -1).fill_(0)
+            return shifted
+
+    input_ids = torch.arange(16, dtype=torch.int64).reshape(2, 8)
+    graph = trace_module(TokenShift(), (input_ids,))
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: input_ids.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), TokenShift()(input_ids).numpy())
+
+    lowered = Pipeline.build(LOOP_PASSES).run(graph)
+    assert all(isinstance(node.op, (InputOp, ConstantOp, LoopOp)) for node in lowered.nodes.values())
+
+
+def test_trace_rejects_fill_mutation_observed_through_input_or_preexisting_alias():
+    """The bounded local update must not silently functionalize external or stale storage."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class FillInput(nn.Module):
+        def forward(self, x):
+            x.select(1, -1).fill_(0)
+            return x
+
+    class FillThenReadOldView(nn.Module):
+        def forward(self, x):
+            shifted = torch.roll(x, -1, 1)
+            old_view = shifted.select(1, 0)
+            shifted.select(1, -1).fill_(0)
+            return old_view
+
+    x = torch.randn(2, 8)
+    with pytest.raises(NotImplementedError, match="aten.fill_ observable alias mutation is unsupported"):
+        trace_module(FillInput(), (x,))
+    with pytest.raises(NotImplementedError, match="aten.fill_ observable alias mutation is unsupported"):
+        trace_module(FillThenReadOldView(), (x,))
+
+
 def test_trace_exports_in_inference_grad_mode_without_higher_order_wrapper():
     """A ``no_grad`` helper must export its tensor ops directly, not as a tuple-valued HOP."""
     import numpy as np

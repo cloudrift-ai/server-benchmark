@@ -113,8 +113,8 @@ mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `bra
 Every CloudRift request carries an envelope `{"version": API_VERSION, "data": {...}}`. The server versions its public
 types by calendar date and decodes each request against the newest declared schema whose date is `<= API_VERSION` (an
 unknown in-between date silently resolves *down* to the nearest older schema). `API_VERSION` (`cloudrift.py`) is pinned
-to `2026-05-26`, the **v059** generation: `instances/rent` resolves to v059, `instances/list` to v058, and
-`instances/terminate` to v055. Pin to a date rather than `~upcoming` (CloudRift's own client default) so a future server
+to `2026-08-05`, the current public generation for the instance endpoints used here. Pin to a date rather than
+`~upcoming` (CloudRift's own client default) so a future server
 release can't change request/response shapes under us.
 
 Two v059-era behaviours the client relies on:

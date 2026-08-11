@@ -11,9 +11,9 @@ Distinct from :mod:`emmy.compiler.target`, which represents the
 — consulted by the tile-IR passes that gate on hardware features).
 :class:`RenderTarget` is purely about source-text emission shapes.
 
-Today the only implementation is :class:`CudaRenderTarget` in
-``emmy/compiler/backend/cuda/render_target.py``. Add a new
-implementation per backend that wants to share the Stmt renderer.
+The CUDA backend uses :class:`CudaRenderTarget`; the float32-reference
+Loop runner uses :class:`LoopRenderTarget`. Add one implementation per
+backend that shares the Stmt renderer.
 """
 
 from __future__ import annotations
@@ -52,6 +52,9 @@ class RenderTarget(Protocol):
         unchanged when ``src_dt == dst_dt``. Otherwise wraps with the
         target conversion intrinsic (e.g. ``__half2float(value)``).
         """
+
+    def bitcast(self, value: str, src_dt: str, dst_dt: str) -> str:
+        """Reinterpret one same-width scalar without numerical conversion."""
 
     def intrinsic(self, op_name: str, result_dt: str) -> str:
         """Per-dtype intrinsic spelling for an abstract op name.

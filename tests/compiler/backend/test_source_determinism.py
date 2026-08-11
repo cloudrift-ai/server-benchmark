@@ -8,8 +8,9 @@ prebuilt-cache image impossible. Found on a real RTX 5090 release run: ~270 of ~
 serving kernels re-keyed per boot — the vectorized-store temp name embedded
 ``id(self)``. The compile here runs in two SUBPROCESSES (fresh address space and hash
 seed — an in-process double compile cannot see this class of bug), off-GPU (CUDA
-hidden; sources render without a device), and the traced module is picked to emit a
-vectorized store so the historically-affected path stays covered.
+hidden; sources render without a device), and the traced pointwise reshape is pinned
+to the production ``f2`` register-strip schedule so it must emit a vectorized store.
+The explicit pin keeps coverage independent of deploy-policy and tune-database picks.
 """
 
 import subprocess
@@ -19,18 +20,16 @@ _SNIPPET = """
 import hashlib
 import torch
 from emmy.compiler.backend.cuda.backend import CudaBackend
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
 
 class M(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.l = torch.nn.Linear(64, 64, bias=False)
     def forward(self, x):
-        return self.l(x).reshape(8, 4, 16)
+        return (x + 1).reshape(8, 4, 16)
 
-torch.manual_seed(0)
 g = trace_module(M().eval(), (torch.zeros(8, 64),))
-c = CudaBackend(tune_db="auto").compile(g)
+with pinned_knobs({"TILE": "f2"}):
+    c = CudaBackend().compile(g)
 for _nid, node in sorted(c.nodes.items()):
     src = getattr(node.op, "kernel_source", None)
     if src:

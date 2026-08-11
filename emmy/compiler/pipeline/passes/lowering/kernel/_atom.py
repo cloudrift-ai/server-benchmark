@@ -484,15 +484,16 @@ def _sync_operands(
     channels=(),
     seam: tuple = ((), (), ()),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
-    """The ``sync``-transport (fused-edge) operands + the one-shot prologue stmts, returned as
-    ``(drain-ordered operands, compute-filled, cp.async-filled, prologue)``: A is **compute-filled**
-    from the node's producer cone (``a`` is a ``Body`` — each thread evaluates the cone at
-    the slab cell's absolute ``(m, k)`` coords and writes the result); each fold channel's B is a
-    plain weight copy riding a vectorized ``cp.async`` :class:`Operand` that flies UNDER the
-    compute fill — a canonical B as the K-major ``(bk × tile_n)`` slab, a transposed B
-    (the serving ``F.linear`` layout, K gmem-contiguous) as the N-MAJOR ``(tile_n × bk)`` slab in
-    its own gmem orientation (A's geometry; the ``Operand.trans`` stamp routes the drain to the
-    plain no-``.trans`` ldmatrix — the same slab the copy transports stage). A cone with a
+    """The ``sync`` transport's drain-ordered, computed, copied, and prologue operands.
+
+    Either contraction role may be a generic inline producer cone. A computed A evaluates at
+    absolute ``(m, k)`` and fills the canonical ``tile_m × bk`` slab; a computed B evaluates at
+    ``(k, n)`` and fills canonical ``bk × tile_n``. A materialized counterpart rides the same
+    vectorized ``cp.async`` copy path used by ordinary staged matmul. Thus a decoded/derived B can
+    stream into Tensor Core fragments without ever becoming a dense tensor or a storage-specific
+    lowering op.
+
+    A computed A cone with a
     row-invariant prologue (the fused
     norm→linear per-row statistic — its reduce ``Loop`` + scalar sweep) arrives already split at the
     K seam (``ops.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
@@ -502,7 +503,7 @@ def _sync_operands(
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
     of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
     contract the copy transports follow)."""
-    m_name, k_name = mn[0].axis.name, c.axis.name
+    m_name, n_name, k_name = mn[0].axis.name, mn[1].axis.name, c.axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = seam
 
@@ -515,6 +516,10 @@ def _sync_operands(
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
         stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
         return stmts, operand_name(c.a)
+
+    def n_coord(col) -> Expr:
+        t = BinaryExpr("+", col_base, col)
+        return _clamp_last(t, mn[1].ext) if mn[1].mask else t
 
     prologue: list[Stmt] = []
     if stats:
@@ -533,12 +538,38 @@ def _sync_operands(
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
     channels = channels or ((c.b, c.acc),)
-    a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
-    drain: list = [a_op]
-    sync_ops: list[SyncOperand] = [a_op]
+    drain: list = []
+    sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
+
+    if isinstance(c.a, Load):
+        a_op = Operand(
+            tag="a",
+            buf=c.a.input,
+            shape=(mn[0].tile, bk_elems),
+            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis),
+            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True),
+            swizzle=swizzles[0],
+        )
+        async_ops.append(a_op)
+    else:
+        a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
+        sync_ops.append(a_op)
+    drain.append(a_op)
+
     for f, (bl, _) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
+        if not isinstance(bl, Load):
+            b_body = operand_body(bl)
+
+            def b_value(k0, row, col, *, body=b_body, edge=bl):
+                sigma = Sigma({k_name: BinaryExpr("+", k0, row), n_name: n_coord(col)})
+                return [s.rewrite(lambda nm: nm, sigma) for s in body], operand_name(edge)
+
+            op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
+            sync_ops.append(op)
+            drain.append(op)
+            continue
         # A transposed B stages N-major (``tile_n × bk`` — its own gmem orientation, K stride-1 in
         # gmem and smem alike), so its cp.async chunks are contiguous exactly like the canonical
         # K-major slab's (row-base alignment holds: B's row stride K is a multiple of ``bk_elems``).
@@ -596,12 +627,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             cta=cta,
         )
     elif stage.transport == "sync":
-        # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone);
-        # every B (canonical K-major, or transposed staged N-major) rides a vectorized cp.async
-        # that flies UNDER the compute fill — the mma
-        # tier's ``sync`` transport; single-buffer, one wait + CTA barrier. A k-invariant cone
-        # prefix (the fused norm→linear per-row statistic) rides the transport prologue, run once
-        # ahead of the K-loop.
+        # Generic computed-operand fill: every inline edge is evaluated into its canonical slab;
+        # every materialized counterpart is copied asynchronously underneath that work.
         operands, sync_ops, async_ops, stat_pro = _sync_operands(
             c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
         )

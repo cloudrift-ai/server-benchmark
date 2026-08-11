@@ -327,7 +327,10 @@ def _nodify_contraction(node, free: tuple):
             con = Fold.contraction(
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
-                channels=(Channel(b=b_load, acc=acc),),
+                # A computed B is a closed zero-axis operand node. Unlike A's norm/activation
+                # cone it has no row-statistic seam to split; its whole generic MAP tree is
+                # evaluated at each (k, n) slab cell by the sync compute-fill.
+                channels=(Channel(b=b_load if isinstance(b_load, Load) else Fold.projection(body=Body(tuple(b_load))), acc=acc),),
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
             # STORED form is the contraction itself (1s) — pure algebra; the

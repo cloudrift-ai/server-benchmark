@@ -59,9 +59,15 @@ def assemble_source(op, sources: dict[str, np.ndarray]) -> np.ndarray | None:
     ``source_path`` lookup, or the axis-0 concat of its ``source_parts`` (the
     ``merge_sibling_linears`` weight concat). ``None`` when any source is missing.
     Duck-typed over ``ConstantOp`` and ``backend.plan.WeightSpec`` alike.
-    ``source_graph`` bind records are the loaders' own business (:func:`evaluate_source_graph`)
-    — this helper answers ``None`` for them (``sources`` holds per-path arrays, and a record
-    has no single path)."""
+    A plan ``WeightSpec.generated`` carries a deterministic source-free bind record already
+    evaluated to ``(dtype, shape, bytes)``; reconstruct it without an external lookup.
+    Other ``source_graph`` bind records are the loaders' own business
+    (:func:`evaluate_source_graph`) — this helper answers ``None`` for them.
+    """
+    generated = getattr(op, "generated", None)
+    if generated is not None:
+        dtype, shape, data = generated
+        return np.frombuffer(data, dtype=np.dtype(dtype)).reshape(shape).copy()
     if op.source_parts:
         parts = [sources.get(path) for path, _shape in op.source_parts]
         if any(p is None for p in parts):

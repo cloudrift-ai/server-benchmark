@@ -4,10 +4,8 @@ Lives in a ``_``-prefixed module so the pass loader skips it (only
 ``NNN_<name>.py`` files are loaded as rules — see ``Pass.load``). Both
 ``010_merge_loop_ops`` and ``005_split_shared_indexmap`` import from here,
 so the pure-indexmap predicate and the Write-output renamer stay defined
-once. The splice/fragment plumbing of a producer→consumer merge
-(``build_merged_op`` / ``wrap_merge_fragment``) also lives here so the
-post-split re-fusion rule (``lowering/tile/006_merge_split_glue``) reuses
-it under its own guard set instead of duplicating the assembly.
+once. The splice/fragment plumbing for a one- or multi-consumer region
+also lives here, keeping graph assembly separate from fusion policy.
 """
 
 from __future__ import annotations
@@ -66,34 +64,123 @@ def rename_write_output(op: LoopOp, *, old: str, new: str) -> LoopOp:
     return LoopOp(body=op.body.map(fn))
 
 
-def build_merged_op(graph: Graph, producer: Node, consumer: Node) -> LoopOp | None:
-    """Splice ``producer`` into ``consumer`` and return the merged ``LoopOp``
-    (Writes renamed to the fragment node id ``merged_<consumer.id>``), or
-    ``None`` when ``splice_graph`` rejects the pattern (σ-solve failure,
-    missing axis in consumer scope, splicer-internal validity issues — the
-    pair stays separate).
+def closed_loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], Node] | None:
+    """Return the nearest closed producer-to-sink ``LoopOp`` region.
 
-    Builds the two-node subgraph ``splice_graph`` expects: producer,
-    consumer, and their non-producer external inputs as ``InputOp`` nodes,
-    so the splicer can classify each Load via the graph edges (LoopOp→LoopOp
-    is a splice edge; LoopOp→InputOp is external)."""
-    sub = Graph()
-    for ext_id in list(producer.inputs) + list(consumer.inputs):
-        if ext_id == producer.id or ext_id in sub.nodes:
+    One consumer is the degenerate two-node region. A fan-out must have a
+    common Loop descendant; policy checks (escapes, reductions, recognition
+    boundaries, and work growth) remain the merge rule's responsibility.
+    """
+
+    def reachable(start: str) -> set[str]:
+        found: set[str] = set()
+        pending = [start]
+        while pending:
+            nid = pending.pop()
+            if nid in found:
+                continue
+            node = graph.nodes.get(nid)
+            if node is None or not isinstance(node.op, LoopOp):
+                continue
+            found.add(nid)
+            pending.extend(graph.users(nid))
+        return found
+
+    branches = sorted(graph.users(producer.id))
+    if not branches or any(not isinstance(graph.nodes[nid].op, LoopOp) for nid in branches):
+        return None
+    common: set[str] | None = None
+    for branch in branches:
+        branch_reachable = reachable(branch)
+        common = branch_reachable if common is None else common & branch_reachable
+    if not common:
+        return None
+    sink_id = next((nid for nid in graph.topological_order() if nid in common), None)
+    if sink_id is None:
+        return None
+
+    forward = reachable(producer.id)
+    region: set[str] = set()
+    pending = [sink_id]
+    while pending:
+        nid = pending.pop()
+        if nid in region or nid not in forward:
             continue
+        region.add(nid)
+        for inp in graph.nodes[nid].inputs:
+            parent = graph.producer(inp)
+            if parent is not None:
+                pending.append(parent.id)
+    if producer.id not in region or not set(branches) <= region:
+        return None
+    interior = region - {sink_id}
+    if any(nid in graph.outputs or graph.users(nid) - region for nid in interior):
+        return None
+    # Internal splice edges currently identify a Loop's primary buffer by its
+    # node id. Leave MIMO/secondary-buffer regions on their established path.
+    for nid in region:
+        node = graph.nodes[nid]
+        if len(node.outputs) != 1:
+            return None
+        for inp in node.inputs:
+            parent = graph.producer(inp)
+            if parent is not None and parent.id in region and inp != parent.id:
+                return None
+    return region, graph.nodes[sink_id]
+
+
+def build_merged_region(graph: Graph, region: set[str], sink: Node) -> LoopOp | None:
+    """Splice an owned DAG of ``LoopOp`` nodes into ``sink``.
+
+    ``region`` may be the ordinary two-node case or fan out and reconverge.
+    ``splice_graph`` preserves that structure: a producer statement
+    demanded by several internal consumers is keyed by origin, scope and
+    coordinate substitution, so equal demands share one SSA definition while
+    genuinely different coordinates are emitted separately.
+    """
+    if sink.id not in region or any(not isinstance(graph.nodes[nid].op, LoopOp) for nid in region):
+        return None
+
+    order: list[str] = []
+    seen: set[str] = set()
+
+    def visit(nid: str) -> None:
+        if nid in seen:
+            return
+        seen.add(nid)
+        for inp in graph.nodes[nid].inputs:
+            parent = graph.producer(inp)
+            if parent is not None and parent.id in region:
+                visit(parent.id)
+        order.append(nid)
+
+    visit(sink.id)
+    if seen != region:
+        return None
+
+    sub = Graph()
+    external: list[str] = []
+    for nid in order:
+        for inp in graph.nodes[nid].inputs:
+            producer = graph.producer(inp)
+            producer_id = producer.id if producer is not None else inp
+            if producer_id not in region and inp not in external:
+                external.append(inp)
+    for ext_id in external:
         ext_t = graph.buffer(ext_id)
         shape = ext_t.shape if ext_t is not None else ()
         dtype = ext_t.dtype if ext_t is not None else "f32"
         sub.add_node(InputOp(), [], Tensor(ext_id, shape, dtype), node_id=ext_id)
-    sub.add_node(producer.op, list(producer.inputs), producer.output, node_id=producer.id)
-    sub.add_node(consumer.op, list(consumer.inputs), consumer.output, node_id=consumer.id)
-    sub.outputs = [consumer.id]
+    for nid in order:
+        node = graph.nodes[nid]
+        sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
+    sub.outputs = [sink.id]
 
     result = splice_graph(sub)
     if result is None:
         return None
     merged, _ = result
-    return rename_write_output(merged, old=consumer.id, new=f"merged_{consumer.id}")
+    return rename_write_output(merged, old=sink.id, new=f"merged_{sink.id}")
 
 
 def wrap_merge_fragment(graph: Graph, merged: LoopOp, consumer: Node) -> Graph:

@@ -1,7 +1,10 @@
 """Unit tests for ``op_to_expr`` — elementwise op-name → Expr translation."""
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr
+from emmy.compiler.ir.stmt import Assign, Body
 from emmy.compiler.ir.stmt.base import dtype_promote, op_to_expr
+from emmy.compiler.ir.stmt.normalize import eliminate_copy_aliases
 
 
 def test_square_renders_to_self_multiply():
@@ -21,6 +24,11 @@ def test_copy_is_identity_passthrough():
     """``copy`` returns its input unchanged (dropout lowers through this path)."""
     x = Literal(1.0, "float")
     assert op_to_expr("copy", [x]) is x
+
+
+def test_typed_copy_is_a_cast_not_an_alias():
+    cast = Assign(name="wide", op="copy", args=("narrow",), dtype=F32)
+    assert eliminate_copy_aliases(Body((cast,))) == Body((cast,))
 
 
 def test_sin_cos_render_as_intrinsics():
@@ -75,8 +83,17 @@ def test_integer_ops_keep_integer_spelling_without_changing_mask_semantics():
 
 
 def test_integer_elementwise_promotion_is_operation_specific():
-    for op in ("add", "multiply", "floor_divide", "remainder", "left_shift", "bitwise_xor"):
+    for op in ("add", "multiply", "floor_divide", "remainder", "left_shift", "bitwise_xor", "bitwise_count"):
         assert dtype_promote(op, ["u32", "u32"]) == "u32"
     assert dtype_promote("bitwise_or", ["u64", "u64"]) == "u64"
+    assert dtype_promote("left_shift", ["u16", "u32"]) == "u32"
+    assert dtype_promote("right_shift", ["u64", "i32"]) == "u64"
+    assert dtype_promote("bitwise_and", ["i64", "u32"]) == "i64"
     assert dtype_promote("bitwise_and", ["f32", "f32"]) == "f32"
     assert dtype_promote("equal", ["i32", "i32"]) == "f32"
+
+
+def test_integer_bitwise_count_stays_an_abstract_intrinsic():
+    value = Literal(7, "int")
+    expr = op_to_expr("bitwise_count", [value], dtype="u32")
+    assert isinstance(expr, FuncCallExpr) and expr.name == "bitwise_count" and expr.args == (value,)

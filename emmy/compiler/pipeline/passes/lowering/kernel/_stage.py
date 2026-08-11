@@ -518,6 +518,20 @@ class SyncTransport:
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
         sz, _ = op.value(zero, probe_row, zero)
         ctx = SimplifyCtx.empty()
+
+        def aligned(expr: Expr) -> bool:
+            form = affine_form(expr, expr.free_vars())
+            if form is None:
+                return False
+            anchor, coeffs = form
+            anchor = anchor.simplify(ctx)
+            return (
+                isinstance(anchor, Literal)
+                and isinstance(anchor.value, int)
+                and anchor.value % v == 0
+                and all(coeff % v == 0 for coeff in coeffs.values())
+            )
+
         plans: list[str] = []
         cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
@@ -525,7 +539,6 @@ class SyncTransport:
                 plans.append("hoist")
                 continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
-            anchor = sz[p].index[-1].simplify(ctx) if isinstance(sz[p], Load) else None
             if (
                 isinstance(a, Load)
                 and a.is_scalar
@@ -534,8 +547,8 @@ class SyncTransport:
                 and len(a.index) == len(b.index)
                 and all(x.pretty() == y.pretty() for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
                 and step == 1
-                and isinstance(anchor, Literal)
-                and anchor.value % v == 0
+                and isinstance(sz[p], Load)
+                and aligned(sz[p].index[-1])
             ):
                 plans.append("vector")
             else:
@@ -582,7 +595,9 @@ class SyncTransport:
                 cell_col = _add(col, _lit(j)) if j else col
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
-                vals.append(f"{val}__c{j}")
+                vals.append(val)
+            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in stmt.defines()}
+            vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
             # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
             # unsuffixed, and per-cell references pass through to them; VECTOR positions (a scalar

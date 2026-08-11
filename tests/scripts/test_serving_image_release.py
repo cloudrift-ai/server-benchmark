@@ -163,6 +163,7 @@ OPTIONAL_KEYS = {
     "SERVE_PREFILL_CAPACITY",
     "SERVE_PREFILL_BUCKET",
     "SERVE_M1_TIER",
+    "SERVE_STATIC_ONLY",
 }
 
 
@@ -540,6 +541,7 @@ def test_makefile_forwards_the_pinned_revision_to_the_gate():
     assert "--revision" in body and "SERVE_REVISION" in body
     assert "--strict-major-gaps" in body and "--release-config" in body
     assert "--checkpoint" in body and "CHECKPOINT" in body
+    assert "--static-only-release" in body and "SERVE_STATIC_ONLY" in body
 
 
 def test_release_config_widths_include_pinned_and_warm_decode_prefill(tmp_path):
@@ -562,6 +564,29 @@ def test_release_config_rejects_zero_prefill_capacity(tmp_path):
     config.write_text("SERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=0\n")
     with pytest.raises(ValueError, match="SERVE_PREFILL_CAPACITY must be positive"):
         csg.release_widths(config)
+
+
+def test_static_only_gate_rejects_release_config_without_m1_proof(tmp_path):
+    config = tmp_path / "model.env"
+    config.write_text(
+        "SERVE_STATIC_ONLY=1\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=1\n"
+        "SERVE_DECODE_BUCKET=1\n"
+        "SERVE_PREFILL_CAPACITY=1\n"
+        "SERVE_PREFILL_BUCKET=0\n"
+        "SERVE_M1_TIER=0\n"
+        "SERVE_CAPTURE_SIZES=[1]\n"
+    )
+    result = _gate(
+        "google/gemma-4-12B-it",
+        "--strict-major-gaps",
+        "--static-only-release",
+        "--release-config",
+        str(config),
+    )
+    assert result.returncode == 2
+    assert "static-only release scope is unsafe" in result.stdout
+    assert "SERVE_M1_TIER=1" in result.stdout
 
 
 def test_local_checkpoint_override_preserves_release_provenance():
@@ -605,6 +630,36 @@ def test_strict_release_twin_audit_fails_major_gaps(monkeypatch):
         provenance="org/model@revision",
     )
     assert seen == {"model": "/local/exact-checkpoint", "extra_widths": (32, 512)}
+
+
+def test_static_only_release_twin_audit_captures_only_m1(monkeypatch):
+    import emmy.compiler.pipeline.search.audit as audit
+    import emmy.serving.twins as twins
+
+    seen = {}
+
+    def fake_capture(model, **kwargs):
+        seen.update(model=model, **kwargs)
+        return {"pre1": object()}
+
+    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(audit, "audit_card", lambda _graphs, _gpu, _cap: {"pre1": [{"verdict": "MATCH", "key": None}]})
+
+    assert csg.audit_release_twins(
+        "/local/exact-checkpoint",
+        "NVIDIA GeForce RTX 5090",
+        [(12, 0)],
+        (),
+        provenance="org/model@revision",
+        static_only=True,
+    )
+    assert seen == {
+        "model": "/local/exact-checkpoint",
+        "decode_bucket": 1,
+        "prefill_bucket": 0,
+        "extra_widths": (),
+        "static_only": True,
+    }
 
 
 def test_preflight_enumeration_applies_the_same_revision_rule():

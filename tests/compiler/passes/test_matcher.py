@@ -73,3 +73,19 @@ def test_chain_fails_on_fanout():
     g.outputs = ["r1", "r2"]
     matches = _match(g, [Pattern("ew", ElementwiseOp), Pattern("red", ReduceOp)])
     assert matches == []
+
+
+def test_single_root_match_can_watch_immediate_consumers():
+    """Graph-aware rules invalidate stale root matches without consuming users."""
+    g = _simple_graph()
+    pipeline = Pipeline.from_pattern([Pattern("root", ElementwiseOp)])
+    rule = pipeline.passes[0].rules[0]
+    rule.watch_consumers = True
+
+    (match,) = pipeline.match(g, rule)
+    assert match.consumed == {"m"}
+    assert match.is_alive()
+
+    g.remove_node("o")
+    g.add_node(op=ReduceOp("sum", 1), inputs=["m"], output=Tensor("o", (4, 4)), node_id="o")
+    assert not match.is_alive()

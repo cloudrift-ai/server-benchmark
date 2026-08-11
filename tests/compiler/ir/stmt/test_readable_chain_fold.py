@@ -9,6 +9,7 @@ across the redefinition.
 
 from __future__ import annotations
 
+from emmy.compiler.dtype import U32
 from emmy.compiler.ir.stmt.base import RenderCtx, render_body
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign
@@ -27,6 +28,17 @@ def test_fold_inlines_single_use_temp(monkeypatch) -> None:
     )
     assert not any(" t =" in ln for ln in lines), f"t must fold into its consumer: {lines}"
     assert any("(m - s)" in ln for ln in lines), f"y must carry the folded expression: {lines}"
+
+
+def test_fold_keeps_target_rendered_bitcast_named(monkeypatch) -> None:
+    """A bitcast is rendered by the target-aware ``Assign`` path, not ``op_to_expr``."""
+    monkeypatch.setenv("EMMY_READABLE", "1")
+    lines = _render(
+        Assign(name="bits", op="bitcast", args=("x",), dtype=U32),
+        Assign(name="y", op="copy", args=("bits",), dtype=U32),
+    )
+    assert any("unsigned int bits = emmy_bitcast<unsigned int>(x);" in line for line in lines)
+    assert any(" y = bits;" in line for line in lines)
 
 
 def test_fold_declines_across_operand_redefinition(monkeypatch) -> None:

@@ -156,7 +156,9 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
         def forward(self, x, w_gate, w_up, w_down):
             return nn.functional.linear(nn.functional.silu(nn.functional.linear(x, w_gate)) * nn.functional.linear(x, w_up), w_down)
 
-    h, inter = 32, 16
+    # The deployed Laguna shape. Shape-only compilation allocates no checkpoint tensors and
+    # catches primitives which tiny padded examples can accidentally fold away.
+    h, inter = 3072, 1024
     graph = trace_split(
         Expert(),
         (
@@ -176,17 +178,118 @@ def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     spelled = twins["expert1-sparse-sliding@b2"]
     assert spelled.inputs[:4] == ["x", "w_gate", "w_up", "w_down"]
     assert {spelled.nodes[name].output.dtype.name for name in ("w_gate", "w_up", "w_down")} == {"i16"}
-    assert all(type(node.op).__name__ not in {"TrellisDecodeOp", "HadamardOp"} for node in spelled.nodes.values())
-
+    from emmy.compiler.backend.plan import plan_from_dict, plan_from_graph, plan_to_dict
     from emmy.compiler.context import Context
+    from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
     lowered = Pipeline.build(CUDA_PASSES).run(spelled, ctx=Context(compute_capability=(12, 0)))
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda and all(op.kernel_source for op in cuda)
+    assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
+    plan = plan_from_graph(lowered)
+    assert plan_to_dict(plan_from_dict(plan_to_dict(plan))) == plan_to_dict(plan)
+    assert plan.launches and plan.weights
+    assert all(weight.generated is not None and weight.load_ops == () for weight in plan.weights.values())
+    for weight in ("w_gate", "w_up", "w_down"):
+        assert not {f"{weight}_decoded_{table}" for table in ("bit_start", "word_idx", "next_word")} & set(plan.weights)
+        assert {f"{weight}_decoded_shift_step", f"{weight}_decoded_tile_step"} <= set(plan.weights)
+    factors = [spec.generated for spec in plan.weights.values() if spec.generated is not None and spec.generated[1] == (128, 128)]
+    assert len(factors) == 3 and {factor[0] for factor in factors} == {"<f4"}
+    from emmy.serving.gen_runner import _bind_plan_constants
+
+    assert set(_bind_plan_constants(plan, {}, cache=None)) == set(plan.weights)
     active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
+
+
+def test_symbolic_laguna_coded_expert_preserves_the_token_dim():
+    """The any-width serving twin keeps ``num_tokens`` symbolic through all three factors."""
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp
+    from emmy.serving.gen_runner import trace_split
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate, w_up, w_down):
+            return nn.functional.linear(nn.functional.silu(nn.functional.linear(x, w_gate)) * nn.functional.linear(x, w_up), w_down)
+
+    h = inter = 128
+    graph = trace_split(
+        Expert(),
+        (
+            torch.zeros(8, h, dtype=torch.float16),
+            torch.zeros(inter, h, dtype=torch.float16),
+            torch.zeros(inter, h, dtype=torch.float16),
+            torch.zeros(h, inter, dtype=torch.float16),
+        ),
+        ["x"],
+    )
+    traced_token_dim = graph.nodes["x"].output.shape[0]
+    assert not traced_token_dim.is_static and traced_token_dim.as_atom_name() == "num_tokens"
+
+    storage = {}
+    for proj, n, k in (("gate_proj", inter, h), ("up_proj", inter, h), ("down_proj", h, inter)):
+        base = f"model.layers.1.mlp.experts.0.{proj}"
+        storage[base] = _entry(base, n, k, 2)
+    spelled = _spell_expert_twins("expert-sym-sparse-sliding", graph, storage)["expert-sym-sparse-sliding@b2"]
+    token_dim = spelled.nodes["x"].output.shape[0]
+    assert token_dim == traced_token_dim
+
+    dynamic_factors = [
+        node
+        for node in spelled.nodes.values()
+        if isinstance(node.op, (MatmulOp, ReshapeOp)) and node.output.shape and not node.output.shape[0].is_static
+    ]
+    assert dynamic_factors
+    assert all(node.output.shape[0] == token_dim for node in dynamic_factors)
+    for prefix in ("linear", "linear_1", "linear_2"):
+        factored = [
+            spelled.nodes[f"{prefix}_{suffix}"]
+            for suffix in ("x32", "left_blocks", "left_factor", "left_flat32", "core", "right_blocks", "right_factor", "right_flat")
+        ]
+        assert len({id(node.output.shape[0]) for node in factored}) == 1
+    assert spelled.nodes[spelled.outputs[0]].output.shape[0] == token_dim
+
+
+def test_laguna_serving_twin_capture_includes_symbolic_coded_expert(monkeypatch, tmp_path):
+    """The public weight-free capture path inventories the any-width coded expert."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    import emmy.serving.twins as twins
+
+    cfg = transformers.LagunaConfig(
+        vocab_size=32,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        max_position_embeddings=64,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=2,
+        num_experts_per_tok=1,
+        layer_types=["full_attention"],
+        mlp_layer_types=["sparse"],
+        num_attention_heads_per_layer=[4],
+        sliding_window=16,
+    )
+    cfg.save_pretrained(tmp_path)
+    storage = {}
+    for proj, n, k in (("gate_proj", 128, 128), ("up_proj", 128, 128), ("down_proj", 128, 128)):
+        base = f"model.layers.0.mlp.experts.0.{proj}"
+        storage[base] = _entry(base, n, k, 2)
+    monkeypatch.setattr(twins, "coded_tensor_storage", lambda *_args, **_kwargs: storage)
+
+    graphs = twins.capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=0)
+    assert "expert-sym@b2" in graphs
+    token_dim = graphs["expert-sym@b2"].nodes["x"].output.shape[0]
+    assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
 @pytest.mark.parametrize(

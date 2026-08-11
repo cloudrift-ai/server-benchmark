@@ -72,6 +72,12 @@ def map_cone(body: list, root: str) -> list | None:
         seen.add(id(st))
         if isinstance(st, Load):
             cone.append(st)
+            # A data-dependent gather/index load consumes SSA values through its INDEX rather
+            # than through ``Assign.args``. Those definitions are part of the producer cone too;
+            # dropping them leaves an apparently pure map with undefined index temporaries once
+            # the operand is compute-filled. Axis names are harmless here because ``defs.get``
+            # simply ignores names not defined by the body.
+            need.extend(st.deps())
             continue
         if isinstance(st, Assign):
             cone.append(st)
@@ -201,7 +207,7 @@ def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: L
     return a_leaf, b_leaf, raw, Body((*hoisted, *chain, *epilogue))
 
 
-def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load, str, Body]:
+def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load | list, str, Body]:
     """Resolve the ``(a_load, b_load, acc, epilogue)`` operand→role facts for a ``CONTRACTION``
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
     ``m_name`` / ``n_name``, with projection ``epilogue``.
@@ -263,15 +269,20 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
             raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
         # B is NOT directly named by the lift — it rides a computed cone (and A may too: the
-        # W8A8 double-cone). A storage decode
-        # times k-invariant multiplicative factors binds through the mul-hoist (decode absorbed
-        # by the storage dtype, factors to the epilogue); anything else raises for the same
-        # reason as the computed-A decline above — the positional rule would bind the
-        # cone-INTERNAL load as B and silently drop the cone (measured on the M2b probe: the
-        # scale multiply vanished from the kernel).
+        # W8A8 double-cone). A storage decode times k-invariant multiplicative factors binds
+        # through the mul-hoist first (decode absorbed by the storage dtype, factors to the
+        # epilogue). Otherwise bind a pure MAP cone structurally, just as for A. The operand EDGE
+        # carries the whole producer tree; later scheduling may compute-fill it into the B slab,
+        # or the scalar reading may evaluate it per cell. This is role-generic computed-operand
+        # fusion: no storage-format fact survives recognition.
         hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
         if hoist is not None:
             return hoist
+        if a_leaf is not None and a_leaf.names[0] in lift.args:
+            b_arg = next(a for a in lift.args if a != a_leaf.names[0])
+            cone = map_cone(body, b_arg)
+            if cone and not any(isinstance(st, Load) and m_name in _idx_vars(st.index) for st in cone):
+                return a_leaf, cone, acc, epilogue
         raise LoweringError("warp tier: the ⊗ lift's B operand is a computed cone that does not bind")
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")

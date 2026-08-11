@@ -159,18 +159,19 @@ packed-window extraction, computed codebooks, tile ordering, and the block Hadam
 Checkpoint discovery, sibling pairing, codebook markers, and allocation metadata remain in
 `loader/quant.py` and `loader/safetensors.py`.
 
-At graph birth, `spell_trellis_constants` replaces each logical weight with the format-neutral
-reconstruction built by `loader/trellis.py`: ordinary ranges, casts/bitcasts, elementwise integer
-arithmetic, gathers/index maps, layout operations, and matmuls. The static cone folds through the
-normal constant policy before Loop IR. `spell_trellis_inputs` applies the same generic builder to
-expert weight inputs, declaring packed codes plus their padded channel-vector inputs; it introduces
-no format-specific IR class. Marker presence selects which generic codebook algebra is emitted.
+At graph birth, `spell_trellis_constants` replaces each coded weight together with its sole
+`LinearOp` consumer. `loader/trellis.py` emits the factorized contraction directly: ordinary
+ranges, casts/bitcasts, integer algebra, gathers/index maps, layouts, and matmuls. The packed decode
+becomes the core contraction's computed B operand; no logical dense weight or fp16 weight-rounding
+buffer exists in the executable graph. `spell_trellis_inputs` applies the same builder to expert
+weight inputs. Marker presence selects the generic codebook algebra. An unsupported or shared
+coded linear fails at birth rather than falling back to materialization; ordinary padded channel
+dimensions are handled inside the generic spelling.
 
-The eager and serving reference lanes use `load_dequantized_state_dict` /
-`load_quantized_split` to materialize logical values with the same NumPy decode. A future
-compressed execution lane must optimize the resulting generic primitive graph; it must not recover
-a checkpoint-specific op or statement after decomposition. `coded_tensor_storage` remains a
-loader-only, weight-free inventory for tracing and release coverage.
+`load_dequantized_state_dict` remains an explicit eager/reference utility and the block decoder is
+still used for an unsupported coded LM head. Neither is an automatic compiled-serving fallback.
+`coded_tensor_storage` remains a loader-only, weight-free inventory for tracing and release
+coverage.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
 search — may know canonical dtypes (`f8e4m3`), generic elementwise ops, and graph algebra. They may NEVER contain a

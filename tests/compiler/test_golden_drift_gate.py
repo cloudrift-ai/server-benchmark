@@ -53,9 +53,9 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 # Known-uncovered kernel forks per card — ALL kinds (contractions, rms_norm/reduce sweeps,
 # pointwise), not just the warp-contraction hazards. This list may only change deliberately:
 # remove a line when its golden gets recorded (the test fails until you do); add one only
-# when review accepts a new uncovered kernel. BOTH CARDS ARE EMPTY as of the 2026-07-22
-# merged-sibling reseed (5090 seeded locally, 4090 on a rented card — see the WS1 sections in
-# both gemma4 golden YAMLs): full model coverage is ENFORCED again.
+# when review accepts a new uncovered kernel. The 2026-07-22 merged-sibling reseed restored
+# full contraction coverage (5090 seeded locally, 4090 on a rented card — see the WS1 sections
+# in both gemma4 golden YAMLs); the remaining entries are explicitly deferred auxiliary forks.
 # 2026-07-24: the audit twin set widened to EVERY deployed width (32/64/256/4096 + sym —
 # the m64/m4096 coverage regressions were invisible before), which surfaced the aux keys
 # below at the new widths: pointwise/RoPE/cast glue (reduce_max=0), the per-head qk-norm
@@ -63,11 +63,20 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 # burn them down by recording aux rows opportunistically (manual --ab), majors stay zero.
 EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 5090": {
+        # 2026-08-10: typed loop copies now preserve K-norm's f16->f32 input widening and the
+        # later f32->f16 output boundary instead of erasing them as identity aliases.  The
+        # dynamic K-norm consequently exposes its scalar reduction and output copy as separate
+        # aux forks; the same output copy is visible at m64/m192/m2048/m4096.  None is a warp
+        # contraction.  Burn these down by seeding these typed-boundary rows on the card, or by
+        # adding a cast-aware fusion that retains the explicit precision transitions.
+        ShapeKey(free_prod=8, reduce_max=256, is_warp=False, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=0, is_warp=False, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=245760, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=737280, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=7864320, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=15728640, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=4096),
         # (2026-08-05: the m1 scalar siblings that briefly sat here — the same seam-dtype
         # defect as the eleven warp majors, fixed in ``_cut._ws_dtype`` — are covered again.)
-        ShapeKey(free_prod=33554432, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=35651584, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=557056, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=8388608, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-24b: the m1 (gemv-tier) width joined the audit — its aux keys (m1
         # pointwise/rope glue, per-head rms at M=1, the small o_proj/lm_head-side forms;
@@ -75,9 +84,7 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         # 2026-07-25: the m8 (bucket-8 decode) width joined the audit — its per-head qk-norm rms
         # aux keys (M=8 × heads × head_dim, the same greedy-near-optimal class as the m32/m64
         # entries above; the m8 matmul/fused/glue forks are all golden-covered).
@@ -90,11 +97,6 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=4194304, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=16777216, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=1048576, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        # ... and the m2048 analogs of the m4096 reduce-0 warp aux forks + the n3840 pointwise
-        # (the same deferred/aux fork class as the 33554432/35651584/62914560/15728640 m4096
-        # entries above).
-        ShapeKey(free_prod=16777216, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=17825792, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         # 2026-07-30: the PLACE-knob retirement (#446) commented out the fused computed-A
         # goldens that recorded a PLACE@ placement, so every fused norm→linear / geglu fork
         # (kind="fused", across the m1/m8/m32/m2048/m4096 audit widths) was uncovered.
@@ -113,22 +115,23 @@ EXPECTED_GAPS = {
         # widths' (per-head qk-norm rms sweeps, the post-attn/cut-stat rms key, the merged-cat
         # dup-view glue); the m192 matmul/fused/o_proj forks are all golden-covered.
         ShapeKey(free_prod=737280, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=1572864, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=1671168, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=393216, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=786432, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=98304, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=1572864, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
     },
     "NVIDIA GeForce RTX 4090": {
+        # 2026-08-10: mirrors the 5090's newly explicit dynamic K-norm cast-boundary aux
+        # forks above.  Remove these entries once the two rows are seeded on the 4090 or a
+        # semantics-preserving typed-boundary fusion makes them disappear.
+        ShapeKey(free_prod=8, reduce_max=256, is_warp=False, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=0, is_warp=False, is_dyn=True, kind="", free_max=0),
         # 2026-07-31: the m192 width (the MTP c=64 verify bucket) joined the audit. There is no
         # m192 serving on 24 GB (the 12B does not fit), so the whole m192 fork set is uncovered
-        # here — the merged-cat glue and rms/qknorm sweeps below; the m192 warp-contraction
+        # here — the rms/qknorm sweeps below; the m192 warp-contraction
         # forks (o_proj, the fused cones) live in EXPECTED_MAJOR_GAPS. Mirror the 5090's m192 +
         # o_proj + fused-cut seeding if a 4090 m192 tier is ever wanted.
-        ShapeKey(free_prod=1572864, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=1572864, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=1671168, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=393216, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=737280, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=786432, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
@@ -140,9 +143,7 @@ EXPECTED_GAPS = {
         # (merged/canonical matmuls, fused norm→merged forms) live in EXPECTED_MAJOR_GAPS.
         # Burn down with the m8 mirror once a 4090 is back.
         ShapeKey(free_prod=1048576, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=16777216, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=16777216, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=17825792, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=4194304, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=7864320, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-25: the m8 (bucket-8 decode) width joined the audit. The 5090 seeded its m8
@@ -155,17 +156,11 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=32768, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=4096, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=65536, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=69632, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=245760, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=262144, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=32768, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=33554432, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=35651584, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
-        ShapeKey(free_prod=524288, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=524288, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=557056, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=8388608, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-24b: the m1 (gemv-tier) width joined the audit — its aux keys (m1
         # pointwise/rope glue, per-head rms at M=1, the small o_proj/lm_head-side forms;
@@ -175,9 +170,7 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=3840, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
     },
 }
 

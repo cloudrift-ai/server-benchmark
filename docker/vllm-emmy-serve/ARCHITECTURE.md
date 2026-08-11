@@ -117,10 +117,14 @@ shape is the contract, and the degraded outcome for the others is a cold boot, n
   `SERVE_DECODE_BUCKET`, `SERVE_GPU`); the rest are per-checkpoint opt-ins whose defaults reproduce a dense,
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
   `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
-  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`). The latter four map
+  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), and the release-gate scope
+  opt-in `SERVE_STATIC_ONLY`. The latter four map
   immutably to their `EMMY_GEN_*` variables in initial warm, every shape fixpoint, the baked image, and verify;
   an extra warm shape's prefill field overrides the pinned bucket. A test rejects any other key, because a
   misspelled one reads as a value nothing consumes.
+  `SERVE_STATIC_ONLY=1` narrows only the golden audit, and is fail-closed: it requires runner capacity, decode bucket,
+  and scheduler maximum all equal to one, prefill disabled, the M1 tier enabled, capture sizes exactly `[1]`, and no
+  warm-shape override outside that same envelope. Without it the audit retains all standard widths plus symbolic.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
   compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the

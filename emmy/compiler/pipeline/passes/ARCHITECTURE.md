@@ -274,7 +274,9 @@ failing several passes later:
   against the twist program's positional temps. That node is the edge directly; there is no empty-body
   `Fold.projection(body=(), operands=(…,))` cone wrapper around it, since with no per-cell work `cone_seam` bridges
   no stats
-  either way and both spellings lower identically.
+  either way and both spellings lower identically. The same edge vocabulary applies to **B**: a pure, closed B
+  producer can remain inline and fill the Tensor Core B slab directly. This is a generic producer-to-contraction
+  fusion over ordinary tensor algebra; storage-format reconstruction must already have decomposed before this band.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR

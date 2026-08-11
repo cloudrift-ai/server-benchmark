@@ -127,8 +127,8 @@ def _attention() -> Graph:
     return graph
 
 
-def _tree(build, pick=None, *, target=(12, 0)):
-    """The recognized tile tree for one kernel kind — resolve the tile passes, take the (single)
+def _trees(build, pick=None, *, target=(12, 0)):
+    """The recognized tile trees for one target — resolve the tile passes and collect every
     ``TileOp``'s stored op. ``pick`` selects a fork leaf (default option-0; the schedule slices a
     row stamps never change the walker's structure)."""
 
@@ -141,9 +141,13 @@ def _tree(build, pick=None, *, target=(12, 0)):
         return leaves[0]
 
     rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(target)).resolve(build(), decide)
-    tiles = [n.op for n in rg.nodes.values() if isinstance(n.op, TileOp)]
-    assert len(tiles) == 1, f"expected one kernel, got {len(tiles)}"
-    return tiles[0].op
+    return [n.op.op for n in rg.nodes.values() if isinstance(n.op, TileOp)]
+
+
+def _tree(build, pick=None, *, target=(12, 0)):
+    roots = _trees(build, pick, target=target)
+    assert len(roots) == 1, f"expected one kernel, got {len(roots)}"
+    return roots[0]
 
 
 def _is_warp_row(row: dict) -> bool:
@@ -208,18 +212,21 @@ def test_every_stored_golden_spelling_is_canonical(trees):
         kind = _tree_kind(cfg)
         if cfg.loop_wire is not None:
             # A Loop IR target deliberately has no frontend operation discriminator. Its
-            # persisted algebra is the authoritative tree for path-key spelling.
+            # persisted algebra is the authoritative tree for path-key spelling. Cooperative
+            # reductions lower to a partial and finalize kernel, so a target may contribute
+            # more than one recognized tree.
             with pinned_knobs(cfg.knobs):
-                root = _tree(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
+                roots = _trees(lambda cfg=cfg: cfg.target_program.copy(), target=cfg.compute_cap)
+            assert roots, f"{fname}:{cfg.name}: Loop target lowered to no TileOps"
             kind = "loop"
         elif kind in trees:
-            root = trees[kind]
+            roots = [trees[kind]]
         else:
             # rope / embedding entries carry no tree-path families — nothing to resolve.
             path_keys = [k for k in cfg.knobs if family_of(k) in PATH_FAMILIES]
             assert not path_keys, f"{fname}:{cfg.name}: derived kind {kind!r} has path-family keys but no reference tree"
             continue
-        all_sites = sites(root)
+        roots_and_sites = [(root, sites(root)) for root in roots]
         for key, value in cfg.knobs.items():
             if family_of(key) not in PATH_FAMILIES:
                 continue
@@ -231,14 +238,18 @@ def test_every_stored_golden_spelling_is_canonical(trees):
                     # golden layer. Assert the exception holds exactly (dynamic entries only).
                     assert cfg.dynamic, f"{ctx}: a STATIC attention golden must spell TILE@dd/TILE@pj"
                     with pytest.raises(ValueError, match="ambiguous"):
-                        resolve(root, key, all_sites=all_sites)
+                        resolve(roots[0], key, all_sites=roots_and_sites[0][1])
                     continue
-                site = resolve(root, key, all_sites=all_sites)  # ambiguity would raise — the tripwire
-                if site is None:
+                resolved = [(root, all_sites) for root, all_sites in roots_and_sites if resolve(root, key, all_sites=all_sites) is not None]
+                if not resolved:
                     assert value in ("", None), f"{ctx}: no {key} site on the {kind} tree, yet a non-empty value"
                 else:
-                    assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: bare is not this site's canonical spelling"
+                    for root, all_sites in resolved:
+                        assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: bare is not this site's canonical spelling"
             else:
-                assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: stored spelling is not canonical"
+                resolved = [(root, all_sites) for root, all_sites in roots_and_sites if resolve(root, key, all_sites=all_sites) is not None]
+                assert resolved, f"{ctx}: no matching site on the {kind} tree"
+                for root, all_sites in resolved:
+                    assert canonical(root, key, all_sites=all_sites) == key, f"{ctx}: stored spelling is not canonical"
             checked += 1
     assert checked > 1000, f"suspiciously few golden keys checked ({checked}) — did the loader change?"

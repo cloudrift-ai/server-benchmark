@@ -4,9 +4,9 @@
 (recognized by the ``ElementwiseImpl.decodes`` trait, never an op-name list) times k-invariant
 factors binds as the RAW storage-dtype ``Load`` (the decode absorbed by dtype — every consumer
 converts a bits-carrier element by dtype) with the factors moved onto the accumulator in the
-epilogue (``Σ_k a·(s·w) = s·Σ_k a·w``). A shape the arm cannot hoist — a k-varying (2-D block)
-scale, a non-decode computed B — raises, and the recognizer demotes the cell to ``PLANAR`` (the
-guardrail contract: unmapped, never mis-scheduled). A storage-dtype (fp8) B now also STAGES — a
+epilogue (``Σ_k a·(s·w) = s·Σ_k a·w``). A pure map the arm cannot hoist — a k-varying
+(2-D block) scale or another computed B — remains a closed computed operand instead of being
+positionally misbound to an interior load. A storage-dtype (fp8) B now also STAGES — a
 raw byte slab whose drain converts to the atom's fragments (``test_fp8_staged``); a mismatch that
 is not a byte slab still refuses and keeps the warp tier gmem-direct.
 """
@@ -117,18 +117,26 @@ def test_original_epilogue_reads_the_scaled_value():
     assert scale_def < relu  # ``acc`` is defined (scaled) before the projection reads it
 
 
-def test_k_varying_scale_declines_to_planar():
-    """A 2-D block scale is k-indexed — the factor does not commute out of the fold, so the arm
-    raises and the recognizer keeps the whole cone inline (the fold derives PLANAR)."""
+def test_k_varying_scale_binds_as_whole_computed_b_cone():
+    """A 2-D scale cannot commute out, so the complete generic map remains the B operand."""
     loop = _dequant_loop(scale_index=(Var("k"), Var("n")))
-    with pytest.raises(LoweringError, match="computed cone"):
-        bind_contraction(loop, "m", "n", Body())
+    a, b, acc, epi = bind_contraction(loop, "m", "n", Body())
+    assert isinstance(a, Load) and isinstance(b, list) and acc == "acc" and not len(epi)
+    assert [s.defines() for s in b][-1] == ("wsc",)
+    assert {s.input for s in b if isinstance(s, Load)} == {"w_scale", "w_bits"}
 
 
-def test_non_decode_computed_b_raises_instead_of_positional_misbind():
-    """A computed B whose leaf is NOT the fp8 decode must never fall through to the positional
-    (n, k)-load rule — that binding silently drops the cone (the M2b probe's wrong kernel)."""
+def test_non_decode_computed_b_preserves_cone_instead_of_positional_misbind():
+    """An arbitrary pure map on B binds as a whole; the interior load is never misbound alone."""
     loop = _dequant_loop(decode="exp")
+    a, b, acc, epi = bind_contraction(loop, "m", "n", Body())
+    assert isinstance(a, Load) and isinstance(b, list) and acc == "acc" and not len(epi)
+    assert any(isinstance(s, Assign) and s.name == "dq" and s.op.name == "exp" for s in b)
+
+
+def test_m_dependent_b_cone_declines_instead_of_crossing_operand_roles():
+    """A B producer that reads the output-row axis is not a separable (k,n) operand."""
+    loop = _dequant_loop(scale_index=(Var("m"), Var("k")))
     with pytest.raises(LoweringError, match="computed cone"):
         bind_contraction(loop, "m", "n", Body())
 

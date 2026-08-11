@@ -60,6 +60,14 @@ def register_trace_command(subparsers):
         help="With --serving-twins, include another configured release width. Repeatable.",
     )
     parser.add_argument(
+        "--static-only-release",
+        action="store_true",
+        help=(
+            "With --serving-twins, capture only the proven static M=1 release lane. Requires "
+            "--decode-bucket 1, --prefill-bucket 0, and no --serving-width; symbolic and standard audit widths are omitted."
+        ),
+    )
+    parser.add_argument(
         "--model-provenance",
         metavar="REPO@REVISION",
         help=(
@@ -81,6 +89,9 @@ def handle_trace(args):
     from emmy.compiler.target import apply_target_arg  # noqa: PLC0415
 
     apply_target_arg(args)
+    if args.static_only_release and not args.serving_twins:
+        logger.error("--static-only-release requires --serving-twins")
+        sys.exit(2)
     if args.serving_twins:
         conflicts = []
         if args.code:
@@ -100,6 +111,9 @@ def handle_trace(args):
         if args.decode_bucket < 0 or args.prefill_bucket < 0 or any(width <= 0 for width in (args.serving_width or ())):
             logger.error("serving decode/prefill buckets must be non-negative and additional --serving-width values positive")
             sys.exit(2)
+        if args.static_only_release and (args.decode_bucket != 1 or args.prefill_bucket != 0 or args.serving_width):
+            logger.error("--static-only-release requires --decode-bucket 1, --prefill-bucket 0, and no --serving-width")
+            sys.exit(2)
         from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
 
         graphs = capture_twin_graphs(
@@ -107,6 +121,7 @@ def handle_trace(args):
             decode_bucket=args.decode_bucket,
             prefill_bucket=args.prefill_bucket,
             extra_widths=tuple(args.serving_width or ()),
+            static_only=args.static_only_release,
         )
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.yaml"

@@ -109,6 +109,13 @@ on-disk format survives compiler changes; only runtime-contract changes bump `PL
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
 
+`plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
+It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while
+preserving their alias pattern and `source_parts` order. The stored `ExecutionPlan` template carries binding slots;
+every lookup returns a fresh plan whose `WeightSpec`s contain that graph instance's real paths. Unknown compiler-minted
+paths or unresolved slots fail closed, and only these instantiated plans may reach source loading or pack serialization.
+This is deliberately not a persistent cache: `pack.py` owns cross-process environment/model validity.
+
 **Indirect operands** (`LaunchSpec.indirect_args`, `(arg, table_arg, sel_arg, slot)` per marked input): the
 kernel takes `const T* const* <arg>__table, const int* <arg>__sel, int <arg>__slot` in place of the plain
 pointer and resolves `table[sel[slot]]` in a body preamble — the serving MoE fixed-slot dispatch, where the

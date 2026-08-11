@@ -86,6 +86,27 @@ def test_strict_serving_golden_flags_are_in_model_only_and_validate_widths(run_c
     assert rc == 2
     assert "requires --model" in stdout + stderr
 
+    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--static-only-release")
+    assert rc == 2
+    assert "requires --release-config" in stdout + stderr
+
+    rc, stdout, stderr = run_cli("eval", "golden", "--in-model", "--release-config", "/tmp/release.env")
+    assert rc == 2
+    assert "only valid with --static-only-release" in stdout + stderr
+
+    rc, stdout, stderr = run_cli(
+        "eval",
+        "golden",
+        "--in-model",
+        "--static-only-release",
+        "--release-config",
+        "/tmp/release.env",
+        "--serving-width",
+        "8",
+    )
+    assert rc == 2
+    assert "cannot include additional" in stdout + stderr
+
 
 def test_knobs_missing_db(run_cli, tmp_path):
     """A non-existent DB path is not an error: the registry schema still prints and

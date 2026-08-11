@@ -1,9 +1,12 @@
-"""Merge two adjacent ``LoopOp``s via graph splicing.
+"""Merge adjacent ``LoopOp``s via graph splicing.
 
-Matches a ``LoopOp`` whose sole consumer is another ``LoopOp`` and fuses
-them by handing a two-node subgraph to ``splice_graph``. The splicer
-handles multiple consumer Loads of the producer and shared external
-inputs uniformly (first-seen slot assignment + splice-edge routing).
+Every match is represented as a producer-to-sink region: one consumer is
+the degenerate two-node case, while a fan-out uses its nearest owned
+reconvergence. The complete region goes to the N-way splicer. Shared
+internal definitions remain SSA and are emitted once per equal
+scope/coordinate demand; no frontend treeification is needed. The splicer also
+handles multiple consumer Loads and shared external inputs uniformly
+(first-seen slot assignment + splice-edge routing).
 Splicing refuses patterns it doesn't handle yet (non-trivial σ writer
 forms, etc.); those boundaries stay as separate kernels.
 
@@ -45,7 +48,8 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Select
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_op as _build_merged_op
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import closed_loop_consumer_region as _closed_loop_consumer_region
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_castfree_indexmap as _is_castfree_indexmap_shared
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
@@ -166,9 +170,25 @@ def _has_peer_activation_input(graph: Graph, producer: Node, consumer: Node) -> 
     """Whether the consumer combines the activation with a peer value.
 
     A merged sibling-linear may expose gate and up as two slices of one
-    packed buffer, so the peer can have a different declared shape while
-    still being an ancestor shared by the activation and its consumer.
+    packed buffer. Once the complete gated activation has fused into one
+    LoopOp those slices are no longer separate graph inputs: they are distinct
+    coordinate reads of the same packed input. Preserve that information so
+    region fusion does not misclassify GeGLU/SwiGLU as a unary activation and
+    materialize a serving kernel that already has measured fused goldens.
+
+    Before the activation itself is fused, the peer can instead have a
+    different declared shape while still being an ancestor shared by the
+    activation and its consumer. Keep that established graph-level check too.
     """
+    load_sites: dict[str, set[tuple]] = {}
+    for load in producer.op.body.loads:
+        tensor = graph.buffer(load.input)
+        if tensor is None or not tensor.shape or all(dim.is_static and dim.as_static() == 1 for dim in tensor.shape):
+            continue
+        load_sites.setdefault(load.input, set()).add(load.index)
+    if any(len(indices) > 1 for indices in load_sites.values()):
+        return True
+
     shape = producer.output.shape
     ancestors: set[str] = set()
     pending = list(producer.inputs)
@@ -412,152 +432,109 @@ def _feeds_softmax(graph: Graph, consumer: Node) -> bool:
     return False
 
 
-PATTERN = [
-    Pattern("producer", LoopOp),
-    Pattern("consumer", LoopOp),
-]
+PATTERN = [Pattern("producer", LoopOp)]
+# The region is discovered dynamically. Watching immediate consumers preserves
+# the pair rule's overlap invalidation when matches are enumerated in batches.
+WATCH_CONSUMERS = True
 
 
-def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
-    graph = match.graph
-    if not isinstance(producer.op, LoopOp) or not isinstance(consumer.op, LoopOp):
-        raise RuleSkipped("producer or consumer is no longer a LoopOp")
-    if producer.id not in consumer.inputs:
-        raise RuleSkipped(f"producer {producer.id!r} is not an input of consumer {consumer.id!r}")
-    # A producer that is itself a GRAPH OUTPUT must stay materialized: the splice consumes the
-    # node wholesale, so fusing it silently DROPS that output from the compiled graph (the
-    # escaping-residual ``(rms_norm(x + r), x + r)`` shape returned only the norm). Same guard
-    # ``005_split_shared_indexmap`` applies.
-    if producer.id in graph.outputs:
-        raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
-    # A decided placement-cut workspace is not fusion's to undo: the cut realizer names its seam
-    # buffers ``…__cut_…``, and a sliced re-compile (tune mode) re-enters loop fusion with the
-    # pieces as ordinary producer→consumer pairs — a stat-BEARING piece is braked incidentally
-    # (reduce-heavy), but a stat-free value piece is pure pointwise with one consumer, this
-    # rule's core move, and re-inlining it silently reverts the decided placement (then the
-    # re-cut collides on the existing workspace node).
-    if "__cut_" in producer.id:
-        raise RuleSkipped(f"{producer.id!r} is a decided placement-cut workspace — the cut is not fusion's to undo")
+def _guard_region_member(graph: Graph, member: Node, sink: Node) -> None:
+    """Apply the established pair boundary policy to one region member.
 
-    # Multi-load-of-reduce-heavy-producer guard: if the consumer references
-    # the producer's output via more than one Load stmt AND the producer does
-    # more than a few ops per output element (i.e., has a real reduce whose
-    # body can't be shared across the consumer's load positions), fusion
-    # would duplicate the reduce per load site. Catches SDPA's softmax over
-    # matmul — scaled_qk (head_dim reduce) feeds both row-max and exp, and
-    # fusing would re-run the matmul head_dim reduce at every output element.
-    # Pure-elementwise producers and "cheap" reducers like softmax's
-    # (max + exp) — where the reduce collapses to a row scalar the splicer
-    # can hoist — stay fuseable.
-    if _reduce_heavy(producer.op) and _count_loads_from(consumer.op, producer.id) > 1:
-        raise RuleSkipped("reduce-heavy producer feeds consumer through >1 Load — fusion would duplicate the reduce")
+    For a two-node region ``member`` is the direct producer. For a fan-out,
+    checking every interior member against the common sink prevents an
+    indirect typed-copy, contraction-half, or attention operand cone from
+    bypassing the same materialization boundary merely because it branched.
+    """
+    if _reduce_heavy(member.op) and _count_loads_from(sink.op, member.id) > 1:
+        raise RuleSkipped("reduce-heavy producer feeds sink through >1 Load — fusion would duplicate the reduce")
 
-    # bilinear fold-half protection: only the product's own indexmap plumbing (unsqueeze /
-    # broadcast scaffolding) may fuse into a bare matmul product before its sum-reduce partner
-    # does — see :func:`_pending_contraction_half`. The blocked producer isn't lost: once the
-    # halves merge, it retries against the full contraction kernel on a later fixpoint sweep.
-    # A dtype-changing copy (a traced cast, split source-shaped by ``005_split_cast_from_indexmap``)
-    # never merges INTO pure-indexmap plumbing: the combined kernel would carry the cast on the
-    # plumbing's output — an unsqueeze/broadcast-shaped buffer — instead of the source-shaped
-    # boundary. The plumbing stays lazy and folds into the downstream real consumer, which then
-    # reads the cast's materialized (narrow-dtype) buffer through the composed index. The reverse
-    # direction (castfree plumbing merging into the cast) keeps the cast's own shape and stays legal.
-    if _is_pure_indexmap(producer.op) and not _is_castfree_indexmap(graph, producer) and _is_pure_indexmap(consumer.op):
+    if _is_pure_indexmap(member.op) and not _is_castfree_indexmap(graph, member) and _is_pure_indexmap(sink.op):
         raise RuleSkipped("cast copy feeding indexmap plumbing — the cast stays at the traced dtype boundary")
 
-    if not _is_castfree_indexmap(graph, producer) and _pending_contraction_half(graph, consumer):
-        raise RuleSkipped("consumer is an unfused contraction half — the product merges with its reduce first")
+    if not _is_castfree_indexmap(graph, member) and _pending_contraction_half(graph, sink):
+        raise RuleSkipped("sink is an unfused contraction half — the product merges with its reduce first")
 
-    # Flash-consumer protection: a softmax-then-P@V kernel (the flash recognizer's offer site) is
-    # owned by ``try_flash`` — a compute-bearing producer fused into it lands extra Loads in the
-    # P@V accum loop and the V-operand extraction fails (``others == 1``), so the flash form
-    # silently never certifies (a computed V — Gemma's V-norm — was the finding-2 chain's second
-    # link). The producer stays materialized; flash streams it as the plain-buffer V. The test is
-    # deliberately PREDICTIVE as well (``_sum_contracts_exp_producer``), and the formed-composite test is structural
-    # (``_is_flash_offer_shaped``) rather than the recognizer's verdict: fusion order is free, so
-    # the V-side producer can arrive while the kernel is still a bare P@V contraction whose
-    # softmax half hasn't fused in yet — the offer site only forms afterwards, too late to
-    # protect. The score producer's mirror-image deferral lives in tile recognition
-    # (``is_flash_score_producer``).
-    if not _is_castfree_indexmap(graph, producer) and (
-        _is_flash_offer_shaped(consumer.op) or _sum_contracts_exp_producer(graph, consumer, producer)
-    ):
-        raise RuleSkipped("consumer is a (future) flash softmax-then-P@V offer site — its operands stay materialized")
+    # Flash P@V operands and Q/K score cones must remain plain loads at the
+    # recognition boundary. These tests are predictive because fusion order is
+    # free: the complete flash composite may not have formed yet.
+    if not _is_castfree_indexmap(graph, member) and (_is_flash_offer_shaped(sink.op) or _sum_contracts_exp_producer(graph, sink, member)):
+        raise RuleSkipped("sink is a (future) flash softmax-then-P@V offer site — its operands stay materialized")
 
-    # Flash score-producer protection, the Q/K mirror of the above: the score matmul feeding a
-    # softmax must keep its Q/K as plain ``Load``\\ s for ``_extract_qk`` — an inlined RoPE /
-    # q-k-norm cone de-certifies the flash unit ("score producer's Q/K are not plain loads").
-    # Only accum-free elementwise producers defer (the operand-cone shape: RoPE's mul/trig
-    # chain, the norm's final scale-mul) — reduce-bearing producers are the score's own
-    # dataflow assembling itself (the QK contraction fusing into its scale epilogue) and
-    # pass through, as does the bare-product half merging with its reduce partner. A MASK
-    # epilogue (the causal / banded / additive-bias adds) is exempt: it belongs WITH the
-    # softmax consumer — flash classification reads the mask chain off the rowmax feed, so a
-    # chain of mask adds must stay free to assemble onto the softmax past one another.
     if (
-        not _is_castfree_indexmap(graph, producer)
-        and not any(isinstance(s, Accum) for s in producer.op.body.iter())
-        and not _is_reduce_partner_merge(producer, consumer)
-        and not _mask_epilogue(producer.op)
-        and _feeds_softmax(graph, consumer)
+        not _is_castfree_indexmap(graph, member)
+        and not any(isinstance(stmt, Accum) for stmt in member.op.body.iter())
+        and not _is_reduce_partner_merge(member, sink)
+        and not _mask_epilogue(member.op)
+        and _feeds_softmax(graph, sink)
     ):
-        raise RuleSkipped("consumer feeds a softmax (attention score producer) — Q/K cones stay materialized")
+        raise RuleSkipped("sink feeds a softmax (attention score producer) — Q/K cones stay materialized")
 
-    # …and the contraction must not chase the masks the other way: the QK reduce fusing INTO a
-    # mask epilogue strands the mask on the score-producer side of the flash boundary, where
-    # re-synthesis silently DROPS it (the fused kernel then attends outside the mask). Pair
-    # ordering decided this before the banded mask added a second mask node; now it is explicit.
     if (
-        not _is_castfree_indexmap(graph, producer)
-        and any(isinstance(s, Accum) for s in producer.op.body.iter())
-        and _mask_epilogue(consumer.op)
-        and _feeds_softmax(graph, consumer)
+        not _is_castfree_indexmap(graph, member)
+        and any(isinstance(stmt, Accum) for stmt in member.op.body.iter())
+        and _mask_epilogue(sink.op)
+        and _feeds_softmax(graph, sink)
     ):
-        raise RuleSkipped("score contraction stays clear of softmax mask epilogues — the masks ride the softmax consumer")
+        raise RuleSkipped("score contraction stays clear of softmax mask epilogues — the masks ride the softmax sink")
 
-    # ``build_merged_op`` hands a two-node subgraph to ``splice_graph`` and
-    # returns None on any unsupported pattern: σ-solve failure (writer/reader
-    # index forms incompatible), missing axis in consumer scope, or
-    # splicer-internal validity issues. The rule treats them uniformly —
-    # the producer/consumer pair stays separate.
-    merged = _build_merged_op(graph, producer, consumer)
+
+def _merge_region(match: Match, producer: Node, region: set[str], sink: Node) -> Graph:
+    """Splice a validated one- or multi-consumer region through one path."""
+    graph = match.graph
+    interior = region - {sink.id}
+    if any("__cut_" in nid for nid in interior):
+        raise RuleSkipped("region crosses a decided placement cut")
+    for nid in interior:
+        member = graph.nodes[nid]
+        if len(region) > 2 and any(isinstance(stmt, Accum) for stmt in member.op.body.iter()):
+            raise RuleSkipped(f"interior reducer {nid!r} stays materialized")
+        _guard_region_member(graph, member, sink)
+    if len(region) > 2 and (_has_rowmax(sink.op) or _is_flash_offer_shaped(sink.op) or _feeds_softmax(graph, sink)):
+        raise RuleSkipped("reconvergent region crosses an attention recognition boundary")
+
+    merged = _build_merged_region(graph, region, sink)
     if merged is None:
-        raise RuleSkipped(f"splice_graph rejected pattern: {producer.id!r} -> {consumer.id!r}")
-
-    pre_work = _total_work(producer.op) + _total_work(consumer.op)
-    pre_expensive_work = _total_expensive_work(producer.op) + _total_expensive_work(consumer.op)
-    pre_reads = _total_reads(producer.op) + _total_reads(consumer.op)
+        raise RuleSkipped("N-way Loop splicer rejected the region")
+    pre_work = sum(_total_work(graph.nodes[nid].op) for nid in region)
+    pre_expensive_work = sum(_total_expensive_work(graph.nodes[nid].op) for nid in region)
+    pre_reads = sum(_total_reads(graph.nodes[nid].op) for nid in region)
     post_work = _total_work(merged)
     post_expensive_work = _total_expensive_work(merged)
     post_reads = _total_reads(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:
         raise RuleSkipped(f"work blowup: post={post_work} > {_BLOWUP_FACTOR}× pre={pre_work}")
-    # Flash attention deliberately streams exp(score) into P@V: no full
-    # probability matrix is materialized, and the tile recognizer owns that
-    # composite. Do not apply the generic activation→contraction brake to it.
-    if (
-        pre_expensive_work
-        and post_expensive_work > _BLOWUP_FACTOR * pre_expensive_work
-        and not _is_flash_offer_shaped(merged)
-        and _single_source_activation(graph, producer)
-        and not _has_peer_activation_input(graph, producer, consumer)
-    ):
-        raise RuleSkipped(f"expensive-work blowup: post={post_expensive_work} > {_BLOWUP_FACTOR}× pre={pre_expensive_work}")
     if post_reads > _BLOWUP_FACTOR * pre_reads:
         raise RuleSkipped(f"read blowup: post={post_reads} > {_BLOWUP_FACTOR}× pre={pre_reads}")
+    if pre_expensive_work and post_expensive_work > _BLOWUP_FACTOR * pre_expensive_work and not _is_flash_offer_shaped(merged):
+        if len(region) > 2 or (_single_source_activation(graph, producer) and not _has_peer_activation_input(graph, producer, sink)):
+            raise RuleSkipped(f"expensive-work blowup: post={post_expensive_work} > {_BLOWUP_FACTOR}× pre={pre_expensive_work}")
 
-    # Broadcast-materialization guard: fusing a compute-bearing producer into
-    # a pure-indexmap consumer whose output volume exceeds the producer's
-    # replicates the producer's body across the extra axes (the indexmap's
-    # broadcast stops being lazy). Skip — the indexmap can still fuse the
-    # *other* way, into its downstream consumer.
-    if _is_pure_indexmap(consumer.op) and not _is_pure_indexmap(producer.op) and _output_numel(consumer.op) > _output_numel(producer.op):
+    if (
+        len(region) == 2
+        and _is_pure_indexmap(sink.op)
+        and not _is_pure_indexmap(producer.op)
+        and _output_numel(sink.op) > _output_numel(producer.op)
+    ):
         raise RuleSkipped(
-            f"broadcast materialization: pure-indexmap consumer numel {_output_numel(consumer.op)} > "
+            f"broadcast materialization: pure-indexmap consumer numel {_output_numel(sink.op)} > "
             f"compute producer numel {_output_numel(producer.op)}"
         )
 
-    frag = _wrap_merge_fragment(graph, merged, consumer)
-    match.output = consumer.id
-    match.consumed = {producer.id, consumer.id}
-    return frag
+    match.consumed = region
+    match.output = sink.id
+    return _wrap_merge_fragment(graph, merged, sink)
+
+
+def rewrite(match: Match, producer: Node) -> Graph | None:
+    graph = match.graph
+    if not isinstance(producer.op, LoopOp):
+        raise RuleSkipped("producer is no longer a LoopOp")
+    users = graph.users(producer.id)
+    found = _closed_loop_consumer_region(graph, producer)
+    if found is None:
+        if len(users) > 1:
+            raise RuleSkipped("producer fan-out has no closed reconvergent Loop region")
+        raise RuleSkipped("producer has no Loop consumer region")
+    region, sink = found
+    return _merge_region(match, producer, region, sink)

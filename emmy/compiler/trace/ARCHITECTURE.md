@@ -125,10 +125,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
   and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
   as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An EXL3 checkpoint takes the
-  same split at the trellis format's own shapes (`fmt == "exl3"`), and the dense trunk has two lanes: it DECODES to
-  values by default (the correctness lane — the twin is then a self-contained eager reference), or, under
-  `compress_trunk=True`, stays CODED with the twin's parameters left as uninitialized placeholders at the declared
-  shapes, for a caller that re-sources those constants from the checkpoint itself (`serving/gen_runner.py`). Either
+  same split at the trellis format's own shapes (`fmt == "exl3"`). Its explicit reference API may decode trunk
+  values, while serving passes `compress_trunk=True`: the twin parameters stay uninitialized placeholders and the
+  caller re-sources each coded linear from the checkpoint (`serving/gen_runner.py`). There is no automatic dense
+  serving fallback; an unsupported coded linear fails during birth-time spelling. Either
   way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
   reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
   E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the

@@ -445,23 +445,66 @@ def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     )
 
 
-def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
-    """The geometry a COMPUTED ``a`` edge's compute fill demands: a STATIC contraction K (the
-    ``_staged`` driver reads one) and an N width that EXACTLY covers the output columns (the sync B
-    fill has no N clamp). A masked / symbolic M is fine — the fill σ clamps the overhanging rows and
-    the ``RegStore`` guard discards their store."""
+def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
+    """Geometry required by a sync compute-filled contraction operand.
+
+    Every compute-filled edge needs static K because the staged driver unrolls fixed K chunks. A
+    computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
+    partial inner row element-by-element, so N must be exact. A computed B leaves materialized A
+    as the async operand; M is its *outer* slab row and can be safely clamped as a whole. Computed
+    B's own per-cell fill clamps N before evaluating the generic producer cone.
+    """
     if not c.axis.extent.is_static:
-        return "a computed A edge needs a static contraction K — the sync compute-fill has no K mask"
-    if tile.n.mask:
+        return "a computed contraction operand needs a static K — the sync compute-fill has no K mask"
+    materialized_b = [isinstance(ch.b, Load) for ch in c.channels]
+    if any(materialized_b) and not all(materialized_b):
+        return "sync compute-fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
+    if tile.n.mask and any(isinstance(ch.b, Load) for ch in c.channels):
         return (
-            f"a computed A edge needs a TILE whose N width exactly covers the static output columns "
-            f"(N={tile.n.axis.extent}, no N mask in the sync compute-fill); pick a dividing tile."
+            f"a sync compute-fill with a materialized B needs a TILE whose N width exactly covers "
+            f"the static output columns (N={tile.n.axis.extent}; copied inner-row chunks cannot "
+            f"clamp individual N cells); pick a dividing tile."
         )
     return None
 
 
+def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
+    """A materialized edge beside a compute-filled operand must already have the atom dtype.
+
+    The ``sync`` stage evaluates computed cones into their typed shared-memory slabs, but it
+    *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore cannot feed an
+    f16 ``ldmatrix`` fragment merely because another edge is computed; it must take the demoted
+    scalar reading (or an explicitly converting producer cone).  Computed edges are exempt because
+    their slab store performs the normal typed conversion.
+    """
+    for edge, role in ((c.a, "a"), *((ch.b, "b") for ch in c.channels)):
+        if not isinstance(edge, Load):
+            continue
+        tensor = inputs.get(edge.input) if inputs else None
+        # Structural scheduler fixtures (and a few pre-stamp inventory callers) intentionally do
+        # not carry Tensor metadata.  Absence is not evidence of an unsafe byte copy; the concrete
+        # lowering path always supplies inputs and is where a known mismatch must be rejected.
+        if tensor is None:
+            continue
+        want = tile.atom.operand_dtype(role)
+        if tensor.dtype == want:
+            continue
+        got = tensor.dtype
+        return (
+            f"sync compute-fill: materialized {role.upper()} edge {edge.input!r} is {got}, but "
+            f"atom {tile.atom.name} copies it into a {want} slab without conversion; use the "
+            "demoted scalar reading or an explicitly converting producer cone"
+        )
+    return None
+
+
+def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
+    """Compatibility alias for callers/tests phrased around the original computed-A lane."""
+    return computed_operand_cover(c, tile)
+
+
 def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
-    """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction under ``tile``
+    """The ``sync`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
     — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
     copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
     and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
@@ -482,14 +525,27 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
         return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
-    _, _, stats = cone_seam(c.a)
+    b_nbytes = atom.operand_dtype("b").nbytes
+    _, _, stats = cone_seam(c.a) if not isinstance(c.a, Load) else ((), (), ())
     a_bytes = tile.m.tile * bk_elems * a_nbytes
-    b_bytes = len(c.channels) * tile.n.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * tile.m.tile * 4
-    if a_bytes + b_bytes + stat_bytes > budget:
+    sync_bytes = stat_bytes
+    async_bytes = 0
+    if isinstance(c.a, Load):
+        async_bytes += a_bytes
+    else:
+        sync_bytes += a_bytes
+    for ch in c.channels:
+        if isinstance(ch.b, Load):
+            async_bytes += tile.n.tile * bk_elems * b_nbytes
+        else:
+            sync_bytes += tile.n.tile * bk_elems * b_nbytes
+    if sync_bytes + async_bytes > budget:
         return None
-    depth = want_depth if want_depth >= 2 and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
-    return Stage(depth=depth, transport="sync", smem=(operand_name(c.a),), bk_elems=bk_elems)
+    depth = want_depth if want_depth >= 2 and async_bytes and sync_bytes + want_depth * async_bytes <= budget else 1
+    computed = [] if isinstance(c.a, Load) else [operand_name(c.a)]
+    computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
+    return Stage(depth=depth, transport="sync", smem=tuple(computed), bk_elems=bk_elems)
 
 
 # ---- the twisted streaming pair ---------------------------------------------------------------- #
@@ -717,6 +773,8 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
 
 __all__ = [
     "computed_a_cover",
+    "computed_operand_cover",
+    "computed_operand_copy_dtype",
     "enforce",
     "fragment_epilogue",
     "coop_band_layout",

@@ -179,6 +179,18 @@ def register_eval_command(subparsers) -> None:
             "and reporting against the model provenance. Default: trace the model provenance from the Hub."
         ),
     )
+    pg.add_argument(
+        "--static-only-release",
+        action="store_true",
+        help=(
+            "With --in-model, audit only the proven static M=1 release lane. Requires --release-config "
+            "whose pinned runner and scheduler settings prove that no wider or symbolic tier is reachable."
+        ),
+    )
+    pg.add_argument(
+        "--release-config",
+        help="Pinned release env used to prove --static-only-release reachability. Not used by the standard audit.",
+    )
     pg.set_defaults(func=handle_eval_golden)
 
     pv = sub.add_parser(
@@ -304,15 +316,26 @@ def handle_eval_golden(args) -> None:
         if args.checkpoint and not args.model:
             logger.error("--checkpoint requires --model REPO@REVISION")
             sys.exit(2)
+        if args.static_only_release and not args.release_config:
+            logger.error("--static-only-release requires --release-config")
+            sys.exit(2)
+        if args.release_config and not args.static_only_release:
+            logger.error("--release-config is only valid with --static-only-release")
+            sys.exit(2)
+        if args.static_only_release and args.serving_width:
+            logger.error("--static-only-release cannot include additional --serving-width values")
+            sys.exit(2)
         _in_model_audit(
             args.model,
             strict_major_gaps=args.strict_major_gaps,
             extra_widths=tuple(args.serving_width or ()),
             checkpoint=args.checkpoint,
+            static_only_release=args.static_only_release,
+            release_config=args.release_config,
         )
         return
-    if args.strict_major_gaps or args.serving_width or args.checkpoint:
-        logger.error("--strict-major-gaps / --serving-width / --checkpoint require --in-model")
+    if args.strict_major_gaps or args.serving_width or args.checkpoint or args.static_only_release or args.release_config:
+        logger.error("--strict-major-gaps / --serving-width / --checkpoint / --static-only-release / --release-config require --in-model")
         sys.exit(2)
     require_source(args, {"golden"}, "eval golden compares against recorded golden knobs — --dataset db has no golden to compare to.")
     resolve_online_arg(args)
@@ -330,6 +353,8 @@ def _in_model_audit(
     strict_major_gaps: bool = False,
     extra_widths: tuple[int, ...] = (),
     checkpoint: str | None = None,
+    static_only_release: bool = False,
+    release_config: str | None = None,
 ) -> None:
     """``eval golden --in-model`` — the in-model half of the golden reproduction check.
 
@@ -341,7 +366,16 @@ def _in_model_audit(
     in-model deploys drifted, which is exactly what this mode exists to catch."""
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-    from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+    from emmy.serving.twins import capture_twin_graphs, validate_static_only_release_config  # noqa: PLC0415
+
+    if static_only_release:
+        if not release_config:
+            raise ValueError("static-only release audit requires a release config")
+        try:
+            validate_static_only_release_config(release_config)
+        except (OSError, ValueError) as exc:
+            logger.error("static-only release scope is unsafe: %s", exc)
+            sys.exit(2)
 
     tagged = sorted({g.model for g in GOLDEN_RECORDS if g.model})
     if model_filter and model_filter not in tagged:
@@ -357,7 +391,16 @@ def _in_model_audit(
         source = checkpoint or model
         local = f" from local checkpoint {checkpoint}" if checkpoint else ""
         print(f"=== {model}: tracing serving twins{local} (weight-free) ===")
-        graphs = capture_twin_graphs(source, extra_widths=extra_widths)
+        if static_only_release:
+            graphs = capture_twin_graphs(
+                source,
+                decode_bucket=1,
+                prefill_bucket=0,
+                extra_widths=(),
+                static_only=True,
+            )
+        else:
+            graphs = capture_twin_graphs(source, extra_widths=extra_widths)
         for gpu_name, cap in sorted({(g.gpu_name, tuple(g.compute_cap)) for g in GOLDEN_RECORDS if g.model == model}):
             res = audit_card(graphs, gpu_name, cap)
             counts = summarize(res)

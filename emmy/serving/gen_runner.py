@@ -15,8 +15,11 @@ The caller stitches attention between ``pre`` and ``post`` (a reference torch SD
 Phase-2 host stitch; vLLM's paged ``Attention`` in Phase 3). I/O: the vLLM plugin runs
 device-resident at EVERY width — decode (``T <= bucket``) through the captured static twins,
 prefill / chunked-prefill (``bucket < T <= prefill_capacity``) through the symbolic programs'
-``run_device_sym`` (grids sized per step, capacity buffers, no per-layer host hop); the host
-numpy ``rebind`` path survives for the standalone oracle and as the over-capacity fallback.
+``run_device_sym`` (grids sized per step, capacity buffers, no per-layer host hop). When the
+configured capacity fits entirely inside the static decode bucket, the runner omits the
+redundant symbolic tier so its dynamic upper-bound arena does not consume the model's VRAM.
+The host numpy ``rebind`` path survives for ordinary runners; a static-only runner rejects
+over-capacity calls explicitly.
 NOTE: the per-layer ``CompiledProgram``s share BOTH their
 weights (one device buffer per constant, ``_bind_plan_constants``) and their activation
 buffers + scratch slabs (one ``BufferArena`` per runner) — the footprint no longer scales
@@ -213,7 +216,7 @@ def _bind_plan_constants(plan, sources, cache):
             continue
         import cupy as cp
 
-        key = (w.source_path, w.source_parts, w.load_ops)
+        key = (w.source_path, w.source_parts, w.generated, w.load_ops)
         arr = cache.get(key)
         if arr is None:
             arr = cp.asarray(apply_weight_loads(src, w.load_ops))
@@ -260,7 +263,11 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
 
     from emmy.compiler.loader.safetensors import load_sources_by_path
 
-    unbindable = [nid for nid, w in plan.weights.items() if w.load_ops is None or (w.source_path is None and not w.source_parts)]
+    unbindable = [
+        nid
+        for nid, w in plan.weights.items()
+        if w.load_ops is None or (w.source_path is None and not w.source_parts and w.generated is None)
+    ]
     if unbindable:
         raise RuntimeError(
             f"checkpoint-sourced compile: {len(unbindable)} weight(s) carry no plan-reproducible source "
@@ -316,6 +323,7 @@ def _compile_split(
     aux_examples=None,
     weight_inputs=(),
     ckpt=None,
+    plan_cache=None,
 ):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
@@ -353,7 +361,10 @@ def _compile_split(
     (:func:`_retarget_constants`), ``spell_trellis_constants`` then fires on a serving wrapper
     for the first time (the compressed lane forced, not env-gated), and the constant feed comes
     from the shards rather than the live module (:func:`_plan_sources`). This is what puts an
-    EXL3 trunk on the card at its CODED size; without it a trunk linear binds decoded values."""
+    EXL3 trunk on the card at its CODED size; without it a trunk linear binds decoded values.
+    ``plan_cache`` is a session-scoped, binding-neutral plan-template cache. It runs only on the
+    cold path (an explicit pack ``plan`` still wins), after every loader spelling and ABI hint has
+    reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -380,7 +391,11 @@ def _compile_split(
             spell_trellis_inputs(graph, trellis_specs)
         if indirect_inputs:
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
-        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+
+        def compile_plan(g):
+            return plan_from_graph(CudaBackend(tune_db="auto").compile(g))
+
+        plan = plan_cache.resolve(graph, compile_plan) if plan_cache is not None else compile_plan(graph)
 
     if aux_examples:
         # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
@@ -468,6 +483,22 @@ def _plan_with_slot(plan, slot):
     return dataclasses.replace(plan, launches=launches)
 
 
+def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) -> bool:
+    """Whether every scheduler-visible width is covered by the static decode twins.
+
+    This is deliberately a strict capacity proof, not a performance heuristic.  In this lane
+    symbolic programs are unnecessary and their dynamic-shape arena can be much larger than the
+    quantized model's remaining VRAM.  A static compile failure must therefore fail the boot
+    rather than silently reintroduce the symbolic tier after earlier layers omitted it.
+    """
+    return bool(
+        max_tokens is not None
+        and decode_bucket
+        and 0 < max_tokens <= decode_bucket
+        and not (prefill_bucket and prefill_bucket > decode_bucket)
+    )
+
+
 class EmmyGenRunner:
     def __init__(
         self,
@@ -492,7 +523,7 @@ class EmmyGenRunner:
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
-        self._pre = pre  # list[_Program] — symbolic (prefill / any width)
+        self._pre = pre  # list[_Program] — symbolic (prefill / any width), empty when static-covered
         self._post = post
         self._pre_decode = pre_decode  # list[_Program] — static M=decode_bucket (or None → no bucket)
         self._post_decode = post_decode
@@ -510,8 +541,9 @@ class EmmyGenRunner:
         # ``expert_tiers`` is one program set per group: ``sym`` (any width), ``bucket`` (static
         # M=decode_bucket) and ``one`` (static M=1) for the decode hot path, ``m256`` for
         # prefill-width routed row sets (captured replay — see ``_launch_expert``), and
-        # ``slots`` — the FIXED-SLOT decode tier, k instances of the INDIRECT M=1 twin (fresh
-        # buffers, no shared arena) whose kernels resolve their weight base pointers from the
+        # ``slots`` — the FIXED-SLOT decode tier, k instances of the INDIRECT M=1 twin (one
+        # dedicated, lifetime-compatible arena shared across the ordered slot launches) whose
+        # kernels resolve their weight base pointers from the
         # per-group device tables built in ``_ensure_device`` (the capture-legal T=1 dispatch,
         # ``_moe_combine_slots``). A homogeneous MoE has exactly one group; EXL3's mixed bit
         # allocation gives one per distinct codes shape. A tier whose schedule stages no operand
@@ -569,7 +601,7 @@ class EmmyGenRunner:
 
     @property
     def num_layers(self) -> int:
-        return len(self._pre)
+        return len(self._attn_meta)
 
     @property
     def decode_bucket(self) -> int:
@@ -605,9 +637,8 @@ class EmmyGenRunner:
 
     @property
     def prefill_capacity(self) -> int:
-        """The symbolic programs' device-buffer token capacity — the widest step
-        ``forward_layer_*_device`` serves without a host fallback (0 = built without
-        capacity, host ``rebind`` only)."""
+        """The widest configured device-resident step.  It may be served wholly by the
+        static decode twins, in which case no symbolic program or symbolic arena exists."""
         return self._prefill_capacity or 0
 
     @property
@@ -654,10 +685,13 @@ class EmmyGenRunner:
             # EXL3 keeps the TRUNK coded too — the whole point of a 2-bit checkpoint is that the
             # decoded trunk (GLM-4.5-Air: ~14 GiB) does not fit beside the experts. fp8 trunks
             # stay on the decoded lane, where the values are what the fp8 expert path expects.
-            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary
+            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary, is_exl3_checkpoint
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            coded_trunk = False
+            # EXL3's generic reconstruction algebra is dissolved before lowering, so its
+            # checkpoint sources can stay coded on the card. FP8 keeps the existing
+            # value-trunk lane; only its routed experts are input-spelled today.
+            coded_trunk = is_exl3_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -665,7 +699,7 @@ class EmmyGenRunner:
                 "[gen_runner] loading %s (%s, quantized checkpoint: dense trunk %s, experts compressed) — resolved %s, %s, key %s...",
                 model_id,
                 dtype_str,
-                "as values",
+                "coded" if coded_trunk else "as values",
                 qdir,
                 checkpoint_quant_summary(qdir),
                 checkpoint_quant_digest(qdir),
@@ -760,6 +794,7 @@ class EmmyGenRunner:
 
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
+        from emmy.compiler.backend.plan_cache import PlanTemplateCache
         from emmy.compiler.loader.quant import checkpoint_quant_digest
 
         cfg_dict = model.config.to_dict()
@@ -801,13 +836,25 @@ class EmmyGenRunner:
             decode_ok = decode_ok and "L00.pre.decode" in loaded
             prefill_ok = prefill_ok and "L00.pre.prefill" in loaded
 
+        static_only = _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) and bool(decode_ok)
+        if static_only:
+            logger.info(
+                "[gen_runner] static decode tier covers configured capacity %d (bucket %d) — omitting symbolic arenas",
+                max_tokens,
+                decode_bucket,
+            )
+
         def stored(name):
             return loaded.get(name) if loaded is not None else None
 
         plans: dict = {}
+        # One cold-boot compile session for every split. Plans remain per program (and retain
+        # each layer's actual checkpoint provenance); only binding-neutral compiled structure
+        # is shared. A pack hit supplies ``plan=`` and bypasses this cache entirely.
+        plan_cache = PlanTemplateCache()
 
         def build(name, *args, **kw):
-            prog, built_plan = _compile_split(*args, plan=stored(name), **kw)
+            prog, built_plan = _compile_split(*args, plan=stored(name), plan_cache=plan_cache, **kw)
             plans[name] = built_plan
             return prog
 
@@ -828,6 +875,10 @@ class EmmyGenRunner:
         # all layers' activation buffers + scratch slabs share one layer's worth of
         # device memory instead of scaling with num_layers.
         arena = BufferArena()
+        # Fixed-slot programs also execute serially, but their scratch must not alias the trunk
+        # arena because the post program's h/xn outputs stay live across every slot launch.
+        # One separate arena can safely serve every slot and every expert shape group.
+        slot_arena = BufferArena()
         moe_meta: list = []  # per-layer: None (dense) or the router + 3-D expert weight tensors
         # ONE expert program set per SHAPE GROUP, shared by every MoE layer in that group
         # (weights are inputs): the symbolic any-width program plus static decode-bucket / M=1
@@ -898,16 +949,17 @@ class EmmyGenRunner:
             }
             tiers = {"sym": None, "bucket": None, "one": None, "m256": None, "slots": None, "ind_names": ind_names}
             with torch.device("cpu"):
-                tiers["sym"] = build(
-                    pre + "sym",
-                    expert_w,
-                    [torch.zeros(8, hidden, dtype=dtype), *example_w],
-                    ["x"],
-                    np_dtype,
-                    arena=arena,
-                    capacity=max_tokens,
-                    **expert_kw,
-                )
+                if not static_only:
+                    tiers["sym"] = build(
+                        pre + "sym",
+                        expert_w,
+                        [torch.zeros(8, hidden, dtype=dtype), *example_w],
+                        ["x"],
+                        np_dtype,
+                        arena=arena,
+                        capacity=max_tokens,
+                        **expert_kw,
+                    )
                 # Static expert twins — the decode hot path. Same failure contract as
                 # the per-layer twins: a compile failure drops the tier, the symbolic
                 # program stays the correct fallback. Names avoid the ".decode"/".m1"
@@ -917,7 +969,7 @@ class EmmyGenRunner:
                     # The M=256 prefill twin is the mean per-expert chunk width (§4 of the
                     # dispatch design); it only pays above the decode bucket (an equal-or-larger
                     # bucket fully shadows it).
-                    if not m or (tier == "m256" and m <= max(decode_bucket or 0, 0)):
+                    if not m or (tier == "m256" and (static_only or m <= max(decode_bucket or 0, 0))):
                         continue
                     try:
                         tiers[tier] = build(
@@ -938,8 +990,11 @@ class EmmyGenRunner:
                 # every per-expert input marked as an indirect operand — each kernel fetches its
                 # weight base pointer from a device table indexed by the router's indices tensor
                 # (`table[sel[slot]]`), so the slots read the E-stacked expert tensors DIRECTLY
-                # with no per-step weight staging. Slot instances build with FRESH buffers and NO
-                # shared arena (they never alias each other or the routed tiers); slot `j`'s plan
+                # with no per-step weight staging. Slot instances share one DEDICATED arena with
+                # each other, but not with routed tiers: all slot launches are ordered on one
+                # stream, so their input/scratch lifetimes never overlap; each output is rebound
+                # below to its own row in `_slot_partials`. This avoids multiplying a ~100-MiB
+                # scratch set by top-k while preserving every captured pointer. Slot `j`'s plan
                 # stamps `slot=j` (`_plan_with_slot`). A schedule that stages an indirect operand
                 # through a TMA descriptor fails the compile LOUDLY (descriptors bake the base
                 # address at encode) and single-token decode keeps the routed path (eager; the
@@ -955,7 +1010,15 @@ class EmmyGenRunner:
                     try:
                         slot_example = [torch.zeros(1, hidden, dtype=dtype), *example_w]
                         slot0, ind_plan = _compile_split(
-                            expert_w, slot_example, None, np_dtype, plan=stored_ind, indirect_inputs=ind_names, **expert_kw
+                            expert_w,
+                            slot_example,
+                            None,
+                            np_dtype,
+                            plan=stored_ind,
+                            plan_cache=plan_cache,
+                            indirect_inputs=ind_names,
+                            arena=slot_arena,
+                            **expert_kw,
                         )
                         if not _indirect_covered(ind_plan, ind_names):
                             raise RuntimeError(
@@ -970,6 +1033,7 @@ class EmmyGenRunner:
                                 plan=_plan_with_slot(ind_plan, j),
                                 aux_examples=aux_examples,
                                 weight_inputs=ind_names,
+                                arena=slot_arena,
                             )[0]
                             for j in range(1, moe_top_k)
                         ]
@@ -981,6 +1045,11 @@ class EmmyGenRunner:
                             g,
                             ex,
                         )
+                if static_only and tiers["bucket"] is None:
+                    raise RuntimeError(
+                        f"expert group {g} static decode compile failed while bucket {decode_bucket} "
+                        f"covers the configured capacity {max_tokens}; no symbolic fallback was allocated"
+                    )
             return tiers
 
         for i, block in enumerate(layers):
@@ -1051,32 +1120,33 @@ class EmmyGenRunner:
             pre_consts: dict = {}
             post_consts: dict = {}
             with torch.device("cpu"):
-                pre_programs.append(
-                    build(
-                        f"L{i:02d}.pre.sym",
-                        pre_w,
-                        [torch.zeros(8, hidden, dtype=dtype)],
-                        ["hidden"],
-                        np_dtype,
-                        dev_consts=pre_consts,
-                        ckpt=ckpt,
-                        arena=arena,
-                        capacity=max_tokens,
+                if not static_only:
+                    pre_programs.append(
+                        build(
+                            f"L{i:02d}.pre.sym",
+                            pre_w,
+                            [torch.zeros(8, hidden, dtype=dtype)],
+                            ["hidden"],
+                            np_dtype,
+                            dev_consts=pre_consts,
+                            ckpt=ckpt,
+                            arena=arena,
+                            capacity=max_tokens,
+                        )
                     )
-                )
-                post_programs.append(
-                    build(
-                        f"L{i:02d}.post.sym",
-                        post_w,
-                        [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=dtype)],
-                        ["attn_out", "residual"],
-                        np_dtype,
-                        dev_consts=post_consts,
-                        ckpt=ckpt,
-                        arena=arena,
-                        capacity=max_tokens,
+                    post_programs.append(
+                        build(
+                            f"L{i:02d}.post.sym",
+                            post_w,
+                            [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=dtype)],
+                            ["attn_out", "residual"],
+                            np_dtype,
+                            dev_consts=post_consts,
+                            ckpt=ckpt,
+                            arena=arena,
+                            capacity=max_tokens,
+                        )
                     )
-                )
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
                 # compile fails (e.g. a demoted-matmul lowering gap at this bucket), drop the
                 # decode path entirely and fall back to the symbolic programs (slow but correct).
@@ -1107,6 +1177,11 @@ class EmmyGenRunner:
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket
+                        if static_only:
+                            raise RuntimeError(
+                                f"layer {i} static decode compile failed while bucket {decode_bucket} "
+                                f"covers configured capacity {max_tokens}; no symbolic fallback was allocated"
+                            ) from ex
                         logger.warning("[gen_runner] decode-bucket compile failed at layer %d (%s); decode falls back to symbolic", i, ex)
                         decode_ok = False
                 # Static M=1 twins — the gemv-class c=1 decode tier: at one row the contractions
@@ -1254,6 +1329,13 @@ class EmmyGenRunner:
         use_decode = decode_ok and len(pre_decode) == len(layers)
         use_m1 = m1_ok and len(pre_m1) == len(layers) and len(post_m1) == len(layers)
         use_prefill = prefill_ok and len(pre_prefill) == len(layers)
+        if plan_cache.hits or plan_cache.misses:
+            logger.info(
+                "[gen_runner] structural plan cache: %d hit(s), %d miss(es), %d template(s)",
+                plan_cache.hits,
+                plan_cache.misses,
+                len(plan_cache),
+            )
         if pack_at is not None and loaded is None:
             # Best-effort save after a full compile: only the program sets that survived
             # (a mid-run twin failure leaves partial lists — those must not be recorded).
@@ -1347,6 +1429,8 @@ class EmmyGenRunner:
         if self._pre_decode is not None and t <= self._decode_bucket:
             q, k, v = self._pre_decode[layer].run([_pad_rows(h, self._decode_bucket)])
             return q[:t], k[:t], v[:t]
+        if not self._pre:
+            raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run([h]))
 
     def forward_layer_post(self, layer, attn_out, residual):
@@ -1363,6 +1447,8 @@ class EmmyGenRunner:
         if self._post_decode is not None and t <= self._decode_bucket:
             out = self._post_decode[layer].run([_pad_rows(a, self._decode_bucket), _pad_rows(r, self._decode_bucket)])[0]
             return out[:t]
+        if not self._post:
+            raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return self._post[layer].run([a, r])[0]
 
     def final_norm(self, hidden):
@@ -1410,6 +1496,20 @@ class EmmyGenRunner:
             from emmy.compiler.backend.gpu_lock import gpu_lock
 
             with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+                # Program construction churns both allocator pools. Release their FREE blocks
+                # before the dominant expert-store transfer: vLLM cannot reclaim them until
+                # ``load_weights`` returns, and on a 32-GiB card that ordering alone can make
+                # the final layer's codes fail despite enough live-memory headroom.
+                before = torch.cuda.mem_get_info()[0]
+                torch.cuda.empty_cache()
+                cp.get_default_memory_pool().free_all_blocks()
+                free, total = torch.cuda.mem_get_info()
+                logger.info(
+                    "[gen_runner] pre-expert allocator reclaim: %.3f GiB released; %.3f of %.3f GiB free",
+                    (free - before) / 2**30,
+                    free / 2**30,
+                    total / 2**30,
+                )
                 for m in self._moe:
                     if m is None:
                         continue
@@ -1583,6 +1683,8 @@ class EmmyGenRunner:
             self._pre_decode[layer].run_device([hidden[pb:]], out=[d[pb:] for d in dests])
             return tuple(dests)
         self._warn_symbolic_decode(t)
+        if not self._pre:
+            raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
@@ -1624,6 +1726,8 @@ class EmmyGenRunner:
             self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[d[:pb] for d in dests])
             self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[d[pb:] for d in dests])
             return dests
+        if not self._post:
+            raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return self._post[layer].run_device_sym([attn_out, residual])
 
     def _moe_combine(self, moe, xn):
@@ -1714,6 +1818,8 @@ class EmmyGenRunner:
             prog, sym = tiers["bucket"], False
         else:
             prog, sym = tiers["sym"], True
+            if prog is None:
+                raise RuntimeError(f"expert row width {t} exceeds the static-only decode bucket {self._decode_bucket}")
         p = prog.program
         feed = {"x": cp.from_dlpack(rows.detach().contiguous())}
         if self._expert_swap_safe[id(prog)]:

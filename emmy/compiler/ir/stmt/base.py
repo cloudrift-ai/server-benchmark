@@ -159,6 +159,7 @@ _INTEGER_ELEMENTWISE_OPS = frozenset(
         "bitwise_and",
         "bitwise_or",
         "bitwise_xor",
+        "bitwise_count",
     }
 )
 
@@ -177,9 +178,18 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     Lifted out of ``Assign.render`` so the ``030_stamp_types`` pass can
     reuse the same rule when stamping ``Assign.dtype`` on the IR.
     """
-    if arg_dtypes and op_name in _INTEGER_ELEMENTWISE_OPS and arg_dtypes[0] in _INTEGER_DTYPES:
-        if all(d == arg_dtypes[0] for d in arg_dtypes):
-            return arg_dtypes[0]
+    if arg_dtypes and op_name in _INTEGER_ELEMENTWISE_OPS and all(d in _INTEGER_DTYPES for d in arg_dtypes):
+        # Keep packed arithmetic in the integer family.  NumPy promotes u64+i32 to f64 because
+        # neither integer type contains the other's full range; that is disastrous for bit
+        # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
+        # wins a tie, while a strictly wider signed type can represent the narrower unsigned
+        # range.  This gives u16+u32 -> u32, u64+i32 -> u64, and i64+u32 -> i64.
+        widths = {"i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
+        signed_width = max((widths[d] for d in arg_dtypes if d.startswith("i")), default=0)
+        unsigned_width = max((widths[d] for d in arg_dtypes if d.startswith("u")), default=0)
+        if unsigned_width >= signed_width:
+            return f"u{unsigned_width}"
+        return f"i{signed_width}"
     if arg_dtypes and all(d == "f16" for d in arg_dtypes):
         return "f16"
     return "f32"
@@ -246,6 +256,8 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
     """
     if dtype in _INTEGER_DTYPES and fn in _INTEGER_BINARY_OP:
         return BinaryExpr(_INTEGER_BINARY_OP[fn], inputs[0], inputs[1])
+    if dtype in _INTEGER_DTYPES and fn == "bitwise_count":
+        return FuncCallExpr("bitwise_count", tuple(inputs))
     if fn in _BINARY_OP:
         return BinaryExpr(_BINARY_OP[fn], inputs[0], inputs[1])
     if fn == "maximum":
@@ -661,7 +673,13 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         bases: dict[str, frozenset[str]] = {}  # inlined temp → the base names its folded expression reads
         stmts = list(body)
         for di, s in enumerate(stmts):
-            if not (isinstance(s, Assign) and total.get(s.name, 0) == 1 and local.get(s.name, 0) == 1 and s.name not in inline):
+            if not (
+                isinstance(s, Assign)
+                and s.op.name != "bitcast"
+                and total.get(s.name, 0) == 1
+                and local.get(s.name, 0) == 1
+                and s.name not in inline
+            ):
                 continue
             # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
             # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp

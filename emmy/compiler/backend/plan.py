@@ -16,6 +16,7 @@ under a ``"cuda"`` key so another backend can add its own namespace.
 
 from __future__ import annotations
 
+import base64
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -45,6 +46,12 @@ PLAN_FORMAT_VERSION = 1
 # format 1 byte-identically, so existing packs and readers are untouched; an old runtime reading
 # a format-2 plan rejects it and falls back to the full compile (the pack loader's contract).
 PLAN_FORMAT_INDIRECT = 2
+
+# Self-contained generated constants: a deterministic source-free ``ConstantOp.source_graph``
+# is evaluated once while projecting the graph, and its bytes ride the plan.  Format 3 is a
+# superset of the indirect ABI, so a plan may carry both generated constants and indirect
+# launches.  Older runtimes reject the plan and safely fall back to a full compile.
+PLAN_FORMAT_GENERATED = 3
 
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
 # factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
@@ -116,12 +123,15 @@ class WeightSpec:
     grammar can't express — such a plan still runs, but can't rebind weights from a pack.
     ``source_parts`` mirrors ``ConstantOp.source_parts`` — ``(path, shape)`` pairs the binder
     concatenates along axis 0 before the chain (``merge_sibling_linears``' weight concat);
-    exactly one of ``source_path`` / ``source_parts`` is set. Assemble the pre-chain source
-    via ``loader.binder.assemble_source`` (duck-typed over both specs)."""
+    exactly one of ``source_path`` / ``source_parts`` is set. ``generated`` is the third,
+    self-contained alternative for deterministic source-free bind records: ``(numpy dtype
+    string, shape, raw bytes)``. Assemble the pre-chain source via
+    ``loader.binder.assemble_source`` (duck-typed over both specs)."""
 
     source_path: str | None
     load_ops: tuple[tuple, ...] | None = ()
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    generated: tuple[str, tuple[int, ...], bytes] | None = None
 
 
 @dataclass
@@ -204,16 +214,28 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     weights: dict[str, WeightSpec] = {}
     for nid, op in graph.loadable_constants():
         load_ops = _encode_load_ops(op.load_ops)
+        generated = None
         if op.source_graph is not None:
-            # A bind record the plan cannot reproduce: the weight has no checkpoint key either,
-            # so a plan-side bind would silently drop it. Mark it unbindable — the pack save
-            # refuses (see ``_save_pack``) instead of writing a pack that boots weightless.
-            logger.warning("plan: constant %r rides a bind record outside the plan vocabulary; weight will not rebind from a pack", nid)
-            load_ops = None
+            # A source-free deterministic record is a generated constant: evaluate it once on
+            # CPU and carry its compact bytes in the plan. Records with checkpoint/input leaves
+            # still require sources the plan grammar cannot express and remain unbindable.
+            from emmy.compiler.loader.binder import evaluate_source_graph  # noqa: PLC0415
+
+            try:
+                value = evaluate_source_graph(op.source_graph, {})
+            except (KeyError, ValueError, TypeError, RuntimeError, NotImplementedError):
+                value = None
+            if value is not None:
+                value = np.ascontiguousarray(value)
+                generated = (value.dtype.str, tuple(int(d) for d in value.shape), value.tobytes())
+            else:
+                logger.warning("plan: constant %r rides a bind record with unresolved leaves; weight will not rebind from a pack", nid)
+                load_ops = None
         weights[nid] = WeightSpec(
             source_path=op.source_path,
             load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
+            generated=generated,
         )
 
     return ExecutionPlan(
@@ -407,8 +429,15 @@ def _dim_from_json(v) -> Dim:
 
 
 def plan_to_dict(plan: ExecutionPlan) -> dict:
+    has_generated = any(w.generated is not None for w in plan.weights.values())
     return {
-        "format": PLAN_FORMAT_INDIRECT if any(lc.indirect_args for lc in plan.launches) else PLAN_FORMAT_VERSION,
+        "format": (
+            PLAN_FORMAT_GENERATED
+            if has_generated
+            else PLAN_FORMAT_INDIRECT
+            if any(lc.indirect_args for lc in plan.launches)
+            else PLAN_FORMAT_VERSION
+        ),
         "backend": plan.backend,
         "inputs": list(plan.inputs),
         "outputs": list(plan.outputs),
@@ -451,6 +480,17 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             nid: {
                 **({"path": w.source_path} if w.source_path is not None else {}),
                 **({"parts": [[p, list(s)] for p, s in w.source_parts]} if w.source_parts else {}),
+                **(
+                    {
+                        "generated": {
+                            "dtype": w.generated[0],
+                            "shape": list(w.generated[1]),
+                            "data": base64.b64encode(w.generated[2]).decode("ascii"),
+                        }
+                    }
+                    if w.generated is not None
+                    else {}
+                ),
                 **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {}),
             }
             for nid, w in plan.weights.items()
@@ -465,8 +505,10 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT):
-        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} and {PLAN_FORMAT_INDIRECT})")
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED):
+        raise ValueError(
+            f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION}, {PLAN_FORMAT_INDIRECT}, and {PLAN_FORMAT_GENERATED})"
+        )
     symbols = d.get("symbols", {})
     return ExecutionPlan(
         backend=d["backend"],
@@ -512,6 +554,15 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 source_path=w.get("path"),
                 load_ops=tuple((k, tuple(a)) for k, a in w["ops"]) if "ops" in w else None,
                 source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in w.get("parts", ())),
+                generated=(
+                    (
+                        w["generated"]["dtype"],
+                        tuple(int(d) for d in w["generated"]["shape"]),
+                        base64.b64decode(w["generated"]["data"], validate=True),
+                    )
+                    if "generated" in w
+                    else None
+                ),
             )
             for nid, w in d.get("weights", {}).items()
         },

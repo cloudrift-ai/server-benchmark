@@ -641,7 +641,7 @@ def test_strict_release_twin_audit_fails_major_gaps(monkeypatch):
         seen.update(model=model, **kwargs)
         return {"pre1": object()}
 
-    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(twins, "capture_in_model_graphs", fake_capture)
     monkeypatch.setattr(
         audit,
         "audit_card",
@@ -688,6 +688,18 @@ def test_static_only_release_twin_audit_captures_only_m1(monkeypatch):
         "extra_widths": (),
         "static_only": True,
     }
+
+
+def test_strict_release_twin_audit_fails_when_provider_rejects_widths(monkeypatch, capsys):
+    import emmy.serving.twins as twins
+
+    monkeypatch.setattr(
+        twins,
+        "capture_in_model_graphs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("fixed architecture width")),
+    )
+    assert not csg.audit_release_twins("org/deepseek", "Tesla V100-SXM3-32GB", [(7, 0)], (64,))
+    assert "FAIL: strict in-model coverage cannot represent this release: fixed architecture width" in capsys.readouterr().out
 
 
 def test_preflight_enumeration_applies_the_same_revision_rule():

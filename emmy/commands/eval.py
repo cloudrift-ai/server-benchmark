@@ -359,14 +359,19 @@ def _in_model_audit(
     """``eval golden --in-model`` — the in-model half of the golden reproduction check.
 
     The isolated check above compiles each golden's own snippet; this one re-traces the
-    serving twin graphs of every model the golden files are tagged with (weight-free —
-    ``emmy.serving.twins`` builds the skeleton from ``config.json`` alone) and audits each
+    in-model graphs of every model the golden files are tagged with (weight-free —
+    ``emmy.serving.twins`` selects serving twins or an exact representative-layer provider
+    from ``config.json`` alone) and audits each
     tagged card's goldens against them via ``search/audit``. The two views genuinely
     disagree: the gemma-4 cast-splice regression reproduced 68/68 pinned while the
     in-model deploys drifted, which is exactly what this mode exists to catch."""
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-    from emmy.serving.twins import capture_twin_graphs, validate_static_only_release_config  # noqa: PLC0415
+    from emmy.serving.twins import (  # noqa: PLC0415
+        capture_in_model_graphs,
+        capture_twin_graphs,
+        validate_static_only_release_config,
+    )
 
     if static_only_release:
         if not release_config:
@@ -390,17 +395,22 @@ def _in_model_audit(
     for model in models:
         source = checkpoint or model
         local = f" from local checkpoint {checkpoint}" if checkpoint else ""
-        print(f"=== {model}: tracing serving twins{local} (weight-free) ===")
-        if static_only_release:
-            graphs = capture_twin_graphs(
-                source,
-                decode_bucket=1,
-                prefill_bucket=0,
-                extra_widths=(),
-                static_only=True,
-            )
-        else:
-            graphs = capture_twin_graphs(source, extra_widths=extra_widths)
+        print(f"=== {model}: tracing in-model audit graphs{local} (weight-free) ===")
+        try:
+            if static_only_release:
+                graphs = capture_twin_graphs(
+                    source,
+                    decode_bucket=1,
+                    prefill_bucket=0,
+                    extra_widths=(),
+                    static_only=True,
+                )
+            else:
+                graphs = capture_in_model_graphs(source, extra_widths=extra_widths)
+        except (NotImplementedError, ValueError) as exc:
+            logger.error("in-model audit cannot represent %s: %s", model, exc)
+            failed = True
+            continue
         for gpu_name, cap in sorted({(g.gpu_name, tuple(g.compute_cap)) for g in GOLDEN_RECORDS if g.model == model}):
             res = audit_card(graphs, gpu_name, cap)
             counts = summarize(res)
@@ -423,7 +433,7 @@ def _in_model_audit(
         logger.error(
             "golden serving audit FAILED — a recorded golden no longer deploys, a twin failed to compile, or "
             "strict release coverage found an uncovered warp-contraction fork. Fix/re-record drift and close every "
-            "major release-width gap before warming; the twins track the installed modeling code exactly as serving does."
+            "major release-width gap before warming; the audit providers track the installed modeling code."
         )
         sys.exit(1)
 

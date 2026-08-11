@@ -17,17 +17,16 @@ that survives SSH drops, hard PASS/FAIL gates that abort-and-teardown instead of
 the headroom-sweep policy that finalizes the model config, secret hygiene for the push, and the release
 side-effects.
 
-Every step is parameterized by `MODEL` (an HF id). The slug derived from it names both the published image and the
-pinned config, so nothing else needs naming:
+The recipe is the publication input. Resolve exactly one `model.huggingface`, one concrete engine image, one hardware
+target, and one serving shape before provisioning; reject experiment grids or multiple image variants. Use the
+resolved HF id as `MODEL` for the build and qualification commands:
 
 ```bash
 make serve-config MODEL=google/gemma-4-12B-it   # model / slug / config path / image tag / target GPU
 make serve-models                               # which models already have a pinned config
 ```
 
-The serving recipe is the publication input. Before warming, resolve its one concrete model, engine image, target
-hardware, and serving shape; reject experiment grids or multiple image variants. The recipe image must use the
-canonical immutable reference that `emmy publish` validates:
+The recipe image must use the canonical immutable reference that `emmy publish` validates:
 
 ```text
 cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>
@@ -46,14 +45,16 @@ does not substitute for the fresh-container zero-recompile gate.
 
 Budget: ~2–3 h wall on a rental for a 12B-class model (image build ~20 min, headroom sweep ~30–60 min, validate
 ~30 min, warm ~30 min, bake/verify/publication ~30 min). **Hard cap: 4 h** — if the session exceeds it, capture
-down, report. A larger checkpoint scales this up; re-estimate before starting rather than inheriting these numbers.
+logs, tear down, and report. A larger checkpoint scales this up; re-estimate before starting rather than inheriting
+these numbers.
 
 ## Inputs to confirm
 
 Ask only for what the user hasn't already given:
 
-1. **Model** — the HF id. Required; there is no default worth guessing. Run `make serve-config MODEL=<id>` and show
-   the resolved slug, config path, image tag and target GPU before anything else happens.
+1. **Recipe** — required; there is no publication default worth guessing. Resolve its singleton HF id, engine image,
+   runtime family/version/revision, serving shape, and target GPU. Run `make serve-config MODEL=<resolved-id>` and
+   show the slug, config path, image tag, and target GPU before anything else happens.
 2. **Mode** — rental (default) or local. Local requires the config's `SERVE_GPU` in `nvidia-smi` on this machine; if
    the box is multi-GPU, resolve that card's index and export `GPU_DEVICE=<index>` for every warm/verify
    invocation. Check ≥100 GB free disk for a 12B-class model (base image + `warm/` + baked weight layer +

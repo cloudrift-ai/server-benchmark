@@ -351,23 +351,118 @@ def test_trace_copy_uses_broadcast_source_values_and_matches_eager():
     np.testing.assert_array_equal(got, Copy()(template, source).numpy())
 
 
-def test_trace_rejects_copy_mutation_observed_through_original_base():
-    """A functional copy result cannot stand in for a later read through its mutated base."""
+def test_trace_reassembles_static_local_slice_copies_observed_through_base():
+    """Sequential writes through static slices version and reassemble a local base."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class CopyThenReadBase(nn.Module):
+        def forward(self, template, right_kv, right_gate, shifted_kv, shifted_gate):
+            new_kv = template.new_zeros((1, 3, 8, 16))
+            new_gate = template.new_full((1, 3, 8, 16), float("-inf"))
+            new_kv[:, :, 4:] = right_kv
+            new_gate[:, :, 4:] = right_gate
+            new_kv[:, 1:, :4] = shifted_kv
+            new_gate[:, 1:, :4] = shifted_gate
+            return (new_kv * new_gate.softmax(dim=2, dtype=torch.float32).to(new_kv.dtype)).sum(dim=2)
+
+    template = torch.randn(1, 3, 4, 32)
+    right_kv = torch.randn(1, 3, 4, 16)
+    right_gate = torch.randn(1, 3, 4, 16)
+    shifted_kv = torch.randn(1, 2, 4, 16)
+    shifted_gate = torch.randn(1, 2, 4, 16)
+    values = (template, right_kv, right_gate, shifted_kv, shifted_gate)
+    graph = trace_module(CopyThenReadBase(), values)
+    updates = [
+        node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2 and node.id.endswith("_base")
+    ]
+    assert len(updates) == 4
+
+    backend = NumpyBackend()
+    result, _ = backend.run(
+        backend.compile(graph), input_data={name: value.numpy() for name, value in zip(graph.inputs, values, strict=True)}
+    )
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_allclose(got, CopyThenReadBase()(*values).numpy(), rtol=1e-6, atol=1e-6)
+
+    lowered = Pipeline.build(LOOP_PASSES).run(graph)
+    assert all(isinstance(node.op, (InputOp, ConstantOp, LoopOp)) for node in lowered.nodes.values())
+
+
+def test_trace_treats_empty_static_local_slice_copy_as_noop():
+    """An empty local write preserves its base without loading a zero-sized source."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class EmptyCopy(nn.Module):
+        def forward(self, template, source):
+            base = template.new_full((2, 5), 3.0)
+            base[:, 2:2].copy_(source)
+            return base
+
+    values = (torch.randn(1), torch.randn(2, 0))
+    graph = trace_module(EmptyCopy(), values)
+    backend = NumpyBackend()
+    result, _ = backend.run(
+        backend.compile(graph), input_data={name: value.numpy() for name, value in zip(graph.inputs, values, strict=True)}
+    )
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_array_equal(got, EmptyCopy()(*values).numpy())
+
+    lowered = Pipeline.build(LOOP_PASSES).run(graph)
+    assert all(isinstance(node.op, (InputOp, ConstantOp, LoopOp)) for node in lowered.nodes.values())
+
+
+def test_trace_rejects_copy_mutation_observed_through_preexisting_alias():
+    """A view made before the write cannot be rebound by local base versioning."""
     import torch
     import torch.nn as nn
 
     from emmy.compiler.trace.torch import trace_module
 
-    class CopyThenReadBase(nn.Module):
+    class CopyThenReadOldView(nn.Module):
         def forward(self, template, source):
             base = template.new_zeros((1, 3, 8, 16))
+            old_view = base[:, 1:]
             base[:, 1:].copy_(source)
-            return base + 1.0
+            return old_view + 1.0
 
     template = torch.randn(1, 3, 4, 32)
     source = torch.randn(1, 2, 8, 16)
     with pytest.raises(NotImplementedError, match="observable alias mutation.*original destination"):
-        trace_module(CopyThenReadBase(), (template, source))
+        trace_module(CopyThenReadOldView(), (template, source))
+
+
+def test_trace_rejects_copy_mutation_through_nonunit_slice():
+    """A strided destination is outside the static contiguous-slice update form."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class StridedCopy(nn.Module):
+        def forward(self, template, source):
+            base = template.new_zeros((1, 4, 8))
+            base[:, ::2].copy_(source)
+            return base
+
+    with pytest.raises(NotImplementedError, match="observable alias mutation.*original destination"):
+        trace_module(StridedCopy(), (torch.randn(1), torch.randn(1, 2, 8)))
 
 
 def test_trace_exports_in_inference_grad_mode_without_higher_order_wrapper():

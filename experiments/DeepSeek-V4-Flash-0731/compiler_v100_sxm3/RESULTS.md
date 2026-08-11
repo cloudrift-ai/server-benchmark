@@ -1,12 +1,12 @@
 # DeepSeek-V4-Flash-0731 compiler qualification on 16× V100 SXM3 32 GB
 
-Status: partial compiler experiment. The architecture-wide trace exposed an output-live aliased mutation that Graph IR
-cannot represent. The partial YAML preserves valid tuning and O3 evidence, but it is not a complete model golden and
-must not be copied into `emmy/compiler/pipeline/search/goldens/`.
+Status: promotion-qualified. The complete static-sequence-512 architecture inventory is now stored at
+`emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml`. The earlier partial artifacts remain
+below as historical evidence and must not be substituted for the canonical file.
 
 ## Scope
 
-- Date: 2026-08-09
+- Qualification date: 2026-08-10
 - Model: `deepseek-ai/DeepSeek-V4-Flash-0731`
 - Immutable model revision: `7872f01b1d1fe23eabc4c98b48bffcef5a386062`
 - Hardware: 16× `Tesla V100-SXM3-32GB`, compute capability 7.0, 512 GB aggregate GPU memory
@@ -14,6 +14,30 @@ must not be copied into `emmy/compiler/pipeline/search/goldens/`.
 
 These artifacts use architecture-derived FP16 representative constants. They do not establish checkpoint
 representation support, whole-model numerical parity, serving eligibility, or end-to-end serving performance.
+
+## Canonical promotion
+
+The corrected provider traced the four config-derived decoder profiles plus 11 model seams into 13 programs and 279
+exact Loop configurations. All rows have paired positive deployable O3 `emmy_us` and live `emmy-greedy`
+`reference_us` measurements; the canonical file contains no search ranking. Full collision qualification retained a
+universally realized candidate for every one of the 59 ShapeKeys.
+
+Provider fixes after the historical partial run preserve routed-expert clamp-10 semantics, materialize the real
+sliding causal mask, keep HCA/CSA compressor block bias live, fail closed when representative MoE replacement or CSA
+full-selection equivalence cannot be proved, and model static slice updates without observable alias mutation. A
+bounded retrace then repeated O3 candidate-versus-greedy qualification for every changed target and every member of
+its affected ShapeKey bucket.
+
+The final uncovered in-model ShapeKey was a fused `bmm_reduce` present once in each decoder profile. Its natural
+sync-stage candidate was measured directly from the freshly captured full-graph Loop node in two isolated repeats;
+persisted standalone and origins-derived Loop forms were rejected because their structural identities differed. The
+candidate median was 14.603–14.625 ms across the four occurrences versus 16.597–16.717 ms for live greedy, with exact
+outputs and less than 0.10% candidate repeat range.
+
+Final gates on the exact canonical hash `99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309`
+passed PROMOTION and REPOSITORY validation, unpinned offer replay for 279/279 entries with no fall-through, and the
+pinned offline in-model audit at revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062`: 255 matches, zero drift, zero
+compile failures, and zero major gaps. `canonical_qualification.json` records the full contract and evidence hashes.
 
 ## Architecture inventory and semantic boundary
 
@@ -32,18 +56,22 @@ and their 96 unique CUDA sources compiled for `sm_70` at O1. That is syntactic c
 semantic audit showed that target 34 had been generated from an unsound functional interpretation of `aten.copy_`.
 
 The layer-2 compressor creates `new_kv`/`new_gate` bases, writes through destination slices with `copy_`, then reads
-the original bases. Graph IR can model consumers of the returned `copy_` value, but it has no functional slice update
-that reassembles the base. The tracer now fails closed at the first observable mutation:
+the original bases. The previous tracer failed closed at the first observable mutation:
 
 ```text
 NotImplementedError: aten.copy_ observable alias mutation is unsupported: later live node 'slice_15' reads original
 destination alias 'new_zeros'; functional copy_ is supported only through its returned value
 ```
 
-The sparse `topk`/`scatter_` branch investigated earlier is output-dead and remains correctly pruned. The live
-`copy_` mutation above is the honest first unsupported operation. A focused regression proves the failure, while the
-existing direct-return functional `copy_`, mutation-through-returned-view liveness, and dead-local-mutation cases
-remain green.
+The tracer now reassembles a static, unit-step slice update rooted at a local `new_zeros` or `new_full` allocation as
+a two-source index map and versions sequential writes. Inputs, parameters, dynamic or strided slices, pre-existing
+aliases, and used mutation returns remain fail-closed. An independent audit added an empty-slice no-op regression so
+the new path never loads from a zero-sized source.
+
+An intermediate exact offline retrace of layer 2 at sequence length 512 retained 612 FX nodes, pruned 226 dead nodes,
+produced 1,120 Graph IR nodes, and saved 89 distinct exact Loop targets. All 58 focused remote trace tests passed.
+Those then-unmeasured rows were superseded by the architecture-wide retrace and collision qualification described
+above. Exact intermediate counts and hashes remain in `retrace-summary.json`.
 
 ## Equal-budget tuning
 
@@ -58,7 +86,42 @@ contention-affected attempt was excluded before these final arms.
 
 The exact-Loop finalist selector chose 29 searched schedules and 40 measured greedy fallbacks. These results were
 measured against the then-current 69-target inventory and remain useful continuation evidence, but the semantic trace
-failure prevents model-wide promotion.
+failure active at that time prevented model-wide promotion.
+
+### Focused follow-up tuning
+
+A follow-up first searched the six failed or unfinished targets on six GPUs. Three large linear-matmul reductions
+still exceeded the watchdog; the other targets produced mean, linear, and RMSNorm candidates. It then targeted the
+12 kernels responsible for 97.89% of the historical partial inventory's summed O3 time. Those two arms used isolated
+databases, online priors, cubin caches, 12 GPUs, seed 731, `max-candidates=16`, patience 8, and the same O1 ranking
+regime:
+
+| Arm | Attempted rows | Successful rows | `bench_fail` rows |
+| --- | ---: | ---: | ---: |
+| MCTS-only | 148 | 104 | 44 |
+| Recorded proposals plus MCTS | 148 | 105 | 43 |
+
+Nineteen distinct winners then received two fresh deployable O3 pinned comparisons against isolated greedy selection
+with identical deterministic inputs, 10 warmups, and 100 measured iterations. Eight were accepted, five had no
+consistent O3 win, two candidate schedules hit the watchdog, and four remained unresolved because the isolated
+greedy reference exceeded the aggregate watchdog.
+
+| Accepted target | Candidate mean | Greedy mean | Speedup |
+| --- | ---: | ---: | ---: |
+| `k_matmul_reduce_9eab8c` | 5.365 ms | 11.350 ms | 2.12x |
+| `k_rms_norm_linear_reduce_25fe50` | 15.224 us | 22.028 us | 1.45x |
+| `k_matmul_86b937` | 42.368 ms | 54.057 ms | 1.28x |
+| `k_matmul_9e323a` | 34.135 ms | 43.578 ms | 1.28x |
+| `k_mean_0d59f1` | 2.285 us | 2.826 us | 1.24x |
+| `k_matmul_f35d97` | 28.021 ms | 32.824 ms | 1.17x |
+| `k_linear_reduce_5b3de5` | 54.911 ms | 57.204 ms | 1.04x |
+| `k_matmul_softmax_reduce_152eac` | 34.376 ms | 34.412 ms | 1.001x |
+
+The MCTS tensor-core schedule for `k_matmul_reduce_9eab8c` materially beat the recorded-proposal arm; that arm's
+winning O1 tile was about twice as slow as greedy at O3. This is why no O1 result was promoted directly. At this
+historical stage, three large linear-matmul reductions still exceeded the per-launch watchdog and duplicate ShapeKeys
+still needed cross-target A/B. The later canonical run closed both requirements. Historical budgets, knobs, repeat
+records, correctness status, artifact hashes, and unresolved rows are in `tuning-closure-summary.json`.
 
 ## Deployable O3 evidence
 
@@ -84,6 +147,16 @@ have no fabricated timing or knob record.
 - `partial_o3_report.json`: per-target source, knobs, timings, accuracy status, failure, and unfinished records
 - `partial_coverage.json`: decoder/seam inventory, semantic exclusion, and exact partial counts
 - `evidence_hashes.json`: SHA-256 hashes of the source inventory, selection, shard records, and partial outputs
+- `retrace-summary.json`: exact post-fix layer-2 trace counts, source hashes, and remote evidence hashes
+- `tuning-closure-summary.json`: equal-budget focused search plus two-repeat O3 evidence for all 19 distinct winners
+- `canonical_qualification.json`: canonical inventory, bounded closure contracts, fused-gap measurements, gate counts,
+  source hashes, and remote artifact hashes
+- `emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml`: canonical static-sequence-512 V100
+  deployment evidence
 
-No canonical V100 golden is produced. Complete promotion requires a semantically correct functional slice-update/base
-reassembly representation, a fresh full trace, and deployable O3/reference measurements for every resulting target.
+The 132 MB raw search databases, priors, logs, pinned-run JSON, and retrace YAML are mirrored on the supplied node at
+`/home/riftuser/onecat-dsv4-0731/optimization/compiler-tuning-closure`; paths in the summary are relative to that
+directory.
+
+The canonical V100 golden is promotion-qualified only for this FP16 static-sequence-512 architecture inventory. It is
+deliberately separate from the 1Cat serving cache and endpoint qualification evidence.

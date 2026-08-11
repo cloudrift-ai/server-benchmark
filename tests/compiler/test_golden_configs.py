@@ -88,6 +88,16 @@ def test_working_states_and_repository_requires_measurements() -> None:
     validate_golden_file(inventory)
 
 
+def test_promotion_rejects_mixed_bare_and_axis_scoped_schedule_keys() -> None:
+    document = copy.deepcopy(load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY))
+    document["configs"] = [copy.deepcopy(document["configs"][0])]
+    document["configs"][0]["knobs"] = {"REDUCE": "", "REDUCE@a1": "coop"}
+
+    validate_golden_file(document)
+    with pytest.raises(ValueError, match="mixes bare and axis-scoped REDUCE"):
+        validate_golden_file(document, validation=GoldenFileValidation.PROMOTION)
+
+
 def test_program_index_must_resolve_in_document() -> None:
     document = copy.deepcopy(load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY))
     document["configs"][0]["program"] = len(document["programs"])

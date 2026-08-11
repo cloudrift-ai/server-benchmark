@@ -1,0 +1,216 @@
+{
+  "artifacts_sha256": {
+    "_tune/deepseek-v100-canonical-closure/provider-v3-best-sync-offer.json": "49b7f819bf6cc0711fce437a4c7ec3d1bba565fa0b720b0941fa205e79e53b28",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-formal-gates.json": "5aaf0957c3c6b837fa8f1c3a24845aa269632c05f97f78170d98ac7a4b3bf5ec",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-formal-gates.log": "537d025ae868ffe102715717e10072aeb2c3928ea9be90ad592a31baf80a785e",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-cache-preflight.json": "fac89f3c755a8422fb1a5da66f39f8ca1ff91dc805a3585f46f51d9bf62420e3",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-cross-repeat-summary.json": "56709fe585d93acbffd53e0533f7c595f03dafcfd87160347fb48e025e1517e0",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-final-build.json": "f589e299f0317bf48e412ca7fe2e08458242a6126d81178d2eaa89edb368aa39",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-qualification-plan.json": "b859bbcf7c8bfb0a5bebae641e12dbc9e14326017ff16c5bb9943748034e411b",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-repeat1-summary.json": "68a06c9d3998fd5f3534c6a56cbd6e910ff6ca1733cb147a6c04b47d11b824d1",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-repeat2-summary.json": "74b9466f59d6864499637ea0eb0370de058d9e8aab5e6c2fe01ba51cb3d01ee0",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-runner-serialization-smoke.json": "d1cef8e007ecb7e19a91168226f1e3c97ba71f2856713c2381336264d6d85f34",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-fused-shape-key-proof.json": "2db852ea2e4d0f21431bf6dff8b5ebdbfea6f78cf627ed74352c12c441684edd",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-inmodel-gap-capture.json": "e61efa6b66d7822eede1f7a9e28d0452899eb8cbdb15fd8521c54009a808abc8",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-inmodel-origins-map.json": "157da90f5cf3bc057d32d00c0cb6778d1e64935e8755a7bca0f18b70c562790b",
+    "_tune/deepseek-v100-canonical-closure/provider-v3-origins-feasibility.json": "153e2871502093b4841f306e8f877bebf33f9a5564220aee9626da136bce7c77",
+    "_tune/deepseek-v100-canonical-closure/v100_sm70_deepseek_v4_flash_0731.provider-v3-fused-final.candidate.yaml": "99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309"
+  },
+  "candidate": {
+    "canonical_repository_path": "emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml",
+    "changed_configs": [
+      41,
+      120,
+      189,
+      246
+    ],
+    "remote_path": "_tune/deepseek-v100-canonical-closure/v100_sm70_deepseek_v4_flash_0731.provider-v3-fused-final.candidate.yaml",
+    "sha256": "99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309"
+  },
+  "canonical_copy_authorized": true,
+  "checkpoint": "deepseek-ai/DeepSeek-V4-Flash-0731@7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+  "format_version": 1,
+  "fused_gap": {
+    "candidate_knobs": {
+      "RASTER": "",
+      "REDUCE": "",
+      "STAGE": "d1/sync",
+      "TILE": "mma_m8n8k4_f16_f32/f2x8/k8",
+      "WORK": "w16x1"
+    },
+    "candidate_pool_count": 75070,
+    "contract": {
+      "aggregate_run_stage_timeout_seconds": 900,
+      "candidate_checks_accepted": 8,
+      "fresh_repeats": 2,
+      "iterations": 100,
+      "optimization": "O3",
+      "reference_backend": "emmy-greedy",
+      "references_accepted": 8,
+      "seed": 731,
+      "timing_reuse": false,
+      "warmup": 10
+    },
+    "discarded_attempts": [
+      {
+        "path": "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-repeat1-serialization-failed",
+        "reason": "post-measurement LaunchTime JSON serialization failure; no timing reused"
+      },
+      {
+        "path": "_tune/deepseek-v100-canonical-closure/provider-v3-fused-gap-repeat1-serialization-failed2",
+        "reason": "post-measurement LaunchTime JSON serialization failure; no timing reused"
+      }
+    ],
+    "full_loop_cache_key": "e6e51bc0af277a0a690482ba45bfa552b1f4eb75d245d5b867ab578235e23327",
+    "max_candidate_relative_range": 0.0009816731702296509,
+    "max_reference_relative_range": 0.007135823853533941,
+    "natural_candidate_index": 69734,
+    "occurrences": 4,
+    "plan_sha256": "b859bbcf7c8bfb0a5bebae641e12dbc9e14326017ff16c5bb9943748034e411b",
+    "rejected_origins_cache_key": "3669e119f0b4839fb77c771ed833113c0f8974f1e1b46acce3e7df32304e675a",
+    "rejected_standalone_loop_cache_key": "058d02757812e8d3f1249ff896ad8d26ec4ca886751e33e8930a6ec81b7908de",
+    "rows": [
+      {
+        "candidate_median_us": 14603.263854980469,
+        "candidate_relative_range": 0.0009816731702296509,
+        "candidate_repeat_us": [
+          14596.09603881836,
+          14610.431671142578
+        ],
+        "config_index": 41,
+        "correct_both": true,
+        "exact_cache_both": true,
+        "profile_graph": "layer512-sliding-hash-moe",
+        "reference_median_us": 16646.143913269043,
+        "reference_relative_range": 0.007135823853533941,
+        "reference_repeat_us": [
+          16705.535888671875,
+          16586.75193786621
+        ]
+      },
+      {
+        "candidate_median_us": 14612.992286682129,
+        "candidate_relative_range": 0.0004905098162983308,
+        "candidate_repeat_us": [
+          14616.576194763184,
+          14609.408378601074
+        ],
+        "config_index": 120,
+        "correct_both": true,
+        "exact_cache_both": true,
+        "profile_graph": "layer512-compressed-sparse-hash-moe",
+        "reference_median_us": 16716.800689697266,
+        "reference_relative_range": 0.0018376576744742208,
+        "reference_repeat_us": [
+          16701.440811157227,
+          16732.160568237305
+        ]
+      },
+      {
+        "candidate_median_us": 14604.799747467041,
+        "candidate_relative_range": 0.000911504437780713,
+        "candidate_repeat_us": [
+          14611.455917358398,
+          14598.143577575684
+        ],
+        "config_index": 189,
+        "correct_both": true,
+        "exact_cache_both": true,
+        "profile_graph": "layer512-heavily-compressed-moe",
+        "reference_median_us": 16602.11181640625,
+        "reference_relative_range": 0.0,
+        "reference_repeat_us": [
+          16602.11181640625,
+          16602.11181640625
+        ]
+      },
+      {
+        "candidate_median_us": 14625.279903411865,
+        "candidate_relative_range": 0.0002100325596112474,
+        "candidate_repeat_us": [
+          14623.744010925293,
+          14626.815795898438
+        ],
+        "config_index": 246,
+        "correct_both": true,
+        "exact_cache_both": true,
+        "profile_graph": "layer512-compressed-sparse-moe",
+        "reference_median_us": 16596.991539001465,
+        "reference_relative_range": 0.00024673613317361564,
+        "reference_repeat_us": [
+          16594.94400024414,
+          16599.03907775879
+        ]
+      }
+    ],
+    "universally_realized": true
+  },
+  "gates": {
+    "formal_gate_json_sha256": "5aaf0957c3c6b837fa8f1c3a24845aa269632c05f97f78170d98ac7a4b3bf5ec",
+    "formal_gate_log_sha256": "537d025ae868ffe102715717e10072aeb2c3928ea9be90ad592a31baf80a785e",
+    "in_model": {
+      "checkpoint": "deepseek-ai/DeepSeek-V4-Flash-0731@7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+      "status": "pass",
+      "strict_major_gaps": true
+    },
+    "in_model_counts": {
+      "compile_fail": 0,
+      "drift": 0,
+      "gap": 0,
+      "match": 255
+    },
+    "offer": "pass",
+    "promotion_schema": "pass",
+    "repository_schema": "pass"
+  },
+  "gpu": {
+    "compute_capability": [
+      7,
+      0
+    ],
+    "compute_processes_at_handoff": 0,
+    "count": 16,
+    "inventory": [
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0",
+      "Tesla V100-SXM3-32GB, 7.0"
+    ],
+    "ssh_host": "riftuser@185.165.50.61"
+  },
+  "inventory": {
+    "configs": 279,
+    "loops": 279,
+    "profiles": 4,
+    "programs": 13,
+    "ranking_entries": 0
+  },
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "source": {
+    "files_sha256": {
+      "emmy/commands/compile.py": "c9a6c2426c689b89af27ddcdeb9b9a6d3957dccec24720499d61a96cecd003ee",
+      "emmy/commands/eval.py": "4786d59e4c88255a2c1f1d56e95e96b50fb983e24aa361bc9eb3ec65cb127b4e",
+      "emmy/compiler/ir/stmt/base.py": "4178e4d1b145932f652cc059e86eea062f1a4de45da7ec81abb3d64e7d968295",
+      "emmy/compiler/pipeline/search/data/shape.py": "da8ac6b213b11d74de23d59bfe7b497ab61e6c0a3464d5d7874af9b0b03dab96",
+      "emmy/compiler/pipeline/search/golden.py": "b10a2cb69dbf5d00eeafc8be46b16f42f95e06ac3f7268e5078925520a86b88e",
+      "emmy/compiler/trace/huggingface.py": "fb70a3bac53447fdc7706d349e2043a9fc4b90fef4cdc7c555fe582d1552ef28",
+      "emmy/compiler/trace/torch.py": "eb382541d38983435089ba8313abd738605a4a0d9607572801b0c58d4bf757b7",
+      "emmy/serving/twins.py": "f163333ac20e7f7d0cf5cef6399585eda5e9ab120e541eb0aaa56f0830562e82",
+      "scripts/check_serving_goldens.py": "a9c6272c55790ce85ee29eb5314d06dd44b130b7a5087afde2eecb449143003c"
+    },
+    "git_revision": "ee4fc3a0494aa111812395f3ace149f8c8f7e539"
+  },
+  "status": "promotion-qualified"
+}

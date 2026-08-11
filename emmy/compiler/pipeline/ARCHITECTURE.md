@@ -507,8 +507,9 @@ The join has some deliberately non-obvious mechanics:
   because before the split, this fork carries only one reduce axis, with the rsqrt still buried inside the sub-body
   that produces A, so the stamped counts read it as a plain scalar matmul. It is rebuilt under the fused key, which is
   what lets the norm→qkv kernels find their goldens on a cold deploy. A fused golden is required by the schema to
-  record a `d*/sync` STAGE, so its config can never be used for a plain matmul that loads A from global memory and
-  happens to have the same extents.
+  record a `d*/sync` STAGE. `GoldenRecord.shape_key` replays that stored schedule prefix through the same fork-key
+  classifier, so a Loop fallback persists the fused join without serializing a derived ShapeKey; its config can never
+  be used for a plain matmul that loads A from global memory and happens to have the same extents.
 - A golden key that names its axes (a static attention golden's `TILE@dd` plus `TILE@pj`) is all-or-nothing: both must
   match. A golden key written with no axis, for a kind that has several, behaves like a hand pin instead — one plan,
   satisfied by ANY option of the same knob family. That is how a dynamic attention golden's single unsuffixed `TILE`
@@ -1119,6 +1120,9 @@ carry an opaque `ranking` mapping
 for fast-compile feedback (`status`, `latency_us`, compile flags, and measured knobs); it does not change the entry's
 state and is rejected by repository validation because only
 deployable-regime timings belong in trusted goldens.
+An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
+entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
+self-contradictory during the all-of offer check. Promotion rejects that ambiguity before the offer audit.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose

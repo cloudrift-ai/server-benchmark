@@ -1,4 +1,9 @@
 {
+  "emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml": "99578815fad014595a74fa53df0fe42f991562085abe3ba2a58c0a6ddc6fa309",
+  "experiments/DeepSeek-V4-Flash-0731/compiler_v100_sxm3/canonical_qualification.json": "486c42f45fbb320fb18b899a19119fba51c03e464638760a03962f171330c77c",
+  "_tune/deepseek-v100-gap-audit/retrace-after-copy/layer2.yaml": "80874440193fcac40afcced0255608473ab087bc0529629beb4c02d8e71ac018",
+  "_tune/deepseek-v100-gap-audit/retrace-after-copy/run-retry1.log": "584f0f976067d50bd3a330fecaf98d39f0ef1c59b7a403606770a490d31be845",
+  "_tune/deepseek-v100-gap-audit/tuning-closure-summary.json": "8d0b9ddc0de9bbcc38dde3d18a884948714de9985b1df5ca699231867082e88a",
   "_tune/onboard-deepseek-v4-complete/exact-loop-inventory.yaml": "fa1062dab417f89a7c58acfadebb37f3f23ba0e4d740af1f0e611423d9f47c1a",
   "_tune/onboard-deepseek-v4-complete/exact-loop-finalist-selection.json": "64dce2af40f8f81a66915e62eedb8a9803a366ba6dae8dda58e73f6465f0322a",
   "_tune/onboard-deepseek-v4-complete/partial-exact-loop.yaml": "1801b3617a5d2d614e040e8f414c409be1797fee4608e31150845881bc8f3a2c",

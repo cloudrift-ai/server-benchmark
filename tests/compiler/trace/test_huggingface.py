@@ -544,6 +544,169 @@ def test_architecture_trace_twin_replaces_laguna_experts_before_materialization(
     assert not hasattr(mlp, "experts")
 
 
+def test_representative_deepseek_expert_preserves_clamped_swiglu_eager_and_trace():
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.trace.huggingface import replace_moe_with_traceable_expert
+    from emmy.compiler.trace.torch import trace_module
+
+    class Experts(nn.Module):
+        is_transposed = False
+        is_concatenated = True
+        has_bias = False
+        limit = 10.0
+
+        def __init__(self):
+            super().__init__()
+            self.act_fn = nn.functional.silu
+            self.gate_up_proj = nn.Parameter(torch.tensor([[[20.0, 0.0], [0.0, 20.0], [20.0, 0.0], [0.0, -20.0]]]))
+            self.down_proj = nn.Parameter(torch.eye(2).unsqueeze(0))
+
+    class Routed(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Identity()
+            self.experts = Experts()
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = Routed()
+
+    block = Block()
+    assert replace_moe_with_traceable_expert(block)
+    x = torch.ones(1, 2)
+    want = nn.functional.silu(torch.full((1, 2), 10.0)) * torch.tensor([[10.0, -10.0]])
+    torch.testing.assert_close(block.mlp(x), want)
+
+    graph = trace_module(block.mlp, (x,))
+    clamp_ops = [node.op.name for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp)]
+    assert clamp_ops.count("minimum") >= 2
+    assert clamp_ops.count("maximum") >= 1
+
+
+def test_deepseek_architecture_trace_fails_if_representative_expert_is_not_confirmed(monkeypatch, tmp_path):
+    import torch
+    import transformers
+
+    import emmy.compiler.trace.huggingface as huggingface
+
+    config = transformers.DeepseekV4Config(
+        vocab_size=32,
+        hidden_size=16,
+        moe_intermediate_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        head_dim=8,
+        q_lora_rank=8,
+        n_routed_experts=2,
+        num_experts_per_tok=1,
+        n_shared_experts=1,
+        o_groups=1,
+        o_lora_rank=8,
+        index_n_heads=1,
+        index_head_dim=4,
+        index_topk=2,
+        hc_mult=2,
+        layer_types=["heavily_compressed_attention"],
+        mlp_layer_types=["moe"],
+        compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
+    )
+    config.save_pretrained(tmp_path)
+    monkeypatch.setattr(huggingface, "replace_moe_with_traceable_expert", lambda _block: False)
+    with pytest.raises(NotImplementedError, match="confirmed representative routed-expert replacement"):
+        huggingface.load_architecture_trace_twin(tmp_path, torch.float16, 0)
+
+
+def test_deepseek_hca_and_csa_stamp_actual_attention_sliding_window():
+    from types import SimpleNamespace
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+    from emmy.compiler.trace.huggingface import stamp_sliding_windows
+
+    for layer_type in ("heavily_compressed_attention", "compressed_sparse_attention"):
+        graph = Graph()
+        node_id = graph.add_node(op=SdpaOp(), inputs=[], output=Tensor("attention", (1, 2, 8, 8), "float16"))
+        config = SimpleNamespace(model_type="deepseek_v4", sliding_window=999)
+        stamp_sliding_windows(graph, config, layer_type=layer_type, sliding_window=128)
+        assert graph.nodes[node_id].op.sliding_window == 128
+        assert graph.nodes[node_id].op.is_causal
+
+
+def test_deepseek_csa_audit_rejects_genuinely_selective_topk():
+    from types import SimpleNamespace
+
+    from emmy.compiler.trace.huggingface import specialize_deepseek_full_coverage_compressor
+
+    block = SimpleNamespace(
+        self_attn=SimpleNamespace(
+            compressor=SimpleNamespace(
+                compress_rate=4,
+                indexer=SimpleNamespace(compress_rate=4, index_topk=1),
+            )
+        )
+    )
+    with pytest.raises(NotImplementedError, match="cannot replace a selective top-k indexer"):
+        specialize_deepseek_full_coverage_compressor(block, seq_len=8)
+
+
+def test_deepseek_csa_audit_rejects_mismatched_compressor_rates():
+    from types import SimpleNamespace
+
+    from emmy.compiler.trace.huggingface import specialize_deepseek_full_coverage_compressor
+
+    block = SimpleNamespace(
+        self_attn=SimpleNamespace(
+            compressor=SimpleNamespace(
+                compress_rate=4,
+                indexer=SimpleNamespace(compress_rate=8, index_topk=8),
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="compressor and indexer to enumerate the same entries"):
+        specialize_deepseek_full_coverage_compressor(block, seq_len=8)
+
+
+def test_deepseek_csa_selected_layer_requires_full_coverage_specialization(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+    import torch.nn as nn
+
+    import emmy.compiler.trace.huggingface as huggingface
+
+    class Attention(nn.Module):
+        sliding_window = 4
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = Attention()
+
+    class Decoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([Block()])
+            self.rotary_emb = nn.Identity()
+            self.config = SimpleNamespace(
+                model_type="deepseek_v4",
+                hidden_size=8,
+                layer_types=["compressed_sparse_attention"],
+            )
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = Decoder()
+
+    monkeypatch.setattr(huggingface, "specialize_deepseek_full_coverage_compressor", lambda _block, _seq_len: False)
+    with pytest.raises(NotImplementedError, match="requires the confirmed full-coverage compressor specialization"):
+        huggingface.trace_selected_layer(Model(), 0, 8, torch.float16)
+
+
 def test_architecture_only_trace_does_not_load_checkpoint_weights(monkeypatch, tmp_path):
     """Unquantized inventory tracing goes through AutoConfig/from_config and must
     never call ``from_pretrained``, which would download the source weights."""

@@ -21,11 +21,14 @@ stamp the output tensor.
 
 Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
 constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
-`copy_` is treated functionally as a destination-shaped broadcast/cast of its source only when later consumers use
-that returned value. A later live read through the original destination base or another view fails closed: Graph IR
-has no functional slice-update operation that can reassemble the mutated base, so mapping only the `copy_` result
-would silently preserve the old destination values. `masked_fill` lowers to ternary `where(mask, fill, self)` so an
-unselected infinity is preserved instead of becoming NaN through arithmetic selection.
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice chain
+rooted at a local `new_zeros` / `new_full` allocation additionally reassembles the updated base as a two-source
+`IndexMapOp`: the copied value supplies the written region and the previous base supplies the remainder. Rebinding
+the allocation's FX name versions sequential slice writes and later aliases built from that name; an empty slice write
+leaves that version unchanged. A write through an input/parameter, a dynamic or strided slice, a used `copy_` return,
+or a view created before the write still fails closed; those forms need general alias versioning rather than this local
+functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
+instead of becoming NaN through arithmetic selection.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
@@ -86,9 +89,20 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   (`tests/compiler/trace/test_huggingface.py`).
 
   Rotary labels normally live on `self_attn.layer_type`. Laguna instead exposes only `self_attn.layer_idx`, so the
-  single-layer command derives the label from `config.layer_types[layer_idx]`. When that label is one of the rotary
-  module's own `layer_types`, the block receives its one `(cos, sin)` tuple; models whose rotary keys are independent
-  names (DeepSeek V4's `main` / `compress`) continue to receive the complete mapping.
+  shared `trace_selected_layer` library path derives the label from `config.layer_types[layer_idx]`. The command and
+  architecture inventory providers both use that path, including hyper-connection input lanes and required attention
+  kwargs. When the label is one of the rotary module's own `layer_types`, the block receives its one `(cos, sin)`
+  tuple; models whose rotary keys are independent names (DeepSeek V4's `main` / `compress`) continue to receive the
+  complete mapping.
+
+  A static DeepSeek V4 layer receives the same materialized sliding causal mask as the model wrapper. HCA/CSA can
+  therefore extend it with the compressor's per-query `block_bias`; tracing with `attention_mask=None` would make that
+  bias dead. Any future SDPA form is stamped with the selected attention module's own `sliding_window`, including HCA
+  and CSA rather than only `sliding_attention`. At the canonical 512-token width, CSA's 128 compressed entries are all
+  selected by `index_topk=512`; the trace retains the installed compressor's KV computation and rebuilds the identical
+  causal bias after discarding the value-independent scorer/top-k/scatter tail. This specialization is required for a
+  CSA profile and additionally requires the compressor and indexer to enumerate entries at the same rate; a missing
+  specialization, a rate mismatch, or a width where top-k is selective fails closed.
 
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
   (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named
@@ -118,6 +132,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   A model's `routed_scaling_factor` multiplies only the routed expert result before that shared-expert addition.
   Laguna's optional softplus `g_proj` attention gate is likewise retained in both dense and MoE post-attention
   programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
+  Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
+  DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
+  above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
@@ -160,7 +177,7 @@ deliberately retains every mutating ATen schema as impure, including mutations o
 escape the function. Reverse reachability removes those local branches; ATen schema aliases additionally retain a
 write through a view of a returned tensor. An unsupported operation on an observable path remains live and fails
 loudly, so the filter is not an operator-support fallback. Retaining a write does not itself functionalize storage:
-handlers such as `copy_` separately reject an observable read that bypasses the mutation node's returned value.
+`copy_` handles the bounded local-allocation slice form above and separately rejects aliases that cannot be versioned.
 
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —

@@ -47,6 +47,97 @@ logger = logging.getLogger(__name__)
 #: Serving's default static widths (``EmmyGenRunner`` / ``capture_gen_twins`` conventions).
 DECODE_BUCKET = 32
 PREFILL_BUCKET = 256
+#: DeepSeek V4's canonical compiler inventory width. Four complete HCA windows and
+#: 128 complete CSA windows exercise both compressor families without tracing a whole model.
+DEEPSEEK_V4_AUDIT_WIDTH = 512
+
+
+def capture_in_model_graphs(model: str, *, extra_widths: tuple[int, ...] = ()) -> dict[str, Graph]:
+    """Capture the sound graph provider for an in-model golden audit.
+
+    Most generative models use the exact serving ``pre`` / ``post`` / expert twins below.
+    DeepSeek V4 cannot: its HCA/CSA compressors and hyper-connection residual streams do
+    not fit the classic external-attention seam. Audit that architecture through the exact
+    representative full-layer inventory path instead. Both providers are config-only and
+    track the installed Transformers modeling code.
+    """
+    from transformers import AutoConfig  # noqa: PLC0415
+
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+
+    if any(width <= 0 for width in extra_widths):
+        raise ValueError(f"in-model audit widths must be positive, got {extra_widths}")
+    repo, revision = split_revision(model)
+    cfg = AutoConfig.from_pretrained(repo, revision=revision)
+    text = getattr(cfg, "text_config", cfg)
+    if getattr(text, "model_type", None) == "deepseek_v4":
+        if extra_widths:
+            raise ValueError(
+                "DeepSeek V4 in-model audit uses the fixed full-layer architecture width "
+                f"{DEEPSEEK_V4_AUDIT_WIDTH}; additional serving-twin widths {extra_widths} cannot be claimed by this provider"
+            )
+        return _capture_deepseek_v4_architecture_graphs(model, text)
+    return capture_twin_graphs(model, extra_widths=extra_widths)
+
+
+def _capture_deepseek_v4_architecture_graphs(model: str, config, *, seq_len: int = DEEPSEEK_V4_AUDIT_WIDTH) -> dict[str, Graph]:
+    """Trace one exact full decoder layer per DeepSeek V4 structural profile."""
+    import torch  # noqa: PLC0415
+
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+    from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
+        find_text_decoder,
+        load_architecture_trace_twin,
+        trace_selected_layer,
+    )
+
+    repo, revision = split_revision(model)
+    graphs: dict[str, Graph] = {}
+    for layer, attention_type, mlp_type in _deepseek_v4_profiles(config):
+        twin = load_architecture_trace_twin(repo, torch.float16, layer, revision=revision)
+        decoder = find_text_decoder(twin)
+        if not bool(getattr(getattr(decoder.layers[layer], "mlp", None), "_emmy_traceable_expert", False)):
+            raise NotImplementedError(
+                f"DeepSeek V4 in-model profile at layer {layer} lacks confirmed representative routed-expert replacement"
+            )
+        graph, _bundle = trace_selected_layer(twin, layer, seq_len, torch.float16)
+        name = f"layer{seq_len}-{_attention_label(attention_type)}-{mlp_type.replace('_', '-')}"
+        if name in graphs:
+            raise ValueError(f"DeepSeek V4 in-model profile name collision for {name!r}")
+        graphs[name] = graph
+    return graphs
+
+
+def _deepseek_v4_profiles(config) -> list[tuple[int, str, str]]:
+    """First layer index for every installed DeepSeek V4 attention/MLP pairing."""
+    count = getattr(config, "num_hidden_layers", None)
+    attention_types = list(getattr(config, "layer_types", None) or [])
+    mlp_types = list(getattr(config, "mlp_layer_types", None) or [])
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise ValueError(f"DeepSeek V4 in-model audit requires positive num_hidden_layers, got {count!r}")
+    if len(attention_types) != count or len(mlp_types) != count:
+        raise ValueError(
+            "DeepSeek V4 in-model audit requires one attention and MLP type per layer: "
+            f"layers={count}, attention={len(attention_types)}, mlp={len(mlp_types)}"
+        )
+    allowed_attention = {"sliding_attention", "heavily_compressed_attention", "compressed_sparse_attention"}
+    allowed_mlp = {"hash_moe", "moe"}
+    unknown_attention = set(attention_types) - allowed_attention
+    unknown_mlp = set(mlp_types) - allowed_mlp
+    if unknown_attention or unknown_mlp:
+        raise NotImplementedError(
+            "DeepSeek V4 in-model audit does not recognize installed layer signatures: "
+            f"attention={sorted(unknown_attention)}, mlp={sorted(unknown_mlp)}"
+        )
+
+    profiles = []
+    seen = set()
+    for layer, pair in enumerate(zip(attention_types, mlp_types, strict=True)):
+        if pair in seen:
+            continue
+        seen.add(pair)
+        profiles.append((layer, *pair))
+    return profiles
 
 
 def validate_static_only_release_config(path: str | Path) -> None:
@@ -173,6 +264,11 @@ def capture_twin_graphs(
     model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
     text = getattr(cfg, "text_config", cfg)
+    if getattr(text, "model_type", None) == "deepseek_v4":
+        raise NotImplementedError(
+            "DeepSeek V4 cannot be captured as classic serving twins: HCA/CSA compressors and hyper-connection "
+            "residuals do not fit the (q, k, v) seam; use capture_in_model_graphs for its full-layer audit provider"
+        )
     storage = coded_tensor_storage(model, cfg, revision=revision)
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
@@ -231,7 +327,7 @@ def capture_twin_graphs(
         # hangs off ``block.mlp`` (4.8 GiB for one Laguna layer).
         pre_w.to_empty(device="cpu").to(td)
         post_w.to_empty(device="cpu").to(td)
-        attn_width = block.self_attn.q_proj.out_features  # this layer's num_heads * head_dim
+        _num_heads, attn_width = _attention_query_layout(block.self_attn)
         for name, m in buckets:
             # The symbolic program traces at the example width serving uses (8) and ties
             # axis-0 to a ``num_tokens`` Dim; a static twin traces at its bucket, no Dim.
@@ -314,9 +410,55 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
     for i, block in enumerate(trunk.layers):
         attn = at(types, i, "homogeneous")
         mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
-        nheads = at(heads, i, int(block.self_attn.q_proj.out_features // getattr(block.self_attn, "head_dim", 1)))
+        inferred_heads, _width = _attention_query_layout(block.self_attn)
+        nheads = at(heads, i, inferred_heads)
         out.append((str(mlp), str(attn), int(nheads)))
     return out
+
+
+def _attention_query_layout(attn) -> tuple[int, int]:
+    """Return ``(num_heads, flattened query width)`` for a supported attention signature.
+
+    Classic attention exposes one ``q_proj``. DeepSeek V4 instead exposes a low-rank
+    ``q_a_proj`` / ``q_b_proj`` path and a single-head shared ``kv_proj``. Validate the
+    complete shape relation before accepting the latter; a partial unfamiliar signature
+    must fail instead of producing a plausible but wrong post-attention example tensor.
+    """
+    head_dim = getattr(attn, "head_dim", None)
+    if not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0:
+        raise NotImplementedError(f"serving twin attention {type(attn).__name__} requires a positive integer head_dim, got {head_dim!r}")
+
+    q_proj = getattr(attn, "q_proj", None)
+    if q_proj is not None:
+        width = getattr(q_proj, "out_features", None)
+        if not isinstance(width, int) or isinstance(width, bool) or width <= 0 or width % head_dim:
+            raise ValueError(
+                f"serving twin attention {type(attn).__name__} q_proj width {width!r} is not a positive multiple of head_dim={head_dim}"
+            )
+        num_heads = width // head_dim
+        declared = getattr(attn, "num_heads", None)
+        if declared is not None and declared != num_heads:
+            raise ValueError(
+                f"serving twin attention {type(attn).__name__} declares num_heads={declared!r} but q_proj/head_dim imply {num_heads}"
+            )
+        return num_heads, width
+
+    deepseek_fields = ("q_a_proj", "q_a_norm", "q_b_proj", "q_b_norm", "kv_proj", "kv_norm", "o_a_proj", "o_b_proj")
+    if not all(getattr(attn, field, None) is not None for field in deepseek_fields):
+        raise NotImplementedError(
+            f"serving twin attention {type(attn).__name__} has neither q_proj nor the complete DeepSeek low-rank query/shared-KV signature"
+        )
+    num_heads = getattr(attn, "num_heads", None)
+    if not isinstance(num_heads, int) or isinstance(num_heads, bool) or num_heads <= 0:
+        raise ValueError(f"serving twin DeepSeek attention requires positive integer num_heads, got {num_heads!r}")
+    width = getattr(attn.q_b_proj, "out_features", None)
+    kv_width = getattr(attn.kv_proj, "out_features", None)
+    if width != num_heads * head_dim or kv_width != head_dim:
+        raise ValueError(
+            f"serving twin DeepSeek attention shape mismatch: q_b_proj={width!r}, kv_proj={kv_width!r}, "
+            f"num_heads={num_heads}, head_dim={head_dim}"
+        )
+    return num_heads, width
 
 
 def _attention_label(layer_type: str) -> str:

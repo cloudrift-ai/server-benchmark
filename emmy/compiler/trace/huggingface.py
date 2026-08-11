@@ -270,6 +270,203 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
+def find_text_decoder(model):
+    """Return the deepest module owning the text decoder layers and rotary embedding."""
+    import torch.nn as nn  # noqa: PLC0415
+
+    decoder = None
+    for _name, module in model.named_modules():
+        if isinstance(getattr(module, "layers", None), nn.ModuleList) and hasattr(module, "rotary_emb") and hasattr(module, "config"):
+            decoder = module
+    if decoder is None:
+        raise ValueError(f"could not locate a text decoder in {type(model).__name__}")
+    return decoder
+
+
+def selected_layer_type(decoder, block, layer: int):
+    """Return the config-authoritative attention type for one decoder layer."""
+    configured = getattr(decoder.config, "layer_types", None)
+    if configured is not None and 0 <= layer < len(configured):
+        return configured[layer]
+    block_type = getattr(block, "attention_type", None)
+    if block_type is not None:
+        return block_type
+    return getattr(getattr(block, "self_attn", None), "layer_type", None)
+
+
+def specialize_deepseek_full_coverage_compressor(block, seq_len: int) -> bool:
+    """Replace a fixed-shape CSA block-bias tail with its exact all-entry form.
+
+    DeepSeek V4's canonical 512-token audit has 128 CSA entries and ``index_topk=512``,
+    so top-k selects every entry. The downstream compressor consumes only the selected
+    index set to build ``block_bias``; ordering cannot affect that scatter. Retain the
+    installed compressor's exact KV computation, discard its now-value-independent top-k
+    bias, and rebuild the identical causal block bias without unsupported top-k/scatter.
+    Return ``False`` for non-CSA layers and fail closed when top-k is genuinely selective.
+    """
+    import torch  # noqa: PLC0415
+    import torch.nn as nn  # noqa: PLC0415
+
+    attention = getattr(block, "self_attn", None)
+    compressor = getattr(attention, "compressor", None)
+    indexer = getattr(compressor, "indexer", None)
+    if indexer is None:
+        return False
+    compress_rate = getattr(compressor, "compress_rate", None)
+    index_compress_rate = getattr(indexer, "compress_rate", None)
+    index_topk = getattr(indexer, "index_topk", None)
+    if (
+        not isinstance(compress_rate, int)
+        or isinstance(compress_rate, bool)
+        or compress_rate <= 0
+        or not isinstance(index_topk, int)
+        or isinstance(index_topk, bool)
+        or index_topk <= 0
+    ):
+        raise ValueError(
+            "DeepSeek V4 CSA audit requires positive integer compressor.compress_rate and indexer.index_topk, "
+            f"got {compress_rate!r} and {index_topk!r}"
+        )
+    if index_compress_rate != compress_rate:
+        raise ValueError(
+            "DeepSeek V4 CSA audit requires the compressor and indexer to enumerate the same entries: "
+            f"compressor.compress_rate={compress_rate}, indexer.compress_rate={index_compress_rate!r}"
+        )
+    compressed_len = seq_len // compress_rate
+    if compressed_len <= 0 or index_topk < compressed_len:
+        raise NotImplementedError(
+            "DeepSeek V4 CSA audit cannot replace a selective top-k indexer: "
+            f"seq_len={seq_len}, compress_rate={compress_rate}, compressed_len={compressed_len}, index_topk={index_topk}"
+        )
+
+    class FullCoverageCompressor(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = compressor
+            self.compress_rate = compress_rate
+            self.register_buffer("entry_indices", torch.arange(compressed_len, dtype=torch.long).view(1, 1, -1))
+
+        def forward(self, hidden_states, q_residual, position_ids, past_key_values, layer_idx):
+            if past_key_values is not None:
+                raise NotImplementedError("DeepSeek V4 full-coverage CSA audit specialization is stateless only")
+            compressed_kv, _unused_bias = self.inner(hidden_states, q_residual, position_ids, past_key_values, layer_idx)
+            causal_threshold = ((position_ids + 1) // self.compress_rate).unsqueeze(-1)
+            visible = self.entry_indices < causal_threshold
+            batch, _, actual_len, _ = compressed_kv.shape
+            if actual_len != compressed_len:
+                raise ValueError(
+                    f"DeepSeek V4 CSA compressed length changed during static trace: expected {compressed_len}, got {actual_len}"
+                )
+            bias = compressed_kv.new_zeros((batch, 1, position_ids.shape[1], compressed_len))
+            return compressed_kv, bias.masked_fill(~visible.unsqueeze(1), float("-inf"))
+
+    attention.compressor = FullCoverageCompressor()
+    return True
+
+
+def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shapes: dict | None = None):
+    """Trace one already-loaded decoder layer through the canonical model-layer path.
+
+    This is the library primitive shared by ``emmy trace --layer`` and config-only
+    architecture inventory providers. It preserves hyper-connection lanes, model-specific
+    rotary mappings, required attention kwargs, and the representative-MoE substitution a
+    caller may have applied before materializing the layer.
+    """
+    import inspect  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    decoder = find_text_decoder(model)
+    if not 0 <= layer < len(decoder.layers):
+        raise ValueError(f"layer {layer} not found (model has {len(decoder.layers)} layers)")
+    block = decoder.layers[layer]
+    hidden_size = decoder.config.hidden_size
+    self_attn = getattr(block, "self_attn", None)
+    is_deepseek_v4 = getattr(decoder.config, "model_type", None) == "deepseek_v4"
+    deepseek_sliding_window = None
+    if is_deepseek_v4:
+        deepseek_sliding_window = getattr(self_attn, "sliding_window", None)
+        if not isinstance(deepseek_sliding_window, int) or isinstance(deepseek_sliding_window, bool) or deepseek_sliding_window <= 0:
+            raise ValueError(
+                f"DeepSeek V4 selected-layer trace requires a positive self_attn.sliding_window, got {deepseek_sliding_window!r}"
+            )
+    hc_mult = int(getattr(getattr(block, "attn_hc", None), "hc_mult", 0) or 0)
+    x_shape = (1, seq_len, hc_mult, hidden_size) if hc_mult else (1, seq_len, hidden_size)
+    x = torch.randn(*x_shape, dtype=dtype)
+    layer_type = selected_layer_type(decoder, block, layer)
+    rotary_emb = decoder.rotary_emb
+    if layer_type == "sliding_attention" and getattr(decoder, "swa_rotary_emb", None) is not None:
+        rotary_emb = decoder.swa_rotary_emb
+
+    if dynamic_shapes:
+        wrapper = build_layer_wrapper(block, rotary_emb, hidden_size, dtype, layer_type=layer_type)
+        graph = trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes)
+        stamp_sliding_windows(
+            graph,
+            decoder.config,
+            layer_type=layer_type,
+            sliding_window=deepseek_sliding_window,
+        )
+        return graph, (wrapper, (x,), {})
+
+    position_ids = torch.arange(seq_len).unsqueeze(0)
+    if is_deepseek_v4 and layer_type == "compressed_sparse_attention":
+        if not specialize_deepseek_full_coverage_compressor(block, seq_len):
+            raise NotImplementedError("DeepSeek V4 CSA selected-layer trace requires the confirmed full-coverage compressor specialization")
+    rotary_layer_types = tuple(getattr(rotary_emb, "layer_types", ()) or ())
+    if rotary_layer_types and layer_type in rotary_layer_types:
+        position_embeddings = rotary_emb(x, position_ids, layer_type)
+    elif rotary_layer_types:
+        position_embeddings = {rotary_type: rotary_emb(x, position_ids, rotary_type) for rotary_type in rotary_layer_types}
+    else:
+        try:
+            position_embeddings = rotary_emb(x, position_ids, layer_type)
+        except (KeyError, TypeError):
+            position_embeddings = rotary_emb(x, position_ids)
+
+    kwargs = {"position_embeddings": position_embeddings}
+    block_parameters = inspect.signature(block.forward).parameters
+    if "input_ids" in block_parameters:
+        kwargs["input_ids"] = torch.zeros((1, seq_len), dtype=torch.long)
+    if self_attn is not None:
+        attention_parameters = inspect.signature(self_attn.forward).parameters
+        if "position_ids" in attention_parameters:
+            kwargs["position_ids"] = position_ids
+        if "attention_mask" in attention_parameters:
+            if is_deepseek_v4:
+                from transformers.masking_utils import create_sliding_window_causal_mask  # noqa: PLC0415
+
+                mask_inputs = x[:, :, 0, :] if x.ndim == 4 else x
+                attention_mask = create_sliding_window_causal_mask(
+                    config=decoder.config,
+                    inputs_embeds=mask_inputs,
+                    attention_mask=None,
+                    past_key_values=None,
+                    position_ids=position_ids,
+                )
+                if not isinstance(attention_mask, torch.Tensor):
+                    raise ValueError(
+                        "DeepSeek V4 selected-layer trace requires a materialized static sliding causal mask, "
+                        f"got {type(attention_mask).__name__}"
+                    )
+                kwargs["attention_mask"] = attention_mask
+            else:
+                kwargs["attention_mask"] = None
+    ple = build_synthetic_ple(block, seq_len, dtype)
+    if ple is not None:
+        kwargs["per_layer_input"] = ple
+    graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
+    stamp_sliding_windows(
+        graph,
+        decoder.config,
+        layer_type=layer_type,
+        sliding_window=deepseek_sliding_window,
+    )
+    return graph, (block, (x,), kwargs)
+
+
 def _build_pre_wrapper(block):
     """The shared q/k/v carve of one HF decoder layer: ``pre(hidden[T, H]) -> (q, k, v)`` runs
     ``input_layernorm`` → separate projections → reshape-into-heads → q/k(/v) norm, returning
@@ -470,6 +667,10 @@ def replace_moe_with_traceable_expert(block) -> bool:
     act_fn = getattr(experts, "act_fn", None)
     if transposed or interleaved or has_bias or act_fn is None:
         return False
+    raw_limit = getattr(experts, "limit", None)
+    limit = None if raw_limit is None else float(raw_limit)
+    if limit is not None and limit <= 0:
+        raise ValueError(f"representative MoE expert requires a positive clamp limit, got {raw_limit!r}")
     shared_experts = next(
         (module for attr in ("shared_experts", "shared_expert") if (module := getattr(block.mlp, attr, None)) is not None),
         None,
@@ -485,12 +686,20 @@ def replace_moe_with_traceable_expert(block) -> bool:
             self.w_gate_up = nn.Parameter(experts.gate_up_proj[0], requires_grad=False)
             self.w_down = nn.Parameter(experts.down_proj[0], requires_grad=False)
             self.act_fn = act_fn
+            self.limit = limit
             self.shared_experts = shared_experts
             self.routed_scaling_factor = routed_scaling_factor
             self._emmy_traceable_expert = True
 
         def forward(self, x, input_ids=None):  # noqa: ARG002 — block API compatibility
             gate, up = nn.functional.linear(x, self.w_gate_up).chunk(2, dim=-1)
+            if self.limit is not None:
+                # DeepSeek V4's routed experts clamp both SwiGLU branches before
+                # activation. Keep the exact ``experts._apply_gate`` algebra in
+                # the representative path; omitting it changes both graph shape
+                # and eager values for the deployed clamp-10 experts.
+                gate = gate.clamp(max=self.limit)
+                up = up.clamp(min=-self.limit, max=self.limit)
             output = nn.functional.linear(self.act_fn(gate) * up, self.w_down)
             output = output * self.routed_scaling_factor
             if self.shared_experts is not None:
@@ -682,7 +891,13 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False):
     return pre, PostAttn(), ExpertFFN()
 
 
-def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> None:
+def stamp_sliding_windows(
+    graph,
+    config,
+    *,
+    layer_type: str | None = None,
+    sliding_window: int | None = None,
+) -> None:
     """Stamp per-layer sliding windows onto the traced ``SdpaOp`` nodes of ``graph``.
 
     The trace erases the window: a single-layer trace carries no mask at all (HF takes the
@@ -698,7 +913,7 @@ def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> No
     alone — their stream end still derives through the whole-model trace's opaque bias operand."""
     from emmy.compiler.ir.frontend.ir import SdpaOp
 
-    window = getattr(config, "sliding_window", None)
+    window = sliding_window if sliding_window is not None else getattr(config, "sliding_window", None)
     layer_types = getattr(config, "layer_types", None)
     if not window:
         return
@@ -709,8 +924,14 @@ def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> No
         types = list(layer_types)
     else:
         return
+    deepseek_v4 = getattr(config, "model_type", None) == "deepseek_v4"
+    deepseek_banded = {"heavily_compressed_attention", "compressed_sparse_attention"}
+    if deepseek_v4 and len(sdpa_nodes) > 1 and layer_type is not None:
+        raise NotImplementedError(
+            f"DeepSeek V4 selected-layer sliding-window stamping expected at most one attention SDPA node, found {len(sdpa_nodes)}"
+        )
     for node, lt in zip(sdpa_nodes, types, strict=True):
-        if lt == "sliding_attention":
+        if lt == "sliding_attention" or (deepseek_v4 and lt in deepseek_banded):
             node.op.sliding_window = window
         # Sliding AND full layers: the wrapper's mask is causal — asserting it structurally lets
         # the lowering derive the stream END (and, banded, the stream START) through the opaque
@@ -1308,7 +1529,11 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
     # Drop the packed all-expert parameters while they are still meta tensors.
     # ``to_empty`` below then allocates only representative-expert + shared-expert
     # storage for supported MoE blocks, rather than every expert in the source.
-    replace_moe_with_traceable_expert(block)
+    replaced = replace_moe_with_traceable_expert(block)
+    if getattr(config, "model_type", None) == "deepseek_v4" and not replaced:
+        raise NotImplementedError(
+            f"DeepSeek V4 layer {layer} requires confirmed representative routed-expert replacement for architecture tracing"
+        )
     block.to_empty(device="cpu")
 
     # Rotary buffers are non-persistent in transformers and the decoder-level

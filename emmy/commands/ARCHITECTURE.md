@@ -141,6 +141,13 @@ The explicit provenance lets a local pre-upload checkpoint produce rows that can
 HF snapshot identity; the resulting file is consumed directly by `tune --golden-file` and verified by explicit
 `run --golden-file --golden NAME` calls.
 
+The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
+dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
+per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
+This provider is audit-only; `emmy trace --serving-twins` does not claim a DeepSeek serving split it cannot execute,
+and strict audits reject additional `--serving-width` values because the fixed full-layer provider cannot claim those
+serving shapes.
+
 `emmy tune --golden-file PATH` consumes embedded programs directly. Rows for the same provenance or Loop IR target are grouped as candidate knob
 sets, measured in file order before MCTS, and written back as working-only `ranking` metadata. `--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a

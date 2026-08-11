@@ -7,7 +7,9 @@ not a persistence format: golden YAML stores stable frontend IR plus provenance,
 then derives both the histogram and this key with the current compiler.
 
 ``from_matmul`` remains a convenience for callers that already have explicit
-matmul dimensions; generic golden records always use ``from_s_features``.
+matmul dimensions. Generic golden records start from ``from_s_features`` and replay
+their stored schedule prefix through the same offer-aware classifier as deployment,
+which supplies the otherwise-unstamped flash and pre-split computed-A kind signal.
 """
 
 from __future__ import annotations

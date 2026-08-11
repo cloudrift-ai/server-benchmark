@@ -1,0 +1,32 @@
+# Optional current-model system qualification on four B200s. Add an Emmy engine arm before using this as evidence of
+# an Emmy end-to-end gain; otherwise it accompanies the optional B200 kernel-portability result.
+model:
+  huggingface: "nvidia/Kimi-K2.5-NVFP4"
+  revision: 0fd0a5e6879298d3476e3b61852a79792a35ae3d
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.90
+    context_length: 262144
+    max_concurrent_requests: 32
+    vllm:
+      image: "vllm/vllm-openai:v0.17.0"
+      extra_args: "--tool-call-parser kimi_k2 --reasoning-parser kimi_k2"
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  repeats: 3
+
+matrices:
+  - deploy.gpu: "NVIDIA B200"
+    deploy.gpu_count: 4
+    zip:
+      benchmark.random_input_len: [256, 4000, 16384]
+      benchmark.random_output_len: [256, 4000, 1024]
+      benchmark.max_concurrency: [32, 32, 1]
+      benchmark.num_prompts: [128, 80, 6]

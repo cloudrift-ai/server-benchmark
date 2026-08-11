@@ -1,0 +1,97 @@
+# Frozen RTX 5090 serving A/B: stock vLLM, Emmy standard precision, and Emmy fast math. All lanes use the same
+# prompts and scheduler-facing workload. Fast math is a separate precision lane and requires a quality evaluation.
+model:
+  huggingface: "google/gemma-4-12B-it"
+  revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.96
+    context_length: 16384
+    max_concurrent_requests: 64
+    vllm:
+      extra_args: "--dtype float16 --no-enable-prefix-caching"
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  repeats: 3
+
+matrices:
+  # Stock reference: short high-concurrency, interactive, batch, and long-prefill cells.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
+    zip:
+      benchmark.random_input_len: [256, 4096, 4096, 8192]
+      benchmark.random_output_len: [256, 4096, 4096, 256]
+      benchmark.max_concurrency: [64, 1, 8, 4]
+      benchmark.num_prompts: [256, 8, 64, 16]
+
+  # Emmy interactive lane.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: >-
+      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+      --max-num-batched-tokens 4128 --no-enable-prefix-caching
+    cross:
+      engine.llm.vllm.extra_env:
+        - "EMMY_GEN_DECODE_BUCKET=32"
+        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 8
+
+  # Emmy batch lane with the 2048-token prefill chunk.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: >-
+      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+      --max-num-batched-tokens 2056 --no-enable-prefix-caching
+    cross:
+      engine.llm.vllm.extra_env:
+        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+    benchmark.max_concurrency: 8
+    benchmark.num_prompts: 64
+
+  # Emmy long-prefill/RAG lane.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: >-
+      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+      --max-num-batched-tokens 4104 --no-enable-prefix-caching
+    cross:
+      engine.llm.vllm.extra_env:
+        - "EMMY_GEN_DECODE_BUCKET=8"
+        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8"
+    benchmark.random_input_len: 8192
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 4
+    benchmark.num_prompts: 16
+
+  # Emmy short high-concurrency lane.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: >-
+      --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+      --max-num-batched-tokens 2112 --no-enable-prefix-caching
+    cross:
+      engine.llm.vllm.extra_env:
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+    benchmark.random_input_len: 256
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 64
+    benchmark.num_prompts: 256

@@ -1,0 +1,35 @@
+# Common model-derived kernel corpus on Hopper. Four homogeneous devices parallelize candidate measurements.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    for seq_len in 1 512; do
+      seq_dir="$task_dir/seq-$$seq_len"
+      mkdir -p "$$seq_dir"
+      export EMMY_TUNE_DB="$$seq_dir/autotune.db"
+      export EMMY_ONLINE_FILE="$$seq_dir/online.json"
+      export EMMY_CUBIN_CACHE="$$seq_dir/cubins"
+      ./venv/bin/emmy trace Qwen/Qwen3-0.6B --layer 0 --seq-len "$$seq_len" \
+        --model-provenance Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca \
+        --output "$$seq_dir/working.yaml" 2>&1 | tee "$$seq_dir/trace.log"
+      ./venv/bin/emmy tune --golden-file "$$seq_dir/working.yaml" --clean \
+        --devices "$gpu_device_ids" --max-candidates 12 --patience 4 --seed 0 \
+        --bench --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
+        --dump-dir "$$seq_dir/dump" 2>&1 | tee "$$seq_dir/tune.log"
+      tar -C "$$seq_dir" -czf "$$seq_dir/artifacts.tar.gz" \
+        working.yaml trace.log tune.log autotune.db cubins dump
+    done
+  result_files:
+    - "seq-*/artifacts.tar.gz"
+  timeout: 43200
+
+matrices:
+  deploy.gpu: "NVIDIA H200 141GB"
+  deploy.gpu_count: 4

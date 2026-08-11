@@ -99,7 +99,10 @@ def test_flash_slice_absorbs_score_producer() -> None:
         def forward(self, q, k, v):
             return torch.nn.functional.scaled_dot_product_attention(q, k, v)
 
-    q, k, v = (torch.randn(1, 2, 16, 8) for _ in range(3))
+    # Keep the outer graph on the two-LoopOp boundary this slice test exercises. The smaller
+    # (16, 8) cell now merges completely under gate-free fusion and is covered by recognizer
+    # tests; head_dim=32 crosses the aggregate-work cap while remaining a tiny CPU-only fixture.
+    q, k, v = (torch.randn(1, 2, 64, 32) for _ in range(3))
     graph = trace_module(_Sdpa().cpu(), (q, k, v))
     fused = Pipeline.build(LOOP_PASSES).run(graph, db=SearchDB())
     loops = [(nid, n) for nid, n in fused.nodes.items() if isinstance(n.op, LoopOp)]

@@ -587,6 +587,10 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
     spell_trellis_inputs(graph, {"w": (0, (8, 8, 32))})
+    # This is a computed-B lowering test, not a loop-fusion-policy test. Make the two spelling
+    # boundaries observable so gate-free index-map fusion cannot expand either workspace and
+    # replace the computed-B contraction with a planar realization.
+    graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
     def choose_sync_mma(fp):
         leaves = flatten_leaves(fp.options)
@@ -630,6 +634,8 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
     spell_trellis_inputs(graph, {"w": (0, tuple(tensors["layer.trellis"].shape))})
+    # Preserve the same computed-B lowering boundary as the GPU-less source test above.
+    graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
     def choose_sync_mma(fp):
         leaves = flatten_leaves(fp.options)

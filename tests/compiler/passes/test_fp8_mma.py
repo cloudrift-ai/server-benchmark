@@ -36,8 +36,7 @@ from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 K32 = "mma_m16n8k32_e4m3_f32"
 

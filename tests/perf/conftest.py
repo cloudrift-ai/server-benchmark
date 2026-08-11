@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.compiler.conftest import requires_cuda  # noqa: F401  (re-exported)
+from tests.compiler.helpers import requires_cuda  # noqa: F401  (re-exported)
 from tests.perf.cases import Case
 
 _RESULTS_DIR = Path(__file__).resolve().parent / ".results"

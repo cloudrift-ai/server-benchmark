@@ -199,7 +199,7 @@ def _is_cuda_item(item) -> bool:
     ``tests/compiler/``), (b) a ``[cuda...]`` callspec id (the
     ``run_graph`` fixture's third variant + every ``test_e2e_accuracy``
     parametrization), or (c) an explicit ``xdist_group("cuda")`` marker
-    (the ``tests/serving/*_gpu.py`` pytestmark convention). The explicit
+    (the ``tests/serving/**/*_gpu.py`` pytestmark convention). The explicit
     marker MUST be honored here: otherwise the LPT bucketing below adds a
     function-level ``w<N>`` group that shadows the module-level ``cuda``
     mark (``get_closest_marker`` prefers function-level), scattering the

@@ -25,7 +25,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.conftest import requires_cuda, requires_sm90
+from tests.compiler.helpers import requires_cuda, requires_sm90
 
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous

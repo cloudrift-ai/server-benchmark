@@ -18,7 +18,7 @@ import sys
 import textwrap
 import time
 
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def test_oneshot_compare_worker_uses_selected_device(monkeypatch) -> None:

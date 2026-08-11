@@ -13,8 +13,7 @@ from emmy.compiler.ir.frontend.ir import ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 torch = pytest.importorskip("torch")
 

@@ -27,8 +27,7 @@ from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
 from emmy.compiler.pipeline.search.space import stage_moves
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"

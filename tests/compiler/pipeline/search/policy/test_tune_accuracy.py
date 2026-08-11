@@ -34,7 +34,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ....conftest import drain_tune, requires_cuda
+from tests.compiler.helpers import drain_tune, requires_cuda
 
 # Small-shape variants of the perf suite. Dimensions are picked so each
 # planner branch (matmul, cooperative-K, multi-Accum matmul, multi-stmt

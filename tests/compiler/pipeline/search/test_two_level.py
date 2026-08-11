@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.two_level import (
     InnerReward,
     OpResult,
 )
-from tests.compiler.conftest import drain_tune, run_inner_reward, run_two_level
+from tests.compiler.helpers import drain_tune, run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on
 # stagnation (the fake backend gives a stable but arbitrary per-variant

@@ -14,8 +14,7 @@ from unittest.mock import AsyncMock
 
 from emmy import config
 from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def test_child_env_pins_device_without_mutating_os_environ() -> None:
@@ -73,7 +72,7 @@ def test_async_worker_real_roundtrip_single_gpu() -> None:
     from emmy.compiler.ir.frontend.ir import MatmulOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
     from emmy.compiler.pipeline.search.db import SearchDB
-    from tests.compiler.conftest import run_inner_reward
+    from tests.compiler.helpers import run_inner_reward
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (64, 128)), node_id="a")

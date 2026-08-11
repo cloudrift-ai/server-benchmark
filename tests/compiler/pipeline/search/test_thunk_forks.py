@@ -21,7 +21,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp, Op
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule
-from tests.compiler.conftest import drain_tune
+from tests.compiler.helpers import drain_tune
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Shared node-row fixtures for the search-package tests.
+"""Shared node-row builders for the search-package tests.
 
 The dicts here are PHYSICS-CALIBRATED against the node-store plausibility gate and are
 consumed by both ``test_node_gate.py`` (which tests the predicates directly) and

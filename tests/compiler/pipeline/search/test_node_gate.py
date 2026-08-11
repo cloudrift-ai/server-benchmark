@@ -13,9 +13,9 @@ import json
 
 from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, implausible_value_reason, impossible_kernel_reason
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-from tests.compiler.pipeline.search.conftest import F16_MATMUL_FEATS as _F16_FEATS
-from tests.compiler.pipeline.search.conftest import impossible_staged_feats
-from tests.compiler.pipeline.search.conftest import node_row as _row
+from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS as _F16_FEATS
+from tests.compiler.pipeline.search.helpers import impossible_staged_feats
+from tests.compiler.pipeline.search.helpers import node_row as _row
 
 
 def _insert_raw(db: SearchDB, row: NodeRow) -> None:

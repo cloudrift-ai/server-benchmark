@@ -7,8 +7,7 @@ from emmy.compiler.backend.cuda.program import _collapse_inert_dims, _Compiled, 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def _minimal_compiled(**kw) -> _Compiled:

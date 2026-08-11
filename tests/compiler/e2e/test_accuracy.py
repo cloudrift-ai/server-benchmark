@@ -12,8 +12,7 @@ import numpy as np
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-
-from ..conftest import dtype_input_scale, dtype_tol
+from tests.compiler.helpers import dtype_input_scale, dtype_tol
 
 
 def _assert_close(actual, expected, dtype, **overrides):

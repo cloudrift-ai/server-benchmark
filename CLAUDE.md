@@ -114,8 +114,8 @@ Quick test models / scripts (for local iteration):
   serving-validated on a 4080, tuned TPOT 1.28x stock; defaults to thinking mode — pass `enable_thinking: false`
   in chat probes for terse outputs). `TinyLlama/TinyLlama-1.1B-Chat-v1.0` stays as the ungated **Llama-arch**
   smoke model. GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
-- Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_golden_set.py`, `bench_gen_*.py`,
-  `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `digest_kernels.py` — the kernel-source byte-identity
+- Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_golden_set.py`, `profile_gen_decode.py`,
+  `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `digest_kernels.py` — the kernel-source byte-identity
   gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
   usage;
   the skills that drive them document the flows.

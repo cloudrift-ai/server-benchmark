@@ -8,6 +8,8 @@ reproduces the eager block tail exactly. Pure eager, CPU, fp32 — no compile.
 
 import pytest
 
+from tests.support.checkpoints import exl3_linear_tensors
+
 
 def _tiny_olmoe_config(transformers):
     return transformers.OlmoeConfig(
@@ -371,8 +373,6 @@ def _exl3_moe_checkpoint(dirpath, cfg, *, routing_bias=None, omit_routing_bias=F
     from safetensors.torch import save_file
     from transformers import AutoModelForCausalLM
 
-    from tests.compiler.loader.test_exl3 import _exl3_linear_tensors
-
     model = AutoModelForCausalLM.from_config(cfg).to(torch.float16).eval()
     if routing_bias is not None:
         # Make expert choice depend only on the nonzero correction bias.  This gives the loader
@@ -385,7 +385,7 @@ def _exl3_moe_checkpoint(dirpath, cfg, *, routing_bias=None, omit_routing_bias=F
         t = t.detach().cpu()
         if name.endswith(".weight") and t.ndim == 2 and ".layers." in name and "mlp.gate.weight" not in name:
             n, k = t.shape
-            coded, dec = _exl3_linear_tensors(name[: -len(".weight")], n, k)
+            coded, dec = exl3_linear_tensors(name[: -len(".weight")], n, k)
             tensors.update(coded)
             ref[name] = torch.from_numpy(np.ascontiguousarray(dec))
         else:
@@ -412,7 +412,7 @@ def _exl3_moe_checkpoint(dirpath, cfg, *, routing_bias=None, omit_routing_bias=F
                 ("down_proj", (cfg.hidden_size, cfg.moe_intermediate_size)),
             ):
                 base = f"model.layers.{layer}.mlp.experts.{e}.{proj}"
-                coded, dec = _exl3_linear_tensors(base, n, k)
+                coded, dec = exl3_linear_tensors(base, n, k)
                 tensors.update(coded)
                 ref[base + ".weight"] = torch.from_numpy(np.ascontiguousarray(dec))
     save_file({k: v.clone() for k, v in tensors.items()}, str(dirpath / "model.safetensors"))

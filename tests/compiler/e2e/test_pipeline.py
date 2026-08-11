@@ -11,8 +11,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Accum, LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-
-from ..conftest import matmul_graph, requires_cuda
+from tests.compiler.helpers import matmul_graph, requires_cuda
 
 
 def _compile(graph: Graph) -> Graph:

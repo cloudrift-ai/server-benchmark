@@ -25,7 +25,7 @@ whole trunk: GLM-4.5-Air 2.25 stores q/k/v at 4 bits on 42 layers and 3 bits on 
 recorded in the inventory, so a coded twin is emitted once per distinct rate profile and named
 ``<twin>@b<rates>`` before equivalent generic targets are deduplicated.
 
-Consumed by ``emmy eval golden --in-model`` and the golden drift CI gate. Note the traced
+Consumed by ``emmy eval golden --in-model`` and the serving-image release gate. Note the traced
 graph tracks the installed ``transformers`` modeling code: a transformers bump that
 changes the model's forward changes these twins — exactly as it would change serving.
 """

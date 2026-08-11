@@ -17,8 +17,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp, SoftmaxOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def test_cuda_name_int_dtypes():

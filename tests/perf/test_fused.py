@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.compiler.conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 from tests.perf.cases import FUSED_CASES, Case
 
 pytestmark = [pytest.mark.perf, requires_cuda]

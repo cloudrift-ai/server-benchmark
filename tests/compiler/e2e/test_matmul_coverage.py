@@ -33,8 +33,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-
-from ..conftest import dyn_M, requires_cuda, requires_sm90
+from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
 
 
 def _has_cuda() -> bool:

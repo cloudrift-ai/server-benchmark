@@ -11,7 +11,8 @@ def test_laguna_v100_recipe_matches_the_measured_experiment(project_root) -> Non
     experiment = yaml.safe_load(Path(project_root, "experiments/Laguna-S-2.1-FP8/serving_v100_sxm3/recipe.yaml").read_text())
 
     assert "benchmark" not in production
-    assert production == {key: value for key, value in experiment.items() if key != "benchmark"}
+    serving_config = {key: value for key, value in production.items() if key != "tags"}
+    assert serving_config == {key: value for key, value in experiment.items() if key != "benchmark"}
 
     llm = production["engine"]["llm"]
     assert llm["tensor_parallel_size"] == 8

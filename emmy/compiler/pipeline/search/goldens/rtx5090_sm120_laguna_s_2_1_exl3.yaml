@@ -26238,146 +26238,186 @@ programs:
     inputs: [mul_5]
     outputs: [[reshape_1, f16, [1, 1024]]]
 configs:
-- name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_0c3c76.83607e6bb51b
-  program: 0
+- program: 0
   target:
     loop: 0
-  knobs:
-    WORK: t512
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 13.877633591772804
-    reference_us: 534.4560146331787
-    reference_backend: emmy-greedy
-- name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_18ce98.81c97f2528b1
-  program: 0
+  realizations:
+  - name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_0c3c76.83607e6bb51b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 13.877633591772804
+      reference_us: 534.4560146331787
+      reference_backend: emmy-greedy
+- program: 0
   target:
     loop: 1
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 12.10634155971248
-    reference_us: 119.79600042104721
-    reference_backend: emmy-greedy
-- name: post1-dense-full@b2.k_linear_mean_reduce_9229c0.3bf128783f17
-  program: 1
+  realizations:
+  - name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_18ce98.81c97f2528b1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 12.10634155971248
+      reference_us: 119.79600042104721
+      reference_backend: emmy-greedy
+- program: 1
   target:
     loop: 2
-  knobs:
-    WORK: t512
-  measurements:
-    emmy_us: 97.56640195846558
-    reference_us: 5294.159889221191
-    reference_backend: emmy-greedy
-- name: post1-dense-full@b2.k_matmul_reduce_a91b88.6f1209ddb350
-  program: 1
+  realizations:
+  - name: post1-dense-full@b2.k_linear_mean_reduce_9229c0.3bf128783f17
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+    measurements:
+      emmy_us: 97.56640195846558
+      reference_us: 5294.159889221191
+      reference_backend: emmy-greedy
+- program: 1
   target:
     loop: 3
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: g32k/coop-t
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 22.153191724565872
-    reference_us: 346.9280004501343
-    reference_backend: emmy-greedy
-- name: post1-dense-full@b2.k_matmul_bitcast_reduce_1dc203.0d413667064b
-  program: 1
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_reduce_a91b88.6f1209ddb350
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g32k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 22.153191724565872
+      reference_us: 346.9280004501343
+      reference_backend: emmy-greedy
+- program: 1
   target:
     loop: 4
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 129.62599843740463
-    reference_us: 567.8079724311829
-    reference_backend: emmy-greedy
-- name: post1-dense-full@b2.k_matmul_bitcast_reduce_8d07da.e6171cbf04fe
-  program: 1
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_bitcast_reduce_1dc203.0d413667064b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 129.62599843740463
+      reference_us: 567.8079724311829
+      reference_backend: emmy-greedy
+- program: 1
   target:
     loop: 5
-  knobs:
-    WORK: t512
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 101.54240131378174
-    reference_us: 1405.4400324821472
-    reference_backend: emmy-greedy
-- name: post1-sparse-sliding@b2.k_linear_mean_reduce_b09d37.300a02a8ed2f
-  program: 2
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_bitcast_reduce_8d07da.e6171cbf04fe
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 101.54240131378174
+      reference_us: 1405.4400324821472
+      reference_backend: emmy-greedy
+- program: 2
   target:
     loop: 6
-  knobs:
-    WORK: t512
-  measurements:
-    emmy_us: 86.82787869915816
-    reference_us: 7887.919902801514
-    reference_backend: emmy-greedy
-- name: post1-sparse-sliding@b2.k_matmul_reduce_f7578b.5519f1ed440e
-  program: 2
+  realizations:
+  - name: post1-sparse-sliding@b2.k_linear_mean_reduce_b09d37.300a02a8ed2f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+    measurements:
+      emmy_us: 86.82787869915816
+      reference_us: 7887.919902801514
+      reference_backend: emmy-greedy
+- program: 2
   target:
     loop: 7
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: g32k/coop-t
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 31.549626843591852
-    reference_us: 519.4399952888489
-    reference_backend: emmy-greedy
-- name: pre1-dense-full@b2.k_matmul_bitcast_reduce_f73101.3f726aa4f625
-  program: 3
+  realizations:
+  - name: post1-sparse-sliding@b2.k_matmul_reduce_f7578b.5519f1ed440e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g32k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 31.549626843591852
+      reference_us: 519.4399952888489
+      reference_backend: emmy-greedy
+- program: 3
   target:
     loop: 8
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 67.09333260854086
-    reference_us: 567.7280128002167
-    reference_backend: emmy-greedy
-- name: pre1-sparse-sliding@b2.k_matmul_bitcast_reduce_713714.7177937cd34b
-  program: 4
+  realizations:
+  - name: pre1-dense-full@b2.k_matmul_bitcast_reduce_f73101.3f726aa4f625
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 67.09333260854086
+      reference_us: 567.7280128002167
+      reference_backend: emmy-greedy
+- program: 4
   target:
     loop: 9
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 98.7392008304596
-    reference_us: 567.6720142364502
-    reference_backend: emmy-greedy
+  realizations:
+  - name: pre1-sparse-sliding@b2.k_matmul_bitcast_reduce_713714.7177937cd34b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 98.7392008304596
+      reference_us: 567.6720142364502
+      reference_backend: emmy-greedy
 loops:
 - inputs: [linear_left_flat, w_gate]
   outputs: [linear_core_reduce]

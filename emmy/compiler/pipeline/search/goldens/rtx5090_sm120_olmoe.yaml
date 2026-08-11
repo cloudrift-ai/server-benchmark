@@ -207,211 +207,274 @@ programs:
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
 configs:
-- name: olmoe_1b7b.expert_gate_up.m1
-  program: 0
+- program: 0
   target:
     origins:
     - linear
-  knobs:
-    WORK: t64
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 3.3
-    reference_us: 8.2
-    reference_backend: cublas
-- name: olmoe_1b7b.expert_down.m1
-  program: 1
+  realizations:
+  - name: olmoe_1b7b.expert_gate_up.m1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 3.3
+      reference_us: 8.2
+      reference_backend: cublas
+- program: 1
   target:
     origins:
     - linear
-  knobs:
-    WORK: t32
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 2.5
-    reference_us: 6.1
-    reference_backend: cublas
-- name: olmoe_1b7b.qk_cat.m16
-  program: 2
+  realizations:
+  - name: olmoe_1b7b.expert_down.m1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2.5
+      reference_us: 6.1
+      reference_backend: cublas
+- program: 2
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f1x2/k4
-    REDUCE: g4k
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 5.4
-    reference_us: 10.2
-    reference_backend: cublas
-- name: olmoe_1b7b.o_proj.m16
-  program: 3
+  realizations:
+  - name: olmoe_1b7b.qk_cat.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f1x2/k4
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 5.4
+      reference_us: 10.2
+      reference_backend: cublas
+- program: 3
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f1x1/k4
-    REDUCE: g4k
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 3.9
-    reference_us: 8.2
-    reference_backend: cublas
-- name: olmoe_1b7b.expert_down.m16
-  program: 4
+  realizations:
+  - name: olmoe_1b7b.o_proj.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f1x1/k4
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 3.9
+      reference_us: 8.2
+      reference_backend: cublas
+- program: 4
   target:
     origins:
     - linear
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f32/f1x1/k4
-    REDUCE: g4k
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 2.9
-    reference_us: 6.1
-    reference_backend: cublas
-- name: olmoe_1b7b.rms_norm.k2048.m16
-  program: 5
+  realizations:
+  - name: olmoe_1b7b.expert_down.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f1x1/k4
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2.9
+      reference_us: 6.1
+      reference_backend: cublas
+- program: 5
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t512
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 2.4
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: olmoe_1b7b.qk_cat.m1.t
-  program: 6
+  realizations:
+  - name: olmoe_1b7b.rms_norm.k2048.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2.4
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 6
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t128
-    TILE: ''
-    REDUCE: g8k/coop-t
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 5.8
-    reference_us: 10.8
-    reference_backend: cublas
-- name: olmoe_1b7b.o_proj.m1.t
-  program: 7
+  realizations:
+  - name: olmoe_1b7b.qk_cat.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: g8k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 5.8
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 7
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t256
-    TILE: ''
-    REDUCE: g8k/coop-t
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 4.0
-    reference_us: 10.3
-    reference_backend: cublas
-- name: olmoe_1b7b.rms_norm.k2048.m1
-  program: 8
+  realizations:
+  - name: olmoe_1b7b.o_proj.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g8k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 4.0
+      reference_us: 10.3
+      reference_backend: cublas
+- program: 8
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t512
-    TILE: ''
-    REDUCE: coop
-    STAGE: ''
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 1.9
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: olmoe_1b7b.expert_gate_up.m256
-  program: 9
+  realizations:
+  - name: olmoe_1b7b.rms_norm.k2048.m1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1.9
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 9
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g4k
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 18.8
-    reference_us: 16.8
-    reference_backend: cublas
-- name: olmoe_1b7b.expert_down.m256
-  program: 10
+  realizations:
+  - name: olmoe_1b7b.expert_gate_up.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 18.8
+      reference_us: 16.8
+      reference_backend: cublas
+- program: 10
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g2k
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 11.2
-    reference_us: 10.3
-    reference_backend: cublas
-- name: olmoe_1b7b.expert_gate_up.dynM
-  program: 11
+  realizations:
+  - name: olmoe_1b7b.expert_down.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g2k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 11.2
+      reference_us: 10.3
+      reference_backend: cublas
+- program: 11
   target:
     origins:
     - linear
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    REDUCE: g4k
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 31.0
-    reference_us: 30.6
-    reference_backend: cublas
-- name: olmoe_1b7b.expert_down.dynM
-  program: 12
+  realizations:
+  - name: olmoe_1b7b.expert_gate_up.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 31.0
+      reference_us: 30.6
+      reference_backend: cublas
+- program: 12
   target:
     origins:
     - linear
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: ''
-    STAGE: d2/tma
-    LOOPIFY: '0'
-    RASTER: ''
-  measurements:
-    emmy_us: 17.8
-    reference_us: 17.0
-    reference_backend: cublas
+  realizations:
+  - name: olmoe_1b7b.expert_down.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 17.8
+      reference_us: 17.0
+      reference_backend: cublas

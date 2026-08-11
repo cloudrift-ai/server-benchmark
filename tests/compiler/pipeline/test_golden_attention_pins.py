@@ -36,7 +36,7 @@ def test_static_attention_golden_pins_bind(golden, monkeypatch):
         return o
 
     ctx = Context(compute_capability=tuple(golden.compute_cap))
-    with pinned_knobs(golden.knobs):
+    with pinned_knobs({**golden.pin_map, **golden.knobs}):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(g, decide)
     tile_pins = {k: v for k, v in golden.knobs.items() if k.startswith("TILE@")}
     assert tile_pins, f"{golden.name}: static attention golden should record axis-keyed TILE pins"

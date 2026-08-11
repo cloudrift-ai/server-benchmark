@@ -30,9 +30,11 @@ class WorkingGoldenTarget:
     code: str | None
     input: str | None
     dynamic: list[str] | None
+    bindings: dict[str, int] = field(default_factory=dict)
+    pins: dict[str, object] = field(default_factory=dict)
     program: object | None = None
-    entry_indexes: list[int] = field(default_factory=list)
-    proposals: list[tuple[int, dict]] = field(default_factory=list)
+    entry_indexes: list[tuple[int, int]] = field(default_factory=list)
+    proposals: list[tuple[tuple[int, int], dict]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ def write_trace_inventory(
     model: str | None = None,
     ctx=None,
     force_loop_targets: bool = False,
+    realizations: list[dict] | None = None,
 ) -> TraceInventoryResult:
     """Lower a trace through fusion and write a self-contained target inventory."""
     destination = preflight_trace_inventory(path)
@@ -74,6 +77,7 @@ def write_trace_inventory(
         loops=loops,
         entries=entries,
         force_loop_targets=force_loop_targets,
+        realizations=realizations,
     )
     _dump_trace_inventory(destination, ctx=ctx, model=model, programs=programs, loops=loops, entries=entries)
     return TraceInventoryResult(path=destination, target_count=len(entries))
@@ -85,6 +89,7 @@ def write_trace_inventories(
     *,
     model: str | None = None,
     ctx=None,
+    realizations: list[dict] | None = None,
 ) -> TraceInventoryResult:
     """Combine named traces into one exact-Loop-IR working inventory.
 
@@ -114,6 +119,7 @@ def write_trace_inventories(
             force_loop_targets=True,
             name_prefix=name,
             seen_loops=seen_loops,
+            realizations=realizations,
         )
     _dump_trace_inventory(destination, ctx=ctx, model=model, programs=programs, loops=loops, entries=entries)
     return TraceInventoryResult(path=destination, target_count=len(entries))
@@ -129,6 +135,7 @@ def _append_trace_inventory(
     force_loop_targets: bool,
     name_prefix: str | None = None,
     seen_loops: set[int] | None = None,
+    realizations: list[dict] | None = None,
 ) -> None:
     """Append one lowered graph to shared trace-inventory pools."""
     from emmy.compiler import provenance  # noqa: PLC0415
@@ -199,11 +206,16 @@ def _append_trace_inventory(
             target = {"loop": loop_ref}
         if program_ref is None:
             program_ref = intern_program(programs, input_graph)
-        entry = {
-            "name": name,
-            "program": program_ref,
-            "target": target,
-        }
+        if realizations is None:
+            rows = [{"name": name, "bindings": {}, "pins": {"FAST_MATH": False}}]
+        else:
+            rows = []
+            for template in realizations:
+                row = copy.deepcopy(template)
+                suffix = row.pop("name")
+                row["name"] = f"{name}.{suffix}" if suffix else name
+                rows.append(row)
+        entry = {"program": program_ref, "target": target, "realizations": rows}
         entries.append(entry)
 
 
@@ -239,19 +251,29 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
         raise ValueError(f"working golden cannot point inside the canonical repository goldens: {source}")
     document = load_golden_file(source)
 
-    by_source: dict[tuple[int, tuple], WorkingGoldenTarget] = {}
+    by_source: dict[tuple[int, tuple, tuple[tuple[str, int], ...], tuple[tuple[str, object], ...]], WorkingGoldenTarget] = {}
     for index, entry in enumerate(document["configs"]):
-        if kernel and kernel not in entry["name"]:
-            continue
-        record = golden_record_from_entry(document, entry)
-        key = (record.program_index, record.target_key)
-        target = by_source.get(key)
-        if target is None:
-            target = WorkingGoldenTarget(label=entry["name"], code=None, input=None, dynamic=None, program=record.target_program)
-            by_source[key] = target
-        target.entry_indexes.append(index)
-        if "knobs" in entry:
-            target.proposals.append((index, dict(entry["knobs"])))
+        for realization_index, realization in enumerate(entry["realizations"]):
+            if kernel and kernel not in realization["name"]:
+                continue
+            record = golden_record_from_entry(document, entry, realization)
+            key = (record.program_index, record.target_key, record.bindings, record.pins)
+            target = by_source.get(key)
+            if target is None:
+                target = WorkingGoldenTarget(
+                    label=realization["name"],
+                    code=None,
+                    input=None,
+                    dynamic=None,
+                    bindings=record.binding_map,
+                    pins=record.pin_map,
+                    program=record.target_program,
+                )
+                by_source[key] = target
+            path = (index, realization_index)
+            target.entry_indexes.append(path)
+            if "knobs" in realization:
+                target.proposals.append((path, dict(realization["knobs"])))
 
     if not by_source:
         raise ValueError(f"no working golden targets matched --kernel {kernel!r}")
@@ -343,11 +365,11 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
     """Atomically persist measured proposal feedback."""
     configs = document["configs"]
-    for (entry_index, _pins), ranking in zip(target.proposals, rankings, strict=True):
-        entry = configs[entry_index]
-        if golden_entry_state(entry) == GoldenEntryState.VERIFIED:
+    for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
+        realization = configs[entry_index]["realizations"][realization_index]
+        if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
             continue
-        entry["ranking"] = {**ranking, "source": "proposal"}
+        realization["ranking"] = {**ranking, "source": "proposal"}
     dump_golden_file(document, path, overwrite=True)
 
 
@@ -374,27 +396,30 @@ def persist_tune_winner(
         }
         winner_key = canonical_row_key(winner_knobs)
         matching = [
-            index
-            for index in target.entry_indexes
-            if "knobs" in configs[index] and canonical_row_key(configs[index]["knobs"]) == winner_key
+            path
+            for path in target.entry_indexes
+            if "knobs" in configs[path[0]]["realizations"][path[1]]
+            and canonical_row_key(configs[path[0]]["realizations"][path[1]]["knobs"]) == winner_key
         ]
         writable = next(
-            (index for index in matching if golden_entry_state(configs[index]) != GoldenEntryState.VERIFIED),
+            (path for path in matching if golden_entry_state(configs[path[0]]["realizations"][path[1]]) != GoldenEntryState.VERIFIED),
             None,
         )
         if writable is not None:
-            previous = dict(configs[writable].get("ranking") or {})
-            configs[writable]["ranking"] = {
+            realization = configs[writable[0]]["realizations"][writable[1]]
+            previous = dict(realization.get("ranking") or {})
+            realization["ranking"] = {
                 **winner_ranking,
                 "source": previous.get("source", "tune"),
                 "tune_winner": True,
             }
         elif not matching:
-            seed = copy.deepcopy(configs[target.entry_indexes[0]])
+            config_index, realization_index = target.entry_indexes[0]
+            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
             for key in ("knobs", "measurements", "ranking"):
                 seed.pop(key, None)
             seed["knobs"] = winner_knobs
             seed["ranking"] = {**winner_ranking, "tune_winner": True}
-            configs.append(seed)
-            target.entry_indexes.append(len(configs) - 1)
+            configs[config_index]["realizations"].append(seed)
+            target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
     dump_golden_file(document, path, overwrite=True)

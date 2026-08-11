@@ -154,21 +154,18 @@ correlate.
   offered options, and a golden overriding the first option on a compile with no prior are all logged loudly.
 - **The record of the resolution.** Each decided fork records what was chosen and the time of whichever row decided
   it — a measured time when a golden or a measurement decided, a predicted one otherwise.
-- **The audits.** `emmy eval golden` re-runs the golden-tier consultations and reports what the compiler produces
-  against what was recorded. That is the subject of the next page.
+- **The audits.** `emmy eval golden GOLDEN_YAML --serving-config PATH` re-runs the file's own-program and exact
+  serving-matrix consultations on the pinned GPU. That is the subject of the next page.
 
 ## See it yourself
 
-The audit below re-compiles each recorded shape with nothing pinned, prints the knob values the compiler chose beside
-the recorded ones, and then reports whether each recorded configuration is still among the options the compiler
-offers at all:
+The audit below validates one canonical file against the release configuration and live GPU, then checks its own
+programs and freshly traced serving matrix:
 
 ```bash
-emmy eval golden
-emmy eval golden --kernel matmul.square.512
+emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
 ```
 
-Neither needs a GPU: once the shape and the target card are known, the set of offered options is fixed, so nothing has
-to be run. The next page explains how to read the result.
+The next page explains how to read the result.
 
 Next: [7. Golden configurations](./07-golden-configurations.md).

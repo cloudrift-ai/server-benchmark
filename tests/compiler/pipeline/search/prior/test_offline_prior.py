@@ -221,7 +221,7 @@ def test_evaluate_record_rank_is_tie_pessimistic(monkeypatch):
     golden = {"TILE": "f4x8", "WORK": "t32x16"}
     from types import SimpleNamespace
 
-    record = SimpleNamespace(knobs=golden, target_program=Graph())
+    record = SimpleNamespace(knobs=golden, target_program=Graph(), pin_map={"FAST_MATH": False})
 
     _, rank_tied, pool, rank_opt = golden_eval.evaluate_record(record, ctx=None, scorer=lambda r: 1.0)
     assert pool == 4

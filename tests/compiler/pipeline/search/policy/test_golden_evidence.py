@@ -56,6 +56,7 @@ _W1X1_TILE = "mma_m16n8k16_f16_f32/f1x1"
 
 
 def _record(name, shape_key, knobs, us, *, gpu=CARD, cap=CAP):
+    fast_math = fast_math_knobs(knobs)
     return SimpleNamespace(
         name=name,
         shape_key=shape_key,
@@ -64,7 +65,8 @@ def _record(name, shape_key, knobs, us, *, gpu=CARD, cap=CAP):
         gpu_name=gpu,
         compute_cap=cap,
         is_routing=False,
-        fast_math=fast_math_knobs(knobs),
+        pins=(("FAST_MATH", fast_math),),
+        pin_map={"FAST_MATH": fast_math},
     )
 
 

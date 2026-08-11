@@ -95,8 +95,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 - `twins.py` — **weight-free serving-twin capture**. Builds a trimmed random-init skeleton from a model's
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
-  `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
-  serving-image release gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
+  `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
+  GOLDEN_YAML --serving-config PATH` release audit and serving-image gate;
+  `scripts/capture_gen_twins.py` remains the full-checkpoint diagnostic capture.
   Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
   `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
   The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
@@ -109,6 +110,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific
   operation or search key survives decomposition.
+- `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
+  exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
+  prefill, M=1, warm shapes, symbolic fallbacks, and input pin regimes cannot drift across independent flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
@@ -281,17 +285,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
   evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
   not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does
-  not). So the evidence path is the **twins** — the `pre`/`post` graphs at each width, captured by
-  `scripts/capture_gen_twins.py` (which calls `gen_runner.trace_split`, the same trace `_compile_split` makes, so the
-  captured JSON is byte-for-byte what serving compiles) and then fed to `emmy tune` with `EMMY_TUNE_DB` /
-  `EMMY_ONLINE_FILE` pointed at a twin-local DB. Capture a **global** (`full_attention`) layer alongside the sliding
-  one for any model whose layers are not homogeneous — gemma-4's global layers carry a larger `head_dim`, so their
-  projections are different shapes with different optimal configs. Re-capture whenever a tracer/recognizer change
-  alters the graphs: the DB's evidence is keyed to structural signatures, and stale evidence applied to new graphs
-  serves worse than either coherent state. Whether the *recorded goldens* still deploy against the current twins is
-  checked before a serving-image release: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and
-  audits per fork (MATCH / DRIFT / GAP); `make serve-goldens` runs the strict release gate for the pinned model,
-  revision, card, and serving widths.
+  not). So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
+  every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
+  matrix. `emmy tune --golden-file` specializes and tunes each binding and precision regime. Capture a **global**
+  (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
+  global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
+  Re-capture whenever a tracer/recognizer change alters the graphs. The release audit re-traces the exact widths
+  weight-free, checks every realization, and reports MATCH / DRIFT / GAP before the serving image is warmed.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:

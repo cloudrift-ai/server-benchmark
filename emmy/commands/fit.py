@@ -120,12 +120,9 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         if ctx is None:
             ctx = ctxs[card] = Context.from_target(tuple(g.compute_cap), gpu_name=g.gpu_name)
         base = {**ctx.features(), **g.structural_features}
-        if g.fast_math:
-            from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-            with F16_MMA_F32_ACC.pinned("1"):
-                rows = enumerate_graph(g.target_program.copy(), ctx)
-        else:
+        with pinned_knobs(g.pin_map):
             rows = enumerate_graph(g.target_program.copy(), ctx)
         tier = "dyn" if g.dynamic else (g.shape_key.kind or ("warp" if g.shape_key.is_warp else "thread"))
         if not rows:

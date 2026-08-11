@@ -711,915 +711,1064 @@ programs:
     inputs: [x, p_weight]
     outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 3840]]]
 configs:
-- name: matmul.square.512
-  program: 0
+- program: 0
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t16x8
-    TILE: f4x8
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 10.1
-    reference_us: 10.8
-    reference_backend: cublas
-- name: matmul.square.1024
-  program: 1
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.1
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 1
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t32x8
-    TILE: f4x10
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 58.5
-    reference_us: 45.4
-    reference_backend: cublas
-- name: matmul.square.2048
-  program: 2
+  realizations:
+  - name: matmul.square.1024
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x10
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 58.5
+      reference_us: 45.4
+      reference_backend: cublas
+- program: 2
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t32x16
-    TILE: f4x8
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 359.1
-    reference_us: 320.0
-    reference_backend: cublas
-- name: matmul.square.4096
-  program: 3
+  realizations:
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x8
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 359.1
+      reference_us: 320.0
+      reference_backend: cublas
+- program: 3
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t32x8
-    TILE: f4x26
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 2727.9
-    reference_us: 2458.6
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 4
+  realizations:
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x26
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2727.9
+      reference_us: 2458.6
+      reference_backend: cublas
+- program: 4
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x2
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 4.9
-    reference_us: 5.8
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 4
+  realizations:
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 4.9
+      reference_us: 5.8
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 6.0
+      reference_us: 5.8
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 4.8
+      reference_us: 5.8
+      reference_backend: cublas
+- program: 5
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x2
-    TILE: mma_m16n8k16_f16_f32/f4x2/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 6.0
-    reference_us: 5.8
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 4
+  realizations:
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 20.4
+      reference_us: 18.1
+      reference_backend: cublas
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 15.8
+      reference_us: 18.1
+      reference_backend: cublas
+- program: 6
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x2
-    TILE: mma_m16n8k16_f16_f16/f2x2/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 4.8
-    reference_us: 5.8
-    reference_backend: cublas
-- name: matmul.square.1024.fp16
-  program: 5
+  realizations:
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 123.4
+      reference_us: 115.2
+      reference_backend: cublas
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 82.7
+      reference_us: 115.2
+      reference_backend: cublas
+- program: 7
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 20.4
-    reference_us: 18.1
-    reference_backend: cublas
-- name: matmul.square.1024.fp16
-  program: 5
+  realizations:
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 869.4
+      reference_us: 822.3
+      reference_backend: cublas
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 603.1
+      reference_us: 822.3
+      reference_backend: cublas
+- program: 8
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x2
-    TILE: mma_m16n8k16_f16_f16/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 15.8
-    reference_us: 18.1
-    reference_backend: cublas
-- name: matmul.square.2048.fp16
-  program: 6
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.6
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 9
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f4x4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 123.4
-    reference_us: 115.2
-    reference_backend: cublas
-- name: matmul.square.2048.fp16
-  program: 6
+  realizations:
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 343.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 267.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 362.0
+      reference_us: 328.0
+      reference_backend: cublas
+- program: 10
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 82.7
-    reference_us: 115.2
-    reference_backend: cublas
-- name: matmul.square.4096.fp16
-  program: 7
+  realizations:
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 119.9
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 108.7
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 88.4
+      reference_us: 119.0
+      reference_backend: cublas
+- program: 11
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 869.4
-    reference_us: 822.3
-    reference_backend: cublas
-- name: matmul.square.4096.fp16
-  program: 7
+  realizations:
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 803.8
+      reference_us: 721.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 664.6
+      reference_us: 721.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 648.2
+      reference_us: 721.0
+      reference_backend: cublas
+- program: 12
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 603.1
-    reference_us: 822.3
-    reference_backend: cublas
-- name: matmul.square.512.dynM
-  program: 8
+  realizations:
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 371.0
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 274.0
+      reference_us: 388.0
+      reference_backend: cublas
+- program: 13
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t16x8
-    TILE: f4x8
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 10.6
-    reference_us: 10.8
-    reference_backend: cublas
-- name: matmul.qkv.h4096
-  program: 9
+  realizations:
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 343.0
+      reference_us: 330.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 298.9
+      reference_us: 330.0
+      reference_backend: cublas
+- program: 14
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 343.7
-    reference_us: 328.0
-    reference_backend: cublas
-- name: matmul.qkv.h4096
-  program: 9
+  realizations:
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 119.5
+      reference_us: 112.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 89.3
+      reference_us: 112.0
+      reference_backend: cublas
+- program: 15
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: gm8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 267.7
-    reference_us: 328.0
-    reference_backend: cublas
-- name: matmul.qkv.h4096
-  program: 9
+  realizations:
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 923.6
+      reference_us: 742.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 665.6
+      reference_us: 742.0
+      reference_backend: cublas
+- program: 16
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 362.0
-    reference_us: 328.0
-    reference_backend: cublas
-- name: matmul.o_proj.h4096
-  program: 10
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f4x4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 119.9
-    reference_us: 119.0
-    reference_backend: cublas
-- name: matmul.o_proj.h4096
-  program: 10
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 108.7
-    reference_us: 119.0
-    reference_backend: cublas
-- name: matmul.o_proj.h4096
-  program: 10
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 88.4
-    reference_us: 119.0
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096
-  program: 11
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x8/k2
-    REDUCE: ''
-    RASTER: gm8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 803.8
-    reference_us: 721.0
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096
-  program: 11
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 664.6
-    reference_us: 721.0
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096
-  program: 11
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp/p2
-  measurements:
-    emmy_us: 648.2
-    reference_us: 721.0
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096
-  program: 12
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 371.0
-    reference_us: 388.0
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096
-  program: 12
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 274.0
-    reference_us: 388.0
-    reference_backend: cublas
-- name: matmul.qkv.h4096.dynM
-  program: 13
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 343.0
-    reference_us: 330.0
-    reference_backend: cublas
-- name: matmul.qkv.h4096.dynM
-  program: 13
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 298.9
-    reference_us: 330.0
-    reference_backend: cublas
-- name: matmul.o_proj.h4096.dynM
-  program: 14
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 119.5
-    reference_us: 112.0
-    reference_backend: cublas
-- name: matmul.o_proj.h4096.dynM
-  program: 14
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 89.3
-    reference_us: 112.0
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096.dynM
-  program: 15
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 923.6
-    reference_us: 742.0
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096.dynM
-  program: 15
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 665.6
-    reference_us: 742.0
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096.dynM
-  program: 16
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f4x8
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 376.4
-    reference_us: 388.0
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096.dynM
-  program: 16
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k2
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 275.5
-    reference_us: 388.0
-    reference_backend: cublas
-- name: pointwise.n4096
-  program: 17
+  realizations:
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 376.4
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 275.5
+      reference_us: 388.0
+      reference_backend: cublas
+- program: 17
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 4.6
-    reference_us: 5.0
-    reference_backend: torch-eager
-- name: pointwise.n16384
-  program: 18
+  realizations:
+  - name: pointwise.n4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 4.6
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 18
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-  measurements:
-    emmy_us: 16.3
-    reference_us: 18.0
-    reference_backend: torch-eager
-- name: pointwise.n4096.dynM
-  program: 19
+  realizations:
+  - name: pointwise.n16384
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+    measurements:
+      emmy_us: 16.3
+      reference_us: 18.0
+      reference_backend: torch-eager
+- program: 19
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f2
-  measurements:
-    emmy_us: 4.6
-    reference_us: 5.0
-    reference_backend: torch-eager
-- name: pointwise.n16384.dynM
-  program: 20
+  realizations:
+  - name: pointwise.n4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f2
+    measurements:
+      emmy_us: 4.6
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 20
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    TILE: f4
-  measurements:
-    emmy_us: 16.5
-    reference_us: 19.0
-    reference_backend: torch-eager
-- name: softmax.k2048
-  program: 21
+  realizations:
+  - name: pointwise.n16384.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+    measurements:
+      emmy_us: 16.5
+      reference_us: 19.0
+      reference_backend: torch-eager
+- program: 21
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 3.5
-    reference_us: 6.0
-    reference_backend: torch-eager
-- name: softmax.k8192
-  program: 22
+  realizations:
+  - name: softmax.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.5
+      reference_us: 6.0
+      reference_backend: torch-eager
+- program: 22
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t512
-    REDUCE: coop
-  measurements:
-    emmy_us: 12.4
-    reference_us: 14.0
-    reference_backend: torch-eager
-- name: softmax.k2048.dynM
-  program: 23
+  realizations:
+  - name: softmax.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+    measurements:
+      emmy_us: 12.4
+      reference_us: 14.0
+      reference_backend: torch-eager
+- program: 23
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t128
-    REDUCE: coop
-  measurements:
-    emmy_us: 3.6
-    reference_us: 6.0
-    reference_backend: torch-eager
-- name: softmax.k8192.dynM
-  program: 24
+  realizations:
+  - name: softmax.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.6
+      reference_us: 6.0
+      reference_backend: torch-eager
+- program: 24
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 13.2
-    reference_us: 14.0
-    reference_backend: torch-eager
-- name: reduce.k2048
-  program: 25
+  realizations:
+  - name: softmax.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 13.2
+      reference_us: 14.0
+      reference_backend: torch-eager
+- program: 25
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t128
-    REDUCE: coop
-  measurements:
-    emmy_us: 2.1
-    reference_us: 4.0
-    reference_backend: torch-eager
-- name: reduce.k8192
-  program: 26
+  realizations:
+  - name: reduce.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 2.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 26
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 4.5
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: reduce.k2048.dynM
-  program: 27
+  realizations:
+  - name: reduce.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.5
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 27
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t128
-    REDUCE: coop
-  measurements:
-    emmy_us: 2.1
-    reference_us: 4.0
-    reference_backend: torch-eager
-- name: reduce.k8192.dynM
-  program: 28
+  realizations:
+  - name: reduce.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 2.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 28
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 4.6
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: rms_norm.k2048
-  program: 29
+  realizations:
+  - name: reduce.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.6
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 29
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 4.1
-    reference_us: 4.0
-    reference_backend: torch-eager
-- name: rms_norm.k4096
-  program: 30
+  realizations:
+  - name: rms_norm.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 30
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 7.2
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: rms_norm.k8192
-  program: 31
+  realizations:
+  - name: rms_norm.k4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 7.2
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 31
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 13.8
-    reference_us: 13.0
-    reference_backend: torch-eager
-- name: rms_norm.k2048.dynM
-  program: 32
+  realizations:
+  - name: rms_norm.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 13.8
+      reference_us: 13.0
+      reference_backend: torch-eager
+- program: 32
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 4.1
-    reference_us: 4.0
-    reference_backend: torch-eager
-- name: rms_norm.k4096.dynM
-  program: 33
+  realizations:
+  - name: rms_norm.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 33
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 7.2
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: rms_norm.k8192.dynM
-  program: 34
+  realizations:
+  - name: rms_norm.k4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 7.2
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 34
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 13.8
-    reference_us: 13.0
-    reference_backend: torch-eager
-- name: attention.hd64
-  program: 35
+  realizations:
+  - name: rms_norm.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 13.8
+      reference_us: 13.0
+      reference_backend: torch-eager
+- program: 35
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-    TILE@pj: mma_m16n8k16_f16_f32/f1x8/k8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 10.6
-    reference_us: 10.0
-    reference_backend: torch-eager
-- name: attention.hd64
-  program: 35
+  realizations:
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f32/f1x8/k8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.6
+      reference_us: 10.0
+      reference_backend: torch-eager
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 9.6
+      reference_us: 10.0
+      reference_backend: torch-eager
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
+      STAGE: d1/cp/split
+    measurements:
+      emmy_us: 9.3
+      reference_us: 10.0
+      reference_backend: torch-eager
+- program: 36
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-    TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 9.6
-    reference_us: 10.0
-    reference_backend: torch-eager
-- name: attention.hd64
-  program: 35
+  realizations:
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 19.9
+      reference_us: 18.0
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 18.2
+      reference_us: 18.0
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d1/cp/split
+    measurements:
+      emmy_us: 17.7
+      reference_us: 18.0
+      reference_backend: torch-eager
+- program: 37
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-    TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
-    STAGE: d1/cp/split
-  measurements:
-    emmy_us: 9.3
-    reference_us: 10.0
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 36
+  realizations:
+  - name: attention.hd64.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.7
+      reference_us: 11.0
+      reference_backend: torch-eager
+- program: 38
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 19.9
-    reference_us: 18.0
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 36
+  realizations:
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 20.3
+      reference_us: 19.0
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 18.6
+      reference_us: 19.0
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d1/cp/split
+    measurements:
+      emmy_us: 18.1
+      reference_us: 19.0
+      reference_backend: torch-eager
+- program: 39
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 18.2
-    reference_us: 18.0
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 36
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
-    STAGE: d1/cp/split
-  measurements:
-    emmy_us: 17.7
-    reference_us: 18.0
-    reference_backend: torch-eager
-- name: attention.hd64.dynM
-  program: 37
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f1x16/k4
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 10.7
-    reference_us: 11.0
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 38
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f1x8/k8
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 20.3
-    reference_us: 19.0
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 38
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f1x16/k4
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 18.6
-    reference_us: 19.0
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 38
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f16/f1x16/k4
-    STAGE: d1/cp/split
-  measurements:
-    emmy_us: 18.1
-    reference_us: 19.0
-    reference_backend: torch-eager
-- name: attention.hd256.dynM
-  program: 39
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f1x2/k16
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 40.4
-    reference_us: 42.0
-    reference_backend: torch-eager
-- name: attention.hd256.dynM
-  program: 39
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    TILE: mma_m16n8k16_f16_f32/f1x4/k16
-    STAGE: d2/cp
-  measurements:
-    emmy_us: 38.0
-    reference_us: 42.0
-    reference_backend: torch-eager
-- name: rms_norm.k3840
-  program: 40
+  realizations:
+  - name: attention.hd256.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x2/k16
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 40.4
+      reference_us: 42.0
+      reference_backend: torch-eager
+  - name: attention.hd256.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x4/k16
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 38.0
+      reference_us: 42.0
+      reference_backend: torch-eager
+- program: 40
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 6.9
-    reference_us: 7.0
-    reference_backend: torch-eager
-- name: gemma4_12b.qknorm.k256
-  program: 41
+  realizations:
+  - name: rms_norm.k3840
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 6.9
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 41
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t64
-    REDUCE: coop
-  measurements:
-    emmy_us: 3.7
-    reference_us: 5.0
-    reference_backend: torch-eager
-- name: rms_norm.k3840.dynM
-  program: 42
+  realizations:
+  - name: gemma4_12b.qknorm.k256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.7
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 42
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    REDUCE: coop
-  measurements:
-    emmy_us: 6.9
-    reference_us: 7.0
-    reference_backend: torch-eager
+  realizations:
+  - name: rms_norm.k3840.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 6.9
+      reference_us: 7.0
+      reference_backend: torch-eager

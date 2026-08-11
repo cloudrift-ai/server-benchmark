@@ -524,7 +524,9 @@ def _anchor_golden(**over):
         is_routing=False,
     )
     kw.update(over)
-    kw["fast_math"] = fast_math_knobs(kw["knobs"])
+    fast_math = fast_math_knobs(kw["knobs"])
+    kw["pins"] = (("FAST_MATH", fast_math),)
+    kw["pin_map"] = {"FAST_MATH": fast_math}
     return SimpleNamespace(**kw)
 
 

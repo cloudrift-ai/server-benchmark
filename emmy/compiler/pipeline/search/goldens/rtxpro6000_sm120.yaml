@@ -130,144 +130,179 @@ programs:
     inputs: [x0, x1]
     outputs: [[matmul, f32, [{sym: seq_len, hint: 512}, 512]]]
 configs:
-- name: matmul.square.512
-  program: 0
+- program: 0
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t16x8
-    TILE: f2x6
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 11.0
-    reference_us: 12.6
-    reference_backend: cublas
-- name: matmul.square.1024
-  program: 1
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f2x6
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 11.0
+      reference_us: 12.6
+      reference_backend: cublas
+- program: 1
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t16x16
-    TILE: f4x6
-    RASTER: ''
-    STAGE: d4/tma
-  measurements:
-    emmy_us: 49.2
-    reference_us: 55.6
-    reference_backend: cublas
-- name: matmul.square.2048
-  program: 2
+  realizations:
+  - name: matmul.square.1024
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x16
+      TILE: f4x6
+      RASTER: ''
+      STAGE: d4/tma
+    measurements:
+      emmy_us: 49.2
+      reference_us: 55.6
+      reference_backend: cublas
+- program: 2
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t32x16
-    TILE: f4x12
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 357.6
-    reference_us: 324.8
-    reference_backend: cublas
-- name: matmul.square.4096
-  program: 3
+  realizations:
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x12
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 357.6
+      reference_us: 324.8
+      reference_backend: cublas
+- program: 3
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t32x16
-    TILE: f4x6
-    RASTER: ''
-    STAGE: d3/tma
-  measurements:
-    emmy_us: 3021.4
-    reference_us: 2426.0
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 4
+  realizations:
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x6
+      RASTER: ''
+      STAGE: d3/tma
+    measurements:
+      emmy_us: 3021.4
+      reference_us: 2426.0
+      reference_backend: cublas
+- program: 4
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    RASTER: ''
-    STAGE: d3/tma
-  measurements:
-    emmy_us: 3.8
-    reference_us: 6.1
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 4
+  realizations:
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      RASTER: ''
+      STAGE: d3/tma
+    measurements:
+      emmy_us: 3.8
+      reference_us: 6.1
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 3.7
+      reference_us: 6.1
+      reference_backend: cublas
+- program: 5
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 3.7
-    reference_us: 6.1
-    reference_backend: cublas
-- name: matmul.square.1024.fp16
-  program: 5
+  realizations:
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      RASTER: ''
+      STAGE: d4/tma
+    measurements:
+      emmy_us: 13.9
+      reference_us: 12.5
+      reference_backend: cublas
+- program: 6
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x4
-    TILE: mma_m16n8k16_f16_f32/f4x2/k2
-    RASTER: ''
-    STAGE: d4/tma
-  measurements:
-    emmy_us: 13.9
-    reference_us: 12.5
-    reference_backend: cublas
-- name: matmul.square.2048.fp16
-  program: 6
+  realizations:
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 78.6
+      reference_us: 69.9
+      reference_backend: cublas
+- program: 7
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 78.6
-    reference_us: 69.9
-    reference_backend: cublas
-- name: matmul.square.4096.fp16
-  program: 7
+  realizations:
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w8x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k4
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 515.9
+      reference_us: 467.2
+      reference_backend: cublas
+- program: 8
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w8x2
-    TILE: mma_m16n8k16_f16_f32/f2x8/k4
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 515.9
-    reference_us: 467.2
-    reference_backend: cublas
-- name: matmul.square.512.dynM
-  program: 8
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: t16x8
-    TILE: f2x6
-    REDUCE: g2a
-    RASTER: ''
-    STAGE: d4/tma
-  measurements:
-    emmy_us: 10.2
-    reference_us: 12.6
-    reference_backend: cublas
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f2x6
+      REDUCE: g2a
+      RASTER: ''
+      STAGE: d4/tma
+    measurements:
+      emmy_us: 10.2
+      reference_us: 12.6
+      reference_backend: cublas

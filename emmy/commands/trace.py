@@ -40,31 +40,11 @@ def register_trace_command(subparsers):
         ),
     )
     parser.add_argument(
-        "--decode-bucket",
-        type=int,
-        default=32,
-        help="With --serving-twins, include this deployed decode width (default: 32).",
-    )
-    parser.add_argument(
-        "--prefill-bucket",
-        type=int,
-        default=256,
-        help="With --serving-twins, include this deployed prefill width (default: 256).",
-    )
-    parser.add_argument(
-        "--serving-width",
-        action="append",
-        type=int,
-        default=None,
-        metavar="N",
-        help="With --serving-twins, include another configured release width. Repeatable.",
-    )
-    parser.add_argument(
-        "--static-only-release",
-        action="store_true",
+        "--serving-config",
+        metavar="PATH",
         help=(
-            "With --serving-twins, capture only the proven static M=1 release lane. Requires "
-            "--decode-bucket 1, --prefill-bucket 0, and no --serving-width; symbolic and standard audit widths are omitted."
+            "With --serving-twins, read the model provenance and every static/dynamic precision realization "
+            "from this pinned release env. The trace stores each structural kernel once as symbolic IR."
         ),
     )
     parser.add_argument(
@@ -89,10 +69,13 @@ def handle_trace(args):
     from emmy.compiler.target import apply_target_arg  # noqa: PLC0415
 
     apply_target_arg(args)
-    if args.static_only_release and not args.serving_twins:
-        logger.error("--static-only-release requires --serving-twins")
+    if args.serving_config and not args.serving_twins:
+        logger.error("--serving-config requires --serving-twins")
         sys.exit(2)
     if args.serving_twins:
+        if not args.serving_config:
+            logger.error("--serving-twins requires --serving-config PATH")
+            sys.exit(2)
         conflicts = []
         if args.code:
             conflicts.append("--code")
@@ -108,21 +91,15 @@ def handle_trace(args):
         if conflicts:
             logger.error("--serving-twins is incompatible with %s", ", ".join(conflicts))
             sys.exit(2)
-        if args.decode_bucket < 0 or args.prefill_bucket < 0 or any(width <= 0 for width in (args.serving_width or ())):
-            logger.error("serving decode/prefill buckets must be non-negative and additional --serving-width values positive")
-            sys.exit(2)
-        if args.static_only_release and (args.decode_bucket != 1 or args.prefill_bucket != 0 or args.serving_width):
-            logger.error("--static-only-release requires --decode-bucket 1, --prefill-bucket 0, and no --serving-width")
-            sys.exit(2)
+        from emmy.serving.release import load_serving_config  # noqa: PLC0415
         from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
 
-        graphs = capture_twin_graphs(
-            args.input,
-            decode_bucket=args.decode_bucket,
-            prefill_bucket=args.prefill_bucket,
-            extra_widths=tuple(args.serving_width or ()),
-            static_only=args.static_only_release,
-        )
+        try:
+            serving = load_serving_config(args.serving_config)
+        except (OSError, ValueError) as exc:
+            logger.error("invalid serving config: %s", exc)
+            sys.exit(2)
+        graphs = capture_twin_graphs(args.input, decode_bucket=0, prefill_bucket=0)
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.yaml"
         try:
@@ -130,8 +107,15 @@ def handle_trace(args):
         except FileExistsError as e:
             logger.error(str(e))
             sys.exit(2)
-        model = args.model_provenance or args.input
-        result = write_trace_inventories(graphs, destination, model=model)
+        if args.model_provenance and args.model_provenance != serving.model_provenance:
+            logger.error("--model-provenance must match the serving config (%s)", serving.model_provenance)
+            sys.exit(2)
+        result = write_trace_inventories(
+            graphs,
+            destination,
+            model=serving.model_provenance,
+            realizations=[row.to_golden() for row in serving.realizations],
+        )
         logger.info(
             "Saved serving-twin golden YAML: %s (%d graph(s), %d distinct kernel(s))",
             result.path,
@@ -139,8 +123,8 @@ def handle_trace(args):
             result.target_count,
         )
         return
-    # A trace inventory records programs and shapes, not checkpoint values.  On a
-    # On a multi-hundred-billion-parameter checkpoint, avoid materializing a
+    # A trace inventory records programs and shapes, not checkpoint values. On a
+    # multi-hundred-billion-parameter checkpoint, avoid materializing a
     # full eager architecture twin merely to export one requested layer.
     graph, basename, _ = load_or_trace(args, architecture_only=True)
     destination = args.output or f"{basename}.golden.yaml"

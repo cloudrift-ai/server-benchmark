@@ -162,7 +162,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
-| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and serving-image release qualification (see Part 7). |
+| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-realization pin-only signal). Backs the file-scoped `emmy eval golden` release audit (see Part 7). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -545,7 +545,7 @@ fallthrough"). Two consequences when recording a fused row:
   — so record one or the other. The schema check accepts a combination that the offered options then reject.
 - A row must be verified to **deploy**, not merely to reproduce under a hand-forced pin. `--ab` reproduces configs the
   compiler would never offer on its own, so a row that only works when pinned still looks healthy in the isolated
-  golden-reproduction check. Only the in-model audit (`eval golden --in-model`) catches it.
+  golden-reproduction check. Only the serving-matrix audit catches it.
 
 **The golden tier needs no prior.** A resolve with no prior at all — `load_prior` failed (a corrupt online checkpoint
 or an erroring offline artifact; see the hierarchy section above), or `Pipeline.run` fell back to taking each rule's
@@ -824,9 +824,11 @@ sidecar writes, target/candidate reconstruction, exact proposal measurement, and
 `search/pins.py` owns the scoped knob environment and realized-pin validation shared with `run`; neither reusable
 service belongs to the CLI layer.
 
-For `tune --golden-file`, every entry with an explicit `knobs` mapping (including `{}` for a forkless anchor) is
-compiled with scoped authoritative pins and measured through
-the normal isolated benchmark and DB persistence path before the unpinned MCTS. A realized-vs-requested check marks an
+For `tune --golden-file`, each realization specializes its parent symbolic program with its `bindings` and applies
+its registered input `pins` before enumeration. Every realization with an explicit `knobs` mapping (including `{}`
+for a forkless anchor) is compiled with scoped authoritative pins and measured through
+the normal isolated benchmark and DB persistence path before MCTS continues in the same input pin regime. A
+realized-vs-requested check marks an
 unoffered proposal `pin_unmatched` instead of attributing the planner's fallback to the proposed row. Successful seed
 rows feed the shared prior immediately, so the following MCTS can use their evidence. Ranking feedback is flushed to
 the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
@@ -1095,8 +1097,9 @@ A golden record is a reviewed, per-GPU measurement of a frontend program target.
 are, how a golden's layout has to match the fork it is meant to decide, the two audits that catch a golden that no
 longer deploys, and the checks that keep the A/B honest.
 
-`golden.py` holds one generic `GoldenRecord`. Each record references a stable frontend Torch IR program by its
-document-local list index. The preferred target selector is a non-empty, unique set of frontend provenance origins.
+`golden.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend Torch
+IR program by its document-local list index. The preferred target selector is a non-empty, unique set of frontend
+provenance origins.
 When lowering produces a kernel without such a selector, the record points into the document's optional `loops` pool,
 which stores that standalone post-fusion Loop IR slice. Current lowering derives the `S_*` histogram, `ShapeKey`, dtype
 classification, dynamic status, and operation kind lazily; none is serialized. Trace inventories retain the complete
@@ -1107,23 +1110,22 @@ directly. There are no kernel-kind classes or snippet generators.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
 every golden under `search/goldens/` in the same change. The loader does not carry migrations or legacy decoders for
 working files outside the repository; keeping the checked-in corpus loadable is the compatibility gate. Programs are
-a plain list and configs refer to them by integer index; no program digest or persistent identifier is stored. Loop IR
+a plain list and structural configs refer to them by integer index; no program digest or persistent identifier is
+stored. Loop IR
 fallbacks are implementation-level rather than a compatibility promise and follow the same regenerate-the-corpus
 invariant. Frontend graph nodes omit empty `attrs` / `inputs`, store tensors as `[name, dtype, shape]`, and encode static
 dimensions as integers to keep the persistence surface small.
 
-**One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** A working file
-may contain an inventory entry (no knobs or timings), a proposed candidate (knobs but no timings), or a verified
-candidate (knobs plus paired positive Emmy/reference measurements). `load_golden_file` and `dump_golden_file` validate
-this format without mutating the parsed entries; dumping refuses to replace an existing file unless its caller opts
-in explicitly. A traced inventory embeds stable frontend Torch IR and selects targets by origin IDs or a Loop IR
-fallback. Repository promotion is stricter: every entry must carry an explicit knobs mapping
-(possibly empty for a verified forkless anchor) plus both positive finite timings. Missing, one-sided, zero, NaN,
-and infinite measurements are rejected before they can become trusted deploy evidence. A working entry may also
-carry an opaque `ranking` mapping
-for fast-compile feedback (`status`, `latency_us`, compile flags, and measured knobs); it does not change the entry's
-state and is rejected by repository validation because only
-deployable-regime timings belong in trusted goldens.
+**One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** Each structural
+config contains only `model`, `program`, `target`, and a non-empty `realizations` array. A realization contains its
+name, positive named dimension `bindings`, and explicit registered input `pins`, plus optional `knobs`, `measurements`,
+and working-only `ranking`. `pins` defines the enumeration regime; `knobs` records the configuration selected and
+measured inside that regime. Empty bindings retain the symbolic program; non-empty bindings specialize it before
+lowering. A working realization may be inventory-only, a proposal, or verified. Repository promotion requires an
+explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
+every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
+they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
+the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
 entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
 self-contradictory during the all-of offer check. Promotion rejects that ambiguity before the offer audit.
@@ -1154,40 +1156,31 @@ foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still do
 to fused computed-A programs: their stored `torch.linear` edge is the served layout, and the sync compute-fill stages
 every B fold channel via cp.async on either layout.
 
-**Provenance and the in-model drift audit.** A golden file (or entry) may carry an optional `model:` header — the HF
-model id whose serving graph the targets came from (`GoldenRecord.model`; pure provenance, never part of any join key).
-Model-tagged goldens opt into the **in-model drift audit** (`emmy eval golden --in-model`, library `search/audit.py`):
-the model's serving twins are re-traced **weight-free** (`emmy/serving/twins.py` builds a trimmed random-init skeleton
-from `config.json` alone — a trace never reads a weight value) and each tagged card's twins are compiled with the
-golden tier as the only evidence (no tune DB, online file pointed at a nonexistent path, deployable nvcc regime
-forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consultation — and the card targeted via
-`Context.from_target`, so verdicts are machine-independent). Each golden-tier consultation yields MATCH (a recorded
-golden realized), DRIFT (shape keyed but nothing realizes — always a defect: the recording claims a µs the deploy can
-no longer produce), or GAP (no golden for the shape). This is the in-model half of the reproduction check: the
-isolated snippet A/B reproduced 68/68 while the in-model deploys drifted (the cast-splice class), which is exactly the
-blind spot the audit closes. `major_gap_keys` isolates uncovered warp-contraction forks, the misdeploy/hang hazard
-class. Serving-image release qualification runs `scripts/check_serving_goldens.py` with `--strict-major-gaps` (the
-`make serve-goldens` gate) for the pinned model, revision, card, and configured widths; a
-drift, compile failure, or major gap fails the release. The default correctness suite tests the reusable audit
-mechanism with synthetic verdicts rather than retracing and compiling a model/card matrix. The twins track the
-installed `transformers` modeling code by design: a transformers bump that changes the forward changes the twins
-exactly as it changes serving, and release qualification goes loudly red.
-`scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
+**Provenance and the serving-matrix audit.** `emmy eval golden GOLDEN_YAML --serving-config PATH` derives model,
+revision, GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env. The
+command requires that exact file and live GPU, validates that every structural target contains every expected
+realization, and re-traces the model's twins weight-free. It compiles each precision lane with only that file's
+records as golden evidence. Each consultation yields MATCH, DRIFT, or GAP; any DRIFT, GAP, or compile failure blocks
+release. The same command also runs the own-program reproduction and offer audit, closing both the pin-only and fused
+in-model blind spots in one operation. The default correctness suite tests the reusable audit mechanism with
+synthetic verdicts rather than retracing and compiling a model/card matrix. The twins track the installed
+`transformers` modeling code by design: a change to the model forward changes the twins exactly as it changes serving,
+and release qualification goes loudly red. `scripts/diagnostics/audit_golden_match.py` is the lower-level audit over
+explicit graph JSONs on a live box.
 
 **The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every
-forking golden entry it re-compiles the shape's OWN snippet un-pinned (deployable regime, the golden file's own card —
-the enumeration is static given shape+context, so no GPU bench) and checks the recorded knobs against the offered
-candidates. An entry only a pin can realize (`EMMY_KNOBS` / working-file proposal measurement benches it, the
-enumeration never offers
+forking realization it re-compiles the target's own program under the realization's input pins, without pinning its
+recorded winner (deployable regime, the golden file's own card — the enumeration is static given shape+context, so no
+GPU bench), and checks the recorded knobs against the offered candidates. An entry only an additional winner pin can
+realize (`EMMY_KNOBS` / working-file proposal measurement benches it, the input-regime enumeration never offers
 it) reports **PIN-ONLY** — legal as a documented lever while an OFFERED sibling floors the shape (the 4090
 `attention.hd512.s4096` split-KV row beside its serial deploy-floor sibling); a shape whose entries are ALL pin-only
 reports **FALL-THROUGH** and exits 1: a deploy logs "no offered candidate realizes any of them" and falls past the
 golden tier — the missing-floor pathology that deployed a 111 ms 0.03x `mlp_down.m4096` kernel and NaN-poisoned the
-downstream accuracy check before the floor-sibling discipline. Fast-math entries audit under the pinned
-`F16_MMA_F32_ACC` gate (their own deploy regime). The own-snippet and in-model views genuinely differ: the 5090
-`mlp_down.m4096` split-K row realizes standalone but not on the serving twin's epilogue-fused down — the offer audit
-passes it and `--in-model` is the authority there, while the s4096 split-KV row fails even standalone, which is what
-this audit catches at record time.
+downstream accuracy check before the floor-sibling discipline. Every realization audits under its explicit input
+pins. The own-program and serving-twin views genuinely differ: the 5090 `mlp_down.m4096`
+split-K row realizes standalone but not on the serving twin's epilogue-fused down, while the s4096 split-KV row fails
+even standalone. The unified release command runs both views.
 
 **Live-GPU scoping.** `run` / `compile --golden NAME` prefer the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can

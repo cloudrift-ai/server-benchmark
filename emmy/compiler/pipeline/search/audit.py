@@ -16,9 +16,9 @@ nvcc regime (goldens are -O3 truth; under ``make test``'s ``-Xcicc -O1`` lane go
 consultation would silently never fire) and targets the golden file's own card via
 ``Context.from_target``, so it runs identically on a GPU-less CI box and the 5090 host.
 
-Consumers: ``emmy eval golden --in-model`` (re-traces a model's serving twins weight-free
-via ``emmy.serving.twins`` and audits every card whose goldens are tagged with that
-model), the serving-image release gate (``scripts/check_serving_goldens.py``), and
+Consumers: ``emmy eval golden GOLDEN_YAML --serving-config PATH`` (re-traces the pinned
+model's serving twins weight-free and audits the exact file-scoped realization matrix),
+the serving-image release gate, and
 ``scripts/diagnostics/audit_golden_match.py`` (explicit graph JSONs).
 """
 
@@ -56,13 +56,21 @@ def audit_graph(graph: Graph, ctx=None) -> list[dict]:
     return records
 
 
-def audit_card(graphs: dict[str, Graph], gpu_name: str, compute_cap: tuple[int, int]) -> dict[str, list[dict]]:
+def audit_card(
+    graphs: dict[str, Graph],
+    gpu_name: str,
+    compute_cap: tuple[int, int],
+    *,
+    goldens: list | None = None,
+) -> dict[str, list[dict]]:
     """Audit every graph in ``graphs`` (name → traced Graph) against the recorded goldens
-    of ``(gpu_name, compute_cap)``, off-GPU-safe. Returns name → verdict records; a graph
-    whose compile raises yields a single :data:`COMPILE_FAIL` record with the error."""
+    of ``(gpu_name, compute_cap)``, off-GPU-safe. ``goldens`` optionally scopes the audit
+    to one file or precision lane. Returns name → verdict records; a graph whose compile
+    raises yields a single :data:`COMPILE_FAIL` record with the error."""
     from emmy import config  # noqa: PLC0415
     from emmy.compiler import target  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search import golden  # noqa: PLC0415
 
     cap = tuple(compute_cap)
     out: dict[str, list[dict]] = {}
@@ -72,8 +80,11 @@ def audit_card(graphs: dict[str, Graph], gpu_name: str, compute_cap: tuple[int, 
         # non-golden forks, so the compile follows the real cold-deploy path.
         absent = Path(tmp) / "absent-online.json"
         prev_target = target._OVERRIDE  # noqa: SLF001 — save/restore around the audit
+        recorded = golden.GOLDEN_RECORDS
         with config.nvcc_flags_override(""), config.online_file_override(absent):
             target.set_target(cap)
+            if goldens is not None:
+                golden.GOLDEN_RECORDS = goldens
             try:
                 # Built inside the overrides: ``compile_flags`` (→ ``H_opt=3``, the
                 # deployable regime golden consultation is gated on) reads the env at
@@ -86,6 +97,7 @@ def audit_card(graphs: dict[str, Graph], gpu_name: str, compute_cap: tuple[int, 
                         logger.error("golden audit: %s failed to compile: %s", name, ex)
                         out[name] = [{"node": None, "key": None, "verdict": COMPILE_FAIL, "golden": None, "us": None, "error": str(ex)}]
             finally:
+                golden.GOLDEN_RECORDS = recorded
                 target.set_target(prev_target)
     return out
 

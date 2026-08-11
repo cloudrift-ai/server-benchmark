@@ -13,27 +13,21 @@ change to how that script spells its arguments moves every shipped image's kerne
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from emmy.publish import model_slug as library_model_slug
+from emmy.serving.release import load_serving_config, model_matches, revision_matches, split_revision
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SERVE_DIR = PROJECT_ROOT / "docker" / "vllm-emmy-serve"
 SLUG_SCRIPT = SERVE_DIR / "model_slug.sh"
 SERVE_SCRIPT = SERVE_DIR / "serve.sh"
-
-_spec = importlib.util.spec_from_file_location("check_serving_goldens", PROJECT_ROOT / "scripts" / "check_serving_goldens.py")
-csg = importlib.util.module_from_spec(_spec)
-sys.modules["check_serving_goldens"] = csg
-_spec.loader.exec_module(csg)
 
 
 def slug(model: str) -> str:
@@ -72,7 +66,6 @@ def test_python_slug_matches_the_shell_schema():
     """The library owns the rule; the gate and shell adapters must agree with it."""
     for model in ("google/gemma-4-12B-it", "Qwen/Qwen3-Embedding-0.6B", "org/Weird Model!!Name"):
         assert library_model_slug(model) == slug(model)
-        assert csg.model_slug(model) == slug(model)
 
 
 @pytest.mark.parametrize(
@@ -88,12 +81,13 @@ def test_python_slug_matches_the_shell_schema():
     ],
 )
 def test_golden_model_coverage_rule(golden_model, target, want):
-    assert csg.covers(golden_model, target) is want
+    config = SimpleNamespace(model=target, revision=None)
+    assert model_matches(golden_model, config) is want
 
 
 def test_prefix_rule_respects_dash_boundaries():
     """`gemma-4-1` must not cover `gemma-4-12b` — a substring match would alias two models."""
-    assert not csg.covers("google/gemma-4-1", "gemma-4-12b")
+    assert not model_matches("google/gemma-4-1", SimpleNamespace(model="gemma-4-12b", revision=None))
 
 
 @pytest.mark.parametrize(
@@ -105,7 +99,7 @@ def test_prefix_rule_respects_dash_boundaries():
     ],
 )
 def test_revision_splits_off_the_provenance_tag(model, want):
-    assert csg.split_revision(model) == want
+    assert split_revision(model) == want
 
 
 @pytest.mark.parametrize(
@@ -126,7 +120,8 @@ def test_revision_splits_off_the_provenance_tag(model, want):
     ],
 )
 def test_revision_tagged_goldens_match_their_own_revision_only(golden_model, revision, want):
-    assert csg.covers(golden_model, "glm-4.5-air-exl3", revision) is want
+    config = SimpleNamespace(model="glm-4.5-air-exl3", revision=revision)
+    assert model_matches(golden_model, config) is want
 
 
 @pytest.mark.parametrize(
@@ -141,11 +136,12 @@ def test_revision_tagged_goldens_match_their_own_revision_only(golden_model, rev
     ],
 )
 def test_revision_comparison(golden_rev, target_rev, want):
-    assert csg.revision_matches(golden_rev, target_rev) is want
+    assert revision_matches(golden_rev, target_rev) is want
 
 
 REQUIRED_KEYS = {
     "SERVE_MODEL",
+    "SERVE_GOLDEN_FILE",
     "SERVE_MAX_MODEL_LEN",
     "SERVE_MAX_NUM_BATCHED_TOKENS",
     "SERVE_GPU_MEM_UTIL",
@@ -461,142 +457,59 @@ def test_release_scripts_are_syntactically_valid():
         assert subprocess.run([shell, "-n", str(script)], capture_output=True).returncode == 0, script.name
 
 
-def test_gate_reports_a_card_with_no_goldens():
-    result = subprocess.run(
-        [sys.executable, "scripts/check_serving_goldens.py", "--model", "google/gemma-4-12B-it", "--gpu", "NVIDIA Made Up 9000"],
-        capture_output=True,
-        text=True,
-        cwd=PROJECT_ROOT,
-    )
-    assert result.returncode == 1
-    assert "no goldens recorded" in result.stdout
+def test_makefile_uses_eval_golden_as_the_release_gate():
+    make = (PROJECT_ROOT / "Makefile").read_text()
+    body = make.split("serve-goldens:", 1)[1].split("\nserve-warm:", 1)[0]
+    assert "emmy eval golden" in body
+    assert "SERVE_GOLDEN_FILE" in body
+    assert "--serving-config" in body and "SERVE_CONFIG" in body
+    assert "check_serving_goldens.py" not in body
+    assert "serve-warm: serve-goldens" in make
 
 
-def test_gate_reports_a_tuned_card_with_no_goldens_for_this_model():
-    """The distinction that matters to the operator: the card is tuned, just not for this."""
-    result = subprocess.run(
-        [sys.executable, "scripts/check_serving_goldens.py", "--model", "meta-llama/Llama-3.1-8B", "--gpu", "NVIDIA GeForce RTX 5090"],
-        capture_output=True,
-        text=True,
-        cwd=PROJECT_ROOT,
-    )
-    assert result.returncode == 1
-    assert "none recorded for" in result.stdout
-    assert "models this card IS tuned for" in result.stdout
-
-
-def test_gate_passes_for_the_shipped_gemma4_config():
-    """The one model with a pinned config must pass its own gate on its pinned card."""
-    result = _gate("google/gemma-4-12B-it")
-    assert result.returncode == 0, result.stdout
-    assert "google/gemma-4-12B" in result.stdout  # provenance is reported, not just a count
-
-
-def _gate(model: str, *args: str, gpu: str = "NVIDIA GeForce RTX 5090"):
-    cmd = [sys.executable, "scripts/check_serving_goldens.py", "--model", model, "--gpu", gpu, *args]
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=PROJECT_ROOT)
-
-
-# The `@revision`-tagged golden file that made these cases real. It is tagged by sha
-# rather than by the `2.25bpw` branch it was cut from, because the release pipeline pins
-# `SERVE_REVISION` to a sha and the gate compares revisions exactly. Before the revision half of
-# the matcher existed, every one of the three checks below reported "none recorded for this model".
-_TAGGED_MODEL = "turboderp/GLM-4.5-Air-exl3"
-_TAGGED_REV = "6a309ed6d606fc0154e6e1aeb0912cd3c25534fe"
-
-
-def _tagged_gate(monkeypatch, capsys, model: str, *args: str):
-    """Run the CLI against one synthetic tagged record, independent of shipped models."""
-    from emmy.compiler.pipeline.search import golden
-
-    record = SimpleNamespace(
-        gpu_name="NVIDIA GeForce RTX 5090",
-        compute_cap=(12, 0),
-        model=f"{_TAGGED_MODEL}@{_TAGGED_REV}",
-        origin_ops=("matmul",),
-    )
-    monkeypatch.setattr(golden, "GOLDEN_RECORDS", [record])
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["check_serving_goldens.py", "--model", model, "--gpu", record.gpu_name, *args],
-    )
-    return SimpleNamespace(returncode=csg.main(), stdout=capsys.readouterr().out)
-
-
-def test_gate_matches_a_revision_tagged_golden_set(monkeypatch, capsys):
-    result = _tagged_gate(monkeypatch, capsys, _TAGGED_MODEL, "--revision", _TAGGED_REV)
-    assert result.returncode == 0, result.stdout
-    assert f"{_TAGGED_MODEL}@{_TAGGED_REV}" in result.stdout
-    assert _TAGGED_REV in result.stdout
-
-
-def test_gate_rejects_a_different_revision_of_the_same_repo(monkeypatch, capsys):
-    """An EXL3 rung differs in exactly the per-tensor bit allocation the shape keys carry, so
-    another rung's goldens are not coverage — and the message must say THAT, not "no goldens"."""
-    result = _tagged_gate(monkeypatch, capsys, _TAGGED_MODEL, "--revision", "2.0bpw")
-    assert result.returncode == 1
-    assert f"recorded against {_TAGGED_REV}, not '2.0bpw'" in result.stdout
-    assert "none recorded for" not in result.stdout
-
-
-def test_gate_fails_loudly_when_the_revision_cannot_be_evaluated(monkeypatch, capsys):
-    """Tagged goldens + an unnamed release revision is UNEVALUABLE. The gate must not report it
-    as zero coverage (the pre-fix behaviour) and must not report it as OK either."""
-    result = _tagged_gate(monkeypatch, capsys, _TAGGED_MODEL)
-    assert result.returncode == 1
-    assert "CANNOT be evaluated" in result.stdout
-    assert "--revision" in result.stdout
-
-
-def test_gate_accepts_the_tagged_spelling_on_the_model_flag(monkeypatch, capsys):
-    """`<repo>@<rev>` is the golden file's spelling; typing it at the CLI must not mangle the slug."""
-    assert _tagged_gate(monkeypatch, capsys, f"{_TAGGED_MODEL}@{_TAGGED_REV}").returncode == 0
-
-
-def test_untagged_goldens_cover_a_revision_pinned_release():
-    """gemma-4's goldens carry no revision tag, so pinning SERVE_REVISION cannot un-cover them —
-    the compatibility half of the rule, and what keeps every shipped golden file working."""
-    result = _gate("google/gemma-4-12B-it", "--revision", "a1b2c3d4e5f6a1b2")
-    assert result.returncode == 0, result.stdout
-
-
-def test_makefile_forwards_the_pinned_revision_to_the_gate():
-    """The gate can only apply the revision rule if the release pipeline tells it the revision.
-    `make serve-goldens` is the only caller in the workflow."""
-    body = (PROJECT_ROOT / "Makefile").read_text().split("serve-goldens:", 1)[1].split("\nserve-warm:", 1)[0]
-    assert "check_serving_goldens.py" in body
-    assert "--revision" in body and "SERVE_REVISION" in body
-    assert "--strict-major-gaps" in body and "--release-config" in body
-    assert "--checkpoint" in body and "CHECKPOINT" in body
-    assert "--static-only-release" in body and "SERVE_STATIC_ONLY" in body
-
-
-def test_release_config_widths_include_pinned_and_warm_decode_prefill(tmp_path):
+def test_release_config_realizations_include_pinned_and_warm_decode_prefill(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(
-        "SERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\nSERVE_PREFILL_BUCKET=0\n"
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=96\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\nSERVE_PREFILL_BUCKET=0\n"
         'SERVE_WARM_SHAPES="8:2048:2056 64::4096 32:512:544:fm"\n'
     )
-    assert csg.release_widths(config) == (8, 32, 64, 512, 2048)
+    serving = load_serving_config(config)
+    got = {(dict(row.bindings).get("num_tokens"), row.pins) for row in serving.realizations}
+    assert {
+        (8, (("FAST_MATH", False),)),
+        (32, (("FAST_MATH", False),)),
+        (64, (("FAST_MATH", False),)),
+        (2048, (("FAST_MATH", False),)),
+        (32, (("FAST_MATH", True),)),
+        (512, (("FAST_MATH", True),)),
+    } <= got
 
 
 def test_release_config_uses_capacity_as_default_prefill_bucket(tmp_path):
     config = tmp_path / "model.env"
-    config.write_text("SERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\n")
-    assert csg.release_widths(config) == (32, 96)
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=96\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\n"
+    )
+    serving = load_serving_config(config)
+    assert serving.static_widths == (1, 32, 96)
 
 
 def test_release_config_rejects_zero_prefill_capacity(tmp_path):
     config = tmp_path / "model.env"
-    config.write_text("SERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=0\n")
-    with pytest.raises(ValueError, match="SERVE_PREFILL_CAPACITY must be positive"):
-        csg.release_widths(config)
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=0\n"
+    )
+    with pytest.raises(ValueError, match="SERVE_PREFILL_CAPACITY must be >= 1"):
+        load_serving_config(config)
 
 
-def test_static_only_gate_rejects_release_config_without_m1_proof(tmp_path):
+def test_static_only_config_rejects_release_without_m1_proof(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
         "SERVE_STATIC_ONLY=1\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=1\n"
         "SERVE_DECODE_BUCKET=1\n"
@@ -605,105 +518,10 @@ def test_static_only_gate_rejects_release_config_without_m1_proof(tmp_path):
         "SERVE_M1_TIER=0\n"
         "SERVE_CAPTURE_SIZES=[1]\n"
     )
-    result = _gate(
-        "google/gemma-4-12B-it",
-        "--strict-major-gaps",
-        "--static-only-release",
-        "--release-config",
-        str(config),
-    )
-    assert result.returncode == 2
-    assert "static-only release scope is unsafe" in result.stdout
-    assert "SERVE_M1_TIER=1" in result.stdout
+    with pytest.raises(ValueError, match="unsafe static-only serving envelope"):
+        load_serving_config(config)
 
 
-def test_local_checkpoint_override_preserves_release_provenance():
-    source, provenance = csg.release_capture_source("cloudriftai/model-exl3", "0123456789abcdef", "/local/exact")
-    assert source == "/local/exact"
-    assert provenance == "cloudriftai/model-exl3@0123456789abcdef"
-
-
-def test_strict_release_twin_audit_fails_major_gaps(monkeypatch):
-    import emmy.compiler.pipeline.search.audit as audit
-    import emmy.serving.twins as twins
-
-    class MajorKey:
-        is_warp = True
-        reduce_max = 128
-
-        def __str__(self):
-            return "major-key"
-
-    key = MajorKey()
-    seen = {}
-
-    def fake_capture(model, **kwargs):
-        seen.update(model=model, **kwargs)
-        return {"pre1": object()}
-
-    monkeypatch.setattr(twins, "capture_in_model_graphs", fake_capture)
-    monkeypatch.setattr(
-        audit,
-        "audit_card",
-        lambda _graphs, _gpu, _cap: {
-            "pre1": [{"verdict": "GAP", "key": key}],
-        },
-    )
-
-    assert not csg.audit_release_twins(
-        "/local/exact-checkpoint",
-        "NVIDIA GeForce RTX 5090",
-        [(12, 0)],
-        (32, 512),
-        provenance="org/model@revision",
-    )
-    assert seen == {"model": "/local/exact-checkpoint", "extra_widths": (32, 512)}
-
-
-def test_static_only_release_twin_audit_captures_only_m1(monkeypatch):
-    import emmy.compiler.pipeline.search.audit as audit
-    import emmy.serving.twins as twins
-
-    seen = {}
-
-    def fake_capture(model, **kwargs):
-        seen.update(model=model, **kwargs)
-        return {"pre1": object()}
-
-    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
-    monkeypatch.setattr(audit, "audit_card", lambda _graphs, _gpu, _cap: {"pre1": [{"verdict": "MATCH", "key": None}]})
-
-    assert csg.audit_release_twins(
-        "/local/exact-checkpoint",
-        "NVIDIA GeForce RTX 5090",
-        [(12, 0)],
-        (),
-        provenance="org/model@revision",
-        static_only=True,
-    )
-    assert seen == {
-        "model": "/local/exact-checkpoint",
-        "decode_bucket": 1,
-        "prefill_bucket": 0,
-        "extra_widths": (),
-        "static_only": True,
-    }
-
-
-def test_strict_release_twin_audit_fails_when_provider_rejects_widths(monkeypatch, capsys):
-    import emmy.serving.twins as twins
-
-    monkeypatch.setattr(
-        twins,
-        "capture_in_model_graphs",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("fixed architecture width")),
-    )
-    assert not csg.audit_release_twins("org/deepseek", "Tesla V100-SXM3-32GB", [(7, 0)], (64,))
-    assert "FAIL: strict in-model coverage cannot represent this release: fixed architecture width" in capsys.readouterr().out
-
-
-def test_preflight_enumeration_applies_the_same_revision_rule():
-    """The preflight renders + nvcc-compiles the model's golden set, so enumerating another
-    rung's shapes would gate a rental on the wrong kernels. Same matcher, revision included."""
-    body = (PROJECT_ROOT / "scripts" / "preflight_serving_kernels.sh").read_text()
-    assert "select_goldens" in body and "REVISION" in body
+def test_retired_serving_gate_scripts_are_absent():
+    assert not (PROJECT_ROOT / "scripts" / "check_serving_goldens.py").exists()
+    assert not (PROJECT_ROOT / "scripts" / "preflight_serving_kernels.sh").exists()

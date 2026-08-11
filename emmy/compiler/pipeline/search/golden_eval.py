@@ -43,14 +43,10 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> list[dict]:
 
 def evaluate_record(record, ctx: Context, scorer: Callable[[dict], float] | None = None) -> tuple[dict, int | None, int, int | None]:
     """Rank a generic program-backed record in its current candidate enumeration."""
-    from contextlib import nullcontext  # noqa: PLC0415
-
-    from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
 
-    gate = F16_MMA_F32_ACC.pinned("1") if fast_math_knobs(record.knobs) else nullcontext()
-    with gate:
+    with pinned_knobs(record.pin_map):
         rows = enumerate_graph(record.target_program.copy(), ctx)
     if not rows:
         return {}, None, 0, None

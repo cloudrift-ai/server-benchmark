@@ -580,931 +580,1052 @@ programs:
     inputs: [x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
 configs:
-- name: matmul.square.512
-  program: 0
+- program: 0
   target:
     origins:
     - matmul
-  knobs:
-    WORK: t16x8
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d3/tma
-    TILE: f4x8
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 8.6
-    reference_us: 12.28
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 1
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d3/tma
+      TILE: f4x8
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 8.6
+      reference_us: 12.28
+      reference_backend: cublas
+- program: 1
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x8
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d3/tma
-    TILE: mma_m16n8k16_f16_f32/f4x1/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 4.2
-    reference_us: 6.14
-    reference_backend: cublas
-- name: matmul.square.512.fp16
-  program: 1
+  realizations:
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d3/tma
+      TILE: mma_m16n8k16_f16_f32/f4x1/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 4.2
+      reference_us: 6.14
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f4x1/k4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d3/tma
+    measurements:
+      emmy_us: 3.9
+      reference_us: 6.14
+      reference_backend: cublas
+- program: 2
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w1x8
-    TILE: mma_m16n8k16_f16_f16/f4x1/k4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d3/tma
-  measurements:
-    emmy_us: 3.9
-    reference_us: 6.14
-    reference_backend: cublas
-- name: matmul.square.1024
-  program: 2
+  realizations:
+  - name: matmul.square.1024
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 15.59
+      reference_us: 14.51
+      reference_backend: cublas
+- program: 3
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f1x4/k8
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 15.59
-    reference_us: 14.51
-    reference_backend: cublas
-- name: matmul.square.2048
-  program: 3
+  realizations:
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 88.5
+      reference_us: 98.36
+      reference_backend: cublas
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 61.3
+      reference_us: 98.36
+      reference_backend: cublas
+- program: 4
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 88.5
-    reference_us: 98.36
-    reference_backend: cublas
-- name: matmul.square.2048
-  program: 3
+  realizations:
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d4/tma
+      TILE: mma_m16n8k16_f16_f32/f2x4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 640.83
+      reference_us: 640.93
+      reference_backend: cublas
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/tma
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 491.9
+      reference_us: 640.93
+      reference_backend: cublas
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 481.1
+      reference_us: 640.93
+      reference_backend: cublas
+- program: 5
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 61.3
-    reference_us: 98.36
-    reference_backend: cublas
-- name: matmul.square.4096
-  program: 4
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d4/tma
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 4.2
+      reference_us: 6.14
+      reference_backend: cublas
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f16/f2x2/k8
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.6
+      reference_us: 6.14
+      reference_backend: cublas
+- program: 6
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d4/tma
-    TILE: mma_m16n8k16_f16_f32/f2x4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 640.83
-    reference_us: 640.93
-    reference_backend: cublas
-- name: matmul.square.4096
-  program: 4
+  realizations:
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d4/tma
+      TILE: mma_m16n8k16_f16_f32/f2x4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 258.47
+      reference_us: 250.54
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/tma
+      TILE: mma_m16n8k16_f16_f16/f2x4/k8
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 238.5
+      reference_us: 250.54
+      reference_backend: cublas
+- program: 7
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/tma
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 491.9
-    reference_us: 640.93
-    reference_backend: cublas
-- name: matmul.square.4096
-  program: 4
+  realizations:
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 90.1
+      reference_us: 95.22
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 64.8
+      reference_us: 95.22
+      reference_backend: cublas
+- program: 8
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 481.1
-    reference_us: 640.93
-    reference_backend: cublas
-- name: matmul.square.512.dynM
-  program: 5
+  realizations:
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d4/tma
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 610.6
+      reference_us: 557.94
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 594.9
+      reference_us: 557.94
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 369.7
+      reference_us: 557.94
+      reference_backend: cublas
+- program: 9
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d4/tma
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 4.2
-    reference_us: 6.14
-    reference_backend: cublas
-- name: matmul.square.512.dynM
-  program: 5
+  realizations:
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 303.0
+      reference_us: 296.95
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 201.3
+      reference_us: 296.95
+      reference_backend: cublas
+- program: 10
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x2
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f16/f2x2/k8
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.6
-    reference_us: 6.14
-    reference_backend: cublas
-- name: matmul.qkv.h4096
-  program: 6
+  realizations:
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 250.8
+      reference_us: 249.82
+      reference_backend: cublas
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f16/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/tma
+    measurements:
+      emmy_us: 240.6
+      reference_us: 249.82
+      reference_backend: cublas
+- program: 11
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d4/tma
-    TILE: mma_m16n8k16_f16_f32/f2x4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 258.47
-    reference_us: 250.54
-    reference_backend: cublas
-- name: matmul.qkv.h4096
-  program: 6
+  realizations:
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: g4k
+      RASTER: ''
+      STAGE: d1/tma
+      TILE: mma_m16n8k16_f16_f32/f4x2/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 91.4
+      reference_us: 95.08
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 64.9
+      reference_us: 95.08
+      reference_backend: cublas
+- program: 12
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w2x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/tma
-    TILE: mma_m16n8k16_f16_f16/f2x4/k8
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 238.5
-    reference_us: 250.54
-    reference_backend: cublas
-- name: matmul.o_proj.h4096
-  program: 7
+  realizations:
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 610.6
+      reference_us: 553.7
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 595.6
+      reference_us: 553.7
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 370.1
+      reference_us: 553.7
+      reference_backend: cublas
+- program: 13
   target:
     origins:
     - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 90.1
-    reference_us: 95.22
-    reference_backend: cublas
-- name: matmul.o_proj.h4096
-  program: 7
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 64.8
-    reference_us: 95.22
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096
-  program: 8
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d4/tma
-    TILE: mma_m16n8k16_f16_f32/f4x4/k2
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 610.6
-    reference_us: 557.94
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096
-  program: 8
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 594.9
-    reference_us: 557.94
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096
-  program: 8
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 369.7
-    reference_us: 557.94
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096
-  program: 9
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 303.0
-    reference_us: 296.95
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096
-  program: 9
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 201.3
-    reference_us: 296.95
-    reference_backend: cublas
-- name: matmul.qkv.h4096.dynM
-  program: 10
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 250.8
-    reference_us: 249.82
-    reference_backend: cublas
-- name: matmul.qkv.h4096.dynM
-  program: 10
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w2x4
-    TILE: mma_m16n8k16_f16_f16/f2x4/k8
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d1/tma
-  measurements:
-    emmy_us: 240.6
-    reference_us: 249.82
-    reference_backend: cublas
-- name: matmul.o_proj.h4096.dynM
-  program: 11
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w1x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: g4k
-    RASTER: ''
-    STAGE: d1/tma
-    TILE: mma_m16n8k16_f16_f32/f4x2/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 91.4
-    reference_us: 95.08
-    reference_backend: cublas
-- name: matmul.o_proj.h4096.dynM
-  program: 11
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 64.9
-    reference_us: 95.08
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096.dynM
-  program: 12
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f2x4/k2
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 610.6
-    reference_us: 553.7
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096.dynM
-  program: 12
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f32/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 595.6
-    reference_us: 553.7
-    reference_backend: cublas
-- name: matmul.mlp_gate_up.h4096.dynM
-  program: 12
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: ''
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 370.1
-    reference_us: 553.7
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096.dynM
-  program: 13
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x4
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: g8k
-    RASTER: ''
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f2x2/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 304.0
-    reference_us: 295.03
-    reference_backend: cublas
-- name: matmul.mlp_down.h4096.dynM
-  program: 13
-  target:
-    origins:
-    - matmul
-  knobs:
-    WORK: w4x2
-    TILE: mma_m16n8k16_f16_f16/f4x8/k4
-    REDUCE: g2k
-    RASTER: ''
-    STAGE: d2/tma
-  measurements:
-    emmy_us: 201.8
-    reference_us: 295.03
-    reference_backend: cublas
-- name: softmax.k2048
-  program: 14
+  realizations:
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x4
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: g8k
+      RASTER: ''
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 304.0
+      reference_us: 295.03
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/tma
+    measurements:
+      emmy_us: 201.8
+      reference_us: 295.03
+      reference_backend: cublas
+- program: 14
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t512
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.7
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: reduce.k2048
-  program: 15
+  realizations:
+  - name: softmax.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.7
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 15
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t64
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 1.5
-    reference_us: 5.4
-    reference_backend: torch-eager
-- name: softmax.k8192
-  program: 16
+  realizations:
+  - name: reduce.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 1.5
+      reference_us: 5.4
+      reference_backend: torch-eager
+- program: 16
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t256
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 10.2
-    reference_us: 14.29
-    reference_backend: torch-eager
-- name: reduce.k8192
-  program: 17
+  realizations:
+  - name: softmax.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 10.2
+      reference_us: 14.29
+      reference_backend: torch-eager
+- program: 17
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t128
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.3
-    reference_us: 6.1
-    reference_backend: torch-eager
-- name: rms_norm.k2048
-  program: 18
+  realizations:
+  - name: reduce.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.3
+      reference_us: 6.1
+      reference_backend: torch-eager
+- program: 18
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t512
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.8
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: rms_norm.k4096
-  program: 19
+  realizations:
+  - name: rms_norm.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.8
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 19
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t512
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 6.4
-    reference_us: 6.14
-    reference_backend: torch-eager
-- name: rms_norm.k8192
-  program: 20
+  realizations:
+  - name: rms_norm.k4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 6.4
+      reference_us: 6.14
+      reference_backend: torch-eager
+- program: 20
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 10.2
-    reference_us: 10.24
-    reference_backend: torch-eager
-- name: pointwise.n4096
-  program: 21
+  realizations:
+  - name: rms_norm.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 10.2
+      reference_us: 10.24
+      reference_backend: torch-eager
+- program: 21
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    TILE: f4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.3
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: pointwise.n16384
-  program: 22
+  realizations:
+  - name: pointwise.n4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      TILE: f4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.3
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 22
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    TILE: f2
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 11.1
-    reference_us: 12.51
-    reference_backend: torch-eager
-- name: softmax.k2048.dynM
-  program: 23
+  realizations:
+  - name: pointwise.n16384
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      TILE: f2
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 11.1
+      reference_us: 12.51
+      reference_backend: torch-eager
+- program: 23
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t512
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.7
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: reduce.k2048.dynM
-  program: 24
+  realizations:
+  - name: softmax.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.7
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 24
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t64
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 1.5
-    reference_us: 5.4
-    reference_backend: torch-eager
-- name: softmax.k8192.dynM
-  program: 25
+  realizations:
+  - name: reduce.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 1.5
+      reference_us: 5.4
+      reference_backend: torch-eager
+- program: 25
   target:
     origins:
     - softmax
-  knobs:
-    WORK: t256
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 10.1
-    reference_us: 14.27
-    reference_backend: torch-eager
-- name: reduce.k8192.dynM
-  program: 26
+  realizations:
+  - name: softmax.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 10.1
+      reference_us: 14.27
+      reference_backend: torch-eager
+- program: 26
   target:
     origins:
     - sum_1
     - sum_1_keepdim
-  knobs:
-    WORK: t128
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.3
-    reference_us: 6.1
-    reference_backend: torch-eager
-- name: rms_norm.k2048.dynM
-  program: 27
+  realizations:
+  - name: reduce.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.3
+      reference_us: 6.1
+      reference_backend: torch-eager
+- program: 27
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t512
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.9
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: rms_norm.k4096.dynM
-  program: 28
+  realizations:
+  - name: rms_norm.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.9
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 28
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t512
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 6.4
-    reference_us: 6.14
-    reference_backend: torch-eager
-- name: rms_norm.k8192.dynM
-  program: 29
+  realizations:
+  - name: rms_norm.k4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 6.4
+      reference_us: 6.14
+      reference_backend: torch-eager
+- program: 29
   target:
     origins:
     - rms_norm
-  knobs:
-    WORK: t256
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    REDUCE: coop
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 10.3
-    reference_us: 10.25
-    reference_backend: torch-eager
-- name: pointwise.n4096.dynM
-  program: 30
+  realizations:
+  - name: rms_norm.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      REDUCE: coop
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 10.3
+      reference_us: 10.25
+      reference_backend: torch-eager
+- program: 30
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    TILE: f4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 3.3
-    reference_us: 4.1
-    reference_backend: torch-eager
-- name: pointwise.n16384.dynM
-  program: 31
+  realizations:
+  - name: pointwise.n4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      TILE: f4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 3.3
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 31
   target:
     origins:
     - relu
-  knobs:
-    WORK: ''
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    TILE: f2
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 11.1
-    reference_us: 12.52
-    reference_backend: torch-eager
-- name: attention.hd64
-  program: 32
+  realizations:
+  - name: pointwise.n16384.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      TILE: f2
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 11.1
+      reference_us: 12.52
+      reference_backend: torch-eager
+- program: 32
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    STAGE: d2/tma
-    TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-    TILE@pj: mma_m16n8k16_f16_f32/f1x8/k8
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 8.6
-    reference_us: 10.24
-    reference_backend: torch-eager
-- name: attention.hd64
-  program: 32
+  realizations:
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      STAGE: d2/tma
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f32/f1x8/k8
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 8.6
+      reference_us: 10.24
+      reference_backend: torch-eager
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      STAGE: d2/tma
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
+    measurements:
+      emmy_us: 7.2
+      reference_us: 10.24
+      reference_backend: torch-eager
+- program: 33
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d2/tma
-    TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-    TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
-  measurements:
-    emmy_us: 7.2
-    reference_us: 10.24
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 33
+  realizations:
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      STAGE: d2/tma
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 16.5
+      reference_us: 18.42
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      STAGE: d1/tma/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
+    measurements:
+      emmy_us: 15.7
+      reference_us: 18.42
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x1
+      STAGE: d2/tma
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
+    measurements:
+      emmy_us: 14.6
+      reference_us: 18.42
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x1
+      STAGE: d1/tma/split
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
+    measurements:
+      emmy_us: 13.5
+      reference_us: 18.42
+      reference_backend: torch-eager
+- program: 34
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    STAGE: d2/tma
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 16.5
-    reference_us: 18.42
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 33
+  realizations:
+  - name: attention.hd64.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f1x16/k4
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 8.6
+      reference_us: 10.23
+      reference_backend: torch-eager
+  - name: attention.hd64.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f16/f1x8/k8
+    measurements:
+      emmy_us: 7.5
+      reference_us: 10.23
+      reference_backend: torch-eager
+- program: 35
   target:
     origins:
     - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    STAGE: d1/tma/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
-  measurements:
-    emmy_us: 15.7
-    reference_us: 18.42
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 33
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    STAGE: d2/tma
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
-  measurements:
-    emmy_us: 14.6
-    reference_us: 18.42
-    reference_backend: torch-eager
-- name: attention.hd128
-  program: 33
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    STAGE: d1/tma/split
-    TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-    TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
-  measurements:
-    emmy_us: 13.5
-    reference_us: 18.42
-    reference_backend: torch-eager
-- name: attention.hd64.dynM
-  program: 34
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f1x16/k4
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 8.6
-    reference_us: 10.23
-    reference_backend: torch-eager
-- name: attention.hd64.dynM
-  program: 34
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w4x1
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f16/f1x8/k8
-  measurements:
-    emmy_us: 7.5
-    reference_us: 10.23
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 35
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    FAST_EXP: false
-    INTERLEAVE_LOADS: true
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f32/f1x8/k8
-    VECTORIZE_LOADS: true
-  measurements:
-    emmy_us: 16.4
-    reference_us: 18.4
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 35
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    STAGE: d2/tma
-    TILE: mma_m16n8k16_f16_f16/f1x16/k4
-  measurements:
-    emmy_us: 15.3
-    reference_us: 18.4
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 35
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    STAGE: d1/tma/split
-    TILE: mma_m16n8k16_f16_f32/f1x8/k8
-  measurements:
-    emmy_us: 16.0
-    reference_us: 18.4
-    reference_backend: torch-eager
-- name: attention.hd128.dynM
-  program: 35
-  target:
-    origins:
-    - scaled_dot_product_attention
-  knobs:
-    WORK: w2x1
-    STAGE: d1/tma/split
-    TILE: mma_m16n8k16_f16_f16/f1x16/k4
-  measurements:
-    emmy_us: 13.5
-    reference_us: 18.4
-    reference_backend: torch-eager
+  realizations:
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 16.4
+      reference_us: 18.4
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x1
+      STAGE: d2/tma
+      TILE: mma_m16n8k16_f16_f16/f1x16/k4
+    measurements:
+      emmy_us: 15.3
+      reference_us: 18.4
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      STAGE: d1/tma/split
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+    measurements:
+      emmy_us: 16.0
+      reference_us: 18.4
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x1
+      STAGE: d1/tma/split
+      TILE: mma_m16n8k16_f16_f16/f1x16/k4
+    measurements:
+      emmy_us: 13.5
+      reference_us: 18.4
+      reference_backend: torch-eager

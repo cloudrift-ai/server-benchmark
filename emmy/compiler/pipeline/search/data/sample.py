@@ -51,10 +51,11 @@ class Sample:
     """One ``(config, latency, identity)`` row, normalized across sources.
 
     ``knobs`` holds *only* tunable knobs (``S_*`` / ``H_*`` live in ``s_full`` /
-    ``context``); ``shape`` is the arithmetic identity; ``ref_us`` is the cuBLAS /
-    torch reference (golden only, ``None`` elsewhere); ``pretty`` / ``name`` carry
-    the kernel C identifier for DB rows. ``source`` ∈ ``{"golden", "db", "prior"}``
-    marks provenance for the
+    ``context``); ``pins`` holds the input knob regime for a golden replay and is
+    empty for measurement rows from other sources. ``shape`` is the arithmetic
+    identity; ``ref_us`` is the cuBLAS / torch reference (golden only, ``None``
+    elsewhere); ``pretty`` / ``name`` carry the kernel C identifier for DB rows.
+    ``source`` ∈ ``{"golden", "db", "prior"}`` marks provenance for the
     orthogonality fail-fast (``dataset_args.require_source``)."""
 
     knobs: dict
@@ -63,6 +64,7 @@ class Sample:
     name: str | None = None
     dtype: str | None = None
     ref_us: float | None = None
+    pins: dict = field(default_factory=dict)
     context: dict = field(default_factory=dict)
     pretty: str | None = None
     source: str = "db"
@@ -111,6 +113,7 @@ class Sample:
             name=cfg.name,
             dtype=cfg.dtype,
             ref_us=cfg.reference_us,
+            pins=cfg.pin_map,
             # gpu_name pins the device-physical features (H_sm_count / smem / …) to
             # the golden's OWN card's memorized specs, not the live device's — so a
             # PRO 6000 golden ranked on a 5090 (both cc 12.0) gets 188 SMs, not 170.

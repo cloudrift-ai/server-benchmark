@@ -41,6 +41,8 @@ def test_repository_golden_deserializes(path: Path) -> None:
     for entry in document["configs"]:
         assert not (_FORBIDDEN_ENTRY_FIELDS & set(entry)), path
         assert set(entry["target"]) in ({"origins"}, {"loop"}), path
+        assert entry["realizations"]
+        assert all("pins" in realization for realization in entry["realizations"]), path
     for record in records:
         assert record.program.nodes
         assert bool(record.origins) != (record.loop_wire is not None)
@@ -89,7 +91,8 @@ def test_working_states_and_repository_requires_measurements() -> None:
     document = load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY)
     inventory = copy.deepcopy(document)
     inventory["configs"] = [copy.deepcopy(inventory["configs"][0])]
-    entry = inventory["configs"][0]
+    inventory["configs"][0]["realizations"] = [copy.deepcopy(inventory["configs"][0]["realizations"][0])]
+    entry = inventory["configs"][0]["realizations"][0]
     entry.pop("knobs")
     entry.pop("measurements")
     assert golden_entry_state(entry) == GoldenEntryState.INVENTORY
@@ -102,10 +105,36 @@ def test_working_states_and_repository_requires_measurements() -> None:
     validate_golden_file(inventory)
 
 
+def test_realization_pins_are_registered_and_typed() -> None:
+    document = copy.deepcopy(load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY))
+    document["configs"] = [copy.deepcopy(document["configs"][0])]
+    document["configs"][0]["realizations"] = [copy.deepcopy(document["configs"][0]["realizations"][0])]
+    realization = document["configs"][0]["realizations"][0]
+
+    realization["pins"] = {"FAST_MATH": False, "F16_MMA_F32_ACC": True}
+    validate_golden_file(document)
+    record = load_golden_records(document)[0]
+    assert record.pin_map == {"F16_MMA_F32_ACC": True, "FAST_MATH": False}
+
+    realization["pins"] = {"NOT_A_KNOB": False}
+    with pytest.raises(ValueError, match="names unknown knob 'NOT_A_KNOB'"):
+        validate_golden_file(document)
+
+    realization["pins"] = {"FAST_MATH": "false"}
+    with pytest.raises(ValueError, match=r"pins\.FAST_MATH must be a bool value"):
+        validate_golden_file(document)
+
+    realization["pins"] = {"WORK": "w1x1"}
+    realization["knobs"] = {"WORK": "w2x2"}
+    with pytest.raises(ValueError, match="conflicting input pins and measured knobs for WORK"):
+        validate_golden_file(document)
+
+
 def test_promotion_rejects_mixed_bare_and_axis_scoped_schedule_keys() -> None:
     document = copy.deepcopy(load_golden_file(_FILES[0], validation=GoldenFileValidation.REPOSITORY))
     document["configs"] = [copy.deepcopy(document["configs"][0])]
-    document["configs"][0]["knobs"] = {"REDUCE": "", "REDUCE@a1": "coop"}
+    document["configs"][0]["realizations"] = [copy.deepcopy(document["configs"][0]["realizations"][0])]
+    document["configs"][0]["realizations"][0]["knobs"] = {"REDUCE": "", "REDUCE@a1": "coop"}
 
     validate_golden_file(document)
     with pytest.raises(ValueError, match="mixes bare and axis-scoped REDUCE"):

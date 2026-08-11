@@ -1007,12 +1007,7 @@ def _classify_inline_rowmax(lp: Loop, m_var: str) -> tuple[bool, int | None, str
         cur = nxt
 
     sum_names = {s.name for s in lp.body.iter() if isinstance(s, Accum) and _is_sum(s)}
-    if not (
-        isinstance(cur, Assign)
-        and cur.op.name == "multiply"
-        and len(cur.args) == 2
-        and sum(a in sum_names for a in cur.args) == 1
-    ):
+    if not (isinstance(cur, Assign) and cur.op.name == "multiply" and len(cur.args) == 2 and sum(a in sum_names for a in cur.args) == 1):
         return None
     for select in coord_selects:
         kind = _coord_select_kind(select, lp.axis.name, m_var)
@@ -1084,9 +1079,7 @@ def _recognize(graph: Graph, node: Node) -> _FlashMatch | None:
                 values = [
                     ld
                     for ld in direct
-                    if isinstance(ld, Load)
-                    and _slot_of(ld.index, lp.axis.name) is not None
-                    and _slot_of(ld.index, d_var) is not None
+                    if isinstance(ld, Load) and _slot_of(ld.index, lp.axis.name) is not None and _slot_of(ld.index, d_var) is not None
                 ]
                 if len(values) == 1:
                     inline_pv.append((values[0].input, lp))
@@ -1170,9 +1163,7 @@ def _qk_cell(rowmax: Loop, m_var: str, kv_var: str) -> tuple[Loop, list[Stmt], s
             leaves = [
                 s
                 for s in cone
-                if isinstance(s, Load)
-                and _slot_of(s.index, lp.axis.name) is not None
-                and ((m_var in vars_) or (kv_var in vars_))
+                if isinstance(s, Load) and _slot_of(s.index, lp.axis.name) is not None and ((m_var in vars_) or (kv_var in vars_))
             ]
             if len(leaves) != 1:
                 break

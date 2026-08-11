@@ -583,9 +583,7 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
             absorbed = [lowered.nodes[producer] for producer in fused if producer in lowered.nodes]
             origins = frozenset(origin for item in (node, *absorbed) for origin in provenance.get(item) if origin in record.program.nodes)
             feature_map = {
-                name: float(value)
-                for name, value in (getattr(node.op, "knobs", {}) or {}).items()
-                if name.startswith(STRUCT_PREFIX)
+                name: float(value) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
             }
             if fused:
                 feature_map["S_flash_certified"] = 1.0

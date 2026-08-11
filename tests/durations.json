@@ -129,6 +129,7 @@
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_offers_map_rows_then_warp_contraction_rows": 1.98,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_symbolic_m_offers_warp_rows": 1.51,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_normed_gqa_sdpa_certifies_flash": 0.21,
+ "tests/compiler/passes/test_recognize_boundary_rules.py::test_recognize_fires_on_pointwise": 14.0,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_a_dtype_change_keys_a_different_pool": 3.14,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_a_live_pin_keys_a_different_pool": 0.77,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_fresh_context_starts_cold": 1.05,

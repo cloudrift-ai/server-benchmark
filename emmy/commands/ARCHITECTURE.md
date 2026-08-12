@@ -553,9 +553,9 @@ emmy agent tools --output /tmp/emmy-agent-tools.json
 
 Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
 from the same definitions the runner sends to the model. The optional force-final turn disables tools once so the
-model produces the durable output with evidence already gathered; an empty forced result fails. `--disable-thinking`
-requests the endpoint's concise chat-template mode for structured tasks. `--max-turns` remains the hard limit. See
-`emmy/agent/ARCHITECTURE.md` for the security and workflow-ownership boundary.
+model produces the durable output with evidence already gathered; that request omits tool definitions, and an empty
+forced result fails. `--disable-thinking` requests the endpoint's concise chat-template mode for structured tasks.
+`--max-turns` remains the hard limit. See `emmy/agent/ARCHITECTURE.md` for the security and workflow-ownership boundary.
 
 ### `emmy fit`
 

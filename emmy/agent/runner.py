@@ -479,10 +479,12 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:
         for turn in range(1, args.max_turns + 1):
+            payload["tools"] = tool_definitions()
             payload["tool_choice"] = "auto"
             force_final = turn == args.force_final_turn
             if force_final:
                 messages.append({"role": "user", "content": FORCE_FINAL_REMINDER})
+                payload.pop("tools")
                 payload["tool_choice"] = "none"
             messages = _compact_messages(messages)
             payload["messages"] = messages

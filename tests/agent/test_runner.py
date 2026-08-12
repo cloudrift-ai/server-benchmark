@@ -156,6 +156,7 @@ async def test_run_can_force_the_final_response(monkeypatch, tmp_path):
 
     assert payloads[1]["messages"][-1] == {"role": "user", "content": runner.FORCE_FINAL_REMINDER}
     assert payloads[1]["tool_choice"] == "none"
+    assert "tools" not in payloads[1]
     assert payloads[1]["chat_template_kwargs"] == {"enable_thinking": False}
     assert output.read_text() == '{"complete": true}\n'
 

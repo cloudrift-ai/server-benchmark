@@ -19,7 +19,8 @@ assistant/tool groups are dropped together, so a tool result is never separated 
 context notice is folded into the original user prompt, preserving the endpoint contract that the one system message
 must come first. The caller can lower the per-turn output reservation with `--max-output-tokens` when a workflow has a
 small atomic result. A caller can use `--force-final-turn` to append one user message and disable tools on that turn;
-the resulting assistant content is written through the normal final-output path, while an empty forced response fails
+the request omits the tool definitions as well as selecting no tool so a model cannot render a textual tool call. The
+resulting assistant content is written through the normal final-output path, while an empty forced response fails
 instead of resuming exploration. `--disable-thinking` passes the common chat-template option for concise structured
 tasks whose endpoint model supports it. The maximum turn count remains the hard limit. HTTP failures include a
 bounded response detail in the runner error so endpoint validation failures remain actionable. Rate limits and server

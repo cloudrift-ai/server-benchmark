@@ -54,7 +54,8 @@ transports, and the scale-out strategies (`DataParallelismScaleOutStrategy`, `Re
 The post-health **smoke test** branches on the recipe model config. Embedding models (`model.task: embed`) POST
 `/v1/embeddings` and require a non-empty finite vector with L2 norm in [0.9, 1.1]. Generative models use the chat
 endpoint by default ("What is 2+2?" must contain "4"); base checkpoints set `model.smoke_test: completion` to test the
-same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop.
+same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop. Benchmark
+orchestration uses the same probe as a transport-readiness check but does not interpret the returned model content.
 `parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container logs.
 
 `model.revision` is the one immutable Hugging Face revision for a deployment. The model-download phase passes it to
@@ -79,6 +80,12 @@ Benchmark configuration (`load_config()` / `validate_config()`), per-run logging
 task; task results are `(task, ok, timing)` triples), and structured results (`BenchmarkMetrics` / `SystemInfo`
 dataclasses, `parse_benchmark_metrics()`, `compose_json_result()` / `compose_result()` — both take an optional `timing`
 arg feeding the `"timing"` JSON key / `=== Timing ===` text section).
+
+The benchmark library is an experiment-agnostic runner: it records complete client output, server logs, timing,
+system information, and partial observations after failure. It treats execution and evidence-collection failures as
+authoritative, but does not judge model output, metrics, backend selection, or scientific claims. A recipe may use a
+small self-contained post-processing command, but cannot delegate result interpretation or report generation to a
+script. The complete boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
 `--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` (nothing is generated); the
@@ -221,7 +228,7 @@ For each task in group:
     +-- set gpu_device_ids if task.gpu_count < group.gpu_count
     +-- deploy(DeployParams) -> compose up
     +-- run_benchmark_workload()
-    +-- save results
+    +-- capture raw server log and save raw or partial results
     +-- on_task_done callback (--commit-results: git add + commit + push)
     +-- teardown() (skipped with --no-teardown)
     |

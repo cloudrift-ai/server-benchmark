@@ -20,11 +20,6 @@ command:
     - "*.json"
   timeout: 300
 
-aggregate:
-  run: |
-    ./venv/bin/python scripts/aggregate_sgemm.py $run_dir --output $run_dir/report.md
-  timeout: 60
-
 matrices:
   cross:
     deploy.gpu_count: 1

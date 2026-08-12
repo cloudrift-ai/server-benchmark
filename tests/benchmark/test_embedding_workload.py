@@ -2,7 +2,7 @@
 
 from emmy.benchmark.results import parse_benchmark_metrics
 from emmy.benchmark.workload import build_bench_command
-from emmy.deploy.orchestrate import _check_chat_response, _check_completion_response, _check_embedding_response
+from emmy.deploy.orchestrate import _check_chat_response, _check_completion_response, _check_embedding_response, _smoke_response_check
 from emmy.recipe.types import Recipe
 
 
@@ -86,3 +86,22 @@ def test_check_completion_response():
     assert _check_completion_response('{"choices": [{"text": " five"}]}')[0] == "fail"
     assert _check_completion_response("oops")[0] == "retry"
     assert _check_completion_response('{"choices": [{}]}')[0] == "retry"
+
+
+def test_bench_readiness_does_not_judge_model_output():
+    cases = [
+        (_recipe("generate"), '{"choices": [{"message": {"content": "five"}}]}'),
+        (
+            Recipe.from_dict(
+                {
+                    "model": {"huggingface": "org/base", "task": "generate", "smoke_test": "completion"},
+                    "engine": {"llm": {"vllm": {}}},
+                }
+            ),
+            '{"choices": [{"text": "five"}]}',
+        ),
+        (_recipe("embed"), '{"data": [{"embedding": [3.0, 4.0]}]}'),
+    ]
+    for recipe, response in cases:
+        check = _smoke_response_check(recipe, check_smoke_output=False)
+        assert check(response)[0] == "pass"

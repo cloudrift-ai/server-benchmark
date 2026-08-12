@@ -9,6 +9,8 @@ Emmy is a Python tool for deploying and benchmarking LLM inference on GPU server
 The `README.md` is intentionally short — example-driven, no narrative. For details, consult the ARCHITECTURE.md files:
 
 - **CLI usage** (deploy local/ssh/cloud, bench, teardown, vm, hardware-aware deploy, fixed-host mode, experiments, CI workflow) → [`emmy/commands/ARCHITECTURE.md`](emmy/commands/ARCHITECTURE.md)
+- **Benchmark orchestration boundary** (generic execution and raw evidence collection; no experiment-specific
+  interpretation) → [`emmy/benchmark/ARCHITECTURE.md`](emmy/benchmark/ARCHITECTURE.md)
 - **Serving** (vLLM out-of-tree embedding plugin — emmy-compiled kernels behind vLLM's `/v1/embeddings`; `serving` extra) → [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md)
 - **Recipes vs experiments** (`recipes/` = the one recommended serving config per model, what `emmy deploy` runs;
   `experiments/` = benchmark grids, what `emmy bench` runs) → [`recipes/ARCHITECTURE.md`](recipes/ARCHITECTURE.md)
@@ -173,6 +175,23 @@ IMPORTANT: You MUST follow ALL of these steps for EVERY code change. Do NOT skip
 **Keep PRs minimal.** Retain only durable implementation, tests, documentation, recipes, and publication evidence.
 Delete exploratory scripts, intermediate experiments, run snapshots, and executed plans once their conclusions are
 encoded in a durable artifact.
+
+**Do not script open-ended reasoning.** Code should implement stable, reusable mechanics with a clear contract.
+Model- or experiment-dependent judgment—such as interpreting heterogeneous benchmark evidence or deciding how to
+assemble every possible serving report—belongs in skill instructions and agent reasoning, not in the benchmark
+harness, result validators, or a growing family of one-off scripts. Simple, readable mechanical post-processing may
+be embedded directly in a recipe; if the logic needs a large decision tree or model-specific policy, keep it out of
+code.
+
+Before submitting any PR, audit the complete diff and ask:
+
+- Which new functionality can be removed?
+- Which existing CLI, library, recipe, or skill can be reused instead?
+- Which logic should not be scripted and should become concise agent instructions?
+- Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
+
+Perform the removals and consolidation before requesting review. Tests should protect the smaller contract, not
+preserve unnecessary machinery.
 
 ### Before committing (MANDATORY — do NOT skip these)
 

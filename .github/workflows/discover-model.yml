@@ -175,7 +175,9 @@ jobs:
           except for this required obsolete comparison or when another entry needs closer inspection. Use at most six
           public-web tool calls total, including calls made in parallel, then write the manifest. Do not keep
           researching once every maintained choice and obsolete proposal has enough evidence for this conservative
-          classification.
+          classification. Existing obsolete tags are prior proposals, not evidence: reassess them from best-effort and
+          keep them obsolete only when the replacement is strictly better under this policy. "Comparable reasoning"
+          is evidence for best-effort, not obsolete.
 
           <repository-inventory>
           {inventory}
@@ -217,7 +219,9 @@ jobs:
           for an embedding model. Copy deploy.gpu values exactly from deployment setups in repository-inventory.
           Return an empty onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
           repository file. When OpenCode requires your final response, return the best manifest supported by the
-          evidence already gathered without making another tool call.
+          evidence already gathered without making another tool call. Before returning, check every key letter for
+          letter: maintained_models and best_effort_models entries contain exactly model_id and rationale;
+          replacement_model_id is allowed only in obsolete_models.
           """)
           PY
           set +e

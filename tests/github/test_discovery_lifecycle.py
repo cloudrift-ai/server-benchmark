@@ -38,6 +38,8 @@ def test_discovery_prompt_keeps_obsolete_classification_conservative():
     assert "A replacement that is merely comparable is not" in script
     assert "read both recipe files" in script
     assert "configured context, concurrency, quantization, hardware support, or model" in script
+    assert '"Comparable reasoning"' in script
+    assert "replacement_model_id is allowed only in obsolete_models" in script
 
 
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1):

@@ -40,7 +40,16 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          matches=$(gh pr list --state open --limit 100 \
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          matches=$(retry_gh gh pr list --state open --limit 100 \
             --json number,headRefName,isCrossRepository,labels \
             --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or (.headRefName | startswith("agents/model-discovery-")) or (.headRefName | startswith("agents/plan-onboard-"))))]')
           count=$(jq length <<< "$matches")
@@ -55,10 +64,10 @@ jobs:
             echo "Updating rolling discovery PR #$number from $branch"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            mapfile -t orphan_branches < <(
-              gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/model-discovery-" \
-                --jq '.[].ref | sub("^refs/heads/"; "")' | sort
-            )
+            orphan_output=$(retry_gh gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/model-discovery-" \
+              --jq '.[].ref | sub("^refs/heads/"; "")')
+            mapfile -t orphan_branches < <(printf '%s' "$orphan_output" | sort)
             if [ "${#orphan_branches[@]}" -gt 1 ]; then
               echo "Expected at most one unpaired model discovery branch, found ${#orphan_branches[@]}" >&2
               exit 1
@@ -234,7 +243,13 @@ jobs:
           git add --all -- recipes plans
           git diff --cached --check
           git commit -m "recipes: refresh model lifecycle"
-          git push origin "$branch"
+          for attempt in 1 2 3; do
+            git push origin "$branch" && break
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$attempt"
+          done
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - name: Create or update rolling discovery pull request

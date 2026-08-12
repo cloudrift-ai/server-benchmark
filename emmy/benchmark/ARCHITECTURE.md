@@ -29,6 +29,12 @@ Generic execution integrity is the only automatic acceptance boundary. Process, 
 collection failures are authoritative because they say whether the declared task executed and its evidence was
 collected, not whether the evidence supports a claim.
 
+Every command task records the rendered command, exit code, timing, system information, and declared artifact-transfer
+outcomes in its JSON result. `command.strict` makes three generic integrity requirements fail closed: staged inputs
+must be clean and content-addressed, every declared result file must be retrieved, and source, GPU, and CUDA compiler
+provenance must be present. Dry runs do not require provenance from a host that was never contacted. These checks say
+whether a command measurement is reproducible and complete; they do not interpret its output.
+
 A recipe may declare a short post-processing command directly in its `aggregate.run` block. The command may arrange
 or summarize files mechanically, but must stay readable in the recipe and cannot invoke an external result-analysis
 script. A nonzero command or timeout is an execution failure. Complex interpretation and `RESULTS.md` writing belong

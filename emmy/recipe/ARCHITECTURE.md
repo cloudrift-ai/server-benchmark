@@ -239,6 +239,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
+  strict: true                     # clean source, required artifacts and provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -249,6 +250,11 @@ matrices:
 The `run` template uses `string.Template` `$var` syntax. Substitution variables come from variant params (flattened to leaf names: `deploy.gpu` → `gpu`, `marker` → `marker`) plus harness-injected `$task_dir`, `$gpu_device_ids`, and `$repo_dir` (only when `stage` is non-empty). Conflicting leaf names (e.g. two matrix keys flattening to `gpu`) raise at substitution time.
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
+
+Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
+entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
+declared artifacts so partial evidence is not lost.
 
 ### Inline Post-Processing
 

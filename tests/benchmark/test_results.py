@@ -5,7 +5,9 @@ from pathlib import Path
 from emmy.benchmark.results import (
     BenchmarkMetrics,
     SystemInfo,
+    compose_command_json_result,
     compose_json_result,
+    missing_command_provenance,
     parse_benchmark_metrics,
     parse_system_info,
 )
@@ -87,6 +89,12 @@ NVIDIA GeForce RTX 5090, 32607 MiB, 580.65.06, P0, 42, 2 %
 | NVIDIA-SMI 580.65.06              Driver Version: 580.65.06      CUDA Version: 13.0     |
 +-----------------------------------------------------------------------------------------+
 
+=== GPU PROVENANCE ===
+0, NVIDIA GeForce RTX 5090, GPU-1234, 580.65.06, P0, 42, 2400, 1750, 120.0, 575.0
+
+=== CUDA COMPILER ===
+Cuda compilation tools, release 13.0, V13.0.88
+
 === DOCKER VERSION ===
 Docker version 28.5.1, build e180ab8
 """
@@ -160,6 +168,8 @@ def test_parse_system_info():
     assert s.cuda_version == "13.0"
     assert s.gpu_count == 1
     assert s.docker_version == "28.5.1"
+    assert s.gpu_provenance == ["0, NVIDIA GeForce RTX 5090, GPU-1234, 580.65.06, P0, 42, 2400, 1750, 120.0, 575.0"]
+    assert s.cuda_compiler == "Cuda compilation tools, release 13.0, V13.0.88"
 
 
 def test_parse_system_info_empty():
@@ -253,6 +263,32 @@ def test_compose_json_result_with_timing(tmp_path):
     )
     assert result["timing"] == timing
     assert result["timing"]["total"] == 540.5
+
+
+def test_compose_command_json_result_includes_source_and_failure(tmp_path):
+    task = _make_task(tmp_path)
+    result = compose_command_json_result(
+        task,
+        {"rendered_command": "echo test", "exit_code": 7, "result_paths": ["artifact.json"]},
+        SYSTEM_INFO_RAW,
+        success=False,
+        timing={"command": 1.5, "total": 1.5},
+        source={"source_id": "abc", "clean": True},
+    )
+
+    assert result["status"] == "failed"
+    assert result["command"]["exit_code"] == 7
+    assert result["source"] == {"source_id": "abc", "clean": True}
+    assert result["system"]["gpu_name"] == "NVIDIA GeForce RTX 5090"
+
+
+def test_missing_command_provenance_identifies_fields():
+    assert missing_command_provenance(SYSTEM_INFO_RAW, {"source_id": "abc", "files": {"emmy/a.py": "hash"}}) == []
+    assert missing_command_provenance("", None) == [
+        "staged source manifest",
+        "GPU provenance",
+        "CUDA compiler provenance",
+    ]
 
 
 # ── json_result_path ──────────────────────────────────────────────

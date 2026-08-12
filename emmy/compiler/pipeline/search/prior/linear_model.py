@@ -39,14 +39,25 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 # feature cannot become a descent coordinate by accident.
 ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 
-# The artifact's ``params`` block: the complete key set, in the order it is written. ``storage.write_json``
-# preserves insertion order. This is also the set ``offline._load_artifact`` requires an artifact to carry, so the
-# writer and the deploy-time completeness check cannot drift — add a scalar param here and both follow.
+# The scalar params the FIT searches, in descent-coordinate order — the atomic-free interaction, the one term
+# the deployed quality cannot express as a linear weight. ``fit/linear.py`` walks exactly these coordinates.
+FITTED_PARAMS = ("atomic_free_weight", "atomic_free_split_threshold")
+
+# The artifact's ``params`` block: the complete key set, in the order it is written (``storage.write_json``
+# preserves insertion order). ``scale`` is carried rather than fitted, so it leads and the fitted pair follows.
+# This is also the set ``offline._load_artifact`` requires an artifact to carry and the set the fitter's
+# coordinates are drawn from, so writer, validator and descent cannot drift — add a scalar param once, here.
 #
 # The order matches what the fitter has emitted since the scalar params became fitted coordinates; it is NOT the
 # order in the currently shipped ``offline_weights.json``, which predates that, so the next refit rewrites those
 # two lines once. Reordering to match the shipped file would instead change what a refit emits.
-PARAM_ORDER = ("scale", "atomic_free_weight", "atomic_free_split_threshold")
+PARAM_ORDER = ("scale", *FITTED_PARAMS)
+
+# The two features :func:`atomic_free_term` reads, each with the value an omitted featurization implies: no
+# deferred combine kernel, and a split count of 1. Spelled once — the dict path (:func:`gate_values`), the
+# matrix path (:func:`gate_columns`) and the fit-side column selection all read them from here, and a
+# disagreement between those would silently price the interaction differently on the two sides.
+GATE_DEFAULTS = {"D_finalize_kernel": 0.0, "D_splitk": 1.0}
 
 
 def atomic_free_term(finalize_kernel, splitk, *, weight: float, threshold: float):
@@ -61,17 +72,26 @@ def atomic_free_term(finalize_kernel, splitk, *, weight: float, threshold: float
     return weight * finalize_kernel * ((splitk >= threshold) * 2.0 - 1.0)
 
 
-def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, np.ndarray]:
-    """The two feature columns :func:`atomic_free_term` reads, defaulted exactly as the dict path's
-    ``feats.get`` calls do when the featurization omits them (finalize 0.0, split count 1.0).
+def gate_values(feats: dict) -> tuple[float, ...]:
+    """:data:`GATE_DEFAULTS` read off one feature dict — the per-row twin of :func:`gate_columns`."""
+    return tuple(feats.get(name, default) for name, default in GATE_DEFAULTS.items())
+
+
+def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, ...]:
+    """:data:`GATE_DEFAULTS` read off a packed pool, one column each, defaulted exactly as
+    :func:`gate_values` defaults the dict path.
+
+    The default applies when the NAME is absent from ``names``, which is the matrix-side spelling of the dict
+    path's "key absent from the row" — a column that exists but holds 0.0 is a measured zero, not a default, and
+    must stay one. The two therefore agree whenever a pool's column list is its rows' own feature names. They can
+    read a pool differently only where a gate name is in ``names`` while the pool never stamped it; the resulting
+    split count of 0.0 versus 1.0 changes the term only under a fitted threshold of 1.0 or below, and only for a
+    row that also carries a nonzero finalize (a finalize of 0 zeroes the term outright).
 
     Copies, never column views: the fitter z-scores its pools IN PLACE, and these values must stay in raw units —
     the interaction compares a split COUNT against its threshold."""
     idx = {n: j for j, n in enumerate(names)}
-    n_rows = len(mat)
-    fin = mat[:, idx["D_finalize_kernel"]].copy() if "D_finalize_kernel" in idx else np.zeros(n_rows)
-    spl = mat[:, idx["D_splitk"]].copy() if "D_splitk" in idx else np.ones(n_rows)
-    return fin, spl
+    return tuple(mat[:, idx[name]].copy() if name in idx else np.full(len(mat), default) for name, default in GATE_DEFAULTS.items())
 
 
 def quality_columns(mat: np.ndarray, w: np.ndarray, gates: tuple[np.ndarray, np.ndarray], *, weight: float, threshold: float):
@@ -125,12 +145,10 @@ class LinearModel:
         finiteness, never inside the live range.)"""
         w_set = self.weight_set(self.is_dynamic_row(feats))
         terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
-        if feats.get("D_finalize_kernel", 0.0):
+        finalize, splitk = gate_values(feats)
+        if finalize:
             terms["gate:atomic_free"] = atomic_free_term(
-                feats["D_finalize_kernel"],
-                feats.get("D_splitk", 1.0),
-                weight=self.atomic_free_weight,
-                threshold=self.atomic_free_split_threshold,
+                finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
             )
         return terms
 
@@ -142,12 +160,8 @@ class LinearModel:
         a live candidate always carries the full featurization."""
         w_set = self.weight_set(self.is_dynamic_row(feats))
         quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
-        return quality + atomic_free_term(
-            feats.get("D_finalize_kernel", 0.0),
-            feats.get("D_splitk", 1.0),  # the split-K count (REDUCE@<k>.cta)
-            weight=self.atomic_free_weight,
-            threshold=self.atomic_free_split_threshold,
-        )
+        finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
+        return quality + atomic_free_term(finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold)
 
     def quality_rows(self, mat: np.ndarray, names, *, dynamic: bool) -> np.ndarray:
         """:meth:`quality` over a whole packed pool — column ``j`` of ``mat`` is feature ``names[j]``.

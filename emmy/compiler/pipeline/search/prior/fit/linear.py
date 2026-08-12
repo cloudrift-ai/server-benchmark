@@ -15,7 +15,7 @@ the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in
 What is optimized is the **deployed** scoring function, not a proxy for it. The descent scores through
 :func:`~..linear_model.quality_columns`, the same arithmetic ``OfflinePrior`` ranks with, and the atomic-free
 interaction's ``(weight, threshold)`` pair ride the descent as coordinates alongside the feature weights
-(:data:`PARAM_NAMES`). Because the optimizer is derivative-free, fitting a threshold costs nothing extra — and
+(:data:`FITTED_PARAMS`). Because the optimizer is derivative-free, fitting a threshold costs nothing extra — and
 a scoring constant the fit cannot see is a constant the fit optimizes around, which is what the hand-set gates
 were doing until 2026-08-05.
 
@@ -34,7 +34,13 @@ import numpy as np
 
 from emmy.compiler.pipeline.search.prior.fit.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_table
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, gate_columns, quality_columns
+from emmy.compiler.pipeline.search.prior.linear_model import (
+    FITTED_PARAMS,
+    GATE_DEFAULTS,
+    LinearModel,
+    gate_columns,
+    quality_columns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +58,6 @@ logger = logging.getLogger(__name__)
 # while giving every rank-flat direction a strict descent toward zero (a tie-breaker, not a
 # trade-off; ``emmy fit --l2`` overrides).
 DEFAULT_L2 = 1e-6
-
-
-# The scalar scoring params the descent fits alongside the weights, in coordinate order. These are the
-# offline prior's non-linear term (:func:`~..linear_model.atomic_free_term`) — everything else in the deployed
-# quality IS a linear weight, so it lives in the weight vector and needs no separate coordinate.
-PARAM_NAMES = ("atomic_free_weight", "atomic_free_split_threshold")
 
 
 def eval_weights(mats, gidx: list[int], gates, w: np.ndarray, params: np.ndarray) -> list[int]:
@@ -99,7 +99,7 @@ def fit_weights(
     for why the loss carries the penalty).
 
     The optimized quantity is :func:`~..linear_model.quality_columns` — the linear weights AND the atomic-free
-    interaction's ``(weight, threshold)`` pair, which ride the descent as :data:`PARAM_NAMES`
+    interaction's ``(weight, threshold)`` pair, which ride the descent as :data:`FITTED_PARAMS`
     coordinates past the feature block. Fitting them is only possible because the optimizer is
     derivative-free: a threshold has no useful gradient, but a coordinate step over it is ordinary.
     ``fit_params=False`` freezes the pair at ``seed_params`` (the dynamic stage, which inherits the
@@ -156,7 +156,7 @@ def fit_weights(
     # Coordinate-descent refine around the best, over the feature weights and then the scalar
     # params. On a rank-flat direction the penalty is the only gradient — the descent walks the
     # plateau toward zero magnitude, which is what heals a poisoned incumbent seed on the next refit.
-    n_coord = len(names) + (len(PARAM_NAMES) if fit_params else 0)
+    n_coord = len(names) + (len(FITTED_PARAMS) if fit_params else 0)
     step = 1.0
     for _ in range(8):
         improved = False
@@ -177,7 +177,7 @@ def fit_weights(
             step /= 2
 
     logger.info("  best: %s", topk_table(best_ranks))
-    logger.info("  params: %s", ", ".join(f"{n}={v:g}" for n, v in zip(PARAM_NAMES, best_p, strict=True)))
+    logger.info("  params: %s", ", ".join(f"{n}={v:g}" for n, v in zip(FITTED_PARAMS, best_p, strict=True)))
     for g, r in sorted(zip(groups, best_ranks, strict=True), key=lambda t: -t[1]):
         logger.info("    %-32s [%-6s] rank=%5d", g.name, g.tier, r)
     return best_w, best_p, best_ranks, mu, sd
@@ -237,7 +237,7 @@ class LinearTrainer:
             names,
             np.ones(len(names)),
             seed_w=np.array([seed_weights.get(n, 0.0) for n in names]),
-            seed_params=np.array([getattr(self.init, n) for n in PARAM_NAMES]),
+            seed_params=np.array([getattr(self.init, n) for n in FITTED_PARAMS]),
             rng=rng,
             samples=self.samples,
             l2=self.l2,
@@ -247,7 +247,7 @@ class LinearTrainer:
             weights=raw_weights(names, static_w, static_sd),
             weights_dynamic=None,
             scale=self.init.scale,  # carried from the incumbent: rank-neutral, so the fit has no opinion on it
-            **{n: float(v) for n, v in zip(PARAM_NAMES, params, strict=True)},
+            **{n: float(v) for n, v in zip(FITTED_PARAMS, params, strict=True)},
         )
         if not dyn_groups:
             return LinearFit(model, static_ranks, None)
@@ -289,7 +289,7 @@ class LinearFit:
         # zero weight drops the key), so score over the union. The weight set itself comes from
         # the model, which is where the static-vs-dynamic choice is made — this must not become a
         # second copy of that routing.
-        names = sorted(set(self.model.weight_set(group.dynamic)) | {"D_finalize_kernel", "D_splitk"})
+        names = sorted(set(self.model.weight_set(group.dynamic)) | set(GATE_DEFAULTS))
         return self.model.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
 
     @property
@@ -297,5 +297,5 @@ class LinearFit:
         """The one-line provenance summary the artifact records — rank tables per weight set plus
         the fitted scalar params."""
         dyn = f"dynamic {topk_table(self.dyn_ranks)}" if self.dyn_ranks is not None else "no dynamic cases"
-        params = ", ".join(f"{n}={getattr(self.model, n):g}" for n in sorted(PARAM_NAMES))
+        params = ", ".join(f"{n}={getattr(self.model, n):g}" for n in sorted(FITTED_PARAMS))
         return f"static {topk_table(self.static_ranks)}; {dyn}; params {params}"

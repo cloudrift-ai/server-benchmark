@@ -30,7 +30,7 @@ from emmy.compiler.pipeline.search.prior.fit import (
     rank_of_golden,
     raw_weights,
 )
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+from emmy.compiler.pipeline.search.prior.linear_model import GATE_DEFAULTS, LinearModel, gate_values
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # Seed for the fitted scalar params — the interaction OFF at the shipped threshold, the state a
@@ -216,6 +216,24 @@ def test_model_artifact_round_trips():
     model = LinearModel.from_artifact(art)
     assert LinearModel.from_artifact(model.to_artifact(provenance={})) == model
     assert model.to_artifact(provenance={})["params"] == art["params"]
+
+
+def test_gate_values_and_gate_columns_agree_including_the_defaults():
+    """The interaction's two inputs are read one way for a dict and another for a matrix, and both
+    must yield the same numbers — including for a featurization that omits them, where the defaults
+    are the whole answer. Both now read :data:`GATE_DEFAULTS`, so this pins that they stay in step,
+    and that its ORDER is the order ``atomic_free_term`` takes its positional arguments in."""
+    assert tuple(GATE_DEFAULTS) == ("D_finalize_kernel", "D_splitk")  # finalize first, as the term reads them
+
+    present = {"D_finalize_kernel": 1.0, "D_splitk": 8.0}
+    absent: dict[str, float] = {"D_other": 3.0}
+    for feats in (present, absent):
+        # Like for like: a pool's column list IS its rows' feature names, which is what makes "the
+        # name is missing" and "the key is missing" the same condition on the two sides.
+        names = sorted(feats)
+        cols = gate_columns(feature_matrix([feats], names), names)
+        assert [float(c[0]) for c in cols] == list(gate_values(feats))
+    assert gate_values(absent) == tuple(GATE_DEFAULTS.values())  # nothing stamped → the declared defaults
 
 
 def test_gate_columns_survive_the_in_place_z_scoring():

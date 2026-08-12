@@ -8,7 +8,6 @@ from emmy.compiler.pipeline.search.prior.fit.group import (
 )
 from emmy.compiler.pipeline.search.prior.fit.linear import (
     DEFAULT_L2,
-    PARAM_NAMES,
     LinearFit,
     LinearTrainer,
     eval_weights,
@@ -24,7 +23,6 @@ __all__ = [
     "DEFAULT_FEATURES",
     "DEFAULT_L2",
     "MATMUL_FEATURES",
-    "PARAM_NAMES",
     "Group",
     "LinearFit",
     "LinearTrainer",

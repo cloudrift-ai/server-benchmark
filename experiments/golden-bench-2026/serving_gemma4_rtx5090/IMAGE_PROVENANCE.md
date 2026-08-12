@@ -14,13 +14,11 @@ multi-platform image is
 Linux/amd64 manifest is `sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0`; it is not
 an arm in the matched-system table.
 
-The machine-readable contract is [IMAGE_PROVENANCE.json](IMAGE_PROVENANCE.json). Validate it with the expanded
-recipe before a run:
+The machine-readable contract is [IMAGE_PROVENANCE.json](IMAGE_PROVENANCE.json). Its relationship to the expanded
+recipe is a checked repository invariant:
 
 ```bash
-./venv/bin/python scripts/validate_gemma_serving_ab.py \
-  experiments/golden-bench-2026/serving_gemma4_rtx5090 \
-  experiments/golden-bench-2026/serving_gemma4_rtx5090/IMAGE_PROVENANCE.json
+./venv/bin/pytest tests/benchmark/models/test_golden_bench_2026.py
 ```
 
 Also archive `docker image inspect` output and `python -m pip freeze --all` from the one image. A different digest,

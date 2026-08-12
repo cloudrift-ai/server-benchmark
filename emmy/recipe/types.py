@@ -126,7 +126,11 @@ class BenchmarkConfig:
     server; the JSON result then reports per-field mean and stddev across the runs, so the
     spread is run-to-run noise, not workload variation. ``output_probe_file`` optionally
     names a repo-relative JSONL prompt set captured sequentially after the throughput
-    workload and before teardown; the raw deterministic responses are stored with the task."""
+    workload and before teardown; the raw deterministic responses are stored with the task.
+    ``comparison_arm`` and ``process_repeat`` identify paired fresh-process tasks. When
+    ``require_output_equivalence`` is true, ``emmy bench`` requires byte-exact probe outputs
+    across the two arms before reporting success. ``comparison_order`` records the planned
+    interleaving order without affecting execution."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -137,6 +141,10 @@ class BenchmarkConfig:
     ignore_eos: bool = False
     repeats: int = 1
     output_probe_file: str | None = None
+    comparison_arm: str | None = None
+    process_repeat: int | None = None
+    comparison_order: int | None = None
+    require_output_equivalence: bool = False
 
 
 @dataclass
@@ -260,6 +268,10 @@ class Recipe:
             ignore_eos=bench_dict.get("ignore_eos", False),
             repeats=bench_dict.get("repeats", 1),
             output_probe_file=bench_dict.get("output_probe_file"),
+            comparison_arm=bench_dict.get("comparison_arm"),
+            process_repeat=bench_dict.get("process_repeat"),
+            comparison_order=bench_dict.get("comparison_order"),
+            require_output_equivalence=bench_dict.get("require_output_equivalence", False),
         )
 
         deploy_dict = d.get("deploy", {})

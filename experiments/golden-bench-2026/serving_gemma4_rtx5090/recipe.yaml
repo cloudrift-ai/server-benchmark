@@ -21,13 +21,7 @@ benchmark:
   ignore_eos: true
   repeats: 1
   output_probe_file: "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl"
-
-aggregate:
-  run: >-
-    ./venv/bin/python scripts/validate_serving_output_equivalence.py
-    experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl
-    --results $run_dir/*_benchmark.json --report $run_dir/output-equivalence.json
-  timeout: 60
+  require_output_equivalence: true
 
 matrices:
   # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E, E/S, S/E.
@@ -63,16 +57,19 @@ matrices:
         - *stock_short
         - *emmy_short
       engine.llm.vllm.extra_env:
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+      benchmark.comparison_arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy, emmy, stock, stock, emmy]
+      benchmark.process_repeat: &balanced_repeats [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+      benchmark.comparison_order: &balanced_order [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
   # Interactive point.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -97,16 +94,19 @@ matrices:
         - *stock_interactive
         - *emmy_interactive
       engine.llm.vllm.extra_env:
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=32 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=32"
+        - "EMMY_GEN_DECODE_BUCKET=32"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=32"
+        - "EMMY_GEN_DECODE_BUCKET=32"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=32"
+      benchmark.comparison_arm: *balanced_arms
+      benchmark.process_repeat: *balanced_repeats
+      benchmark.comparison_order: *balanced_order
 
   # Batch point with the 2048-token prefill chunk.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -131,16 +131,19 @@ matrices:
         - *stock_batch
         - *emmy_batch
       engine.llm.vllm.extra_env:
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
+      benchmark.comparison_arm: *balanced_arms
+      benchmark.process_repeat: *balanced_repeats
+      benchmark.comparison_order: *balanced_order
 
   # Long-prefill/RAG point.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -165,13 +168,16 @@ matrices:
         - *stock_long
         - *emmy_long
       engine.llm.vllm.extra_env:
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=0"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=0 EMMY_BENCH_ORDER_INDEX=1"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=2"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=1 EMMY_BENCH_ORDER_INDEX=3"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=4"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=2 EMMY_BENCH_ORDER_INDEX=5"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=6"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=3 EMMY_BENCH_ORDER_INDEX=7"
-        - "EMMY_BENCH_ARM=stock EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=8"
-        - "EMMY_BENCH_ARM=emmy EMMY_GEN_DECODE_BUCKET=8 EMMY_BENCH_PROCESS_REPEAT=4 EMMY_BENCH_ORDER_INDEX=9"
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=8"
+        - "EMMY_GEN_DECODE_BUCKET=8"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=8"
+        - "EMMY_GEN_DECODE_BUCKET=8"
+        - ""
+        - ""
+        - "EMMY_GEN_DECODE_BUCKET=8"
+      benchmark.comparison_arm: *balanced_arms
+      benchmark.process_repeat: *balanced_repeats
+      benchmark.comparison_order: *balanced_order

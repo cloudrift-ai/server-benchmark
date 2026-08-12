@@ -202,6 +202,10 @@ def test_from_dict_full():
             "random_input_len": 2000,
             "random_output_len": 3000,
             "output_probe_file": "experiments/probe.jsonl",
+            "comparison_arm": "emmy",
+            "process_repeat": 3,
+            "comparison_order": 7,
+            "require_output_equivalence": True,
         },
         "deploy": {
             "gpu": "NVIDIA H200",
@@ -219,6 +223,10 @@ def test_from_dict_full():
     assert recipe.benchmark.max_concurrency == 64
     assert recipe.benchmark.num_prompts == 128
     assert recipe.benchmark.output_probe_file == "experiments/probe.jsonl"
+    assert recipe.benchmark.comparison_arm == "emmy"
+    assert recipe.benchmark.process_repeat == 3
+    assert recipe.benchmark.comparison_order == 7
+    assert recipe.benchmark.require_output_equivalence is True
     assert recipe.deploy.gpu == "NVIDIA H200"
     assert recipe.deploy.gpu_count == 8
 

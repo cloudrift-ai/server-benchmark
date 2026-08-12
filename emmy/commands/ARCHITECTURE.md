@@ -415,8 +415,16 @@ the emmy arm runs at; the flag is a plain vLLM passthrough, only meaningful for 
 Loads each recipe, provisions cloud VMs, deploys the model, runs `vllm bench serve`, captures results, and tears down. Recipes sharing the same model and GPU type are grouped onto the same VM (see `GroupByModelAndGpuPlanner`).
 
 An inference recipe may define a local `aggregate` command that checks the complete run directory after all tasks.
-Any failed task, aggregate timeout, or aggregate nonzero status is authoritative: `emmy bench` finishes the complete
-run and artifact collection, reports the failures, and exits nonzero instead of printing a successful completion.
+For paired deterministic serving experiments, the typed `benchmark.require_output_equivalence` gate validates the
+two arms directly without a custom aggregate. Any failed task, built-in gate failure, aggregate timeout, or aggregate
+nonzero status is authoritative: `emmy bench` finishes the complete run and artifact collection, reports the
+failures, and exits nonzero instead of printing a successful completion.
+
+Command recipes receive the same fail-closed status. Their JSON result records the rendered command, exit code,
+timing, system information, and the content-addressed staged-source manifest; `command.require_clean_stage` rejects
+dirty selected paths before transfer. Result-file collection still runs after a nonzero command so partial evidence
+is retained, and later matrix tasks continue. `command.require_result_files` makes a missing or failed artifact
+transfer authoritative, while `command.require_provenance` requires source, GPU, and CUDA-compiler records.
 
 ```bash
 emmy bench recipes/*                                    # All recipes

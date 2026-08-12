@@ -1,7 +1,7 @@
 # Golden bench 2026
 
 This experiment suite supports the Emmy compiler submission. Raw measurements remain in benchmark run directories;
-the repository holds only recipes, validation tools, and the scientific protocol. A recipe is not evidence until its
+the repository holds only recipes, frozen inputs, and the scientific protocol. A recipe is not evidence until its
 required artifacts exist and pass the gates below.
 
 ## Evidence sets
@@ -10,7 +10,6 @@ required artifacts exist and pass the gates below.
 | --- | --- | --- | --- |
 | Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
-| Runtime-derived TP8 audit | Exact serving manifests from the pinned GLM-5.2 and DeepSeek deployments | 8x A100, 8x H200, 8x B200 | Serving-derived shapes only after manifest validation |
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 
 These sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
@@ -19,23 +18,27 @@ cross-platform kernel table. B200 and A100 are stretch platforms; drop B200 firs
 
 ## Kernel methodology
 
-The `kernels_common` matrix recipe creates one hardware variant per platform, and every variant traces all layer-0
-targets at static sequence lengths 1 and 512. The two shapes approximate decode and ordinary prefill while keeping
-the initial search bounded. Search uses at most 12 candidates per kernel,
-patience 4, and seed 0. `kernels_convergence_h200` repeats only the sequence-512 family at seeds 0, 1, and 2; it is a
+The single `kernels` recipe uses its `study` matrix field to keep four evidence sets distinct. Its `common` tasks run
+the same layer-0 targets at static sequence lengths 1 and 512 on every platform. The two shapes approximate decode
+and ordinary prefill while keeping the initial search bounded. Search uses at most 12 candidates per kernel,
+patience 4, and seed 0. The `convergence` tasks repeat only the sequence-512 family at seeds 0, 1, and 2; this is a
 search-stability diagnostic and adds no workload to the headline geometric mean.
 
-The `large_layer` matrix recipe creates H200 and B200 variants that trace Qwen3.6-27B layers 0 and 3 at the pinned
-revision. Layer 0 represents the 48 of 64 linear-attention layers; layer 3 represents the 16 of 64 full-attention
-layers. Both use sequence lengths 1 and 512, at most eight candidates, and patience 3. This supplement tests large
-GEMM and attention shapes without multiplying the main corpus.
+The `large-layer` tasks create H200 and B200 variants that trace Qwen3.6-27B layers 0 and 3 at the pinned revision.
+Layer 0 represents the 48 of 64 linear-attention layers; layer 3 represents the 16 of 64 full-attention layers. Both
+use sequence lengths 1 and 512, at most eight candidates, and patience 3. This supplement tests large GEMM and
+attention shapes without multiplying the main corpus. Its post-fusion targets are selected by provenance from the
+exact full-layer trace and re-resolved in that fusion context; they are not standalone Loop IR artifacts. A target
+that cannot retain a runnable eager/Inductor reference fails the task and makes the supplement incomplete.
 
 Each search has an isolated tuning database, online checkpoint, and cubin cache. The positional trace input and model
-provenance use the same full revision. Every run verifies a content-addressed staged-source manifest, then archives
-that manifest, the resolved model config and digest, package freeze, GPU UUID/state, driver, CUDA compiler, online
-checkpoint, and raw tuning artifacts. A failed case archives its partial evidence; later cases still run.
+provenance use the same full revision. `emmy bench` requires a clean staged source tree and records its Git revision,
+content-addressed file manifest, package freeze, GPU UUID/state, driver, CUDA compiler, command status, online
+checkpoint, and raw tuning artifacts. Every matrix row is a separate task, so a failed case preserves its partial
+evidence and does not prevent later rows from running.
 
-The directly searched winner must match its measured knob map exactly. A helper launches five fresh processes at
+The directly searched winner must match its measured knob map exactly. `emmy run --verify-working-golden` launches
+five fresh processes at
 deployable `-O3`, with 10 warmups and 100 measured iterations. It records the exact searched winner and deploy-path
 Emmy timing and compares with eager PyTorch and Inductor. Inductor uses the installed PyTorch equivalent of
 `mode="max-autotune"`: max autotune, coordinate-descent tuning, and CUDA graphs are all enabled before process start.
@@ -49,8 +52,8 @@ comparison. Hidet 0.6.1 with search space 2 is an independent compiler compariso
 must compile the full graph and match eager output. Keep all traced targets in its denominator and report unsupported
 or failed targets instead of dropping them.
 
-`kernels_search_ablation_h200` executes the only search ablation: cold deploy greedy (budget zero), bounded budgets 4
-and 12, and budget 48 with patience 12, all on the sequence-512 common family. Budget zero runs before tuning in fresh
+The `search-ablation` tasks execute the only search ablation: cold deploy greedy (budget zero), bounded budgets 4 and
+12, and budget 48 with patience 12, all on the sequence-512 common family. Budget zero runs before tuning in fresh
 processes with empty local DB, online-checkpoint, and cubin state. Its manifest is separate from searched
 `winner_total_us`; no post-search result supplies the zero-budget value. Do not claim a prior, lowering, or hardware
 ablation without a corresponding executable recipe.
@@ -76,19 +79,13 @@ platform geometric mean: resample targets, then the five paired process repeats 
 10,000 draws with seed 0. The phrase "faster than baseline" requires full required-backend support and a two-sided
 95% interval whose lower endpoint is above one. Never delete an outlier or rerun based on latency.
 
-## Runtime-derived TP8 kernels
+## Datacenter kernel claim boundary
 
 Configuration arithmetic cannot recover engine layouts, per-rank sharding, quantization backends, expert routing, or
-the actual hot-kernel mix. Therefore `--serving-twins` remains an unsharded config-derived convenience and is not used
-as serving evidence. The intended extension is manifest-driven: a future `--serving-manifest` input will consume
-measured per-rank operator metadata and emit exact reproducers; it must not synthesize TP8 shapes from model config.
-
-The capture and selection contract is in [tp8_runtime_audit/PROTOCOL.md](tp8_runtime_audit/PROTOCOL.md). Until the
-instrumented serving-image exporter exists and `validate_serving_kernel_manifest.py` accepts a measured manifest, the
-TP8 audit is protocol-only and contributes no paper result. Validation requires decode and prefill, every TP rank,
-exact operand shapes/strides/layouts/dtypes, the quantization method and backend, artifact digests, deterministic
-phase-clean selection, and at least 90% of independent Nsight model-forward phase time on every rank. The B200
-expert-parallel lane permits measured rank-local cases; homogeneous TP lanes require each case on every rank.
+the actual hot-kernel mix. Therefore `--serving-twins` is not used as TP8 serving evidence. This suite makes only the
+unsharded common-corpus and large-shape kernel claims above; the 8-GPU recipes are end-to-end system qualification.
+A later TP8 kernel study must first add runtime capture as a reusable Emmy CLI feature and independently reconcile
+decode and prefill coverage. It must not synthesize serving shapes from model configuration alone.
 
 ## End-to-end matrix
 
@@ -122,7 +119,7 @@ compatibility and deliberately fail to imply a compiler speedup by themselves.
 
 ### Gemma estimator and claim rule
 
-Pair stock and Emmy by workload and `EMMY_BENCH_PROCESS_REPEAT`, independent of their balanced execution order. The
+Pair stock and Emmy by workload and `benchmark.process_repeat`, independent of their balanced execution order. The
 primary metric is output-token throughput for `(256,256,64)`, median end-to-end latency for `(4096,4096,1)`,
 output-token throughput for `(4096,4096,8)`, and median time to first token for `(8192,256,4)`. Other recorded
 throughput, TTFT, TPOT, ITL, and latency fields are secondary diagnostics and cannot substitute for a primary metric.
@@ -135,23 +132,23 @@ lower endpoint exceeds one. The equal-weight four-point summary is the geometric
 all four points and the summary to meet the same lower-bound rule.
 
 Every task must report `successful_requests == num_prompts` and `failed_requests == 0`, and every output probe must
-pass. No performance outlier is removed. A machine-readable deployment, client, or network failure before a complete
-metric may trigger one rerun of the entire stock/Emmy pair for that workload/repeat; retain and disclose both failed
-originals. A second failure makes the point incomplete. A semantic mismatch or post-metric performance anomaly is
-never a rerun reason; after a code/configuration fix, restart the entire 40-task matrix under a new source manifest.
+pass. The gate rejects a filtered partial matrix before provisioning. No performance outlier is removed. A
+machine-readable deployment, client, or network failure before a complete metric may trigger one rerun of the entire
+stock/Emmy pair for that workload/repeat; retain and disclose both failed originals. A second failure makes the point
+incomplete. A semantic mismatch or post-metric performance anomaly is never a rerun reason; after a code/configuration
+fix, restart the entire 40-task matrix under a new source ID.
 
 ## Publication gates
 
 - Every kernel result has five exact fresh-process `-O3` replays and passes correctness/integrity checks.
-- Kernel artifacts include the pinned positional model, model-config digest, package freeze, online checkpoint, and
-  GPU/software environment; a provenance mismatch invalidates the result.
+- Kernel artifacts include the pinned positional model, clean staged-source ID, package freeze, online checkpoint,
+  and GPU/software environment; a provenance mismatch invalidates the result.
 - The common-corpus table includes all traced targets or reports every unsupported target in the denominator.
 - The H200 Hidet table uses the identical common targets and counts every missing/failed target against coverage.
 - The H200 convergence diagnostic reports all three seeds, including failures.
 - Every serving image is resolved to a digest in the evidence manifest; the private V100 recipe tag must be resolved
   on the authorized host before publication.
-- TP8 kernel claims require a phase-clean, independently reconciled, digest-verified manifest accepted by the
-  validator; protocol-only data count as no result.
+- The suite makes no TP8 kernel claim; datacenter kernel results retain the stated unsharded corpus boundary.
 - End-to-end speedup claims require matched hardware, model revision, engine revision, workload, and stock/Emmy arms.
 - The Gemma system table additionally requires matched scheduler settings, image provenance, and exact frozen-prompt
   outputs; it is not labeled compiler-caused without a same-route reference arm.

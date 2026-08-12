@@ -44,6 +44,25 @@ from emmy.timing import (
 OnTaskDone = Callable[[BenchmarkTask, bool], Awaitable[None]]
 
 
+def _apply_command_provenance_gate(
+    success: bool,
+    command_info: dict,
+    system_info: str,
+    source: dict | None,
+    *,
+    required: bool,
+    dry_run: bool,
+) -> bool:
+    """Attach missing publication provenance and fail a command task closed."""
+    if not required or dry_run:
+        return success
+    missing = missing_command_provenance(system_info, source)
+    if not missing:
+        return success
+    command_info["provenance_errors"] = missing
+    return False
+
+
 async def _invoke_callback(
     on_task_done: OnTaskDone | None,
     task: BenchmarkTask,

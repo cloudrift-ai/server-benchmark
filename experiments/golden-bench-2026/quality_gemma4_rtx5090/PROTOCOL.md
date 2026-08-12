@@ -3,14 +3,13 @@
 This gate accompanies the matched RTX 5090 serving matrix. It is a semantic-equivalence check, not a task-quality
 benchmark. The recipe's `benchmark.output_probe_file` makes the benchmark harness issue these requests after the
 throughput workload on each fresh stock and Emmy server, before teardown. The task JSON preserves the raw records
-with the exact arm and repeat from `EMMY_BENCH_ARM` and `EMMY_BENCH_PROCESS_REPEAT` and the expanded workload point.
+with the exact `benchmark.comparison_arm`, `benchmark.process_repeat`, and expanded workload point.
 
-The recipe's aggregate step executes the frozen gate over every result and writes `output-equivalence.json`:
+The recipe enables `benchmark.require_output_equivalence`. `emmy bench` executes the frozen gate over every result,
+writes `output-equivalence.json`, and exits nonzero if the gate fails:
 
 ```bash
-python scripts/validate_serving_output_equivalence.py \
-  experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl \
-  --results "$RUN_DIR"/*_benchmark.json --report "$RUN_DIR/output-equivalence.json"
+emmy bench experiments/golden-bench-2026/serving_gemma4_rtx5090
 ```
 
 Every arm must have repeats 0 through 4 and all twelve prompt IDs. Requests are sequential with seed 0, temperature

@@ -1,0 +1,176 @@
+# One bounded model-derived corpus and its diagnostics. Every row is an ordinary matrix task on a shared per-GPU VM;
+# the study field keeps the headline common corpus, large-shape supplement, convergence check, and ablation separate.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/kernels/recipe.yaml
+  require_clean_stage: true
+  require_result_files: true
+  require_provenance: true
+  run: |
+    set -uo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    mkdir -p $task_dir/verification
+    status=0
+    setup_status=0
+    trace_status=0
+    tune_status=0
+    verification_status=0
+    freeze_status=0
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      printf '%s\n' \
+        "study=$study" \
+        "setup_status=$$setup_status" \
+        "trace_status=$$trace_status" \
+        "tune_status=$$tune_status" \
+        "verification_status=$$verification_status" \
+        "freeze_status=$$freeze_status" \
+        > $task_dir/status.txt
+      archive_tmp=$${task_dir}.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup || setup_status=$$?
+    if [ "$$setup_status" -ne 0 ]; then
+      status=1
+    fi
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+    devices="$gpu_device_ids"
+    first_device=$${devices%%,*}
+
+    if [ "$optional_backend" = "hidet" ]; then
+      ./venv/bin/pip install "hidet==0.6.1" || true
+    fi
+
+    ./venv/bin/emmy trace "$model_ref" --layer "$layer" --seq-len "$seq_len" \
+      --model-provenance "$model_ref" --output $task_dir/working.yaml \
+      2>&1 | tee $task_dir/trace.log || trace_status=$$?
+    if [ "$$trace_status" -ne 0 ]; then
+      status=1
+    fi
+
+    if [ "$budget" = "0" ]; then
+      echo "tuning intentionally skipped for the cold greedy case" | tee $task_dir/tune.log
+    elif [ "$$trace_status" -eq 0 ]; then
+      ./venv/bin/emmy tune --golden-file $task_dir/working.yaml --clean \
+        --devices "$$devices" --max-candidates "$budget" --patience "$patience" --seed "$seed" \
+        --dump-dir $task_dir/dump 2>&1 | tee $task_dir/tune.log || tune_status=$$?
+    else
+      tune_status=$$trace_status
+      echo "tune skipped because tracing failed" | tee $task_dir/tune.log
+    fi
+    if [ "$$tune_status" -ne 0 ]; then
+      status=1
+    fi
+
+    if [ "$$trace_status" -ne 0 ]; then
+      verification_status=$$trace_status
+      echo "verification skipped because tracing failed" | tee $task_dir/verification.log
+    elif [ "$verification_mode" = "cold-greedy" ]; then
+      CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
+        --golden-file $task_dir/working.yaml --verify-working-golden cold-greedy \
+        --process-repeats 5 --verification-dir $task_dir/verification --warmup 10 --iters 100 \
+        2>&1 | tee $task_dir/verification.log || verification_status=$$?
+    elif [ "$$tune_status" -eq 0 ]; then
+      verify_args=(
+        ./venv/bin/emmy run --golden-file $task_dir/working.yaml --verify-working-golden tune-winners
+        --process-repeats 5 --verification-dir $task_dir/verification --warmup 10 --iters 100
+        --bench-backends eager,tcompile,emmy
+      )
+      if [ "$optional_backend" = "hidet" ]; then
+        verify_args+=(--bench-backends eager,tcompile,hidet,emmy --optional-bench-backend hidet)
+      fi
+      CUDA_VISIBLE_DEVICES="$$first_device" "$${verify_args[@]}" \
+        2>&1 | tee $task_dir/verification.log || verification_status=$$?
+    else
+      verification_status=$$tune_status
+      echo "verification skipped because tuning failed" | tee $task_dir/verification.log
+    fi
+    if [ "$$verification_status" -ne 0 ]; then
+      status=1
+    fi
+
+    ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || freeze_status=$$?
+    if [ "$$freeze_status" -ne 0 ]; then
+      status=1
+    fi
+    exit "$$status"
+  result_files:
+    - artifacts.tar.gz
+  timeout: 86400
+
+matrices:
+  # Headline common corpus: identical model, layer, sequence lengths, budget, and correctness gate on every GPU.
+  - cross:
+      study: common
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      seq_len: [1, 512]
+      budget: 12
+      patience: 4
+      seed: 0
+      verification_mode: tune-winners
+      zip:
+        deploy.gpu:
+          - "NVIDIA Tesla V100 SXM3 32GB"
+          - "NVIDIA A100 80GB"
+          - "NVIDIA GeForce RTX 4090"
+          - "NVIDIA GeForce RTX 5090"
+          - "NVIDIA H200 141GB"
+          - "NVIDIA B200"
+        deploy.gpu_count: [16, 8, 1, 1, 8, 8]
+        optional_backend: [none, none, none, none, hidet, none]
+
+  # Unsharded BF16 large-shape supplement; separate from the common-corpus geometric mean and not TP8 evidence.
+  - cross:
+      study: large-layer
+      model_ref: Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+      layer: [0, 3]
+      seq_len: [1, 512]
+      budget: 8
+      patience: 3
+      seed: 0
+      verification_mode: tune-winners
+      optional_backend: none
+      zip:
+        deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
+        deploy.gpu_count: [8, 8]
+
+  # Three-seed search-stability diagnostic for one representative common-corpus shape.
+  - cross:
+      study: convergence
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      seq_len: 512
+      budget: 12
+      patience: 4
+      seed: [0, 1, 2]
+      verification_mode: tune-winners
+      optional_backend: none
+      deploy.gpu: "NVIDIA H200 141GB"
+      deploy.gpu_count: 8
+
+  # Search-budget ablation. Budget zero is a fresh cold-greedy process with empty local evidence.
+  - study: search-ablation
+    model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+    layer: 0
+    seq_len: 512
+    seed: 0
+    optional_backend: none
+    deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 8
+    zip:
+      budget: [0, 4, 12, 48]
+      patience: [0, 4, 4, 12]
+      verification_mode: [cold-greedy, tune-winners, tune-winners, tune-winners]

@@ -28,7 +28,7 @@ matrices:
   - cross:
       deploy.gpu: "NVIDIA GeForce RTX 5090"
       deploy.gpu_count: 1
-      engine.llm.vllm.extra_env.EMMY_BENCH_PROCESS_REPEAT: ["0", "1", "2", "3", "4"]
+      benchmark.process_repeat: [0, 1, 2, 3, 4]
       zip:
         benchmark.random_input_len: [128, 4096, 16384]
         benchmark.random_output_len: [128, 1024, 256]

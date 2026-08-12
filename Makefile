@@ -222,6 +222,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
 		--build-arg M1_TIER=$(SERVE_M1_TIER) \
+		--build-arg V2_MODEL_RUNNER=$(SERVE_V2_MODEL_RUNNER) \
 		-t $(SERVE_TAG) $(SERVE_DIR)
 
 serve-verify: serve-config-guard

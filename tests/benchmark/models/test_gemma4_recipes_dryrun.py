@@ -114,9 +114,12 @@ def test_base_recipe_is_one_pinned_completion_server(recipes_dir):
     assert recipe.model.huggingface == "google/gemma-4-12B"
     assert recipe.model.revision == "023679ed352de9bb66cc873c9009ce3482585c08"
     assert recipe.model.smoke_test == "completion"
-    assert recipe.engine.llm.context_length == 16384
-    assert recipe.engine.llm.gpu_memory_utilization == 0.95
-    assert "vllm/vllm-openai@sha256:" in recipe.engine.llm.vllm.image
+    assert recipe.engine.llm.context_length == 131072
+    assert recipe.engine.llm.max_concurrent_requests == 64
+    assert recipe.engine.llm.gpu_memory_utilization == 0.96
+    assert "cloudriftai/vllm-emmy-gemma-4-12b" in recipe.engine.llm.vllm.image
+    assert recipe.engine.llm.vllm.extra_env["EMMY_FAST_MATH"] == "1"
+    assert recipe.engine.llm.vllm.extra_env["VLLM_USE_V2_MODEL_RUNNER"] == "1"
 
     raw = open(os.path.join(directory, "recipe.yaml")).read()
     body = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))

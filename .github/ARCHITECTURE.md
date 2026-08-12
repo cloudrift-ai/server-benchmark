@@ -103,7 +103,10 @@ GitHub App credentials for the long-running push path.
 **Discover model** runs nightly or by manual dispatch. It updates one rolling draft PR rather than opening one PR per
 model. A legacy discovery plan PR is adopted as the rolling PR, and the workflow fails closed if more than one rolling
 discovery PR exists. It also adopts one unpaired discovery branch left by an interrupted PR-creation step, while
-failing closed if multiple such branches would make ownership ambiguous.
+failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
+agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
+remote head as its force-with-lease expectation; a conflict, a stale checkout, or a concurrent branch update stops the
+run before any lifecycle changes are applied.
 
 The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
 `best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or

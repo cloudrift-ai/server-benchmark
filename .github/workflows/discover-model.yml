@@ -89,6 +89,50 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Rebase existing discovery branch on latest main
+        if: steps.rolling.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git fetch origin \
+            "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
+            "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
+
+          original_head="$(git rev-parse HEAD)"
+          remote_head="$(git rev-parse "origin/$EXISTING_BRANCH")"
+          if [ "$original_head" != "$remote_head" ]; then
+            echo "Discovery branch changed after it was selected; refusing to overwrite $remote_head" >&2
+            exit 1
+          fi
+
+          git rebase "origin/$BASE_BRANCH"
+          rebased_head="$(git rev-parse HEAD)"
+          if [ "$rebased_head" = "$original_head" ]; then
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            if git push \
+              --force-with-lease="refs/heads/$EXISTING_BRANCH:$original_head" \
+              origin "HEAD:refs/heads/$EXISTING_BRANCH"; then
+              break
+            fi
+            git fetch origin \
+              "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
+            if [ "$(git rev-parse "origin/$EXISTING_BRANCH")" = "$rebased_head" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$attempt"
+          done
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:

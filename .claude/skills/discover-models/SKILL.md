@@ -19,6 +19,21 @@ Everything here is **keyless and read-only**: `scripts/new_models.py` hits publi
 endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a JSON
 manifest; repository-owned workflow code validates it and writes recipe tags and onboarding shells.
 
+## Automated rolling PR prerequisite
+
+The discovery agent remains read-only in lifecycle mode. When an existing rolling discovery PR or unpaired discovery
+branch is present, workflow orchestration must complete these steps before it builds the recipe inventory or starts
+this skill:
+
+1. Fetch the latest `main` and the exact current remote head of the rolling branch.
+2. Fail if the checked-out head no longer matches that remote head.
+3. Rebase the rolling branch onto `main`; fail without applying lifecycle updates if the rebase conflicts.
+4. Push a changed rebase with an exact `--force-with-lease` expectation for the original remote head.
+
+The workflow, not the discovery agent, owns this Git mutation. A lease failure means another writer advanced the
+branch, so the run must stop rather than overwrite it. Research and lifecycle classification begin only from the
+successfully rebased checkout.
+
 ## Pipeline
 
 ```

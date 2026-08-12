@@ -9,15 +9,15 @@ required artifacts exist and an intelligent reviewer accepts them against the ch
 | Evidence set | Workload | Platforms | Permitted interpretation |
 | --- | --- | --- | --- |
 | Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
-| Native FP8 kernel corpus | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Separate checkpoint-derived W8A8 comparison |
-| Native FP8 large-layer shape stress | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Supplemental dense W8A8 large-shape comparison |
+| Dynamic-FP8 checkpoint layer | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Complete layer inventory; W8A8-only claim deferred |
+| Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 
-These sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
-quantization, or serving evidence and cannot explain an end-to-end result. The BF16 common corpus and native FP8
-corpus have different hardware denominators and must never be pooled. B200 and A100 are stretch platforms; drop B200
-first if access is limited.
+The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
+quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
+complete inventories but do not support a W8A8-only table or geometric mean until a separate golden-filtering tool
+freezes that denominator. B200 and A100 are stretch platforms; drop B200 first if access is limited.
 
 ## Kernel methodology
 
@@ -31,17 +31,15 @@ search-stability diagnostic and adds no workload to the headline geometric mean.
 
 The `fp8-common` tasks trace the exact `RedHatAI/Qwen3-0.6B-FP8-dynamic` revision at the same layer and sequence
 lengths on the four GPUs with native FP8 tensor cores. Checkpoint ingestion spells both the declared per-channel FP8
-weights and the declared per-token dynamic activation quantization into runnable graph algebra. The trace then retains only
-post-fusion targets reading `f8e4m3`; the working YAML records the checkpoint-declaration digest. `EMMY_FP8_MMA=1`
-enables the native W8A8 candidate, and every exact winner must contain
-`mma.sync.aligned.m16n8k32` in a generated CUDA kernel. Source hashes and pattern verdicts are part of each replay.
+weights and the declared per-token dynamic activation quantization into runnable graph algebra. The working YAML
+records the checkpoint-declaration digest but intentionally retains every post-fusion layer target. `EMMY_FP8_MMA=1`
+offers the native W8A8 candidate where applicable.
 
-This is a same-quantized-computation kernel comparison, not a BF16 quality study, native-framework FP8 serving
-comparison, or proof that the small model represents datacenter-scale FP8 layers. Report it in a separate table and
-geometric mean. The three `fp8-convergence` rows repeat only H200 sequence 512 at seeds 0, 1, and 2. A datacenter-scale
-shape check comes only from the separate `fp8-large-layer` supplement: one dense Qwen3-32B layer at sequence lengths
-1 and 512 on H200 and B200, with at most eight candidates and patience 3. It is reported separately from the portable
-FP8 geometric mean and still is not an end-to-end FP8 serving result. The BF16 supplement cannot supply FP8 evidence.
+These tasks are complete-layer engineering evidence, not yet a W8A8-only compiler comparison. Do not compute an FP8
+geometric mean or require native FP8 instructions from unrelated targets. A later reusable golden-filtering tool must
+select targets by stable graph properties, freeze the selected denominator, and preserve unsupported targets before
+the paper admits a W8A8 table. The three `fp8-convergence` rows and the Qwen3-32B `fp8-large-layer` supplement have
+the same limitation; they do not currently support W8A8-only stability or large-shape claims.
 
 The `large-layer` tasks create H200 and B200 variants that trace Qwen3.6-27B layers 0 and 3 at the pinned revision.
 Layer 0 represents the 48 of 64 linear-attention layers; layer 3 represents the 16 of 64 full-attention layers. Both
@@ -56,9 +54,9 @@ content-addressed file manifest, package freeze, GPU UUID/state, driver, CUDA co
 checkpoint, and raw tuning artifacts. Every matrix row is a separate task, so a failed case preserves its partial
 evidence and does not prevent later rows from running.
 
-The directly searched winner must match its measured knob map exactly. `emmy run --all --strict --repeats 5`
-launches five fresh processes at
-deployable `-O3`, with 10 warmups and 100 measured iterations. It records the exact searched winner and deploy-path
+The directly searched winner must match its measured knob map exactly. The recipe invokes
+`emmy run --golden working.yaml --strict` five times at deployable `-O3`, with 10 warmups and 100 measured iterations.
+Each ordinary invocation is an independent process; the CLI contains no repetition or child-process wrapper. It records the exact searched winner and deploy-path
 Emmy timing and compares with eager PyTorch and Inductor. Inductor uses the installed PyTorch equivalent of
 `mode="max-autotune"` with `fullgraph=True`.
 Inductor must compile the full graph and match eager output on the same inputs before its latency is accepted. Any
@@ -139,8 +137,8 @@ All serving points disable prefix caching and use seed 0, temperature 0, and ign
 tasks with `benchmark.repeats: 1`, so every observation receives a fresh deployed server instead of five clients
 against one process. Preserve latency, time to first token, inter-token latency, throughput, engine logs, image
 digests, driver/CUDA state, and failures. A compatibility fallback is not native NVFP4 or EXL3 evidence. General fast
-math is outside this preregistered suite; the exact `FP8_MMA` pin is used only in the separate same-quantized W8A8
-kernel corpus.
+math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
+traces and does not establish a W8A8-only result without the deferred target filter.
 
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings. Their immutable images
 also record the same vLLM source revision. The
@@ -181,10 +179,8 @@ the entire 40-task matrix under a new source ID.
 - Kernel artifacts include the pinned positional model, clean staged-source ID, package freeze, online checkpoint,
   and GPU/software environment; a provenance mismatch invalidates the result.
 - The common-corpus table includes all traced targets or reports every unsupported target in the denominator.
-- The FP8 table is separate, includes only the predeclared `f8e4m3`-input target inventory, records the checkpoint
-  declaration digest, and requires native W8A8 instruction evidence in every exact winner.
-- The FP8 large-layer table is supplemental and includes all retained targets from the one pinned Qwen3-32B layer;
-  it is not pooled into the portable FP8 geometric mean.
+- The dynamic-FP8 runs retain the complete layer inventory and checkpoint-declaration digest. They produce no
+  W8A8-only table, geometric mean, or convergence claim until a separate tool freezes the eligible target set.
 - The H200 convergence diagnostic reports all three seeds, including failures.
 - Every serving image is resolved to a digest in the evidence manifest; the private V100 recipe tag must be resolved
   on the authorized host before publication.

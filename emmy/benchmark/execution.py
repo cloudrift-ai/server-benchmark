@@ -44,25 +44,6 @@ from emmy.timing import (
 OnTaskDone = Callable[[BenchmarkTask, bool], Awaitable[None]]
 
 
-def _apply_command_provenance_gate(
-    success: bool,
-    command_info: dict,
-    system_info: str,
-    source: dict | None,
-    *,
-    required: bool,
-    dry_run: bool,
-) -> bool:
-    """Attach missing publication provenance and fail a command task closed."""
-    if not required or dry_run:
-        return success
-    missing = missing_command_provenance(system_info, source)
-    if not missing:
-        return success
-    command_info["provenance_errors"] = missing
-    return False
-
-
 async def _invoke_callback(
     on_task_done: OnTaskDone | None,
     task: BenchmarkTask,
@@ -344,15 +325,6 @@ async def run_execution_group(
                 task_logger.error("Benchmark failed")
                 if output:
                     task_logger.error(output)
-                    if not dry_run:
-                        benchmark_output = extract_benchmark_results(output)
-                        compose_content = generate_compose(recipe, model_dir, hf_token, gpu_device_ids=gpu_device_ids)
-                        full_result = compose_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
-                        result_path.write_text(full_result)
-                        json_data = compose_json_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
-                        json_data["status"] = "failed"
-                        task.json_result_path().write_text(json.dumps(json_data, indent=2) + "\n")
-                        task_logger.info(f"Partial results saved to: {result_path}")
                 if stderr:
                     task_logger.error(stderr)
 

@@ -160,26 +160,6 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument(
-        "--all",
-        dest="all_targets",
-        action="store_true",
-        help=(
-            "Run every target in --golden-file in a fresh process. Replays the one direct tune winner per target "
-            "when present; otherwise uses isolated empty local evidence. With --all, --json names an output directory."
-        ),
-    )
-    parser.add_argument("--repeats", type=int, default=1, help="Fresh process count for --all (default: 1).")
-    parser.add_argument(
-        "--require-kernel-source",
-        action="append",
-        default=[],
-        metavar="REGEX",
-        help=(
-            "With --strict, require the deployed or exact-pinned program to contain a generated CUDA kernel matching "
-            "REGEX (repeatable). Match verdicts and source hashes are stored in --json."
-        ),
-    )
-    parser.add_argument(
         "--no-record-nodes",
         action="store_true",
         help=(

@@ -124,18 +124,7 @@ class BenchmarkConfig:
 
     ``repeats`` reruns the identical bench-client workload N times against the one deployed
     server; the JSON result then reports per-field mean and stddev across the runs, so the
-    spread is run-to-run noise, not workload variation. ``output_probe_file`` optionally
-    names a repo-relative JSONL prompt set captured sequentially after the throughput
-    workload and before teardown; the raw deterministic responses are stored with the task.
-    ``comparison_arm`` and ``process_repeat`` identify paired fresh-process tasks. When
-    ``require_output_equivalence`` is true, ``emmy bench`` requires byte-exact probe outputs
-    across the two arms before reporting success. ``comparison_order`` records the planned
-    interleaving order without affecting execution. ``require_complete_requests`` requires
-    every client repeat to report exactly ``num_prompts`` successful requests and zero failed
-    requests. ``required_server_log_patterns`` and
-    ``forbidden_server_log_patterns`` are regular-expression gates over the complete server
-    log captured after the workload; requesting either makes log retrieval and every verdict
-    fail closed."""
+    spread is run-to-run noise, not workload variation."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -145,14 +134,6 @@ class BenchmarkConfig:
     temperature: float | None = None
     ignore_eos: bool = False
     repeats: int = 1
-    output_probe_file: str | None = None
-    comparison_arm: str | None = None
-    process_repeat: int | None = None
-    comparison_order: int | None = None
-    require_output_equivalence: bool = False
-    require_complete_requests: bool = False
-    required_server_log_patterns: list[str] = field(default_factory=list)
-    forbidden_server_log_patterns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -275,14 +256,6 @@ class Recipe:
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
             repeats=bench_dict.get("repeats", 1),
-            output_probe_file=bench_dict.get("output_probe_file"),
-            comparison_arm=bench_dict.get("comparison_arm"),
-            process_repeat=bench_dict.get("process_repeat"),
-            comparison_order=bench_dict.get("comparison_order"),
-            require_output_equivalence=bench_dict.get("require_output_equivalence", False),
-            require_complete_requests=bench_dict.get("require_complete_requests", False),
-            required_server_log_patterns=list(bench_dict.get("required_server_log_patterns", [])),
-            forbidden_server_log_patterns=list(bench_dict.get("forbidden_server_log_patterns", [])),
         )
 
         deploy_dict = d.get("deploy", {})
@@ -296,10 +269,6 @@ class Recipe:
         command = None
         cmd_dict = d.get("command")
         if cmd_dict is not None:
-            removed_strict_fields = {"require_clean_stage", "require_result_files", "require_provenance"} & cmd_dict.keys()
-            if removed_strict_fields:
-                names = ", ".join(sorted(removed_strict_fields))
-                raise ValueError(f"command fields {names} were replaced by the single 'strict' field")
             command = CommandConfig(
                 stage=list(cmd_dict.get("stage", [])),
                 run=cmd_dict.get("run", ""),

@@ -51,8 +51,7 @@ transports, and the scale-out strategies (`DataParallelismScaleOutStrategy`, `Re
 `DeployParams` carries the `recipe`, `gpu_device_ids`, etc. `run_deploy()` / `deploy()` accept an optional
 `timer: PhaseTimer` that records per-step durations (see [Timing metrics](#timing-metrics)).
 
-Standalone deploy commands use a post-health **smoke test** that branches on the recipe model config. Embedding
-models (`model.task: embed`) POST
+The post-health **smoke test** branches on the recipe model config. Embedding models (`model.task: embed`) POST
 `/v1/embeddings` and require a non-empty finite vector with L2 norm in [0.9, 1.1]. Generative models use the chat
 endpoint by default ("What is 2+2?" must contain "4"); base checkpoints set `model.smoke_test: completion` to test the
 same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop. Benchmark
@@ -413,25 +412,7 @@ the emmy arm runs at; the flag is a plain vLLM passthrough, only meaningful for 
 
 ### `emmy bench`
 
-Loads each recipe, expands its matrix, allocates GPU hosts, delegates execution to the recipe's workload adapter,
-captures observations, and tears down. Compatible tasks are grouped onto the same VM by the planner.
-
-The orchestration layer is experiment-agnostic. It expands matrices, provisions resources, invokes the declared
-workload adapter, records raw observations, retrieves declared artifacts, reports execution failures, and tears down.
-It never decides whether request counts, model outputs, backend choices, performance values, or comparisons are
-scientifically acceptable. It provides no semantic gate and runs no aggregate or post-processing script. Those
-judgments belong to intelligent review of the complete run directory against the frozen recipe and protocol.
-
-For inference recipes, the deployment probe checks only that the API returns nonempty JSON; it does not judge the
-model's answer. The raw probe response appears in the task log, and a complete redacted server log is saved beside
-each result before teardown so later review has the evidence that orchestration deliberately does not interpret.
-
-The only automatic acceptance boundary is generic execution integrity. A nonzero task, provisioning, transport, or
-required artifact failure makes `emmy bench` exit nonzero. Command JSON records the rendered command, exit code,
-timing, system information, and the content-addressed staged-source manifest. `command.strict` rejects dirty selected
-paths before transfer, makes every declared artifact authoritative, and requires source, GPU, and CUDA-compiler
-provenance. Result-file collection still runs after a nonzero command so partial evidence is retained, and later
-matrix tasks continue.
+Loads each recipe, provisions cloud VMs, deploys the model, runs `vllm bench serve`, captures results, and tears down. Recipes sharing the same model and GPU type are grouped onto the same VM (see `GroupByModelAndGpuPlanner`).
 
 ```bash
 emmy bench recipes/*                                    # All recipes

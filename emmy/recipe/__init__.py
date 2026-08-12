@@ -18,6 +18,7 @@ from emmy.recipe.recipe import (
     validate_extra_args,
 )
 from emmy.recipe.types import (
+    AggregateConfig,
     BenchmarkConfig,
     CommandConfig,
     DeployConfig,
@@ -30,6 +31,7 @@ from emmy.recipe.types import (
 )
 
 __all__ = [
+    "AggregateConfig",
     "BenchmarkConfig",
     "CommandConfig",
     "DeployConfig",

@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-from pathlib import Path
-
 import pytest
 
 from emmy.benchmark.command_workload import _local_result_name, build_substitution_map, render_command, run_command_workload

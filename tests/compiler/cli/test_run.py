@@ -210,8 +210,6 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
     assert "Eager PyTorch" in fns
 
 
-
-
 def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
     import torch._dynamo
 

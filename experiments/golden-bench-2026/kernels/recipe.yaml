@@ -44,9 +44,6 @@ command:
       ./venv/bin/emmy trace "$model_ref" --layer "$layer" --seq-len "$seq_len"
       --model-provenance "$model_ref" --output $task_dir/working.yaml
     )
-    if [ "$input_dtype" != "none" ]; then
-      trace_args+=(--input-dtype "$input_dtype")
-    fi
     "$${trace_args[@]}" 2>&1 | tee $task_dir/trace.log
 
     if [ "$budget" = "0" ]; then
@@ -57,14 +54,12 @@ command:
         --dump-dir $task_dir/dump 2>&1 | tee $task_dir/tune.log
     fi
 
-    verify_args=(
-      ./venv/bin/emmy run --golden-file $task_dir/working.yaml --all --repeats 5 --bench --strict
-      --json $task_dir/verification --warmup 10 --iters 100 --bench-backends eager,tcompile,emmy
-    )
-    if [ "$required_kernel_source" != "none" ]; then
-      verify_args+=(--require-kernel-source "$required_kernel_source")
-    fi
-    CUDA_VISIBLE_DEVICES="$$first_device" "$${verify_args[@]}" 2>&1 | tee $task_dir/verification.log
+    for repeat in 0 1 2 3 4; do
+      EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
+        --golden $task_dir/working.yaml --bench --strict \
+        --json $task_dir/verification/repeat-$$repeat --warmup 10 --iters 100 \
+        --bench-backends eager,tcompile,emmy 2>&1 | tee $task_dir/verification-$$repeat.log
+    done
   result_files:
     - artifacts.tar.gz
   timeout: 86400
@@ -79,8 +74,6 @@ matrices:
       budget: 12
       patience: 4
       seed: 0
-      input_dtype: none
-      required_kernel_source: none
       fp8_mma: 0
       zip:
         deploy.gpu:
@@ -92,7 +85,7 @@ matrices:
           - "NVIDIA B200"
         deploy.gpu_count: 1
 
-  # Native W8A8 FP8 extension: identical checkpoint-derived contraction targets on FP8-capable GPUs.
+  # Dynamic-FP8 checkpoint layers on FP8-capable GPUs. A future golden filter will define the W8A8-only corpus.
   - cross:
       study: fp8-common
       model_ref: RedHatAI/Qwen3-0.6B-FP8-dynamic@068a9040b238d65f5c1064f10232bb15b96c0ff0
@@ -101,8 +94,6 @@ matrices:
       budget: 12
       patience: 4
       seed: 0
-      input_dtype: f8e4m3
-      required_kernel_source: 'mma\.sync\.aligned\.m16n8k32'
       fp8_mma: 1
       zip:
         deploy.gpu:
@@ -112,7 +103,7 @@ matrices:
           - "NVIDIA B200"
         deploy.gpu_count: 1
 
-  # One large dense W8A8 layer on datacenter GPUs; separate from the portable FP8 common-corpus mean.
+  # One large dynamic-FP8 checkpoint layer on datacenter GPUs; W8A8-only reporting awaits a golden filter.
   - cross:
       study: fp8-large-layer
       model_ref: RedHatAI/Qwen3-32B-FP8-dynamic@c6732fc26128341172e4005bad34aafa51c32866
@@ -121,8 +112,6 @@ matrices:
       budget: 8
       patience: 3
       seed: 0
-      input_dtype: f8e4m3
-      required_kernel_source: 'mma\.sync\.aligned\.m16n8k32'
       fp8_mma: 1
       zip:
         deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
@@ -137,8 +126,6 @@ matrices:
       budget: 8
       patience: 3
       seed: 0
-      input_dtype: none
-      required_kernel_source: none
       fp8_mma: 0
       zip:
         deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
@@ -153,13 +140,11 @@ matrices:
       budget: 12
       patience: 4
       seed: [0, 1, 2]
-      input_dtype: none
-      required_kernel_source: none
       fp8_mma: 0
       deploy.gpu: "NVIDIA H200 141GB"
       deploy.gpu_count: 1
 
-  # FP8-specific search stability for the altered W8A8 space; separate from the BF16 diagnostic.
+  # Dynamic-FP8 layer search stability; a W8A8-only stability claim awaits a golden filter.
   - cross:
       study: fp8-convergence
       model_ref: RedHatAI/Qwen3-0.6B-FP8-dynamic@068a9040b238d65f5c1064f10232bb15b96c0ff0
@@ -168,8 +153,6 @@ matrices:
       budget: 12
       patience: 4
       seed: [0, 1, 2]
-      input_dtype: f8e4m3
-      required_kernel_source: 'mma\.sync\.aligned\.m16n8k32'
       fp8_mma: 1
       deploy.gpu: "NVIDIA H200 141GB"
       deploy.gpu_count: 1
@@ -180,8 +163,6 @@ matrices:
     layer: 0
     seq_len: 512
     seed: 0
-    input_dtype: none
-    required_kernel_source: none
     fp8_mma: 0
     deploy.gpu: "NVIDIA H200 141GB"
     deploy.gpu_count: 1

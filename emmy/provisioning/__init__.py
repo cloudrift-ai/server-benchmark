@@ -17,7 +17,6 @@ from emmy.provisioning.ssh_transport import (
     ssh_base_args,
 )
 from emmy.provisioning.staging import (
-    build_stage_manifest,
     build_stage_tar,
     enumerate_staged_files,
     stage_to_remote,
@@ -37,7 +36,6 @@ __all__ = [
     "stage_to_remote",
     "enumerate_staged_files",
     "build_stage_tar",
-    "build_stage_manifest",
     "REMOTE_DEPLOY_DIR",
     "resolve_vm_spec",
     "provision_cloud_vm",

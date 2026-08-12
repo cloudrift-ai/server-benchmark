@@ -4,13 +4,11 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-from emmy.benchmark.execution import _request_completeness_gate
 from emmy.benchmark.results import (
     BenchmarkMetrics,
     aggregate_metrics,
     compose_json_result,
     parse_repeat_metrics,
-    validate_request_completeness,
 )
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
 from emmy.planner import BenchmarkTask
@@ -50,50 +48,6 @@ def test_parse_repeat_metrics_splits_stanzas():
     assert [r.median_ttft_ms for r in repeats] == [100.0, 110.0, 105.0]
     assert parse_repeat_metrics(_stanza(100.0, 50.0))[0].median_ttft_ms == 100.0
     assert len(parse_repeat_metrics(_stanza(100.0, 50.0))) == 1
-
-
-def test_request_completeness_requires_every_repeat() -> None:
-    output = "\n\n".join([_stanza(100.0, 50.0), _stanza(110.0, 52.0)])
-    verdict = validate_request_completeness(output, num_prompts=32, repeats=2)
-    assert verdict["status"] == "pass"
-    assert len(verdict["repeats"]) == 2
-
-
-def test_request_completeness_rejects_partial_or_missing_metrics() -> None:
-    partial = (
-        _stanza(100.0, 50.0)
-        .replace(
-            "Successful requests:                     32",
-            "Successful requests:                     31",
-        )
-        .replace(
-            "Failed requests:                         0",
-            "Failed requests:                         1",
-        )
-    )
-    verdict = validate_request_completeness(partial, num_prompts=32, repeats=1)
-    assert verdict["status"] == "fail"
-    assert len(verdict["errors"]) == 2
-
-    missing = validate_request_completeness("client failed before metrics", num_prompts=32, repeats=1)
-    assert missing["status"] == "fail"
-    assert any("found None" in error for error in missing["errors"])
-
-
-def test_typed_request_completeness_gate_is_authoritative_and_dry_run_safe() -> None:
-    recipe = _recipe()
-    recipe.benchmark.require_complete_requests = True
-    partial = _stanza(100.0, 50.0).replace(
-        "Failed requests:                         0",
-        "Failed requests:                         1",
-    )
-    verdict, success = _request_completeness_gate(recipe, partial, dry_run=False)
-    assert success is False
-    assert verdict["status"] == "fail"
-
-    dry_verdict, dry_success = _request_completeness_gate(recipe, "", dry_run=True)
-    assert dry_success is True
-    assert dry_verdict == {"status": "dry-run", "expected_num_prompts": 32, "expected_repeats": 1}
 
 
 def test_aggregate_metrics_mean_stddev():

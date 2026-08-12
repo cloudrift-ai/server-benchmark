@@ -45,7 +45,8 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
-    assert "--all --repeats 5 --bench --strict" in run
+    assert "for repeat in 0 1 2 3 4" in run
+    assert "--golden $task_dir/working.yaml --bench --strict" in run
     assert "scripts/" not in run
     assert recipe.command.stage == [
         "emmy",
@@ -74,15 +75,13 @@ def test_native_fp8_kernel_corpus_is_separate_and_identical(project_root) -> Non
     assert {task.variant.params["model_ref"] for task in tasks} == {
         "RedHatAI/Qwen3-0.6B-FP8-dynamic@068a9040b238d65f5c1064f10232bb15b96c0ff0"
     }
-    assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in tasks)
     assert all(task.variant.params["fp8_mma"] == 1 for task in tasks)
     for task in tasks:
         command = render_command(
             task.recipe.command.run,
             build_substitution_map(task.variant, [0], "/repo", "/task"),
         )
-        assert "--input-dtype" in command
-        assert "--require-kernel-source" in command
+        assert "--require-kernel-source" not in command
         assert "EMMY_FP8_MMA=1" in command
 
 
@@ -97,7 +96,6 @@ def test_native_fp8_large_layer_supplement_is_bounded(project_root) -> None:
         "RedHatAI/Qwen3-32B-FP8-dynamic@c6732fc26128341172e4005bad34aafa51c32866"
     }
     assert all(task.variant.params["budget"] == 8 for task in tasks)
-    assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in tasks)
 
 
 def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
@@ -213,7 +211,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
             build_substitution_map(task.variant, list(range(8)), "/repo", "/task"),
         )
         assert "--loop-targets" not in command
-        assert "--all --repeats 5 --bench --strict" in command
+        assert "--golden /task/working.yaml --bench --strict" in command
         assert "--bench-backends eager,tcompile,emmy" in command
 
 
@@ -229,7 +227,6 @@ def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
     assert len(fp8_tasks) == 3
     assert {task.variant.params["seed"] for task in fp8_tasks} == {0, 1, 2}
     assert all(task.variant.params["model_ref"].startswith("RedHatAI/Qwen3-0.6B-FP8-dynamic@") for task in fp8_tasks)
-    assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in fp8_tasks)
 
 
 def test_search_ablation_is_executable(project_root) -> None:
@@ -241,7 +238,7 @@ def test_search_ablation_is_executable(project_root) -> None:
         (12, 4),
         (48, 12),
     }
-    assert all("--all --repeats 5 --bench --strict" in task.recipe.command.run for task in tasks)
+    assert all("--golden $task_dir/working.yaml --bench --strict" in task.recipe.command.run for task in tasks)
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 

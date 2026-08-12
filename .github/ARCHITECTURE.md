@@ -61,13 +61,13 @@ recipes for the maintained set, classifies the remaining complete recipes, and s
 lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each shell
 contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
 consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
-checks that the agent did not modify the checkout, then
-`.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
-reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields before validating
-their contents. The runner disables tools at discovery's result turn and writes the agent's final content to the
-temporary manifest path; the agent cannot write recipe changes itself. The repository validator remains the
-authoritative completion gate. This forced final response occurs before the hard turn limit so bounded research yields
-a manifest instead of consuming the remaining calls on additional exploration. Discovery disables the model's
+ignores otherwise valid new candidates beyond the remaining shell slots. It checks that the agent did not modify the
+checkout, then `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper
+tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
+before validating their contents. The runner disables tools at discovery's result turn and writes the agent's final
+content to the temporary manifest path; the agent cannot write recipe changes itself. The repository validator remains
+the authoritative completion gate. This forced final response occurs before the hard turn limit so bounded research
+yields a manifest instead of consuming the remaining calls on additional exploration. Discovery disables the model's
 chat-template thinking mode for this concise JSON result, and an empty forced response fails the run.
 
 The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded

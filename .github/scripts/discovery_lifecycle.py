@@ -325,8 +325,9 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
 
     candidates = manifest.get("onboarding_models", [])
     available_onboarding = MAX_ONBOARDING_MODELS - len(existing_onboarding)
-    if not isinstance(candidates, list) or len(candidates) > available_onboarding:
-        raise ValueError(f"onboarding_models must leave at most {MAX_ONBOARDING_MODELS} total onboarding shells")
+    if not isinstance(candidates, list) or len(candidates) > MAX_ONBOARDING_MODELS:
+        raise ValueError(f"onboarding_models must contain at most {MAX_ONBOARDING_MODELS} candidates")
+    candidates = candidates[:available_onboarding]
     normalized_candidates = []
     candidate_ids: set[str] = set()
     for candidate in candidates:

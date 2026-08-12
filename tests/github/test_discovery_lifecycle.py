@@ -329,14 +329,24 @@ def test_rejects_lifecycle_decision_without_rationale(tmp_path):
         discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
 
 
-def test_existing_onboarding_shells_consume_the_pending_limit(tmp_path):
+def test_existing_onboarding_shells_discard_candidates_beyond_the_pending_limit(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     for index in range(3):
         _recipe(tmp_path, f"pending-{index}", f"org/pending-{index}", tags=["onboarding", "untested"])
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], onboarding=[_candidate()])
 
-    with pytest.raises(ValueError, match="at most 3 total"):
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+
+    assert manifest["onboarding_models"] == []
+
+
+def test_rejects_more_than_three_onboarding_candidates(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], onboarding=[_candidate(f"org/new-{index}") for index in range(4)])
+
+    with pytest.raises(ValueError, match="at most 3 candidates"):
         discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
 
 

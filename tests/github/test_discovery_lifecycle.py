@@ -225,6 +225,26 @@ def test_unclassified_complete_recipe_defaults_to_best_effort(tmp_path):
     assert yaml.safe_load(other.read_text())["tags"] == ["best-effort"]
 
 
+def test_unknown_lower_priority_model_defaults_real_recipe_to_best_effort(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    _recipe(tmp_path, "other", "org/other")
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], best_effort=["org/typo"])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+    assert manifest["best_effort_models"] == ["org/other"]
+
+
+def test_unknown_maintained_model_is_rejected(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/typo"])
+
+    with pytest.raises(ValueError, match="Maintained models must have complete existing recipes: org/typo"):
+        discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+
 def test_rejects_duplicate_lifecycle_classification(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     selection = tmp_path / "selection.json"

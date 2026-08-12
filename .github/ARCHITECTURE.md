@@ -106,9 +106,11 @@ replacement for the same task at a comparable or lower practical VRAM footprint.
 complete recipe at most once; the validator conservatively assigns an omitted complete recipe to `best-effort`. It
 compares qualified targets and demotes an obsolete decision to `best-effort` unless its replacement is active, serves
 the same task, and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest
-deployment. The agent must use `best-effort` when the old model retains any material capability or operating
-advantage. Obsolete recipes remain in git but cannot be deployed, benchmarked, published, or bundled; a later
-reassessment may return one to the maintained or best-effort set. The workflow also creates
+deployment. Unknown lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
+`best-effort`; unknown maintained IDs still fail validation because all ten selections must be exact. The agent must
+use `best-effort` when the old model retains any material capability or operating advantage. Obsolete recipes remain
+in git but cannot be deployed, benchmarked, published, or bundled; a later reassessment may return one to the
+maintained or best-effort set. The workflow also creates
 `onboarding`/`untested` shells up to the three-shell total, removes superseded `plans/onboard-*.md` files, commits the
 lifecycle update to the rolling branch, and refreshes its PR body and labels through the GitHub API on every run. It
 never rents a VM and does not require the GitHub CLI on the self-hosted runner.

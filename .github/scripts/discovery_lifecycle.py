@@ -143,16 +143,20 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
     if len(existing_onboarding) > MAX_ONBOARDING_MODELS:
         raise ValueError(f"Existing onboarding shells exceed the limit of {MAX_ONBOARDING_MODELS}")
 
+    proposed = [*maintained, *best_effort, *obsolete]
+    unfinished = set(proposed) & set(existing_onboarding)
+    if unfinished:
+        raise ValueError(f"Untested onboarding shells cannot be classified: {', '.join(sorted(unfinished))}")
+    complete_models = set(records) - set(existing_onboarding)
+    unknown_maintained = set(maintained) - complete_models
+    if unknown_maintained:
+        raise ValueError(f"Maintained models must have complete existing recipes: {', '.join(sorted(unknown_maintained))}")
+    best_effort = [model_id for model_id in best_effort if model_id in complete_models]
+    obsolete_decisions = [decision for decision in obsolete_decisions if decision["model_id"] in complete_models]
+    obsolete = [decision["model_id"] for decision in obsolete_decisions]
     classified = [*maintained, *best_effort, *obsolete]
     if len(classified) != len(set(classified)):
         raise ValueError("A complete recipe must appear in exactly one lifecycle list")
-    unfinished = set(classified) & set(existing_onboarding)
-    if unfinished:
-        raise ValueError(f"Untested onboarding shells cannot be classified: {', '.join(sorted(unfinished))}")
-    complete_models = records.keys() - set(existing_onboarding)
-    unknown = set(classified) - complete_models
-    if unknown:
-        raise ValueError(f"Lifecycle models must have complete existing recipes: {', '.join(sorted(unknown))}")
     unclassified = complete_models - set(classified)
     best_effort.extend(sorted(unclassified))
 

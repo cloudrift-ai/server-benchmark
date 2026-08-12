@@ -207,6 +207,20 @@ def test_preserves_existing_onboarding_shell(tmp_path):
     assert "rationale" in yaml.safe_load(shell.read_text())["model"]
 
 
+def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
+    shell.write_text(shell.read_text().replace("  - onboarding\n  - untested\n", "- onboarding\n- untested\n"))
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert yaml.safe_load(shell.read_text())["tags"] == ["onboarding", "untested"]
+    assert shell.read_text().count("- onboarding") == 1
+
+
 def test_moves_legacy_onboarding_rationale_under_model(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])

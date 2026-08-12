@@ -244,20 +244,29 @@ jobs:
           PR_NUMBER: ${{ steps.rolling.outputs.number }}
           PLAN_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
         run: |
-          gh label create model-discovery \
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          retry_gh gh label create model-discovery \
             --description "Automated model recipe lifecycle" \
             --color 5319E7 --force
-          gh label create model-onboarding \
+          retry_gh gh label create model-onboarding \
             --description "Automated model discovery and onboarding" \
             --color 1D76DB --force
           if [ -n "$PR_NUMBER" ]; then
-            gh pr edit "$PR_NUMBER" \
+            retry_gh gh pr edit "$PR_NUMBER" \
               --title "Refresh model lifecycle and onboarding" \
               --body-file "$DISCOVERY_SUMMARY" \
               --add-label model-discovery \
               --add-label model-onboarding
           else
-            gh pr create \
+            retry_gh gh pr create \
               --draft \
               --head "$PLAN_BRANCH" \
               --base "${{ github.event.repository.default_branch }}" \

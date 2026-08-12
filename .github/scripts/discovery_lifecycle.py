@@ -339,7 +339,7 @@ def _replace_tag_block(text: str, tags: list[str]) -> str:
     start = next((index for index, line in enumerate(lines) if line.startswith("tags:")), None)
     if start is not None:
         end = start + 1
-        while end < len(lines) and lines[end].startswith((" ", "\t")):
+        while end < len(lines) and lines[end].startswith((" ", "\t", "- ")):
             end += 1
         return "".join([*lines[:start], *block, *lines[end:]])
 

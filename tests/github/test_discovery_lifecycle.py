@@ -31,6 +31,15 @@ def test_opencode_message_precedes_variadic_file_option(workflow, message):
     assert script.index(message) < script.index('--file "$AGENT_PROMPT"')
 
 
+def test_discovery_prompt_keeps_obsolete_classification_conservative():
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
+
+    assert "A replacement that is merely comparable is not" in script
+    assert "read both recipe files" in script
+    assert "configured context, concurrency, quantization, hardware support, or model" in script
+
+
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1):
     path = workspace / "recipes" / name / "recipe.yaml"
     path.parent.mkdir(parents=True)

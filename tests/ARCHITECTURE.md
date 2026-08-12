@@ -103,7 +103,8 @@ directly; they never import from another test module or from `conftest.py`.
 - **Real recipes** — CLI dry-run tests use recipes from the `recipes/` directory to catch config drift.
 - **Recipe lifecycle** — named-model deployment assertions skip when their recipe is disabled; maintained and
   best-effort recipes keep the full serving contract coverage, while obsolete recipes remain covered by lifecycle
-  validation.
+  validation. Repository-automation tests also validate required lifecycle rationales and the one-to-three-entry
+  onboarding deployment matrix.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.

@@ -219,6 +219,7 @@ tags:
 
 model:
   huggingface: "org/model-name"
+  rationale: "Why this model belongs at its current lifecycle level."
 
 engine:
   llm:
@@ -249,9 +250,10 @@ matrices:
       benchmark.max_concurrency: [128, 512]
 ```
 
-Discovery keeps ten tested recipes tagged `maintained`. Useful lower-priority recipes stay runnable as `best-effort`;
-only models with an all-around better replacement at a comparable VRAM footprint become `obsolete`. New model shells
-use `onboarding` plus `untested`. Disabled recipes are not deployable or bundled.
+Discovery keeps ten tested recipes tagged `maintained` and records a rationale under every recipe's `model` block.
+Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become
+`obsolete`. New model shells use `onboarding` plus `untested` and propose up to three deployment matrix entries.
+Disabled recipes are not deployable or bundled.
 
 Generic workload (run any tool on the VM, pull back result files):
 

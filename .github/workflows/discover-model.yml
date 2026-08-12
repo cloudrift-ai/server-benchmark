@@ -4,15 +4,6 @@ on:
   schedule:
     - cron: "17 8 * * *"
   workflow_dispatch:
-    inputs:
-      gpu:
-        description: Exact GPU name from emmy/hardware.py
-        required: false
-        type: string
-      gpu_count:
-        description: Exact GPU count
-        required: false
-        type: number
 
 concurrency:
   group: model-discovery
@@ -26,8 +17,7 @@ jobs:
       contents: read
       pull-requests: read
     env:
-      TARGET_GPU: ${{ inputs.gpu || vars.DISCOVERY_TARGET_GPU || 'NVIDIA H200 141GB' }}
-      TARGET_GPU_COUNT: ${{ inputs.gpu_count || vars.DISCOVERY_TARGET_GPU_COUNT || 1 }}
+      GH_REPO: ${{ github.repository }}
       MAINTAINED_MODEL_COUNT: 10
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
@@ -36,7 +26,6 @@ jobs:
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_TRANSCRIPT: /tmp/emmy-discovery-transcript-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
-      APP_KEY_FILE: /tmp/emmy-discovery-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -48,55 +37,40 @@ jobs:
 
       - name: Find rolling discovery pull request
         id: rolling
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const pulls = await github.paginate(github.rest.pulls.list, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
-            const matches = pulls.filter(pull => {
-              const labels = pull.labels.map(label => label.name);
-              const branch = pull.head.ref;
-              const sameRepo = pull.head.repo && pull.head.repo.full_name === `${context.repo.owner}/${context.repo.repo}`;
-              return sameRepo && (
-                labels.includes('model-discovery') ||
-                branch.startsWith('agents/model-discovery-') ||
-                branch.startsWith('agents/plan-onboard-')
-              );
-            });
-            if (matches.length > 1) {
-              core.setFailed(`Expected at most one rolling model discovery PR, found ${matches.length}`);
-              return;
-            }
-            const pull = matches[0] || null;
-            if (pull) {
-              core.info(`Updating rolling discovery PR #${pull.number} from ${pull.head.ref}`);
-            }
-            let branch = pull ? pull.head.ref : '';
-            if (!pull) {
-              const refs = await github.paginate(github.rest.git.listMatchingRefs, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: 'heads/agents/model-discovery-',
-                per_page: 100,
-              });
-              const orphanBranches = refs.map(ref => ref.ref.replace('refs/heads/', '')).sort();
-              if (orphanBranches.length > 1) {
-                core.setFailed(`Expected at most one unpaired model discovery branch, found ${orphanBranches.length}`);
-                return;
-              }
-              branch = orphanBranches[0] || '';
-              if (branch) {
-                core.info(`Adopting unpaired discovery branch ${branch}`);
-              }
-            }
-            core.setOutput('exists', pull ? 'true' : 'false');
-            core.setOutput('number', pull ? String(pull.number) : '');
-            core.setOutput('branch', branch);
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          matches=$(gh pr list --state open --limit 100 \
+            --json number,headRefName,isCrossRepository,labels \
+            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or (.headRefName | startswith("agents/model-discovery-")) or (.headRefName | startswith("agents/plan-onboard-"))))]')
+          count=$(jq length <<< "$matches")
+          if [ "$count" -gt 1 ]; then
+            echo "Expected at most one rolling model discovery PR, found $count" >&2
+            exit 1
+          fi
+
+          number=$(jq -r '.[0].number // empty' <<< "$matches")
+          branch=$(jq -r '.[0].headRefName // empty' <<< "$matches")
+          if [ -n "$number" ]; then
+            echo "Updating rolling discovery PR #$number from $branch"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            mapfile -t orphan_branches < <(
+              gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/model-discovery-" \
+                --jq '.[].ref | sub("^refs/heads/"; "")' | sort
+            )
+            if [ "${#orphan_branches[@]}" -gt 1 ]; then
+              echo "Expected at most one unpaired model discovery branch, found ${#orphan_branches[@]}" >&2
+              exit 1
+            fi
+            branch="${orphan_branches[0]:-}"
+            if [ -n "$branch" ]; then
+              echo "Adopting unpaired discovery branch $branch"
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - name: Checkout discovery branch
         uses: actions/checkout@v4
@@ -112,9 +86,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Emmy
-        run: |
-          python3 -m venv venv --prompt "emmy"
-          ./venv/bin/pip install -e .
+        run: make setup
 
       - name: Run discover-models agent
         env:
@@ -131,41 +103,53 @@ jobs:
           testing and optimization. Prefer current community demand, serving value, architecture coverage, and a
           useful spread of model sizes. Classify every other complete recipe as best-effort or obsolete. Best-effort
           means the model remains useful and runnable, but is not selected for periodic optimization. Obsolete is a
-          strict technical judgment: use it only when a named all-around better replacement for the same task is
-          available at a comparable or lower practical VRAM footprint. Compare the qualified deployment targets in
-          the recipes: the replacement's smallest target must use no more total physical GPU memory than the old
-          recipe's smallest target. All-around means the old model has no material advantage in quality, context,
-          supported hardware, latency or throughput, operating cost, modality, or licensing. A smaller or quantized
-          recipe is not obsolete merely because a larger or unquantized recipe exists. If evidence is ambiguous or
-          either model retains a useful advantage, use best-effort. Low demand, age, or exclusion from the maintained
-          set is not sufficient. A previously obsolete recipe may become maintained or best-effort when the evidence
-          changes. Never classify an onboarding/untested shell. Keep research bounded: use the repository inventory
-          and at most six targeted public-web searches, then write the manifest. Do not keep researching once every
-          maintained choice and obsolete proposal has enough evidence for this conservative classification.
+          strict technical judgment: use it when a named all-around better replacement for the same task is available
+          at a comparable or lower practical VRAM footprint, or a concrete technical limitation means the recipe
+          should no longer be used. When naming a replacement, compare the qualified deployment targets in the
+          recipes: its smallest target must use no more total physical GPU memory than the old recipe's smallest
+          target. All-around means the old model has no material advantage in quality, context, supported hardware,
+          latency or throughput, operating cost, modality, or licensing. A smaller or quantized recipe is not obsolete
+          merely because a larger or unquantized recipe exists. If evidence is ambiguous or the model retains a useful
+          advantage, use best-effort. Low demand, age, or exclusion from the maintained set is not sufficient. A
+          previously obsolete recipe may become maintained or best-effort when the evidence changes. Never classify
+          an onboarding/untested shell. Keep research bounded: use the repository inventory and at most six targeted
+          public-web searches, then write the manifest. Do not keep researching once every maintained choice and
+          obsolete proposal has enough evidence for this conservative classification.
 
-          Also select zero to three new models with no recipe, all suitable for the exact target
-          {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}. These will become untested onboarding recipe
-          shells. Keep at most three onboarding shells total: every existing onboarding/untested recipe consumes one
-          slot, so select no new model when three already exist. Do not claim shells have been deployed or benchmarked.
-          Do not edit the repository, rent hardware, or deploy anything.
+          Give every maintained, best-effort, obsolete, and onboarding decision a concise evidence-backed rationale.
+          For an obsolete recipe, name the superseding model in both replacement_model_id and the rationale, or omit
+          replacement_model_id and explain the technical reason the recipe should be dropped when no successor is
+          appropriate. Also select zero to three new models with no recipe. For each new model, propose one to three
+          useful deployment setups using only canonical deploy.gpu and positive deploy.gpu_count values. These will
+          become untested onboarding recipe shells. Keep at most three onboarding shells total: every existing
+          onboarding/untested recipe consumes one slot, so select no new model when three already exist. Do not claim
+          shells have been deployed or benchmarked. Do not edit the repository, rent hardware, or deploy anything.
 
           Before your final response, call write_file once with path {os.environ['AGENT_MANIFEST']} and content equal
           to exactly one JSON object without a Markdown fence:
           {{
-            "maintained_models": ["exact/org-model IDs for existing recipes; exactly {os.environ['MAINTAINED_MODEL_COUNT']}"],
-            "best_effort_models": ["exact/org-model IDs for every useful lower-priority complete recipe"],
+            "maintained_models": [
+              {{"model_id": "exact/org-model ID for an existing recipe", "rationale": "why it is maintained"}}
+            ],
+            "best_effort_models": [
+              {{"model_id": "exact/org-model ID", "rationale": "why it remains useful on a best-effort basis"}}
+            ],
             "obsolete_models": [
               {{"model_id": "org/old-model", "replacement_model_id": "org/better-model",
-                "rationale": "qualified target VRAM comparison and why the old model retains no material advantage"}}
+                "rationale": "name the replacement, compare qualified target VRAM, and explain why no advantage remains"}},
+              {{"model_id": "org/drop-model", "rationale": "technical reason to drop it without a successor"}}
             ],
             "onboarding_models": [
-              {{"model_id": "org/model", "task": "generate", "gpu": "{os.environ['TARGET_GPU']}",
-                "gpu_count": {os.environ['TARGET_GPU_COUNT']}, "rationale": "brief evidence-backed reason"}}
+              {{"model_id": "org/model", "task": "generate", "rationale": "why it is worth onboarding",
+                "deployments": [
+                  {{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}}
+                ]}}
             ]
           }}
-          Use task "embed" only for an embedding model. Return an empty onboarding_models list when nothing new is
-          suitable. The manifest file is required; do not edit any repository file. After write_file succeeds, your
-          final response may only confirm completion.
+          maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
+          for an embedding model. Use exact canonical GPU names from the repository hardware registry. Return an empty
+          onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
+          repository file. After write_file succeeds, your final response may only confirm completion.
           """)
           PY
           printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
@@ -197,26 +181,27 @@ jobs:
         run: |
           ./venv/bin/python .github/scripts/discovery_lifecycle.py \
             --input "$AGENT_MANIFEST" \
-            --gpu "$TARGET_GPU" \
-            --gpu-count "$TARGET_GPU_COUNT" \
             --maintained-count "$MAINTAINED_MODEL_COUNT" \
             --summary "$DISCOVERY_SUMMARY"
           git diff --check
 
-      - name: Configure renewable GitHub App credentials
+      - name: Refresh GitHub App token
+        if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
+        id: app-token-refresh
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Configure GitHub CLI credentials
         if: steps.lifecycle.outputs.changed == 'true'
         env:
-          APP_PRIVATE_KEY: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          APP_ID: ${{ secrets.EXPERIMENT_APP_ID }}
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
         run: |
-          rm -f -- "$APP_KEY_FILE"
-          printf '%s' "$APP_PRIVATE_KEY" > "$APP_KEY_FILE"
-          chmod 600 "$APP_KEY_FILE"
           git config user.name "emmy-onboarding-bot"
           git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
-          git config credential.helper ""
-          git config --add credential.helper \
-            "!APP_ID=$APP_ID APP_KEY_FILE=$APP_KEY_FILE $GITHUB_WORKSPACE/.github/scripts/git-credential-github-app.sh"
+          gh auth setup-git
 
       - name: Commit and push rolling lifecycle update
         if: steps.lifecycle.outputs.changed == 'true'
@@ -237,78 +222,40 @@ jobs:
           git push origin "$branch"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
-      - name: Refresh GitHub App token
-        id: app-token-refresh
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
-          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-
       - name: Create or update rolling discovery pull request
-        uses: actions/github-script@v7
+        if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
         env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
           PR_NUMBER: ${{ steps.rolling.outputs.number }}
           PLAN_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
-        with:
-          github-token: ${{ steps.app-token-refresh.outputs.token }}
-          script: |
-            const fs = require('fs');
-            const labels = [
-              {name: 'model-discovery', description: 'Automated model recipe lifecycle', color: '5319E7'},
-              {name: 'model-onboarding', description: 'Automated model discovery and onboarding', color: '1D76DB'},
-            ];
-            for (const label of labels) {
-              try {
-                await github.rest.issues.createLabel({owner: context.repo.owner, repo: context.repo.repo, ...label});
-              } catch (error) {
-                if (error.status !== 422) throw error;
-                await github.rest.issues.updateLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: label.name,
-                  new_name: label.name,
-                  description: label.description,
-                  color: label.color,
-                });
-              }
-            }
-
-            const title = 'Refresh model lifecycle and onboarding';
-            const body = fs.readFileSync(process.env.DISCOVERY_SUMMARY, 'utf8');
-            let pullNumber = Number(process.env.PR_NUMBER || 0);
-            if (pullNumber) {
-              await github.rest.pulls.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pullNumber,
-                title,
-                body,
-              });
-            } else {
-              const result = await github.rest.pulls.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                head: process.env.PLAN_BRANCH,
-                base: context.payload.repository.default_branch,
-                title,
-                body,
-                draft: true,
-              });
-              pullNumber = result.data.number;
-            }
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pullNumber,
-              labels: labels.map(label => label.name),
-            });
+        run: |
+          gh label create model-discovery \
+            --description "Automated model recipe lifecycle" \
+            --color 5319E7 --force
+          gh label create model-onboarding \
+            --description "Automated model discovery and onboarding" \
+            --color 1D76DB --force
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr edit "$PR_NUMBER" \
+              --title "Refresh model lifecycle and onboarding" \
+              --body-file "$DISCOVERY_SUMMARY" \
+              --add-label model-discovery \
+              --add-label model-onboarding
+          else
+            gh pr create \
+              --draft \
+              --head "$PLAN_BRANCH" \
+              --base "${{ github.event.repository.default_branch }}" \
+              --title "Refresh model lifecycle and onboarding" \
+              --body-file "$DISCOVERY_SUMMARY" \
+              --label model-discovery \
+              --label model-onboarding
+          fi
 
       - name: Cleanup discovery credentials and output
         if: always()
         run: |
           rm -f \
-            "$APP_KEY_FILE" \
             "$AGENT_PROMPT" \
             "$AGENT_MANIFEST" \
             "$AGENT_TRANSCRIPT" \

@@ -57,9 +57,11 @@ detector constructs the supported Emmy command from validated experiment paths a
 ## Model discovery and onboarding
 
 All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
-recipes for the maintained set, classifies the remaining complete recipes, and keeps at most three total onboarding
-shells for open-weight Hugging Face models on one exact GPU name and count. Existing shells consume those slots.
-Discovery remains read-only: the workflow checks that the agent did not modify the checkout, then
+recipes for the maintained set, classifies the remaining complete recipes, and supplies a rationale for every
+lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each new shell
+contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
+consume the three-shell limit. Discovery remains read-only: the workflow checks that the agent did not modify the
+checkout, then
 `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
 reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields before validating
 their contents. The agent writes that manifest through the runner to one explicitly allowed temporary path; it cannot
@@ -79,8 +81,8 @@ agent an earlier deadline so artifact validation and cleanup retain time. When t
 qualified recipe replaces it and changes `onboarding`/`untested` to `best-effort`; later discovery runs can promote it
 to the maintained set.
 
-The workflow resolves an existing labeled onboarding PR or creates a new artifact branch, provisions exactly the
-requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
+The workflow uses `gh` to resolve an existing labeled onboarding PR or prepares a new artifact branch, provisions
+exactly the requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
 `onboard-model` skill. If neither provider can supply the exact target, the workflow fails; it does not silently change
 GPU type or count. The skill produces the recommended recipe, its compact serving report, and reproducible experiment
 YAML. Raw benchmark output, experiment reports, dated run snapshots, and onboarding summaries are not repository
@@ -94,28 +96,30 @@ GitHub App credentials for the long-running push path.
 
 ### Discovery lifecycle PR
 
-**Discover model** runs nightly or by manual dispatch. It defaults to one H200, with repository variables and manual
-inputs able to select another exact target. It updates one rolling draft PR rather than opening one PR per model. A
-legacy discovery plan PR is adopted as the rolling PR, and the workflow fails closed if more than one rolling
+**Discover model** runs nightly or by manual dispatch. It updates one rolling draft PR rather than opening one PR per
+model. A legacy discovery plan PR is adopted as the rolling PR, and the workflow fails closed if more than one rolling
 discovery PR exists. It also adopts one unpaired discovery branch left by an interrupted PR-creation step, while
 failing closed if multiple such branches would make ownership ambiguous.
 
 The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
-`best-effort`, and uses `obsolete` only when the decision names an all-around better maintained or best-effort
-replacement for the same task at a comparable or lower practical VRAM footprint. The manifest must classify every
-complete recipe at most once; the validator conservatively assigns an omitted complete recipe to `best-effort`. It
-compares qualified targets and demotes an obsolete decision to `best-effort` unless its replacement is active, serves
-the same task, and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest
-deployment. Unknown lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
-`best-effort`; unknown maintained IDs still fail validation because all ten selections must be exact. The agent must
-use `best-effort` when the old model retains any material capability or operating advantage. Obsolete recipes remain
-in git but cannot be deployed, benchmarked, published, or bundled; a later reassessment may return one to the
-maintained or best-effort set. The workflow also creates
-`onboarding`/`untested` shells up to the three-shell total, removes superseded `plans/onboard-*.md` files, commits the
-lifecycle update to the rolling branch, and refreshes its PR body and labels through the GitHub API on every run. It
-never rents a VM and does not require the GitHub CLI on the self-hosted runner. Discovery uses a bounded research
-prompt and a workflow-specific model-turn cap so the manifest is written before the agent transcript reaches the
-inference endpoint's context ceiling.
+`best-effort`, and uses `obsolete` only when the rationale names an all-around better maintained or best-effort
+replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical reason the
+recipe should no longer be used. The manifest must classify every complete recipe at most once; the validator
+conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
+qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
+and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. Unknown
+lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to `best-effort`;
+unknown maintained IDs still fail validation because all ten selections must be exact. The agent must use
+`best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
+the current rationale directly under `model`. Obsolete recipes remain in git but cannot be deployed, benchmarked,
+published, or bundled; a later reassessment may return one to the maintained or best-effort set.
+
+The workflow creates `onboarding`/`untested` shells up to the three-shell total. Each shell stores its rationale under
+`model` and a list of one to three candidate deployment entries under `matrices`; it does not claim qualification. The
+workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and uses
+`make` for repository setup plus `gh` for rolling-PR discovery and updates. It never rents a VM. Discovery uses a
+bounded research prompt and a workflow-specific model-turn cap so the manifest is written before the agent transcript
+reaches the inference endpoint's context ceiling.
 
 ## Credentials, VM ownership, and cleanup
 
@@ -145,5 +149,4 @@ Agent and experiment workflows use these repository secrets as applicable:
 
 `ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
-`https://inference.cloudrift.ai/v1`. Scheduled discovery defaults can be changed with `DISCOVERY_TARGET_GPU` and
-`DISCOVERY_TARGET_GPU_COUNT`.
+`https://inference.cloudrift.ai/v1`.

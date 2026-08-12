@@ -181,7 +181,7 @@ def test_from_dict_minimal():
 
 def test_from_dict_full():
     d = {
-        "model": {"huggingface": "org/model"},
+        "model": {"huggingface": "org/model", "rationale": "Useful current serving baseline."},
         "engine": {
             "llm": {
                 "tensor_parallel_size": 8,
@@ -208,6 +208,7 @@ def test_from_dict_full():
         },
     }
     recipe = Recipe.from_dict(d)
+    assert recipe.model.rationale == "Useful current serving baseline."
     assert recipe.engine.llm.tensor_parallel_size == 8
     assert recipe.engine.llm.data_parallel_size == 2
     assert recipe.engine.llm.gpu_memory_utilization == 0.95

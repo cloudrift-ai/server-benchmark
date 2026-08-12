@@ -24,7 +24,6 @@ jobs:
       AGENT_KEY_FILE: /tmp/emmy-discovery-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_PROMPT: /tmp/emmy-discovery-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
-      AGENT_TRANSCRIPT: /tmp/emmy-discovery-transcript-${{ github.run_id }}-${{ github.run_attempt }}.txt
       AGENT_INVENTORY: /tmp/emmy-discovery-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
     steps:
@@ -134,8 +133,7 @@ jobs:
           onboarding/untested recipe consumes one slot, so select no new model when three already exist. Do not claim
           shells have been deployed or benchmarked. Do not edit the repository, rent hardware, or deploy anything.
 
-          Before your final response, call write_file once with path {os.environ['AGENT_MANIFEST']} and content equal
-          to exactly one JSON object without a Markdown fence:
+          Your final response must be exactly one JSON object without a Markdown fence:
           {{
             "maintained_models": [
               {{"model_id": "exact/org-model ID for an existing recipe", "rationale": "why it is maintained"}}
@@ -158,8 +156,8 @@ jobs:
           maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
           for an embedding model. Use exact canonical GPU names from the repository hardware registry. Return an empty
           onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
-          repository file. When the runner forces the write_file tool, write the best manifest supported by the
-          evidence already gathered. After write_file succeeds, your final response may only confirm completion.
+          repository file. When the runner requires your final response, return the best manifest supported by the
+          evidence already gathered without making another tool call.
           """)
           PY
           printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
@@ -171,11 +169,10 @@ jobs:
             --skill .claude/skills/discover-models/SKILL.md \
             --prompt "$AGENT_PROMPT" \
             --model "$AGENT_MODEL" \
-            --output "$AGENT_TRANSCRIPT" \
+            --output "$AGENT_MANIFEST" \
             --max-turns 48 \
-            --force-write-turn 8 \
-            --max-output-tokens 6144 \
-            --allow-write "$AGENT_MANIFEST"
+            --force-final-turn 8 \
+            --max-output-tokens 4096
           agent_status=$?
           set -e
           if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_MANIFEST" ]; then
@@ -271,7 +268,6 @@ jobs:
           rm -f \
             "$AGENT_PROMPT" \
             "$AGENT_MANIFEST" \
-            "$AGENT_TRANSCRIPT" \
             "$AGENT_INVENTORY" \
             "$DISCOVERY_SUMMARY" \
             "$AGENT_KEY_FILE"

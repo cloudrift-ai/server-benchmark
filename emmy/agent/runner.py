@@ -20,10 +20,7 @@ MAX_TOOL_OUTPUT = 12_000
 MAX_TRANSCRIPT_CHARS = 24_000
 MAX_FETCH_BYTES = 256_000
 COMPLETION_ATTEMPTS = 3
-FORCE_WRITE_REMINDER = (
-    "Stop further exploration. Complete the requested durable output now, using the required write tool before the "
-    "final response when applicable."
-)
+FORCE_FINAL_REMINDER = "Stop further exploration. Return the requested durable output now as your final response."
 SECRET_ENV_NAMES = {
     "AGENT_KEY_FILE",
     "APP_KEY_FILE",
@@ -149,7 +146,7 @@ class AgentRun:
     endpoint: str = DEFAULT_ENDPOINT
     allow_write: tuple[Path, ...] = ()
     max_turns: int = 160
-    force_write_turn: int | None = None
+    force_final_turn: int | None = None
     max_output_tokens: int = 8192
     request_timeout: float = 600
     api_key_file: Path | None = None
@@ -443,11 +440,8 @@ async def _completion(client: httpx.AsyncClient, endpoint: str, api_key: str, pa
 
 
 async def run(args: AgentRun) -> str:
-    if args.force_write_turn is not None:
-        if not 1 <= args.force_write_turn <= args.max_turns:
-            raise ValueError("Force-write turn must be between 1 and max turns")
-        if len(args.allow_write) != 1:
-            raise ValueError("Force-write turn requires exactly one allowed write path")
+    if args.force_final_turn is not None and not 1 <= args.force_final_turn <= args.max_turns:
+        raise ValueError("Force-final turn must be between 1 and max turns")
     api_key = _take_api_key(args)
     if not api_key:
         raise RuntimeError("The API key file or descriptor was empty")
@@ -483,9 +477,9 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
     async with httpx.AsyncClient(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:
         for turn in range(1, args.max_turns + 1):
             payload["tool_choice"] = "auto"
-            if turn == args.force_write_turn:
-                messages.append({"role": "user", "content": FORCE_WRITE_REMINDER})
-                payload["tool_choice"] = {"type": "function", "function": {"name": "write_file"}}
+            if turn == args.force_final_turn:
+                messages.append({"role": "user", "content": FORCE_FINAL_REMINDER})
+                payload["tool_choice"] = "none"
             messages = _compact_messages(messages)
             payload["messages"] = messages
             message = await _completion(client, args.endpoint, api_key, payload)

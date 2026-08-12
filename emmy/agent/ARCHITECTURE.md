@@ -18,11 +18,11 @@ bounded turn budget. Retained history stays below the response endpoint's practi
 assistant/tool groups are dropped together, so a tool result is never separated from the call that produced it. The
 context notice is folded into the original user prompt, preserving the endpoint contract that the one system message
 must come first. The caller can lower the per-turn output reservation with `--max-output-tokens` when a workflow has a
-small atomic result. A caller with exactly one `--allow-write` path can use `--force-write-turn` to append one user
-message and require the existing `write_file` tool on that turn; later turns return to automatic tool selection and
-the maximum turn count remains the hard limit. HTTP failures include a bounded response detail in the runner error so
-endpoint validation failures remain actionable. Rate limits and server errors get three bounded attempts before the
-runner reports that error.
+small atomic result. A caller can use `--force-final-turn` to append one user message and disable tools on that turn;
+the resulting assistant content is written through the normal final-output path. Later turns return to automatic tool
+selection if the model returns an empty response, and the maximum turn count remains the hard limit. HTTP failures
+include a bounded response detail in the runner error so endpoint validation failures remain actionable. Rate limits
+and server errors get three bounded attempts before the runner reports that error.
 
 Tool descriptions and JSON schemas live beside their handlers in `runner.py`, which is the single source of truth.
 `emmy agent tools` serializes a detached copy of those definitions as JSON for inspection or integration; there is no

@@ -105,13 +105,12 @@ async def test_run_retries_an_empty_final_response(monkeypatch, tmp_path):
     assert payloads[1][-1]["content"].startswith("Your previous response was empty")
 
 
-async def test_run_can_force_the_allowed_result_write(monkeypatch, tmp_path):
+async def test_run_can_force_the_final_response(monkeypatch, tmp_path):
     skill = tmp_path / "SKILL.md"
     prompt = tmp_path / "prompt.md"
     output = tmp_path / "result.txt"
     key = tmp_path / "key"
     source = tmp_path / "source.txt"
-    manifest = tmp_path / "manifest.json"
     skill.write_text("# Test skill\n")
     prompt.write_text("Write the result.\n")
     key.write_text("secret\n")
@@ -129,20 +128,7 @@ async def test_run_can_force_the_allowed_result_write(monkeypatch, tmp_path):
                     }
                 ],
             },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "write-1",
-                        "function": {
-                            "name": "write_file",
-                            "arguments": json.dumps({"path": str(manifest), "content": '{"complete": true}'}),
-                        },
-                    }
-                ],
-            },
-            {"role": "assistant", "content": "complete"},
+            {"role": "assistant", "content": '{"complete": true}'},
         ]
     )
     payloads = []
@@ -160,17 +146,15 @@ async def test_run_can_force_the_allowed_result_write(monkeypatch, tmp_path):
             model="test-model",
             output=output,
             workspace=tmp_path,
-            allow_write=(manifest,),
-            max_turns=3,
-            force_write_turn=2,
+            max_turns=2,
+            force_final_turn=2,
             api_key_file=key,
         )
     )
 
-    assert payloads[1]["messages"][-1] == {"role": "user", "content": runner.FORCE_WRITE_REMINDER}
-    assert payloads[1]["tool_choice"] == {"type": "function", "function": {"name": "write_file"}}
-    assert payloads[2]["tool_choice"] == "auto"
-    assert manifest.read_text() == '{"complete": true}'
+    assert payloads[1]["messages"][-1] == {"role": "user", "content": runner.FORCE_FINAL_REMINDER}
+    assert payloads[1]["tool_choice"] == "none"
+    assert output.read_text() == '{"complete": true}\n'
 
 
 async def test_completion_retries_a_transient_server_error(monkeypatch):

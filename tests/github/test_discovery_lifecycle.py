@@ -150,6 +150,13 @@ def test_extracts_one_lifecycle_object_from_reasoning_text():
     }
 
 
+def test_extracts_last_lifecycle_object_after_an_earlier_draft():
+    first = {"maintained_models": [], "best_effort_models": [], "obsolete_models": [], "onboarding_models": []}
+    final = {**first, "maintained_models": [_decision("org/final")]}
+
+    assert discovery_lifecycle._extract_object(f"Draft: {json.dumps(first)}\nFinal: {json.dumps(final)}") == final
+
+
 def test_rejects_extra_top_level_manifest_fields():
     text = json.dumps(
         {
@@ -443,6 +450,34 @@ def test_obsolete_recipe_replacement_may_use_less_total_vram(tmp_path):
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert manifest["obsolete_models"][0]["model_id"] == "org/old"
+
+
+def test_comparable_replacement_defaults_to_best_effort(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    _recipe(tmp_path, "old", "org/old")
+    selection = tmp_path / "selection.json"
+    decision = _obsolete("org/old", "org/ready")
+    decision["rationale"] = "The replacement has comparable quality at a lower VRAM footprint."
+    _manifest(selection, ["org/ready"], obsolete=[decision])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+
+    assert [item["model_id"] for item in manifest["best_effort_models"]] == ["org/old"]
+    assert manifest["obsolete_models"] == []
+
+
+def test_replacement_with_less_serving_capacity_defaults_to_best_effort(tmp_path):
+    ready = _recipe(tmp_path, "ready", "org/ready")
+    old = _recipe(tmp_path, "old", "org/old")
+    ready.write_text(ready.read_text().replace("llm: {}", "llm: {context_length: 1024, max_concurrent_requests: 8}"))
+    old.write_text(old.read_text().replace("llm: {}", "llm: {context_length: 2048, max_concurrent_requests: 16}"))
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+
+    assert [item["model_id"] for item in manifest["best_effort_models"]] == ["org/old"]
+    assert manifest["obsolete_models"] == []
 
 
 def test_obsolete_recipe_may_include_drop_rationale_without_replacement(tmp_path):

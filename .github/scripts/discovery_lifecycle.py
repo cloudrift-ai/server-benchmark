@@ -46,9 +46,9 @@ def _extract_object(text: str) -> dict:
                 continue
             if isinstance(candidate, dict) and set(candidate) == MANIFEST_FIELDS:
                 candidates.append(candidate)
-        if len(candidates) != 1:
-            raise ValueError("Discovery output must contain exactly one lifecycle JSON object") from None
-        value = candidates[0]
+        if not candidates:
+            raise ValueError("Discovery output must contain a lifecycle JSON object") from None
+        value = candidates[-1]
     if not isinstance(value, dict) or set(value) != MANIFEST_FIELDS:
         raise ValueError(
             "Discovery lifecycle object must contain exactly maintained_models, best_effort_models, obsolete_models, and onboarding_models"
@@ -128,9 +128,12 @@ def _obsolete_decisions(value: object, records: dict[str, dict], *, ignore_inval
 
 def _existing_rationale(record: dict) -> str:
     config = record["config"]
-    return (config.get("model") or {}).get(
-        "rationale"
-    ) or "Retained as a useful runnable recipe on a best-effort basis because discovery did not establish that it is obsolete."
+    rationale = (config.get("model") or {}).get("rationale")
+    if OBSOLETE_TAG not in record["tags"] and rationale:
+        return rationale
+    if OBSOLETE_TAG in record["tags"]:
+        return "Retained on a best-effort basis because discovery did not establish an all-around better replacement."
+    return "Retained as a useful runnable recipe on a best-effort basis because discovery did not establish that it is obsolete."
 
 
 def _model_ids(decisions: list[dict[str, str]]) -> list[str]:
@@ -147,6 +150,11 @@ def _deployment_footprints(config: dict) -> tuple[int, ...]:
             continue
         footprints.append(spec.vram_mib * setup["deploy.gpu_count"])
     return tuple(footprints)
+
+
+def _serving_capacity(config: dict) -> tuple[object, object]:
+    llm = (config.get("engine") or {}).get("llm") or {}
+    return llm.get("context_length"), llm.get("max_concurrent_requests")
 
 
 def validate_manifest(path: Path, workspace: Path) -> dict:
@@ -216,6 +224,18 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
         model_min = min(model_footprints)
         replacement_min = min(replacement_footprints)
         if replacement_min > model_min:
+            best_effort.append({"model_id": model_id, "rationale": _existing_rationale(records[model_id])})
+            continue
+        if "comparable" in decision["rationale"].casefold():
+            best_effort.append({"model_id": model_id, "rationale": _existing_rationale(records[model_id])})
+            continue
+        model_capacity = _serving_capacity(records[model_id]["config"])
+        replacement_capacity = _serving_capacity(records[replacement]["config"])
+        loses_capacity = any(
+            isinstance(old, int) and isinstance(new, int) and old > new
+            for old, new in zip(model_capacity, replacement_capacity, strict=True)
+        )
+        if loses_capacity:
             best_effort.append({"model_id": model_id, "rationale": _existing_rationale(records[model_id])})
             continue
         accepted_obsolete.append(decision)

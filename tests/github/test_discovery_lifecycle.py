@@ -212,14 +212,17 @@ def test_existing_onboarding_shells_consume_the_pending_limit(tmp_path):
         discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
 
 
-def test_requires_every_complete_recipe_to_be_classified(tmp_path):
+def test_unclassified_complete_recipe_defaults_to_best_effort(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
-    _recipe(tmp_path, "other", "org/other")
+    other = _recipe(tmp_path, "other", "org/other")
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"])
 
-    with pytest.raises(ValueError, match="Every complete recipe must be classified: org/other"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert manifest["best_effort_models"] == ["org/other"]
+    assert yaml.safe_load(other.read_text())["tags"] == ["best-effort"]
 
 
 def test_rejects_duplicate_lifecycle_classification(tmp_path):

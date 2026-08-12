@@ -154,8 +154,7 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
     if unknown:
         raise ValueError(f"Lifecycle models must have complete existing recipes: {', '.join(sorted(unknown))}")
     unclassified = complete_models - set(classified)
-    if unclassified:
-        raise ValueError(f"Every complete recipe must be classified: {', '.join(sorted(unclassified))}")
+    best_effort.extend(sorted(unclassified))
 
     replacement_models = set(maintained) | set(best_effort)
     for decision in obsolete_decisions:

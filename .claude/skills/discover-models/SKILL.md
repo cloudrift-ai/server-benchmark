@@ -208,7 +208,8 @@ onboarding row needs the exact target, `generate` or `embed`, and a brief eviden
 them. Do not edit recipe files yourself: the workflow validates exact model IDs, the maintained count, the complete
 lifecycle partition, active replacements for obsolete recipes, target hardware, duplicates, and rationale before
 making any change. It also rejects an obsolete decision when the replacement's smallest known qualified deployment
-uses more total physical GPU memory than the old recipe's smallest deployment.
+uses more total physical GPU memory than the old recipe's smallest deployment. If the agent omits a complete recipe,
+the workflow assigns it to best-effort rather than guessing that it is obsolete.
 
 ## Step 7 — Hand off in survey mode
 

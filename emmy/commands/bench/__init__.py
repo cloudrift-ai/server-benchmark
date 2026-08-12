@@ -42,6 +42,12 @@ _TIMING_COLUMNS = [
 ]
 
 
+def _raise_on_bench_failure(*, task_failed: bool) -> None:
+    """Make generic task execution failures authoritative for the bench process status."""
+    if task_failed:
+        raise SystemExit(1)
+
+
 def _format_timing_table(rows: list[tuple[BenchmarkTask, dict]]) -> str:
     """Render a per-task timing breakdown (seconds) as an aligned table.
 
@@ -211,7 +217,8 @@ def handle_bench(args):
             root_logger.info(f"Instance info saved to: {instances_path}")
             root_logger.info("Run 'emmy teardown <run_dir>' to clean up.")
 
-    # Run aggregate post-processing for recipes that define it
+    # Run small, self-contained post-processing declared directly in the recipe.
+    postprocess_failed = False
     for recipe_dir_resolved, run_dir in recipe_run_dirs.items():
         recipe = next(
             (t.recipe for t in tasks if str(Path(t.recipe_dir).resolve()) == recipe_dir_resolved),
@@ -220,24 +227,20 @@ def handle_bench(args):
         if recipe is None or recipe.aggregate is None:
             continue
 
-        subs = {"run_dir": str(run_dir)}
-        rendered = Template(recipe.aggregate.run).safe_substitute(subs)
-
+        rendered = Template(recipe.aggregate.run).safe_substitute({"run_dir": str(run_dir)})
         if dry_run:
-            root_logger.info(f"[dry-run] aggregate: {rendered}")
+            root_logger.info(f"[dry-run] post-process: {rendered}")
             continue
 
-        root_logger.info(f"Running aggregate for {Path(recipe_dir_resolved).name}...")
+        root_logger.info(f"Running post-processing for {Path(recipe_dir_resolved).name}...")
         try:
-            result = subprocess.run(
-                rendered,
-                shell=True,
-                timeout=recipe.aggregate.timeout,
-            )
+            result = subprocess.run(rendered, shell=True, timeout=recipe.aggregate.timeout)
             if result.returncode != 0:
-                root_logger.error(f"Aggregate failed (rc={result.returncode})")
+                root_logger.error(f"Post-processing failed (rc={result.returncode})")
+                postprocess_failed = True
         except subprocess.TimeoutExpired:
-            root_logger.error(f"Aggregate timed out after {recipe.aggregate.timeout}s")
+            root_logger.error(f"Post-processing timed out after {recipe.aggregate.timeout}s")
+            postprocess_failed = True
 
     # Print summary
     root_logger.info("")
@@ -266,9 +269,13 @@ def handle_bench(args):
             root_logger.info(line)
 
     root_logger.info("")
-    root_logger.info("All done!")
+    if failed or postprocess_failed:
+        root_logger.error("Finished with benchmark failures.")
+    else:
+        root_logger.info("All done!")
     for p in log_file_paths:
         root_logger.info(f"Full logs saved to: {p}")
+    _raise_on_bench_failure(task_failed=bool(failed) or postprocess_failed)
 
 
 def register_bench_command(subparsers):

@@ -11,7 +11,7 @@ from emmy.benchmark.bench_logging import _get_group_logger, active_run_dir, add_
 from emmy.benchmark.command_workload import run_command_workload
 from emmy.benchmark.results import compose_json_result
 from emmy.benchmark.system_info import collect_system_info
-from emmy.benchmark.workload import compose_result, extract_benchmark_results, run_benchmark_workload
+from emmy.benchmark.workload import capture_server_log, compose_result, run_benchmark_workload
 from emmy.deploy import (
     DeployParams,
 )
@@ -267,7 +267,7 @@ async def run_execution_group(
                 port_mappings=conn.port_mappings,
             )
             task_logger.info("Deploying model...")
-            success = await deploy_entry(params, timer=task_timer)
+            success = await deploy_entry(params, timer=task_timer, check_smoke_output=False)
 
             if not success:
                 task_logger.error("Deploy failed, skipping benchmark")
@@ -284,6 +284,12 @@ async def run_execution_group(
                     dry_run=dry_run,
                 )
 
+            server_log_path = result_path.with_name(f"{result_path.stem}_server.log")
+            server_log = await capture_server_log(run_cmd, server_log_path, dry_run=dry_run)
+            if server_log["status"] == "failed":
+                task_logger.error("Failed to collect the raw server log")
+                bench_success = False
+
             # Tear down before persisting results so the teardown duration is captured
             # in the stored timing. The benchmark output is already in memory.
             if not no_teardown:
@@ -292,27 +298,31 @@ async def run_execution_group(
                     await teardown_entry(params)
 
             timing = task_timer.as_dict()
-            if bench_success or dry_run:
-                if not dry_run:
-                    benchmark_output = extract_benchmark_results(output)
-                    compose_content = generate_compose(recipe, model_dir, hf_token, gpu_device_ids=gpu_device_ids)
-                    full_result = compose_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
-                    result_path.write_text(full_result)
-                    json_data = compose_json_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
-                    task.json_result_path().write_text(json.dumps(json_data, indent=2) + "\n")
-                    task_logger.info(f"Results saved to: {result_path}")
-                else:
-                    task_logger.info(f"[dry-run] Would save results to: {result_path}")
-                task_results.append((task, True, timing))
-                await _invoke_callback(on_task_done, task, True, task_logger)
-            else:
+            if not bench_success:
                 task_logger.error("Benchmark failed")
                 if output:
                     task_logger.error(output)
                 if stderr:
                     task_logger.error(stderr)
-                task_results.append((task, False, timing))
-                await _invoke_callback(on_task_done, task, False, task_logger)
+
+            if not dry_run:
+                benchmark_output = output
+                compose_content = generate_compose(recipe, model_dir, hf_token, gpu_device_ids=gpu_device_ids)
+                full_result = compose_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
+                result_path.write_text(full_result)
+
+                json_data = compose_json_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
+                json_data["artifacts"] = {"server_log": server_log}
+                if not bench_success:
+                    json_data["status"] = "failed"
+                task.json_result_path().write_text(json.dumps(json_data, indent=2) + "\n")
+                qualifier = "Results" if bench_success else "Partial results"
+                task_logger.info(f"{qualifier} saved to: {result_path}")
+            else:
+                task_logger.info(f"[dry-run] Would save results to: {result_path}")
+
+            task_results.append((task, bench_success or dry_run, timing))
+            await _invoke_callback(on_task_done, task, bench_success or dry_run, task_logger)
 
     finally:
         active_run_dir.set(None)

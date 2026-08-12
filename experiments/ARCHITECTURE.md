@@ -26,6 +26,14 @@ Related command workloads also stay under the model. Image qualification, kernel
 and final benchmarks for one model should not become unrelated top-level directories. A genuinely cross-model
 compiler experiment may remain at the top level.
 
+## Result analysis
+
+`emmy bench` is an experiment-agnostic runner. Recipes define workloads and neutral matrix labels; they do not define
+semantic gates, log predicates, or output comparisons. A short self-contained `aggregate.run` command may perform
+readable mechanical post-processing, but it may not invoke an external script or generate the experiment report.
+Tests verify the intended configuration before measurement. After a run, an agent examines every raw result, failure,
+log, and artifact against the experiment protocol and writes the model-specific report.
+
 ## Lifetime
 
 Keep experiment configurations that reproduce a published comparison, protect a qualification gate, or are needed

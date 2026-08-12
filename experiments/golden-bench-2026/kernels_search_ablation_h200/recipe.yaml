@@ -17,7 +17,7 @@ command:
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     source_manifest="$repo_dir/experiments/golden-bench-2026/SOURCE_MANIFEST.json"
-    PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_staged_source.py "$source_manifest" --root "$repo_dir" || exit $$?
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_staged_source.py "$$source_manifest" --root "$repo_dir" || exit $$?
     export SOURCE_MANIFEST="$$source_manifest"
     [ -d venv ] || make setup
     overall_status=0

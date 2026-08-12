@@ -1,5 +1,5 @@
-# Unsharded BF16 model-derived shape-stress corpus. Layers 0 and 3 are the deterministic linear-attention and
-# full-attention profiles in Qwen3.6-27B; this is not TP8 or serving-representative evidence.
+# One unsharded BF16 large-shape supplement on H200 and B200. The matrix varies only the hardware; this remains
+# separate from the common-corpus geometric mean and is not TP8, quantization, or serving-representative evidence.
 command:
   stage:
     - emmy
@@ -17,7 +17,7 @@ command:
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     source_manifest="$repo_dir/experiments/golden-bench-2026/SOURCE_MANIFEST.json"
-    PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_staged_source.py "$source_manifest" --root "$repo_dir" || exit $$?
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_staged_source.py "$$source_manifest" --root "$repo_dir" || exit $$?
     export SOURCE_MANIFEST="$$source_manifest"
     [ -d venv ] || make setup
     overall_status=0
@@ -35,5 +35,8 @@ command:
   timeout: 86400
 
 matrices:
-  deploy.gpu: "NVIDIA H200 141GB"
-  deploy.gpu_count: 8
+  zip:
+    deploy.gpu:
+      - "NVIDIA H200 141GB"
+      - "NVIDIA B200"
+    deploy.gpu_count: 8

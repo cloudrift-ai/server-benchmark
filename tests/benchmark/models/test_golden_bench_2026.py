@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe import load_recipe
 
@@ -24,34 +25,46 @@ def _process_repeat(task) -> str:
 
 def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     platforms = {
-        "kernels_v100": ("NVIDIA Tesla V100 SXM3 32GB", 16),
-        "kernels_a100": ("NVIDIA A100 80GB", 8),
-        "kernels_rtx4090": ("NVIDIA GeForce RTX 4090", 1),
-        "kernels_rtx5090": ("NVIDIA GeForce RTX 5090", 1),
-        "kernels_h200": ("NVIDIA H200 141GB", 8),
-        "kernels_b200": ("NVIDIA B200", 8),
+        "NVIDIA Tesla V100 SXM3 32GB": (16, "none"),
+        "NVIDIA A100 80GB": (8, "none"),
+        "NVIDIA GeForce RTX 4090": (1, "none"),
+        "NVIDIA GeForce RTX 5090": (1, "none"),
+        "NVIDIA H200 141GB": (8, "hidet"),
+        "NVIDIA B200": (8, "none"),
     }
+    recipe_dir = _experiment(project_root, "kernels_common")
+    recipe = load_recipe(recipe_dir)
+    tasks = enumerate_tasks([recipe_dir])
+    assert recipe.kind == "command"
+    assert len(tasks) == len(platforms)
+    assert {
+        task.recipe.deploy.gpu: (task.recipe.deploy.gpu_count, task.variant.params["independent_compiler"]) for task in tasks
+    } == platforms
 
-    for name, (gpu, gpu_count) in platforms.items():
-        recipe_dir = _experiment(project_root, name)
-        recipe = load_recipe(recipe_dir)
-        tasks = enumerate_tasks([recipe_dir])
-        assert recipe.kind == "command"
-        assert len(tasks) == 1
-        assert tasks[0].recipe.deploy.gpu == gpu
-        assert tasks[0].recipe.deploy.gpu_count == gpu_count
-
-        run = recipe.command.run
-        assert "for seq_len in 1 512; do" in run
-        pinned_model = "Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca"
-        assert pinned_model in run
-        assert '"$$seq_len" 12 4 0' in run
-        assert "scripts/capture_kernel_environment.py" in recipe.command.stage
-        assert "run_submission_kernel_case.sh" in run
-        assert "overall_status=0" in run
-        assert 'exit "$$overall_status"' in run
-        assert "scripts/run_submission_kernel_case.sh" in recipe.command.stage
-        assert recipe.command.result_files == ["seq-*/artifacts.tar.gz"]
+    run = recipe.command.run
+    assert "for seq_len in 1 512; do" in run
+    pinned_model = "Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca"
+    assert pinned_model in run
+    assert '"$$seq_len" 12 4 0' in run
+    assert 'independent_compiler="$independent_compiler"' in run
+    assert 'pip install "hidet==0.6.1"' in run
+    assert "scripts/capture_kernel_environment.py" in recipe.command.stage
+    assert "run_submission_kernel_case.sh" in run
+    assert "overall_status=0" in run
+    assert 'exit "$$overall_status"' in run
+    assert "scripts/run_submission_kernel_case.sh" in recipe.command.stage
+    assert recipe.command.result_files == ["seq-*/artifacts.tar.gz"]
+    assert len(enumerate_tasks([recipe_dir], filters=[("deploy.gpu", "*H200*")])) == 1
+    for task in tasks:
+        substitutions = build_substitution_map(
+            task.variant,
+            list(range(task.recipe.deploy.gpu_count)),
+            "/repo",
+            "/task",
+        )
+        rendered = render_command(run, substitutions)
+        compiler = task.variant.params["independent_compiler"]
+        assert f'independent_compiler="{compiler}"' in rendered
 
 
 def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
@@ -128,23 +141,22 @@ def test_qwen_nvfp4_qualification_uses_modelopt(project_root) -> None:
 
 
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
-    for name, gpu in (("large_layer_h200", "NVIDIA H200 141GB"), ("large_layer_b200", "NVIDIA B200")):
-        recipe_dir = _experiment(project_root, name)
-        recipe = load_recipe(recipe_dir)
-        tasks = enumerate_tasks([recipe_dir])
-        assert len(tasks) == 1
-        assert tasks[0].recipe.deploy.gpu == gpu
-        assert tasks[0].recipe.deploy.gpu_count == 8
+    recipe_dir = _experiment(project_root, "large_layer")
+    recipe = load_recipe(recipe_dir)
+    tasks = enumerate_tasks([recipe_dir])
+    assert len(tasks) == 2
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA H200 141GB", "NVIDIA B200"}
+    assert all(task.recipe.deploy.gpu_count == 8 for task in tasks)
 
-        run = recipe.command.run
-        assert "for layer in 0 3; do" in run
-        assert "for seq_len in 1 512; do" in run
-        pinned_model = "Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
-        assert pinned_model in run
-        assert '"$$seq_len" 8 3 0' in run
-        assert "run_submission_kernel_case.sh" in run
-        assert "overall_status=0" in run
-        assert recipe.command.result_files == ["layer-*-seq-*/artifacts.tar.gz"]
+    run = recipe.command.run
+    assert "for layer in 0 3; do" in run
+    assert "for seq_len in 1 512; do" in run
+    pinned_model = "Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+    assert pinned_model in run
+    assert '"$$seq_len" 8 3 0' in run
+    assert "run_submission_kernel_case.sh" in run
+    assert "overall_status=0" in run
+    assert recipe.command.result_files == ["layer-*-seq-*/artifacts.tar.gz"]
 
 
 def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
@@ -164,9 +176,12 @@ def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
 
 
 def test_h200_independent_compiler_and_search_ablation_are_executable(project_root) -> None:
-    common = load_recipe(_experiment(project_root, "kernels_h200")).command.run
+    common_dir = _experiment(project_root, "kernels_common")
+    common = load_recipe(common_dir).command.run
+    h200 = next(task for task in enumerate_tasks([common_dir]) if task.recipe.deploy.gpu == "NVIDIA H200 141GB")
     assert 'pip install "hidet==0.6.1"' in common
-    assert '"$gpu_device_ids" default hidet' in common
+    assert h200.variant.params["independent_compiler"] == "hidet"
+    assert '"$gpu_device_ids" default "$$independent_compiler"' in common
 
     ablation_dir = _experiment(project_root, "kernels_search_ablation_h200")
     ablation = load_recipe(ablation_dir)
@@ -179,6 +194,26 @@ def test_h200_independent_compiler_and_search_ablation_are_executable(project_ro
     assert '512 "$$budget" "$$patience" 0' in run
     assert "run_submission_kernel_case.sh" in run
     assert ablation.command.result_files == ["budget-*/artifacts.tar.gz"]
+
+
+def test_every_command_variant_renders(project_root) -> None:
+    root = Path(project_root) / EXP
+    rendered = 0
+    for recipe_path in sorted(root.glob("*/recipe.yaml")):
+        for task in enumerate_tasks([str(recipe_path.parent)]):
+            if task.recipe.command is None:
+                continue
+            substitutions = build_substitution_map(
+                task.variant,
+                list(range(task.recipe.deploy.gpu_count)),
+                "/repo",
+                "/task",
+            )
+            command = render_command(task.recipe.command.run, substitutions)
+            assert "/repo" in command
+            assert "/task" in command
+            rendered += 1
+    assert rendered == 10
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

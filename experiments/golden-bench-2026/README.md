@@ -19,15 +19,16 @@ cross-platform kernel table. B200 and A100 are stretch platforms; drop B200 firs
 
 ## Kernel methodology
 
-Every common-corpus recipe traces all layer-0 targets at static sequence lengths 1 and 512. The two shapes approximate
-decode and ordinary prefill while keeping the initial search bounded. Search uses at most 12 candidates per kernel,
+The `kernels_common` matrix recipe creates one hardware variant per platform, and every variant traces all layer-0
+targets at static sequence lengths 1 and 512. The two shapes approximate decode and ordinary prefill while keeping
+the initial search bounded. Search uses at most 12 candidates per kernel,
 patience 4, and seed 0. `kernels_convergence_h200` repeats only the sequence-512 family at seeds 0, 1, and 2; it is a
 search-stability diagnostic and adds no workload to the headline geometric mean.
 
-The large-layer recipes trace Qwen3.6-27B layers 0 and 3 at the pinned revision. Layer 0 represents the 48 of 64
-linear-attention layers; layer 3 represents the 16 of 64 full-attention layers. Both use sequence lengths 1 and 512,
-at most eight candidates, and patience 3. This supplement tests large GEMM and attention shapes without multiplying
-the main corpus.
+The `large_layer` matrix recipe creates H200 and B200 variants that trace Qwen3.6-27B layers 0 and 3 at the pinned
+revision. Layer 0 represents the 48 of 64 linear-attention layers; layer 3 represents the 16 of 64 full-attention
+layers. Both use sequence lengths 1 and 512, at most eight candidates, and patience 3. This supplement tests large
+GEMM and attention shapes without multiplying the main corpus.
 
 Each search has an isolated tuning database, online checkpoint, and cubin cache. The positional trace input and model
 provenance use the same full revision. Every run verifies a content-addressed staged-source manifest, then archives

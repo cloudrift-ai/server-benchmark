@@ -171,8 +171,9 @@ jobs:
             --model "$AGENT_MODEL" \
             --output "$AGENT_MANIFEST" \
             --max-turns 48 \
-            --force-final-turn 8 \
-            --max-output-tokens 4096
+            --force-final-turn 2 \
+            --max-output-tokens 4096 \
+            --request-timeout 180
           agent_status=$?
           set -e
           if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_MANIFEST" ]; then

@@ -157,7 +157,9 @@ jobs:
           maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
           for an embedding model. Use exact canonical GPU names from the repository hardware registry. Return an empty
           onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
-          repository file. After write_file succeeds, your final response may only confirm completion.
+          repository file. When the runner tells you to stop further exploration, immediately call write_file with
+          the best manifest supported by the evidence already gathered; do not make another tool call first. After
+          write_file succeeds, your final response may only confirm completion.
           """)
           PY
           printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
@@ -171,6 +173,7 @@ jobs:
             --model "$AGENT_MODEL" \
             --output "$AGENT_TRANSCRIPT" \
             --max-turns 48 \
+            --completion-reminder-turn 16 \
             --max-output-tokens 4096 \
             --allow-write "$AGENT_MANIFEST"
           agent_status=$?

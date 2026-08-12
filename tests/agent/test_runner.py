@@ -104,6 +104,56 @@ async def test_run_retries_an_empty_final_response(monkeypatch, tmp_path):
     assert payloads[1][-1]["content"].startswith("Your previous response was empty")
 
 
+async def test_run_injects_optional_completion_reminder(monkeypatch, tmp_path):
+    skill = tmp_path / "SKILL.md"
+    prompt = tmp_path / "prompt.md"
+    output = tmp_path / "result.txt"
+    key = tmp_path / "key"
+    source = tmp_path / "source.txt"
+    skill.write_text("# Test skill\n")
+    prompt.write_text("Write the result.\n")
+    key.write_text("secret\n")
+    key.chmod(0o600)
+    source.write_text("evidence\n")
+    responses = iter(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "read-1",
+                        "function": {"name": "read_file", "arguments": json.dumps({"path": "source.txt"})},
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "complete"},
+        ]
+    )
+    payloads = []
+
+    async def complete(_client, _endpoint, _api_key, payload):
+        payloads.append(list(payload["messages"]))
+        return next(responses)
+
+    monkeypatch.setattr(runner, "_completion", complete)
+
+    await runner.run(
+        runner.AgentRun(
+            skill=skill,
+            prompt=prompt,
+            model="test-model",
+            output=output,
+            workspace=tmp_path,
+            max_turns=2,
+            completion_reminder_turn=2,
+            api_key_file=key,
+        )
+    )
+
+    assert payloads[1][-1] == {"role": "user", "content": runner.COMPLETION_REMINDER}
+
+
 def test_tool_environment_removes_cloud_and_github_credentials(monkeypatch):
     monkeypatch.setenv("CLOUDRIFT_API_KEY", "cloud-secret")
     monkeypatch.setenv("GH_TOKEN", "github-secret")

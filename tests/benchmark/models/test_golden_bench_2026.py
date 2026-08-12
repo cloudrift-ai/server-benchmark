@@ -319,10 +319,9 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
         }
         assert points == expected_points
         assert all(task.recipe.benchmark.repeats == 1 for task in lane)
-        assert all(task.recipe.benchmark.require_complete_requests is True for task in lane)
-        assert all(task.recipe.benchmark.require_output_equivalence is True for task in lane)
         assert all(
-            task.recipe.benchmark.output_probe_file == "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl" for task in lane
+            task.recipe.benchmark.output_equivalence_file == "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl"
+            for task in lane
         )
 
     expected_tokens = {
@@ -344,24 +343,6 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
     assert len(repeats_by_lane_and_point) == 8
     assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_lane_and_point.values())
     assert all(task.recipe.aggregate is None for task in tasks)
-    for point in expected_points:
-        point_tasks = [
-            task
-            for task in tasks
-            if (task.recipe.benchmark.random_input_len, task.recipe.benchmark.random_output_len, task.recipe.benchmark.max_concurrency)
-            == point
-        ]
-        assert [task.recipe.benchmark.comparison_order for task in point_tasks] == list(range(10))
-
-
-def test_every_publication_serving_recipe_requires_complete_requests(project_root) -> None:
-    root = Path(project_root) / EXP
-    recipe_dirs = sorted(path.parent for path in root.glob("serving_*/recipe.yaml"))
-    assert len(recipe_dirs) == 8
-    for recipe_dir in recipe_dirs:
-        tasks = enumerate_tasks([str(recipe_dir)])
-        assert tasks
-        assert all(task.recipe.benchmark.require_complete_requests is True for task in tasks), recipe_dir.name
 
 
 def test_gemma_image_provenance_pins_shared_vllm_revision(project_root) -> None:

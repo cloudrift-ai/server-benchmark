@@ -415,13 +415,13 @@ the emmy arm runs at; the flag is a plain vLLM passthrough, only meaningful for 
 Loads each recipe, provisions cloud VMs, deploys the model, runs `vllm bench serve`, captures results, and tears down. Recipes sharing the same model and GPU type are grouped onto the same VM (see `GroupByModelAndGpuPlanner`).
 
 An inference recipe may define a local `aggregate` command that checks the complete run directory after all tasks.
-For paired deterministic serving experiments, the typed `benchmark.require_output_equivalence` gate validates the
-two arms directly without a custom aggregate. Any failed task, built-in gate failure, aggregate timeout, or aggregate
-nonzero status is authoritative: `emmy bench` finishes the complete run and artifact collection, reports the
-failures, and exits nonzero instead of printing a successful completion.
+For paired deterministic serving experiments, declaring `benchmark.output_equivalence_file` captures frozen prompts
+and validates the two arms directly without a custom aggregate. Any failed task, built-in gate failure, aggregate
+timeout, or aggregate nonzero status is authoritative: `emmy bench` finishes the complete run and artifact
+collection, reports the failures, and exits nonzero instead of printing a successful completion.
 
-`benchmark.require_complete_requests` requires every client repeat to report `successful_requests == num_prompts`
-and `failed_requests == 0`. Missing or partial metrics fail the task while preserving the parsed per-repeat verdict.
+Every inference benchmark requires each client repeat to report `successful_requests == num_prompts` and
+`failed_requests == 0`. Missing or partial metrics fail the task while preserving the parsed per-repeat verdict.
 
 Inference recipes may also declare `benchmark.required_server_log_patterns` and
 `benchmark.forbidden_server_log_patterns`. After each workload, the harness captures the complete Compose log,

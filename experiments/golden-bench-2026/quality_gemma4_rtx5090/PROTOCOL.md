@@ -1,12 +1,12 @@
 # Gemma serving output-equivalence gate
 
 This gate accompanies the matched RTX 5090 serving matrix. It is a semantic-equivalence check, not a task-quality
-benchmark. The recipe's `benchmark.output_probe_file` makes the benchmark harness issue these requests after the
+benchmark. The recipe's `benchmark.output_equivalence_file` makes the benchmark harness issue these requests after the
 throughput workload on each fresh stock and Emmy server, before teardown. The task JSON preserves the raw records
 with the exact `benchmark.comparison_arm`, `benchmark.process_repeat`, and expanded workload point.
 
-The recipe enables `benchmark.require_output_equivalence`. `emmy bench` executes the frozen gate over every result,
-writes `output-equivalence.json`, and exits nonzero if the gate fails:
+`emmy bench` executes the frozen gate over every result, writes `output-equivalence.json`, and exits nonzero if the
+gate fails:
 
 ```bash
 emmy bench experiments/golden-bench-2026/serving_gemma4_rtx5090

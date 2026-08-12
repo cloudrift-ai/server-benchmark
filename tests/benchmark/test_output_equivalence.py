@@ -24,10 +24,9 @@ def _task(tmp_path, arm: str, repeat: int, input_len: int = 256) -> BenchmarkTas
                 "random_input_len": input_len,
                 "random_output_len": 64,
                 "max_concurrency": 4,
-                "output_probe_file": str(tmp_path / "prompts.jsonl"),
+                "output_equivalence_file": str(tmp_path / "prompts.jsonl"),
                 "comparison_arm": arm,
                 "process_repeat": repeat,
-                "require_output_equivalence": True,
             },
             "deploy": {"gpu": "NVIDIA H200", "gpu_count": 1},
         }

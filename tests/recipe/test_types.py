@@ -60,6 +60,15 @@ def test_from_dict_rejects_experiment_specific_benchmark_fields():
         Recipe.from_dict({"benchmark": {"result_validator": "compare outputs"}})
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["comparison_order", "output_probe_file", "require_complete_requests", "require_output_equivalence"],
+)
+def test_from_dict_rejects_removed_benchmark_fields(field):
+    with pytest.raises(ValueError, match="unconditional completeness and output_equivalence_file"):
+        Recipe.from_dict({"benchmark": {field: True}})
+
+
 # ── VllmConfig / SglangConfig ────────────────────────────────────
 
 
@@ -201,12 +210,9 @@ def test_from_dict_full():
             "num_prompts": 128,
             "random_input_len": 2000,
             "random_output_len": 3000,
-            "output_probe_file": "experiments/probe.jsonl",
+            "output_equivalence_file": "experiments/probe.jsonl",
             "comparison_arm": "emmy",
             "process_repeat": 3,
-            "comparison_order": 7,
-            "require_output_equivalence": True,
-            "require_complete_requests": True,
             "required_server_log_patterns": ["native fp4"],
             "forbidden_server_log_patterns": ["marlin"],
         },
@@ -225,12 +231,9 @@ def test_from_dict_full():
     assert recipe.engine.llm.vllm.extra_args == "--kv-cache-dtype fp8"
     assert recipe.benchmark.max_concurrency == 64
     assert recipe.benchmark.num_prompts == 128
-    assert recipe.benchmark.output_probe_file == "experiments/probe.jsonl"
+    assert recipe.benchmark.output_equivalence_file == "experiments/probe.jsonl"
     assert recipe.benchmark.comparison_arm == "emmy"
     assert recipe.benchmark.process_repeat == 3
-    assert recipe.benchmark.comparison_order == 7
-    assert recipe.benchmark.require_output_equivalence is True
-    assert recipe.benchmark.require_complete_requests is True
     assert recipe.benchmark.required_server_log_patterns == ["native fp4"]
     assert recipe.benchmark.forbidden_server_log_patterns == ["marlin"]
     assert recipe.deploy.gpu == "NVIDIA H200"

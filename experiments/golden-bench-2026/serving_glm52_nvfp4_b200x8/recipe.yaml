@@ -23,7 +23,6 @@ benchmark:
   temperature: 0
   ignore_eos: true
   repeats: 1
-  require_complete_requests: true
   required_server_log_patterns:
     - '(?i)Detected ModelOpt NVFP4 checkpoint \(quant_algo=NVFP4\)'
     - "(?i)Using '(FLASHINFER_TRTLLM|FLASHINFER_CUTEDSL|FLASHINFER_CUTEDSL_BATCHED|FLASHINFER_CUTLASS|VLLM_CUTLASS)' NvFp4 MoE backend"

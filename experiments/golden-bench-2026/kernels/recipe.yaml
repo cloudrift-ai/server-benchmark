@@ -9,27 +9,20 @@ command:
     - experiments/golden-bench-2026/kernels/recipe.yaml
   strict: true
   run: |
-    set -uo pipefail
+    set -euo pipefail
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     mkdir -p $task_dir/verification
-    status=0
-    setup_status=0
-    trace_status=0
-    tune_status=0
-    verification_status=0
-    freeze_status=0
     finalize() {
       final_status=$$?
       trap - EXIT
-      printf '%s\n' \
-        "study=$study" \
-        "setup_status=$$setup_status" \
-        "trace_status=$$trace_status" \
-        "tune_status=$$tune_status" \
-        "verification_status=$$verification_status" \
-        "freeze_status=$$freeze_status" \
-        > $task_dir/status.txt
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      else
+        echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
+        final_status=1
+      fi
+      printf 'study=%s\nstatus=%s\n' "$study" "$$final_status" > $task_dir/status.txt
       archive_tmp=$${task_dir}.artifacts.tar.gz
       tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
       mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
@@ -37,10 +30,7 @@ command:
     }
     trap finalize EXIT
 
-    [ -d venv ] || make setup || setup_status=$$?
-    if [ "$$setup_status" -ne 0 ]; then
-      status=1
-    fi
+    [ -d venv ] || make setup
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -57,52 +47,24 @@ command:
     if [ "$input_dtype" != "none" ]; then
       trace_args+=(--input-dtype "$input_dtype")
     fi
-    "$${trace_args[@]}" \
-      2>&1 | tee $task_dir/trace.log || trace_status=$$?
-    if [ "$$trace_status" -ne 0 ]; then
-      status=1
-    fi
+    "$${trace_args[@]}" 2>&1 | tee $task_dir/trace.log
 
     if [ "$budget" = "0" ]; then
       echo "tuning intentionally skipped for the cold greedy case" | tee $task_dir/tune.log
-    elif [ "$$trace_status" -eq 0 ]; then
+    else
       ./venv/bin/emmy tune --golden-file $task_dir/working.yaml --clean \
         --devices "$$devices" --max-candidates "$budget" --patience "$patience" --seed "$seed" \
-        --dump-dir $task_dir/dump 2>&1 | tee $task_dir/tune.log || tune_status=$$?
-    else
-      tune_status=$$trace_status
-      echo "tune skipped because tracing failed" | tee $task_dir/tune.log
-    fi
-    if [ "$$tune_status" -ne 0 ]; then
-      status=1
+        --dump-dir $task_dir/dump 2>&1 | tee $task_dir/tune.log
     fi
 
-    if [ "$$trace_status" -ne 0 ]; then
-      verification_status=$$trace_status
-      echo "verification skipped because tracing failed" | tee $task_dir/verification.log
-    elif [ "$$tune_status" -eq 0 ]; then
-      verify_args=(
-        ./venv/bin/emmy run --golden-file $task_dir/working.yaml --all --repeats 5 --bench --strict
-        --json $task_dir/verification --warmup 10 --iters 100 --bench-backends eager,tcompile,emmy
-      )
-      if [ "$required_kernel_source" != "none" ]; then
-        verify_args+=(--require-kernel-source "$required_kernel_source")
-      fi
-      CUDA_VISIBLE_DEVICES="$$first_device" "$${verify_args[@]}" \
-        2>&1 | tee $task_dir/verification.log || verification_status=$$?
-    else
-      verification_status=$$tune_status
-      echo "verification skipped because tuning failed" | tee $task_dir/verification.log
+    verify_args=(
+      ./venv/bin/emmy run --golden-file $task_dir/working.yaml --all --repeats 5 --bench --strict
+      --json $task_dir/verification --warmup 10 --iters 100 --bench-backends eager,tcompile,emmy
+    )
+    if [ "$required_kernel_source" != "none" ]; then
+      verify_args+=(--require-kernel-source "$required_kernel_source")
     fi
-    if [ "$$verification_status" -ne 0 ]; then
-      status=1
-    fi
-
-    ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || freeze_status=$$?
-    if [ "$$freeze_status" -ne 0 ]; then
-      status=1
-    fi
-    exit "$$status"
+    CUDA_VISIBLE_DEVICES="$$first_device" "$${verify_args[@]}" 2>&1 | tee $task_dir/verification.log
   result_files:
     - artifacts.tar.gz
   timeout: 86400

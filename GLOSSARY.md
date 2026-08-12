@@ -200,6 +200,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Prior** — In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured.
   The offline prior is fitted ahead of time (by `emmy fit`, on the golden dataset) and ships with the repo; the
   online prior learns from collected measurements.
+- **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
+  to use, how strong the regularizer is, which loss to minimize — and producing a model leaves those settings
+  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy's offline-prior
+  trainer is `LinearTrainer`, and the model it produces is a `LinearModel`.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,

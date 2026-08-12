@@ -125,7 +125,7 @@ jobs:
           </repository-inventory>
 
           Give every maintained, best-effort, obsolete, and onboarding decision a concise, one-sentence,
-          evidence-backed rationale.
+          evidence-backed rationale of at most 20 words.
           For an obsolete recipe, name the superseding model in both replacement_model_id and the rationale, or omit
           replacement_model_id and explain the technical reason the recipe should be dropped when no successor is
           appropriate. Also select zero to three new models with no recipe. For each new model, propose one to three
@@ -174,7 +174,7 @@ jobs:
             --output "$AGENT_TRANSCRIPT" \
             --max-turns 48 \
             --force-write-turn 8 \
-            --max-output-tokens 8192 \
+            --max-output-tokens 6144 \
             --allow-write "$AGENT_MANIFEST"
           agent_status=$?
           set -e

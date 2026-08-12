@@ -89,8 +89,8 @@ def test_params_come_from_the_file(tmp_path, monkeypatch):
     path.write_text(json.dumps(art))
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     p = OfflinePrior()
-    assert p._scale == 0.5
-    assert p._atomic_free_weight == 7.0
+    assert p.model.scale == 0.5
+    assert p.model.atomic_free_weight == 7.0
 
 
 def test_explicit_kwargs_win_over_the_file(tmp_path, monkeypatch):
@@ -98,9 +98,9 @@ def test_explicit_kwargs_win_over_the_file(tmp_path, monkeypatch):
     path.write_text(json.dumps(_artifact()))
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     p = OfflinePrior(weights={"D_square": 1.0}, scale=1.0)
-    assert p._w == {"D_square": 1.0}  # kwarg, not the file's 3.0
-    assert p._scale == 1.0
-    assert p._w_dyn == {"D_square": -3.0}  # unpassed fields still resolve from the file
+    assert p.model.weights == {"D_square": 1.0}  # kwarg, not the file's 3.0
+    assert p.model.scale == 1.0
+    assert p.model.weights_dynamic == {"D_square": -3.0}  # unpassed fields still resolve from the file
 
 
 def test_missing_file_is_a_hard_error(tmp_path, monkeypatch):

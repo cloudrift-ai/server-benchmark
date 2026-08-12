@@ -112,10 +112,10 @@ def run_axis(cases: list[Group], axis: str, *, fit_model, seed: int) -> dict:
     for f in folds:
         train = [c for c in cases if fold_key(c, axis) != f]
         hold = [c for c in cases if fold_key(c, axis) == f]
-        if not any(c.tier != "dyn" for c in train):
+        if not any(not c.dynamic for c in train):
             excluded[f] = "static weight set unfittable (0 static cases in training)"
             continue
-        if any(c.tier == "dyn" for c in hold) and not any(c.tier == "dyn" for c in train):
+        if any(c.dynamic for c in hold) and not any(c.dynamic for c in train):
             excluded[f] = "dynamic weight set unfittable (0 dyn cases in training)"
             continue
         model = fit_model(train, np.random.default_rng(seed))

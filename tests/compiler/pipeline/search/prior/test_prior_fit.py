@@ -12,6 +12,7 @@ guarantees the extraction from the original fit script must keep:
 """
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -30,6 +31,7 @@ from emmy.compiler.pipeline.search.prior.fit import (
     rank_of_golden,
     raw_weights,
 )
+from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # Seed for the fitted scalar params — the interaction OFF at the shipped threshold, the state a
@@ -53,6 +55,10 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
             row = {n: float(rng.integers(-4, 5)) for n in names}
             feats.append({k: v for k, v in row.items() if rng.random() > 0.25})
         tier = ["thread", "warp", "reduce", "dyn"][c % 4]
+        # The dynamic cases carry the routing stamp on every row, as the golden case builder writes
+        # it; ``Group.from_dicts`` lifts it into ``Group.dynamic`` and out of the fitted matrix.
+        if tier == "dyn":
+            feats = [{**f, "S_ext_n_symbolic_axis": 1.0} for f in feats]
         cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", int(rng.integers(0, n_rows)), feats))
     return cases, names
 
@@ -61,8 +67,8 @@ def _run_fit(samples=200):
     """The script's two-stage fit (static, then dynamic seeded from static) on the
     fixed synthetic case set, assembled into artifact JSON bytes."""
     cases, names = _synthetic_cases()
-    static_cases = [c for c in cases if c.tier != "dyn"]
-    dyn_cases = [c for c in cases if c.tier == "dyn"]
+    static_cases = [c for c in cases if not c.dynamic]
+    dyn_cases = [c for c in cases if c.dynamic]
     rng = np.random.default_rng(0)
     static_w, params, _, _, static_sd = fit_weights(
         static_cases, names, np.ones(len(names)), seed_w=np.zeros(len(names)), seed_params=SEED_PARAMS, rng=rng, samples=samples
@@ -138,11 +144,15 @@ def test_incumbent_weights_rank_identically_through_fit_eval_and_prior(monkeypat
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_fit_scores_the_deployed_quality_interaction_included(dynamic, monkeypatch):
-    """The fit's ``score_rows`` and the deployed ``OfflinePrior`` are the SAME function, on rows
-    that exercise the atomic-free interaction (both sides of its split threshold) — the invariant
-    that makes the fitted objective the deployed ranking. Scored with the interaction ON, since
-    the shipped weight is 0.0 and a zero term would make the comparison vacuous."""
+def test_dict_and_matrix_paths_score_identically(dynamic, monkeypatch):
+    """One definition, two access shapes. :meth:`LinearModel.quality` scores a live candidate from a
+    feature dict; the fitter scores a packed pool as a matrix. They must agree row for row, including
+    the atomic-free interaction on both sides of its split threshold (scored with the interaction ON,
+    since the shipped weight is 0.0 and a zero term would make the comparison vacuous).
+
+    This also pins the routing agreement, which is the part that CAN break: the dict path reads the
+    symbolic-axis stamp off the row it is scoring, the matrix path reads ``Group.dynamic`` off the
+    pool. Same rows, so they must land on the same weight set."""
     monkeypatch.delenv("EMMY_OFFLINE_FILE", raising=False)
     art = json.loads(_DEFAULT_FILE.read_text())
     params = {"atomic_free_weight": 5.0, "atomic_free_split_threshold": 4.0}
@@ -151,19 +161,31 @@ def test_fit_scores_the_deployed_quality_interaction_included(dynamic, monkeypat
 
     rng = np.random.default_rng(11)
     names = sorted(set(art["weights"]) | _INTERACTION_FEATURES)
+    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
     rows = [
         {
             **{n: float(rng.integers(-2, 3)) for n in names if rng.random() > 0.3},
             "D_finalize_kernel": float(rng.integers(0, 2)),
             "D_splitk": float(rng.choice([1, 2, 4, 8])),  # straddles the threshold in both directions
+            **stamp,
         }
         for _ in range(60)
     ]
-    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
     group = Group.from_dicts("x/case", "case", "dyn" if dynamic else "warp", "x", 0, rows)
+    assert group.dynamic is dynamic  # routed by the rows' stamp, not the tier label
     fitted = fit.score_rows(group)
-    deployed = np.array([prior.quality({**row, **stamp}) for row in rows])
+    deployed = np.array([prior.quality(row) for row in rows])
     assert np.allclose(fitted, deployed)
+
+
+def test_model_artifact_round_trips():
+    """``LinearModel`` → artifact → ``LinearModel`` is exact, so the file a fit ships and the model
+    that produced it rank identically. The params block keeps its full key set (order is free — the
+    writer preserves insertion order, so only the shape matters here)."""
+    art = json.loads(_DEFAULT_FILE.read_text())
+    model = LinearModel.from_artifact(art)
+    assert LinearModel.from_artifact(model.to_artifact(provenance={})) == model
+    assert model.to_artifact(provenance={})["params"] == art["params"]
 
 
 def test_gate_columns_survive_the_in_place_z_scoring():
@@ -189,8 +211,7 @@ def _cases_with_flat_feature():
     behind the D_pow2_threads 686 incident, in miniature."""
     cases, names = _synthetic_cases()
     flat_cases = [
-        Group(g.key, g.name, g.tier, g.gpu, g.pinned_idx, (*g.feat_names, "D_flat"), np.hstack([g.feats, np.full((len(g.feats), 1), 3.0)]))
-        for g in cases
+        replace(g, feat_names=(*g.feat_names, "D_flat"), feats=np.hstack([g.feats, np.full((len(g.feats), 1), 3.0)])) for g in cases
     ]
     return flat_cases, [*names, "D_flat"]
 

@@ -31,10 +31,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_table
-from emmy.compiler.pipeline.search.prior.offline import atomic_free_term
+from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, gate_columns, quality_columns
 
 logger = logging.getLogger(__name__)
 
@@ -60,29 +59,14 @@ DEFAULT_L2 = 1e-6
 PARAM_NAMES = ("atomic_free_weight", "atomic_free_split_threshold")
 
 
-def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, np.ndarray]:
-    """The two feature columns :func:`~..offline.atomic_free_term` reads, defaulted exactly as the
-    deployed ``feats.get`` calls do when the featurization omits them (finalize 0.0, split count 1.0).
-
-    Copies, never column views: :func:`fit_weights` z-scores its pools IN PLACE, and these values must
-    stay in raw units — the interaction compares a split COUNT against its threshold."""
-    idx = {n: j for j, n in enumerate(names)}
-    n_rows = len(mat)
-    fin = mat[:, idx["D_finalize_kernel"]].copy() if "D_finalize_kernel" in idx else np.zeros(n_rows)
-    spl = mat[:, idx["D_splitk"]].copy() if "D_splitk" in idx else np.ones(n_rows)
-    return fin, spl
-
-
-def quality_rows(mat: np.ndarray, w: np.ndarray, gates: tuple[np.ndarray, np.ndarray], params: np.ndarray) -> np.ndarray:
-    """A pool's per-row deployed quality (higher = predicted faster) — the linear part plus the
-    atomic-free interaction, scored through the SAME function ``OfflinePrior`` deploys. The fit's
-    objective is this quantity's golden rank, so the fitter optimizes the deployed ranking itself
-    rather than a proxy that omits the term."""
-    return mat @ w + atomic_free_term(gates[0], gates[1], weight=params[0], threshold=params[1])
-
-
 def eval_weights(mats, gidx: list[int], gates, w: np.ndarray, params: np.ndarray) -> list[int]:
-    return [rank_of_golden(quality_rows(m, w, g, params), gi) for m, g, gi in zip(mats, gates, gidx, strict=True)]
+    """Each pool's golden rank under a candidate weight vector. Scores through
+    :func:`~..linear_model.quality_columns` — the same arithmetic ``OfflinePrior`` deploys — so the fit's
+    objective is the deployed ranking itself rather than a proxy that omits the interaction term."""
+    return [
+        rank_of_golden(quality_columns(m, w, g, weight=params[0], threshold=params[1]), gi)
+        for m, g, gi in zip(mats, gates, gidx, strict=True)
+    ]
 
 
 def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
@@ -215,10 +199,9 @@ class TwoStageFit:
     def score_rows(self, group: Group) -> np.ndarray | None:
         """The group's per-row quality (higher = predicted faster) under the raw weight sets
         and this fit's params — scored exactly as the shipped prior ranks, interaction term
-        included. The static-vs-dynamic weight-set selection lives HERE and nowhere else on the
-        fit side. ``None`` when the group needs the dynamic set and this fit has none (an
+        included. ``None`` when the group needs the dynamic set and this fit has none (an
         unfittable fold — callers exclude it up front)."""
-        w = self.dyn_raw if group.tier == "dyn" else self.static_raw
+        w = self.dyn_raw if group.dynamic else self.static_raw
         if w is None:
             return None
         # The gate columns must be present whether or not the weight dict names them (a pruned
@@ -226,7 +209,13 @@ class TwoStageFit:
         names = sorted(set(w) | {"D_finalize_kernel", "D_splitk"})
         mat = group.matrix(names)
         vec = np.array([w.get(n, 0.0) for n in names])
-        return quality_rows(mat, vec, gate_columns(mat, names), np.array([self.params[n] for n in PARAM_NAMES]))
+        return quality_columns(
+            mat,
+            vec,
+            gate_columns(mat, names),
+            weight=self.params["atomic_free_weight"],
+            threshold=self.params["atomic_free_split_threshold"],
+        )
 
     def to_artifact(self, *, params: dict, provenance: dict) -> dict:
         """This fit as the ``OfflinePrior`` weights artifact dict. ``params`` supplies the
@@ -253,8 +242,8 @@ def fit_two_stage(
     The scalar params (:data:`PARAM_NAMES`, seeded from ``seed_params``) are fitted by the STATIC
     stage and frozen for the dynamic one: the artifact carries a single params block that both
     weight sets score under, so the dynamic weights must be fit against the pair that will deploy."""
-    static_groups = [g for g in groups if g.tier != "dyn"]
-    dyn_groups = [g for g in groups if g.tier == "dyn"]
+    static_groups = [g for g in groups if not g.dynamic]
+    dyn_groups = [g for g in groups if g.dynamic]
     seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
     seed_p = np.array([seed_params[n] for n in PARAM_NAMES])
     logger.info("== static fit (%d cases) ==", len(static_groups))
@@ -277,12 +266,13 @@ def build_artifact(*, weights: dict[str, float], weights_dynamic: dict[str, floa
     ``params`` is the complete scoring-param block — the caller merges the fit's own fitted
     params over whatever it carries forward (``scale``); ``provenance`` is caller-supplied whole
     (fitted date, script, args, case counts, notes) so the assembly stays a pure, deterministic
-    function."""
-    return {
-        "feat_ver": FEATURIZER_VERSION,
-        "kind": "linear",
-        "weights": weights,
-        "weights_dynamic": weights_dynamic,
-        "params": params,
-        "provenance": provenance,
-    }
+    function. The shape itself belongs to :meth:`~..linear_model.LinearModel.to_artifact`, so a
+    fit and a round-tripped model serialize identically."""
+    model = LinearModel(
+        weights=weights,
+        weights_dynamic=weights_dynamic,
+        scale=float(params["scale"]),
+        atomic_free_weight=float(params["atomic_free_weight"]),
+        atomic_free_split_threshold=float(params["atomic_free_split_threshold"]),
+    )
+    return model.to_artifact(provenance=provenance)

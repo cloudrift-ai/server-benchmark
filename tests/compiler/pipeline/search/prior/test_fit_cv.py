@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from emmy.commands.fit import register_fit_command
+from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_FEATURES,
     MATMUL_FEATURES,
@@ -101,8 +102,11 @@ def test_dual_rank_tie_plateau():
 
 
 def _case(name, tier, gpu, gidx=1, n_rows=6, key=None):
-    """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal."""
-    feats = [{"D_a": float(i), "D_b": float((i * 7) % 3)} for i in range(n_rows)]
+    """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal. A ``dyn``
+    case carries the routing stamp on every row, exactly as the golden case builder writes it —
+    that stamp, not the tier label, is what puts the group on the dynamic weight set."""
+    stamp = {"S_ext_n_symbolic_axis": 1.0} if tier == "dyn" else {}
+    feats = [{"D_a": float(i), "D_b": float((i * 7) % 3), **stamp} for i in range(n_rows)]
     return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, gidx, feats)
 
 
@@ -117,6 +121,34 @@ def _cases():
         _case("matmul.qkv.h4096", "warp", "gpuB", gidx=4),
         _case("reduce.k2048", "reduce", "gpuB", gidx=0),
     ]
+
+
+# --- weight-set routing ------------------------------------------------------------
+
+
+def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
+    """``S_ext_n_symbolic_axis`` picks the weight set and is then held OUT of the fitted matrix.
+
+    Holding it out is structural, not a feature-view choice: the stamp is constant across a pool, so
+    a weight on it shifts every candidate equally and cancels out of the within-shape ranking. The
+    rank objective cannot see it, which makes any value a descent lands on there noise — so it must
+    not be reachable as a coordinate at all."""
+    static, dyn = _case("m.512", "warp", "gpuA"), _case("m.512.dynM", "dyn", "gpuA")
+    assert (static.dynamic, dyn.dynamic) == (False, True)
+    for case in (static, dyn):
+        assert "S_ext_n_symbolic_axis" not in case.feat_names
+        assert case.feats.shape[1] == len(case.feat_names)
+    # The tier is now just a label: routing reads the stamp off the rows, so a group whose label and
+    # whose rows disagree follows the rows.
+    mislabelled = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
+    assert mislabelled.dynamic is True
+
+
+def test_featurizer_preserves_the_routing_stamp():
+    """The stamp survives ``knob_features`` — the one step between a golden's structural features and
+    the row the fit packs. Without it the whole dynamic weight set would silently stop being reached."""
+    assert features.knob_features({"S_ext_n_symbolic_axis": 1.0, "S_ext_free_prod": 4096.0})["S_ext_n_symbolic_axis"] == 1.0
+    assert "S_ext_n_symbolic_axis" not in features.knob_features({"S_ext_free_prod": 4096.0})
 
 
 NAMES = ["D_a", "D_b"]

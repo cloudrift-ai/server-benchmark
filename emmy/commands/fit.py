@@ -34,6 +34,7 @@ from emmy.compiler.pipeline.search.prior.fit import Group, fit_two_stage, topk_t
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
+from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,11 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
         # ``MMA_tier`` — see its rationale in ``prior/fit/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
-        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
+        # ROUTING_FEATURES survive any view: they pick the weight set rather than contribute a
+        # term, and ``Group.from_dicts`` lifts them straight out of the matrix. Keeping them
+        # unconditionally means a narrower ``--features`` spec cannot silently misroute a
+        # symbolic-axis pool, and the recorded spec stays comparable with earlier fits.
+        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k) or k in ROUTING_FEATURES} for r in rows]
         key = f"{g.gpu_name}/{g.name}"
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
@@ -176,7 +181,7 @@ def handle_fit(args) -> None:
     logger.info("Building golden dataset (each golden under its own card's context) ...")
     cases, skipped = build_golden_groups(args.features)
     names = sorted({n for c in cases for n in c.feat_names})
-    n_dyn = sum(1 for c in cases if c.tier == "dyn")
+    n_dyn = sum(1 for c in cases if c.dynamic)
     logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
 
     incumbent = storage.read_json(config.offline_path() or _DEFAULT_FILE)

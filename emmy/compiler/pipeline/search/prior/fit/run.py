@@ -42,7 +42,7 @@ def run_fit(groups: list[Group], skipped: list[tuple[str, str, str]], *, full_tr
         pkg_logger.setLevel(level)
 
     metrics = build_metrics(header, groups, skipped, full_model, cv)
-    n_dyn = sum(1 for g in groups if g.tier == "dyn")
+    n_dyn = sum(1 for g in groups if g.dynamic)
     artifact = full_model.to_artifact(
         params=params,
         provenance={**provenance, "cases": {"static": len(groups) - n_dyn, "dynamic": n_dyn}, "notes": notes},

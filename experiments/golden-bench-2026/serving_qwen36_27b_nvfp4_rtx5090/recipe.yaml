@@ -22,19 +22,12 @@ benchmark:
   seed: 0
   temperature: 0
   ignore_eos: true
-  repeats: 1
-  required_server_log_patterns:
-    - '(?i)Detected ModelOpt NVFP4 checkpoint \(quant_algo=W4A16_NVFP4\)'
-    - '(?i)using MarlinNvFp4LinearKernel for NVFP4 GEMM'
-    - '(?i)Weight-only FP4 compression will be used leveraging the Marlin kernel'
-  forbidden_server_log_patterns:
-    - '(?i)(EmulationNvFp4LinearKernel|emulat)'
 
 matrices:
   - cross:
       deploy.gpu: "NVIDIA GeForce RTX 5090"
       deploy.gpu_count: 1
-      benchmark.process_repeat: [0, 1, 2, 3, 4]
+      repeat: [0, 1, 2, 3, 4]
       zip:
         benchmark.random_input_len: [128, 4096, 16384]
         benchmark.random_output_len: [128, 1024, 256]

@@ -22,5 +22,5 @@ recipe is a checked repository invariant:
 ```
 
 Also archive `docker image inspect` output and `python -m pip freeze --all` from the one image. A different digest,
-stock entrypoint, package inventory, model snapshot, or scheduler setting closes the matched-system gate. A
+stock entrypoint, package inventory, model snapshot, or scheduler setting invalidates the matched-system claim. A
 compiler-caused end-to-end claim additionally requires a within-`EmmyGenModel` reference-kernel arm.

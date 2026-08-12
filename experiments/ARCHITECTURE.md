@@ -40,11 +40,20 @@ or interpretation differs; do not copy a command body once per GPU.
 
 Command workloads may preserve partial artifacts and then exit nonzero after all declared cases run. The harness
 still pulls every declared `result_files` match from a failed command task, so a failure remains in the denominator
-and retains the logs needed to classify it. A recipe should archive each case before returning its aggregate status.
+and retains the logs needed to classify it. A recipe should archive its evidence before returning its exit status.
+
+## Result analysis
+
+`emmy bench` is an experiment-agnostic runner. Recipes define workloads and neutral matrix labels; they do not define
+semantic gates, log predicates, output comparisons, or aggregate scripts. Tests must verify that durable recipes pin
+the intended models, images, hardware, workload points, repetitions, and command lines before measurement. After a
+run, an intelligent reviewer examines every raw result, failure, log, and artifact against the protocol. Missing
+requests, wrong backends, fallbacks, semantic mismatches, suspicious measurements, and claim boundaries are review
+findings, not conditions hard-coded into the runner.
 
 ## Lifetime
 
-Keep experiment configurations that reproduce a published comparison, protect a qualification gate, or are needed
+Keep experiment configurations that reproduce a published comparison, support a durable qualification, or are needed
 for a planned measurement. Delete exploratory configurations, intermediate candidates, duplicate run snapshots, and
 their one-off helper scripts after the result is encoded in a final recipe, its `RESULTS.md`, a golden config, a test,
 or a durable architecture note. Plans and local run artifacts are not experiment deliverables.

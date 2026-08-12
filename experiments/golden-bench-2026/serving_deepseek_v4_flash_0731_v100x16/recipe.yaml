@@ -31,13 +31,12 @@ benchmark:
   seed: 0
   temperature: 0
   ignore_eos: true
-  repeats: 1
 
 matrices:
   - cross:
       deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
       deploy.gpu_count: 16
-      benchmark.process_repeat: [0, 1, 2, 3, 4]
+      repeat: [0, 1, 2, 3, 4]
       zip:
         benchmark.random_input_len: [128, 1024, 2048]
         benchmark.random_output_len: [128, 256, 512]

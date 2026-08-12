@@ -2,7 +2,7 @@
 
 This experiment suite supports the Emmy compiler submission. Raw measurements remain in benchmark run directories;
 the repository holds only recipes, frozen inputs, and the scientific protocol. A recipe is not evidence until its
-required artifacts exist and pass the gates below.
+required artifacts exist and an intelligent reviewer accepts them against the checklist below.
 
 ## Evidence sets
 
@@ -116,18 +116,18 @@ The executable end-to-end NVFP4-checkpoint recipes are narrower system qualifica
 checkpoint is mixed precision: FP8 attention and W4A16 NVFP4 MLP projections. Its exact vLLM route deliberately uses
 `MarlinNvFp4LinearKernel`, so the RTX 5090 result is labeled W4A16-NVFP4/Marlin compatibility and throughput, not
 native Blackwell FP4-MMA evidence. The separate Qwen3-8B checkpoint declares W4A4 for every transformer Linear and is
-the native RTX 5090 qualification; its gate requires an exact optimized NVFP4 GEMM selection and rejects Marlin and
-emulation. The B200 GLM checkpoint uses W4A4 routed experts; its gate requires the exact vLLM selection line for an
-allowed native NVFP4 MoE backend and rejects Marlin, emulation, unsupported-hardware, and fallback evidence. A failed
-gate preserves the benchmark but invalidates its stated qualification. These stock lanes do not measure Emmy compiler
-speedup and are not inputs to the protocol-only kernel lane.
+the native RTX 5090 qualification. Intelligent review must confirm an exact optimized NVFP4 GEMM selection and reject
+Marlin and emulation. The B200 GLM checkpoint uses W4A4 routed experts. Review of the complete run logs must confirm
+the exact optimized RTX 5090 GEMM and native B200 NVFP4 MoE selections and reject Marlin, emulation,
+unsupported-hardware, or fallback evidence where those paths contradict the lane's claim. These stock lanes do not
+measure Emmy compiler speedup and are not inputs to the protocol-only kernel lane.
 
 ## End-to-end matrix
 
 | Platform | Recipe | Purpose | Claim status |
 | --- | --- | --- | --- |
 | RTX 4090 | Qwen3.6-27B AWQ, TP1 | Recent consumer qualification | Stock baseline until an Emmy arm exists |
-| RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic gating |
+| RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
 | RTX 5090 | Qwen3.6-27B mixed FP8/W4A16-NVFP4, TP1 | Requested quantized checkpoint | W4A16/Marlin compatibility and throughput only |
 | RTX 5090 | Qwen3-8B NVFP4, TP1 | Native W4A4 consumer qualification | Stock capability result until an Emmy arm exists |
 | 16x V100 | DeepSeek-V4-Flash-0731, TP8xPP2 | New checkpoint on the proven SM70 serving path | Portability result until a matched stock arm exists |
@@ -144,10 +144,9 @@ kernel corpus.
 
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings. Their immutable images
 also record the same vLLM source revision. The
-[image provenance gate](serving_gemma4_rtx5090/IMAGE_PROVENANCE.md) is executable; a difference in scheduler settings
-or base revision invalidates the A/B. The frozen
-[output-equivalence gate](quality_gemma4_rtx5090/PROTOCOL.md) requires exact deterministic completions on all five
-fresh stock and Emmy servers.
+[image provenance contract](serving_gemma4_rtx5090/IMAGE_PROVENANCE.md) is checked against the recipe before a run; an
+intelligent reviewer rejects the A/B if the final evidence shows different scheduler settings, runtime revisions, or
+model semantics. `emmy bench` does not compare outputs or make this scientific decision.
 
 The Gemma delta supports a matched end-to-end serving-system speedup claim. Stock uses vLLM's native route while Emmy
 uses `EmmyGenModel`, so this A/B does not isolate compiler kernels alone. A compiler-caused end-to-end claim requires
@@ -156,7 +155,7 @@ compatibility and deliberately fail to imply a compiler speedup by themselves.
 
 ### Gemma estimator and claim rule
 
-Pair stock and Emmy by workload and `benchmark.process_repeat`, independent of their balanced execution order. The
+Pair stock and Emmy by workload and the neutral matrix label `repeat`, independent of their balanced execution order. The
 primary metric is output-token throughput for `(256,256,64)`, median end-to-end latency for `(4096,4096,1)`,
 output-token throughput for `(4096,4096,8)`, and median time to first token for `(8192,256,4)`. Other recorded
 throughput, TTFT, TPOT, ITL, and latency fields are secondary diagnostics and cannot substitute for a primary metric.
@@ -168,15 +167,15 @@ lower endpoint exceeds one. The equal-weight four-point summary is the geometric
 10,000-draw seed-0 bootstrap that resamples the five pairs within each point. "Faster across the matrix" requires
 all four points and the summary to meet the same lower-bound rule.
 
-Every serving recipe enables the built-in request-completeness gate: every repeat must report
-`successful_requests == num_prompts` and `failed_requests == 0`, and every output probe must pass. The equivalence
-gate rejects a filtered partial Gemma matrix before provisioning. No performance outlier is removed. A
-machine-readable deployment, client, or network failure before a complete metric may trigger one rerun of the entire
-stock/Emmy pair for that workload/repeat; retain and disclose both failed originals. A second failure makes the point
-incomplete. A semantic mismatch or post-metric performance anomaly is never a rerun reason; after a code/configuration
-fix, restart the entire 40-task matrix under a new source ID.
+For every serving task, intelligent review must confirm `successful_requests == num_prompts`, `failed_requests == 0`,
+the complete preregistered matrix, the intended backend from the raw logs, and plausible outputs and metrics. `emmy
+bench` records these facts but does not accept or reject them. No performance outlier is removed. A machine-readable
+deployment, client, or network failure before a complete metric may trigger one rerun of the entire stock/Emmy pair
+for that workload/repeat; retain and disclose both failed originals. A second failure makes the point incomplete. A
+semantic mismatch or post-metric performance anomaly is never a rerun reason; after a code/configuration fix, restart
+the entire 40-task matrix under a new source ID.
 
-## Publication gates
+## Intelligent publication review
 
 - Every kernel result has five exact fresh-process `-O3` replays and passes correctness/integrity checks.
 - Kernel artifacts include the pinned positional model, clean staged-source ID, package freeze, online checkpoint,
@@ -191,8 +190,8 @@ fix, restart the entire 40-task matrix under a new source ID.
   on the authorized host before publication.
 - The suite makes no TP8 kernel claim; datacenter kernel results retain the stated unsharded corpus boundary.
 - End-to-end speedup claims require matched hardware, model revision, engine revision, workload, and stock/Emmy arms.
-- The Gemma system table additionally requires matched scheduler settings, image provenance, and exact frozen-prompt
-  outputs; it is not labeled compiler-caused without a same-route reference arm.
-- Native end-to-end quantization claims require the built-in server-log gate to name the exact method and backend and
-  reject fallback paths; a recipe without a passing gate is planned evidence only.
+- The Gemma system table additionally requires matched scheduler settings, image provenance, and a documented
+  intelligent semantic comparison; it is not labeled compiler-caused without a same-route reference arm.
+- Native end-to-end quantization claims require the reviewer to identify the exact method and backend in raw logs and
+  reject fallback paths; a recipe alone is planned evidence only.
 - Datacenter claims remain per-system. Results are not generalized from TP8 to TP4, or across GPU generations.

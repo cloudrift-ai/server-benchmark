@@ -19,8 +19,6 @@ benchmark:
   seed: 0
   temperature: 0
   ignore_eos: true
-  repeats: 1
-  output_equivalence_file: "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl"
 
 matrices:
   # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E, E/S, S/E.
@@ -66,8 +64,8 @@ matrices:
         - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-      benchmark.comparison_arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy, emmy, stock, stock, emmy]
-      benchmark.process_repeat: &balanced_repeats [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+      arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy, emmy, stock, stock, emmy]
+      repeat: &balanced_repeats [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
 
   # Interactive point.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -102,8 +100,8 @@ matrices:
         - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=32"
-      benchmark.comparison_arm: *balanced_arms
-      benchmark.process_repeat: *balanced_repeats
+      arm: *balanced_arms
+      repeat: *balanced_repeats
 
   # Batch point with the 2048-token prefill chunk.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -138,8 +136,8 @@ matrices:
         - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-      benchmark.comparison_arm: *balanced_arms
-      benchmark.process_repeat: *balanced_repeats
+      arm: *balanced_arms
+      repeat: *balanced_repeats
 
   # Long-prefill/RAG point.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -174,5 +172,5 @@ matrices:
         - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=8"
-      benchmark.comparison_arm: *balanced_arms
-      benchmark.process_repeat: *balanced_repeats
+      arm: *balanced_arms
+      repeat: *balanced_repeats

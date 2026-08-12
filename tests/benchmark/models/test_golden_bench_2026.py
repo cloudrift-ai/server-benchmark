@@ -1,11 +1,10 @@
-"""Configuration gates for the 2026 compiler-submission experiments."""
+"""Configuration checks for the 2026 compiler-submission experiments."""
 
 import json
 import subprocess
 from pathlib import Path
 
 from emmy.benchmark.command_workload import build_substitution_map, render_command
-from emmy.benchmark.execution import validate_server_log_patterns
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe import load_recipe
 
@@ -162,7 +161,7 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
             assert benchmark.ignore_eos is True
             assert benchmark.repeats == 1
             point = (benchmark.random_input_len, benchmark.random_output_len, benchmark.max_concurrency)
-            repeats_by_point.setdefault(point, set()).add(benchmark.process_repeat)
+            repeats_by_point.setdefault(point, set()).add(task.variant.params["repeat"])
             assert "--no-enable-prefix-caching" in task.recipe.engine.llm.vllm.extra_args
             if name != "serving_deepseek_v4_flash_0731_v100x16":
                 assert "@sha256:" in task.recipe.engine.llm.vllm.image
@@ -178,11 +177,6 @@ def test_qwen_nvfp4_qualification_is_w4a16_marlin(project_root) -> None:
         assert llm.context_length == 32768
         assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
         assert "--quantization modelopt" in llm.vllm.extra_args
-        benchmark = task.recipe.benchmark
-        assert benchmark.required_server_log_patterns
-        assert any("marlin" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
-        assert any("weight-only fp4" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
-        assert any("emulat" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
 
 
 def test_qwen3_native_nvfp4_qualification_requires_optimized_w4a4_kernel(project_root) -> None:
@@ -190,41 +184,19 @@ def test_qwen3_native_nvfp4_qualification_requires_optimized_w4a4_kernel(project
     for task in tasks:
         llm = task.recipe.engine.llm
         assert llm.tensor_parallel_size == 1
+        assert task.recipe.model.revision == "ccd10a893cbca613259517c3efe08e151ddf2b8e"
+        assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
         assert "--quantization modelopt" in llm.vllm.extra_args
-        benchmark = task.recipe.benchmark
-        assert any("cutlassnvfp4" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
-        assert any("marlin" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
-        assert any("emulation" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
-        for backend in ("FlashInferCutlassNvFp4LinearKernel", "CutlassNvFp4LinearKernel"):
-            logs = f"Detected ModelOpt NVFP4 checkpoint (quant_algo=NVFP4).\nUsing {backend} for NVFP4 GEMM"
-            assert (
-                validate_server_log_patterns(
-                    logs,
-                    benchmark.required_server_log_patterns,
-                    benchmark.forbidden_server_log_patterns,
-                )["status"]
-                == "pass"
-            )
-        for backend in ("MarlinNvFp4LinearKernel", "EmulationNvFp4LinearKernel"):
-            logs = f"Detected ModelOpt NVFP4 checkpoint (quant_algo=NVFP4).\nUsing {backend} for NVFP4 GEMM"
-            assert (
-                validate_server_log_patterns(
-                    logs,
-                    benchmark.required_server_log_patterns,
-                    benchmark.forbidden_server_log_patterns,
-                )["status"]
-                == "fail"
-            )
 
 
-def test_b200_nvfp4_qualification_requires_native_backend_logs(project_root) -> None:
+def test_b200_nvfp4_qualification_pins_native_capable_configuration(project_root) -> None:
     tasks = enumerate_tasks([_experiment(project_root, "serving_glm52_nvfp4_b200x8")])
     for task in tasks:
-        benchmark = task.recipe.benchmark
-        assert any("vllm_cutlass" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
-        assert all("modeloptnvfp4" not in pattern.lower() for pattern in benchmark.required_server_log_patterns)
-        assert any("falling back" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
-        assert any("marlin" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
+        llm = task.recipe.engine.llm
+        assert task.recipe.model.revision == "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa"
+        assert llm.tensor_parallel_size == 8
+        assert "--enable-expert-parallel" in llm.vllm.extra_args
+        assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
 
 
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
@@ -299,8 +271,8 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
     tasks = enumerate_tasks([_experiment(project_root, "serving_gemma4_rtx5090")])
     assert len(tasks) == 40
 
-    stock = [task for task in tasks if task.recipe.benchmark.comparison_arm == "stock"]
-    emmy = [task for task in tasks if task.recipe.benchmark.comparison_arm == "emmy"]
+    stock = [task for task in tasks if task.variant.params["arm"] == "stock"]
+    emmy = [task for task in tasks if task.variant.params["arm"] == "emmy"]
     assert len(stock) == 20
     assert len(emmy) == 20
     assert {task.recipe.engine.llm.vllm.image for task in tasks} == {
@@ -319,10 +291,6 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
         }
         assert points == expected_points
         assert all(task.recipe.benchmark.repeats == 1 for task in lane)
-        assert all(
-            task.recipe.benchmark.output_equivalence_file == "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl"
-            for task in lane
-        )
 
     expected_tokens = {
         (256, 256, 64): 2112,
@@ -338,11 +306,10 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
             task.recipe.benchmark.max_concurrency,
         )
         assert f"--max-num-batched-tokens {expected_tokens[point]}" in task.recipe.engine.llm.vllm.extra_args
-        lane = task.recipe.benchmark.comparison_arm
-        repeats_by_lane_and_point.setdefault((lane, point), set()).add(task.recipe.benchmark.process_repeat)
+        lane = task.variant.params["arm"]
+        repeats_by_lane_and_point.setdefault((lane, point), set()).add(task.variant.params["repeat"])
     assert len(repeats_by_lane_and_point) == 8
     assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_lane_and_point.values())
-    assert all(task.recipe.aggregate is None for task in tasks)
 
 
 def test_gemma_image_provenance_pins_shared_vllm_revision(project_root) -> None:
@@ -354,11 +321,11 @@ def test_gemma_image_provenance_pins_shared_vllm_revision(project_root) -> None:
     assert "sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0" in text
     assert "sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3" in text
     assert {task.recipe.engine.llm.vllm.image for task in tasks} == {provenance["image"]}
-    assert {task.recipe.engine.llm.vllm.entrypoint for task in tasks if task.recipe.benchmark.comparison_arm == "stock"} == {
+    assert {task.recipe.engine.llm.vllm.entrypoint for task in tasks if task.variant.params["arm"] == "stock"} == {
         provenance["stock_entrypoint"]
     }
     assert all(
         f'"architectures":["{provenance["emmy_architecture"]}"]' in task.recipe.engine.llm.vllm.extra_args
         for task in tasks
-        if task.recipe.benchmark.comparison_arm == "emmy"
+        if task.variant.params["arm"] == "emmy"
     )

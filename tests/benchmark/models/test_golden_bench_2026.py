@@ -21,12 +21,12 @@ def _kernel_tasks(project_root: str, study: str):
 
 def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     platforms = {
-        "NVIDIA Tesla V100 SXM3 32GB": (16, "none"),
-        "NVIDIA A100 80GB": (8, "none"),
+        "NVIDIA Tesla V100 SXM3 32GB": (1, "none"),
+        "NVIDIA A100 80GB": (1, "none"),
         "NVIDIA GeForce RTX 4090": (1, "none"),
         "NVIDIA GeForce RTX 5090": (1, "none"),
-        "NVIDIA H200 141GB": (8, "hidet"),
-        "NVIDIA B200": (8, "none"),
+        "NVIDIA H200 141GB": (1, "hidet"),
+        "NVIDIA B200": (1, "none"),
     }
     recipe_dir = _experiment(project_root, "kernels")
     recipe = load_recipe(recipe_dir)
@@ -138,7 +138,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
     tasks = _kernel_tasks(project_root, "large-layer")
     assert len(tasks) == 8
     assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA H200 141GB", "NVIDIA B200"}
-    assert all(task.recipe.deploy.gpu_count == 8 for task in tasks)
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert {task.variant.params["layer"] for task in tasks} == {0, 3}
     assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
     assert {task.variant.params["model_ref"] for task in tasks} == {"Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"}
@@ -157,7 +157,7 @@ def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
     assert len(tasks) == 3
     assert {task.variant.params["seed"] for task in tasks} == {0, 1, 2}
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
-    assert all(task.recipe.deploy.gpu_count == 8 for task in tasks)
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert all(task.variant.params["seq_len"] == 512 for task in tasks)
 
 
@@ -179,6 +179,7 @@ def test_h200_independent_compiler_and_search_ablation_are_executable(project_ro
     cold = next(task for task in tasks if task.variant.params["budget"] == 0)
     assert cold.variant.params["verification_mode"] == "cold-greedy"
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 
 
 def test_every_command_variant_renders(project_root) -> None:

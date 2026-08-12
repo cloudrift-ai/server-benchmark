@@ -129,7 +129,7 @@ matrices:
           - "NVIDIA GeForce RTX 5090"
           - "NVIDIA H200 141GB"
           - "NVIDIA B200"
-        deploy.gpu_count: [16, 8, 1, 1, 8, 8]
+        deploy.gpu_count: 1
         optional_backend: [none, none, none, none, hidet, none]
 
   # Unsharded BF16 large-shape supplement; separate from the common-corpus geometric mean and not TP8 evidence.
@@ -145,7 +145,7 @@ matrices:
       optional_backend: none
       zip:
         deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
-        deploy.gpu_count: [8, 8]
+        deploy.gpu_count: 1
 
   # Three-seed search-stability diagnostic for one representative common-corpus shape.
   - cross:
@@ -159,7 +159,7 @@ matrices:
       verification_mode: tune-winners
       optional_backend: none
       deploy.gpu: "NVIDIA H200 141GB"
-      deploy.gpu_count: 8
+      deploy.gpu_count: 1
 
   # Search-budget ablation. Budget zero is a fresh cold-greedy process with empty local evidence.
   - study: search-ablation
@@ -169,7 +169,7 @@ matrices:
     seed: 0
     optional_backend: none
     deploy.gpu: "NVIDIA H200 141GB"
-    deploy.gpu_count: 8
+    deploy.gpu_count: 1
     zip:
       budget: [0, 4, 12, 48]
       patience: [0, 4, 4, 12]

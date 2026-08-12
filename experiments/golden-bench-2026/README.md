@@ -21,7 +21,8 @@ cross-platform kernel table. B200 and A100 are stretch platforms; drop B200 firs
 The single `kernels` recipe uses its `study` matrix field to keep four evidence sets distinct. Its `common` tasks run
 the same layer-0 targets at static sequence lengths 1 and 512 on every platform. The two shapes approximate decode
 and ordinary prefill while keeping the initial search bounded. Search uses at most 12 candidates per kernel,
-patience 4, and seed 0. The `convergence` tasks repeat only the sequence-512 family at seeds 0, 1, and 2; this is a
+patience 4, and seed 0. Every kernel task requests and tunes on one GPU; multi-GPU allocation is not part of the
+kernel claim. The `convergence` tasks repeat only the sequence-512 family at seeds 0, 1, and 2; this is a
 search-stability diagnostic and adds no workload to the headline geometric mean.
 
 The `large-layer` tasks create H200 and B200 variants that trace Qwen3.6-27B layers 0 and 3 at the pinned revision.

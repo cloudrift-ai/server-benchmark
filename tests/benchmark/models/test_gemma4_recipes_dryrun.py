@@ -107,7 +107,7 @@ def test_recipe_shape_agrees_with_the_release_config(project_root, recipes_dir):
 def test_base_recipe_is_one_pinned_completion_server(recipes_dir):
     """The separately requested base checkpoint has no chat contract or benchmark grid."""
     directory = _require_runnable(recipes_dir, BASE_RECIPE)
-    tasks = _tasks(recipes_dir, BASE_RECIPE)
+    tasks = enumerate_tasks([directory])
     assert len(tasks) == 1
 
     recipe = tasks[0].recipe

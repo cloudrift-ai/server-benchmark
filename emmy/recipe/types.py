@@ -310,10 +310,3 @@ class Recipe:
         """True for embedding recipes (``model.task: embed``) — /v1/embeddings
         smoke test + ``vllm bench serve --backend openai-embeddings`` workload."""
         return self.model.task == "embed"
-
-    @property
-    def lifecycle(self) -> str | None:
-        """The maintained, best-effort, obsolete, or onboarding lifecycle tag, when present."""
-        from emmy.recipe.lifecycle import LIFECYCLE_TAGS
-
-        return next((tag for tag in self.tags if tag in LIFECYCLE_TAGS), None)

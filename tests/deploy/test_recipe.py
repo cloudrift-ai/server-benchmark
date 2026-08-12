@@ -157,7 +157,6 @@ def test_load_recipe_parses_runnable_lifecycle_tag(tmp_recipe_dir, tag):
     recipe = load_recipe(tmp_recipe_dir)
 
     assert recipe.tags == (tag,)
-    assert recipe.lifecycle == tag
 
 
 @pytest.mark.parametrize("tags", [["obsolete"], ["onboarding", "untested"]])

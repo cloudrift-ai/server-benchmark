@@ -7,7 +7,7 @@ import yaml
 GPU = "NVIDIA H200 141GB"
 
 
-def test_recipe_create_json_and_list_by_tag(run_cli, tmp_path):
+def test_recipe_create_and_list_by_tag(run_cli, tmp_path):
     root = tmp_path / "recipes"
     returncode, stdout, stderr = run_cli(
         "recipe",
@@ -20,15 +20,12 @@ def test_recipe_create_json_and_list_by_tag(run_cli, tmp_path):
         "--deployment",
         GPU,
         "1",
-        "--json",
     )
 
     assert returncode == 0, stderr
-    created = json.loads(stdout)
-    assert created["model_id"] == "org/new-model"
-    assert created["tags"] == ["onboarding", "untested"]
-    assert created["deployments"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
-    assert yaml.safe_load((root / "new-model" / "recipe.yaml").read_text())["matrices"] == created["deployments"]
+    recipe_path = root / "new-model" / "recipe.yaml"
+    assert stdout.strip() == str(recipe_path)
+    assert yaml.safe_load(recipe_path.read_text())["matrices"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
 
     returncode, stdout, stderr = run_cli("recipe", "list", str(root), "--tag", "onboarding", "--json")
 

@@ -254,9 +254,8 @@ jobs:
           existing = os.environ.get("EXISTING_PR")
           plan = (
               f"This is the execution of existing model-onboarding PR #{existing}. Read the matching onboarding "
-              "recipe shell or legacy plan. Replace the shell with the qualified recipe, replace its onboarding and "
-              "untested tags with best-effort, and delete any matching plans/onboard-*.md file after all artifacts "
-              "are complete."
+              "recipe shell. Replace the shell with the qualified recipe and replace its onboarding and untested "
+              "tags with best-effort after all artifacts are complete."
               if existing
               else "This is a new onboarding; create all required artifacts from the tracked skill."
           )
@@ -277,9 +276,8 @@ jobs:
           atomic summary, including experiment_artifacts with retained experiment recipe.yaml files only. Put the
           selected benchmark numbers in the final recipe's RESULTS.md; do not retain raw results, experiment reports,
           dated run snapshots, or onboarding summaries. Also include artifacts listing every intended created,
-          modified, or deleted repository file (including a removed onboarding plan) and no exploratory output. Allowed areas are
-          recipes/, experiments/, docker/vllm-emmy-serve/models/, canonical golden YAML files, and deletion of the
-          matching plans/onboard-*.md file.
+          modified, or deleted repository file and no exploratory output. Allowed areas are recipes/, experiments/,
+          docker/vllm-emmy-serve/models/, and canonical golden YAML files.
           """
           Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
           PY

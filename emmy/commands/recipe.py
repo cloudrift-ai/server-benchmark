@@ -26,11 +26,7 @@ def _handle_create(args) -> None:
     try:
         deployments = [{"deploy.gpu": gpu_name, "deploy.gpu_count": int(gpu_count)} for gpu_name, gpu_count in args.deployment]
         path = create_recipe_stub(args.root, args.model_id, args.rationale, args.task, deployments)
-        if args.json:
-            created = next(recipe for recipe in recipe_inventory(args.root) if recipe["model_id"] == args.model_id)
-            logger.info(json.dumps(created, sort_keys=True))
-        else:
-            logger.info(str(path))
+        logger.info(str(path))
     except (OSError, ValueError) as exc:
         logger.error(str(exc))
         raise SystemExit(2) from exc
@@ -59,5 +55,4 @@ def register_recipe_command(subparsers) -> None:
         metavar=("GPU", "COUNT"),
         help="Candidate deploy.gpu and deploy.gpu_count; repeat for up to three setups",
     )
-    create_parser.add_argument("--json", action="store_true", help="Print the created recipe metadata as JSON")
     create_parser.set_defaults(func=_handle_create)

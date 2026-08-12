@@ -22,4 +22,4 @@ def test_best_effort_recipe_is_enumerated(tmp_path):
     tasks = enumerate_tasks([str(recipe)])
 
     assert len(tasks) == 1
-    assert tasks[0].recipe.lifecycle == "best-effort"
+    assert tasks[0].recipe.tags == ("best-effort",)

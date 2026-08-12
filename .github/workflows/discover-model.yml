@@ -51,7 +51,7 @@ jobs:
           }
           matches=$(retry_gh gh pr list --state open --limit 100 \
             --json number,headRefName,isCrossRepository,labels \
-            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or (.headRefName | startswith("agents/model-discovery-")) or (.headRefName | startswith("agents/plan-onboard-"))))]')
+            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or (.headRefName | startswith("agents/model-discovery-"))))]')
           count=$(jq length <<< "$matches")
           if [ "$count" -gt 1 ]; then
             echo "Expected at most one rolling model discovery PR, found $count" >&2
@@ -292,7 +292,7 @@ jobs:
             branch="agents/model-discovery-${GITHUB_RUN_ID}"
             git switch -c "$branch"
           fi
-          git add --all -- recipes plans
+          git add --all -- recipes
           git diff --cached --check
           git commit -m "recipes: refresh model lifecycle"
           for attempt in 1 2 3; do
@@ -309,7 +309,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
           PR_NUMBER: ${{ steps.rolling.outputs.number }}
-          PLAN_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
+          DISCOVERY_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
         run: |
           retry_gh() {
             for attempt in 1 2 3; do
@@ -332,7 +332,7 @@ jobs:
               -F body=@"$DISCOVERY_SUMMARY" >/dev/null
           else
             PR_NUMBER=$(retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
-              -f head="$PLAN_BRANCH" \
+              -f head="$DISCOVERY_BRANCH" \
               -f base="${{ github.event.repository.default_branch }}" \
               -f title="Refresh model lifecycle and onboarding" \
               -F body=@"$DISCOVERY_SUMMARY" \

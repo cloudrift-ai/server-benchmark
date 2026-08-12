@@ -74,9 +74,6 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     first = _recipe(tmp_path, "first", "org/first", leading_comment=True)
     second = _recipe(tmp_path, "second", "org/second", tags=["maintained"])
     third = _recipe(tmp_path, "third", "org/third", tags=["best-effort"])
-    plan = tmp_path / "plans" / "onboard-old.md"
-    plan.parent.mkdir()
-    plan.write_text("old plan")
     selection = tmp_path / "selection.json"
     _manifest(
         selection,
@@ -89,13 +86,7 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     result = discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    assert result == {
-        "changed": True,
-        "maintained_count": 1,
-        "best_effort_count": 1,
-        "obsolete_count": 1,
-        "onboarding_count": 1,
-    }
+    assert result == {"changed": True}
     assert first.read_text().startswith("# Keep this qualification note.\ntags:\n  - maintained\n")
     assert yaml.safe_load(second.read_text())["tags"] == ["best-effort"]
     assert yaml.safe_load(third.read_text())["tags"] == ["obsolete"]
@@ -112,7 +103,6 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     assert yaml.safe_load(third.read_text())["model"]["rationale"] == (
         "org/first supersedes this recipe: The replacement is stronger at the same practical VRAM footprint."
     )
-    assert not plan.exists()
     summary = (tmp_path / "summary.md").read_text()
     assert "`org/new-model`" in summary
     assert "`org/third` → `org/first`" in summary
@@ -218,21 +208,6 @@ def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_
 
     assert yaml.safe_load(shell.read_text())["tags"] == ["onboarding", "untested"]
     assert shell.read_text().count("- onboarding") == 1
-
-
-def test_moves_legacy_onboarding_rationale_under_model(tmp_path):
-    _recipe(tmp_path, "ready", "org/ready")
-    shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
-    shell.write_text(shell.read_text() + "discovery:\n  rationale: Strong recent adoption.\n")
-    selection = tmp_path / "selection.json"
-    _manifest(selection, ["org/ready"])
-
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
-    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
-
-    text = shell.read_text()
-    assert yaml.safe_load(text)["model"]["rationale"] == "Strong recent adoption."
-    assert "discovery:" not in text
 
 
 def test_moves_existing_rationale_immediately_below_model_id(tmp_path):

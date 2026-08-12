@@ -339,7 +339,7 @@ directory.
 ```bash
 emmy recipe list [ROOT] [--tag TAG]... [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
-  --deployment GPU COUNT [--deployment GPU COUNT]... [--json]
+  --deployment GPU COUNT [--deployment GPU COUNT]...
 ```
 
 ### `emmy deploy local`

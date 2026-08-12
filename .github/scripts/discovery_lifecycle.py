@@ -128,11 +128,9 @@ def _obsolete_decisions(value: object, records: dict[str, dict], *, ignore_inval
 
 def _existing_rationale(record: dict) -> str:
     config = record["config"]
-    return (
-        (config.get("model") or {}).get("rationale")
-        or (config.get("discovery") or {}).get("rationale")
-        or "Retained as a useful runnable recipe on a best-effort basis because discovery did not establish that it is obsolete."
-    )
+    return (config.get("model") or {}).get(
+        "rationale"
+    ) or "Retained as a useful runnable recipe on a best-effort basis because discovery did not establish that it is obsolete."
 
 
 def _model_ids(decisions: list[dict[str, str]]) -> list[str]:
@@ -313,24 +311,11 @@ def _replace_model_rationale(text: str, rationale: str) -> str:
     return "".join(lines)
 
 
-def _remove_discovery_block(text: str) -> str:
-    lines = text.splitlines(keepends=True)
-    start = next((index for index, line in enumerate(lines) if line.startswith("discovery:")), None)
-    if start is None:
-        return text
-    end = start + 1
-    while end < len(lines) and (not lines[end].strip() or lines[end].startswith((" ", "\t"))):
-        end += 1
-    return "".join([*lines[:start], *lines[end:]])
-
-
-def _set_lifecycle(record: dict, lifecycle: str, rationale: str, *, remove_discovery: bool = False) -> bool:
+def _set_lifecycle(record: dict, lifecycle: str, rationale: str) -> bool:
     path = record["path"]
     before = path.read_text()
     after = _replace_tag_block(before, _tags_with_lifecycle(record["tags"], lifecycle))
     after = _replace_model_rationale(after, rationale)
-    if remove_discovery:
-        after = _remove_discovery_block(after)
     if before == after:
         return False
     path.write_text(after)
@@ -413,15 +398,7 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
     for decision in manifest["obsolete_models"]:
         changed = _set_lifecycle(records[decision["model_id"]], OBSOLETE_TAG, decision["rationale"]) or changed
     for decision in manifest["existing_onboarding_models"]:
-        changed = (
-            _set_lifecycle(
-                records[decision["model_id"]],
-                ONBOARDING_TAG,
-                decision["rationale"],
-                remove_discovery=True,
-            )
-            or changed
-        )
+        changed = _set_lifecycle(records[decision["model_id"]], ONBOARDING_TAG, decision["rationale"]) or changed
     for candidate in manifest["onboarding_models"]:
         create_recipe_stub(
             workspace / "recipes",
@@ -431,18 +408,8 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
             candidate["deployments"],
         )
         changed = True
-    for plan in workspace.glob("plans/onboard-*.md"):
-        plan.unlink()
-        changed = True
-
     summary_path.write_text(_summary(manifest))
-    return {
-        "changed": changed,
-        "maintained_count": len(manifest["maintained_models"]),
-        "best_effort_count": len(manifest["best_effort_models"]),
-        "obsolete_count": len(manifest["obsolete_models"]),
-        "onboarding_count": len(manifest["existing_onboarding_models"]) + len(manifest["onboarding_models"]),
-    }
+    return {"changed": changed}
 
 
 def _write_outputs(result: dict) -> None:

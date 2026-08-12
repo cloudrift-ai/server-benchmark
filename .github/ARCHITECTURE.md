@@ -94,15 +94,15 @@ artifacts. An Emmy-tuned prebuilt image is produced only when the architecture, 
 release gates pass.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, canonical-golden, and matching plan paths. Unmanifested or exploratory
-output is rejected. The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable
-GitHub App credentials for the long-running push path.
+allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
+The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable GitHub App
+credentials for the long-running push path.
 
 ### Discovery lifecycle PR
 
 **Discover model** runs nightly or by manual dispatch. It updates one rolling draft PR rather than opening one PR per
-model. A legacy discovery plan PR is adopted as the rolling PR, and the workflow fails closed if more than one rolling
-discovery PR exists. It also adopts one unpaired discovery branch left by an interrupted PR-creation step, while
+model, and the workflow fails closed if more than one rolling discovery PR exists. It also adopts one unpaired
+discovery branch left by an interrupted PR-creation step, while
 failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
 agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
 remote head as its force-with-lease expectation; a conflict, a stale checkout, or a concurrent branch update stops the
@@ -126,18 +126,11 @@ benchmarked, published, or bundled; a later reassessment may return one to the m
 The workflow creates `onboarding`/`untested` shells up to the three-shell total through the same catalog library that
 backs `emmy recipe create`. Each shell stores its rationale under `model` and a list of one to three candidate
 deployment entries under `matrices`; subsequent runs validate and report the same setups while the shell remains
-pending. A shell does not claim qualification. The
-workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and uses
+pending. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and uses
 the API-only `make setup-agent` target for repository setup plus `gh` for rolling-PR discovery and updates. It never
-rents a VM. Pull-request mutations use `gh api` REST endpoints rather than the deprecated Projects Classic fields in
-the CLI's GraphQL edit path. GitHub CLI reads and writes plus the recipe push get three bounded attempts so a transient
-transport error does not fail discovery or strand a pushed recipe commit. Discovery uses a bounded research prompt
-and a workflow-specific model-turn cap so the manifest is written before the agent transcript reaches the inference
-endpoint's context ceiling. The recipe catalog renders one compact inventory of identity, lifecycle, rationale, task,
-and deployment setups into the prompt rather than making the agent load complete serving configurations; the
-lifecycle helper retains only the classification policy and manifest application. The shared runner retains only a
-bounded recent history. Discovery reserves 3,072 output tokens because its only durable model output is the atomic
-manifest; onboarding retains the larger general-purpose runner default.
+rents a VM. Network operations use bounded retries, and discovery keeps research, prompt inventory, retained history,
+and final output within the inference endpoint's context limit. The lifecycle helper retains only classification
+policy and manifest application.
 
 ## Credentials, VM ownership, and cleanup
 

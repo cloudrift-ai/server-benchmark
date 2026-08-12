@@ -21,7 +21,8 @@ must come first. The caller can lower the per-turn output reservation with `--ma
 small atomic result. A caller with exactly one `--allow-write` path can use `--force-write-turn` to append one user
 message and require the existing `write_file` tool on that turn; later turns return to automatic tool selection and
 the maximum turn count remains the hard limit. HTTP failures include a bounded response detail in the runner error so
-endpoint validation failures remain actionable.
+endpoint validation failures remain actionable. Rate limits and server errors get three bounded attempts before the
+runner reports that error.
 
 Tool descriptions and JSON schemas live beside their handlers in `runner.py`, which is the single source of truth.
 `emmy agent tools` serializes a detached copy of those definitions as JSON for inspection or integration; there is no

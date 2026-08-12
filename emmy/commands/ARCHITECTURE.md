@@ -547,7 +547,7 @@ must arrive through a one-use mode-`0600` file or inherited file descriptor and 
 ```bash
 emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
   --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json \
-  --max-output-tokens 4096 --allow-write /tmp/manifest.json --force-write-turn 16
+  --max-output-tokens 4096 --allow-write /tmp/manifest.json --force-write-turn 8
 emmy agent tools --output /tmp/emmy-agent-tools.json
 ```
 

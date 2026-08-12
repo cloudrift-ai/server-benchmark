@@ -19,6 +19,7 @@ DEFAULT_ENDPOINT = "https://inference.cloudrift.ai/v1"
 MAX_TOOL_OUTPUT = 12_000
 MAX_TRANSCRIPT_CHARS = 24_000
 MAX_FETCH_BYTES = 256_000
+COMPLETION_ATTEMPTS = 3
 FORCE_WRITE_REMINDER = (
     "Stop further exploration. Complete the requested durable output now, using the required write tool before the "
     "final response when applicable."
@@ -420,11 +421,16 @@ async def _run_tool(
 
 
 async def _completion(client: httpx.AsyncClient, endpoint: str, api_key: str, payload: dict) -> dict:
-    response = await client.post(
-        f"{endpoint.rstrip('/')}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json=payload,
-    )
+    for attempt in range(COMPLETION_ATTEMPTS):
+        response = await client.post(
+            f"{endpoint.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
+        retryable = response.status_code == 429 or response.status_code >= 500
+        if not retryable or attempt == COMPLETION_ATTEMPTS - 1:
+            break
+        await asyncio.sleep(2**attempt)
     if response.is_error:
         detail = " ".join(response.text[:2000].split())
         suffix = f": {detail}" if detail else ""

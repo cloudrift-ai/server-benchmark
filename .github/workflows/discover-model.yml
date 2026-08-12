@@ -172,7 +172,7 @@ jobs:
             --model "$AGENT_MODEL" \
             --output "$AGENT_TRANSCRIPT" \
             --max-turns 48 \
-            --force-write-turn 16 \
+            --force-write-turn 8 \
             --max-output-tokens 4096 \
             --allow-write "$AGENT_MANIFEST"
           agent_status=$?

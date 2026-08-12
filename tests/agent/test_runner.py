@@ -1,6 +1,7 @@
 import json
 import os
 
+import httpx
 import pytest
 
 from emmy.agent import runner
@@ -170,6 +171,29 @@ async def test_run_can_force_the_allowed_result_write(monkeypatch, tmp_path):
     assert payloads[1]["tool_choice"] == {"type": "function", "function": {"name": "write_file"}}
     assert payloads[2]["tool_choice"] == "auto"
     assert manifest.read_text() == '{"complete": true}'
+
+
+async def test_completion_retries_a_transient_server_error(monkeypatch):
+    responses = iter(
+        [
+            httpx.Response(502, json={"error": {"message": "upstream unavailable"}}),
+            httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "complete"}}]}),
+        ]
+    )
+    sleeps = []
+
+    async def handler(_request):
+        return next(responses)
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(runner.asyncio, "sleep", sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        message = await runner._completion(client, "https://example.com/v1", "key", {"model": "test"})
+
+    assert message["content"] == "complete"
+    assert sleeps == [1]
 
 
 def test_tool_environment_removes_cloud_and_github_credentials(monkeypatch):

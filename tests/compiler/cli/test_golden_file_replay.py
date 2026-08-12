@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
@@ -27,8 +29,15 @@ def _working_loop(path, *, state="inventory"):
     entry = document["configs"][0]
     realization = entry["realizations"][0]
     realization["name"] = "working.relu"
-    if state in {"proposal", "verified"}:
+    if state in {"proposal", "tuned", "verified"}:
         realization["knobs"] = {"WORK": "w1x1"}
+    if state == "tuned":
+        realization["ranking"] = {
+            "source": "tune",
+            "status": "ok",
+            "tune_winner": True,
+            "measured_knobs": {"WORK": "w1x1"},
+        }
     if state == "verified":
         realization["measurements"] = {
             "emmy_us": 1.0,
@@ -139,6 +148,31 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
     assert args.golden_configs[0].pins == {"FAST_MATH": False}
     assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": False, "WORK": "w1x1"}
+
+
+def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path, state="tuned")
+    args = _args(path)
+
+    resolve_golden_arg(args)
+
+    assert len(args.golden_configs) == 1
+    assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
+
+
+def test_working_invalid_direct_tune_winner_is_rejected(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path, state="tuned")
+    document["configs"][0]["realizations"][0]["ranking"]["measured_knobs"] = {"WORK": "w2x2"}
+    dump_golden_file(document, path, overwrite=True)
+
+    with pytest.raises(SystemExit, match="2"):
+        resolve_golden_arg(_args(path))
 
 
 def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):

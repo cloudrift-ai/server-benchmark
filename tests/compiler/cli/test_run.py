@@ -28,6 +28,18 @@ def _randn(shape: str, dtype, scale: float | None = None) -> str:
     return f"torch.randn({shape})"
 
 
+def _working_golden_for_live_gpu(name: str) -> Path:
+    from emmy import gpu
+    from emmy.compiler.pipeline.search import golden
+
+    live_name = gpu.live_name()
+    for path in sorted((Path(golden.__file__).parent / "goldens").glob("*.yaml")):
+        records = golden.load_golden_records(golden.load_golden_file(path))
+        if any(record.name == name and record.gpu_name == live_name for record in records):
+            return path
+    pytest.skip(f"no {name} working golden for {live_name}")
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
@@ -198,13 +210,27 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
     assert "Eager PyTorch" in fns
 
 
+def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
+    import torch._dynamo
+
+    from emmy.commands.run import _build_torch_fns
+
+    monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
+
+    fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
+
+    assert "torch.compile" not in fns
+
+
 @requires_cuda
 def test_run_golden_bench_shows_benched_golden_row(run_cli):
-    """``run --golden NAME --bench`` compiles + benches the recorded golden (knobs
-    pinned) and prints it as a ``golden NAME``-labeled row in the kernel table, plus the
+    """A selected working-golden target compiles and benches its recorded knobs,
+    then prints it as a ``golden NAME``-labeled row in the kernel table, plus the
     ``greedy (isolated)`` twin — the greedy graph re-benched through the pinned-row path,
     the baseline the golden rows compare against."""
-    rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench")
+    path = _working_golden_for_live_gpu("matmul.square.512")
+    rc, stdout, stderr = run_cli("run", "--golden", str(path), "--target", "matmul.square.512", "--bench")
     assert rc == 0, f"stderr: {stderr}"
     assert "golden matmul.square.512" in stdout, stdout
     assert "greedy (isolated)" in stdout, stdout
@@ -327,6 +353,24 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref)
     assert "missing" in _wrong_answer_flag({}, ref)
     assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
+
+
+def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    eager = {"o": np.array([1.0, 100.0], dtype=np.float32)}
+    passed = _strict_correctness_proof({"o": np.array([1.0015, 100.05], dtype=np.float32)}, eager)
+    assert passed["status"] == "pass"
+    assert passed["reference"] == "eager"
+    assert passed["rtol"] == passed["atol"] == 1e-3
+    assert passed["max_abs_error"] > 0
+    assert passed["mean_abs_error"] > 0
+
+    failed = _strict_correctness_proof({"o": np.array([1.01, 100.0], dtype=np.float32)}, eager)
+    assert failed["status"] == "fail"
+    assert "exceeds" in failed["error"]
 
 
 def test_unreproducible_pin_flag(monkeypatch):
@@ -627,13 +671,27 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
 
 @requires_cuda
 def test_run_golden_bench_json_record(run_cli, tmp_path):
-    """``run --bench --golden NAME --json PATH`` writes the machine-readable A/B record:
+    """A working-golden benchmark writes the machine-readable A/B record:
     backends, the greedy kernel rows, and one pinned entry per recorded golden config with
     its integrity ``flags`` field and recorded reference latencies."""
     import json
 
     out = tmp_path / "ab.json"
-    rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench", "--warmup", "2", "--iters", "5", "--json", str(out))
+    path = _working_golden_for_live_gpu("matmul.square.512")
+    rc, stdout, stderr = run_cli(
+        "run",
+        "--golden",
+        str(path),
+        "--target",
+        "matmul.square.512",
+        "--bench",
+        "--warmup",
+        "2",
+        "--iters",
+        "5",
+        "--json",
+        str(out),
+    )
     assert rc == 0, f"stderr: {stderr}"
     rec = json.loads(out.read_text())
     assert rec["golden"] == "matmul.square.512"
@@ -745,9 +803,9 @@ def test_run_code_matmul_accuracy(run_cli, dtype):
 
 @requires_cuda
 def test_run_code_target_override(run_cli):
-    """``--target sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
+    """``--gpu-arch sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
     on the live device and must match eager, so ``rc == 0`` is the accuracy assertion."""
-    rc, _, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(256, 256), torch.randn(256, 256))", "--target", "sm_80")
+    rc, _, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(256, 256), torch.randn(256, 256))", "--gpu-arch", "sm_80")
     assert rc == 0, f"stderr: {stderr}"
 
 
@@ -1398,10 +1456,55 @@ def test_write_ab_json_greedy_isolated_block(tmp_path):
     results = {"Eager PyTorch": 100.0, "torch.compile": 50.0, "Emmy": 25.0}
     _write_ab_json(args, results, greedy, bench, [], greedy_iso=iso)
     rec = json.loads((tmp_path / "ab.json").read_text())
-    assert rec["backends"]["Eager PyTorch"] == {"latency_us": 100.0, "speedup_vs_eager": 1.0}
+    assert rec["backends"]["Eager PyTorch"] == {
+        "latency_us": 100.0,
+        "captured": False,
+        "timing_semantics": "uncaptured_forward",
+        "speedup_vs_eager": 1.0,
+    }
     assert rec["backends"]["torch.compile"]["speedup_vs_eager"] == 2.0
     assert rec["backends"]["Emmy"]["speedup_vs_eager"] == 4.0
     assert rec["greedy"]["total_us"] == 500.0
     iso_rec = rec["greedy"]["isolated"]
     assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0
     assert iso_rec["kernels"][0]["us"] == 400.0 and iso_rec["flags"] == []
+
+
+def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _GoldenBench, _write_ab_json
+
+    greedy, bench, _iso = _iso_bench_fixtures()
+    multi_bench = SimpleNamespace(
+        min_ms=0.8,
+        time_ms=0.9,
+        per_launch=[
+            SimpleNamespace(idx=0, samples=[0.3], time_ms=0.3),
+            SimpleNamespace(idx=1, samples=[0.5], time_ms=0.5),
+        ],
+        num_launches=2,
+        captured=True,
+        e2e_min_ms=0.6,
+    )
+    sample = SimpleNamespace(name="ab TILE=f2x4", knobs={"TILE": "f2x4"}, shape=None, dynamic=None)
+    row = _GoldenBench(sample, greedy, multi_bench, [])
+    args = SimpleNamespace(
+        json=str(tmp_path / "ab.json"),
+        code="torch.matmul(a, b)",
+        input=None,
+        ir=None,
+        golden=None,
+        dynamic=None,
+        warmup=1,
+        iters=1,
+    )
+
+    _write_ab_json(args, {"Emmy": 600.0}, greedy, bench, [row])
+
+    pinned = json.loads((tmp_path / "ab.json").read_text())["pinned"][0]
+    assert pinned["total_us"] == 600.0
+    assert pinned["timing_semantics"] == "whole_program_e2e"
+    assert pinned["captured"] is True
+    assert pinned["num_launches"] == 2

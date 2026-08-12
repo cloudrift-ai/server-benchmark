@@ -136,11 +136,12 @@ async def _run_job(req: dict) -> dict:
         # In-process within this child — the parent's SIGKILL is the wall-timeout backstop.
         backend = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0)
         kind, payload = spec
-        accuracy_error = run_io = None
+        accuracy_error = run_io = correctness = None
         if kind == "frontend_graph":
             from emmy.commands.run import bench_lowered_vs_torch
 
-            results, bench, avail, captured, accuracy_error = await bench_lowered_vs_torch(
+            want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
+            response = await bench_lowered_vs_torch(
                 payload,
                 req["graph"],
                 backend,
@@ -149,7 +150,12 @@ async def _run_job(req: dict) -> dict:
                 warmup=req["warmup"],
                 iters=req["iters"],
                 bench_backends=req["bench_backends"],
+                strict_accuracy=req.get("strict_accuracy", False),
+                return_reference=want_reference,
             )
+            results, bench, avail, captured, accuracy_error = response[:5]
+            if want_reference:
+                correctness, run_io = response[5:]
         elif kind == "trace_args":
             import types
 
@@ -204,6 +210,7 @@ async def _run_job(req: dict) -> dict:
             "captured": captured,
             "accuracy_error": accuracy_error,
             "run_io": run_io,
+            "correctness": correctness,
         }
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from emmy.benchmark.bench_logging import _get_group_logger, active_run_dir, add_group_file_handler
 from emmy.benchmark.command_workload import run_command_workload
-from emmy.benchmark.results import compose_json_result
+from emmy.benchmark.results import compose_command_json_result, compose_json_result, missing_command_provenance
 from emmy.benchmark.system_info import collect_system_info
 from emmy.benchmark.workload import capture_server_log, compose_result, run_benchmark_workload
 from emmy.deploy import (
@@ -185,10 +185,12 @@ async def run_execution_group(
                 for p in t.recipe.command.stage:
                     if p not in stage_paths_union:
                         stage_paths_union.append(p)
+        stage_manifest = None
         if stage_paths_union:
             repo_dir_remote = f"{REMOTE_DEPLOY_DIR}/{group_label}/repo"
+            strict_stage = any(t.recipe.command.strict for t in group.tasks if t.recipe.kind == "command" and t.recipe.command is not None)
             try:
-                await stage_to_remote(
+                stage_manifest = await stage_to_remote(
                     Path.cwd(),
                     stage_paths_union,
                     conn.address,
@@ -196,6 +198,7 @@ async def run_execution_group(
                     conn.ssh_port,
                     repo_dir_remote,
                     dry_run=dry_run,
+                    require_clean=strict_stage,
                 )
             except Exception as e:
                 logger.error(f"Staging failed: {e}")
@@ -235,9 +238,10 @@ async def run_execution_group(
                 # local artifacts are easy to correlate when debugging.
                 run_suffix = task.run_dir.name if task.run_dir is not None else "default"
                 task_dir_remote = f"{REMOTE_DEPLOY_DIR}/{group_label}/{task.variant}/{run_suffix}"
+                command_info: dict = {"rendered_command": None, "exit_code": None, "result_paths": []}
                 try:
                     async with task_timer.ameasure(PHASE_COMMAND):
-                        cmd_success, _info = await run_command_workload(
+                        cmd_success, command_info = await run_command_workload(
                             task,
                             run_cmd,
                             repo_dir=repo_dir_remote,
@@ -251,7 +255,26 @@ async def run_execution_group(
                 except Exception as e:
                     task_logger.error(f"Command workload error: {e}")
                     cmd_success = False
-                task_results.append((task, cmd_success, task_timer.as_dict()))
+                    command_info["error"] = str(e)
+                if recipe.command.strict and not dry_run:
+                    if errors := missing_command_provenance(system_info, stage_manifest):
+                        command_info["provenance_errors"] = errors
+                        cmd_success = False
+                if errors := command_info.get("provenance_errors"):
+                    task_logger.error("Required command provenance is missing: %s", ", ".join(errors))
+                timing = task_timer.as_dict()
+                if not dry_run:
+                    command_result = compose_command_json_result(
+                        task,
+                        command_info,
+                        system_info,
+                        success=cmd_success,
+                        timing=timing,
+                        source=stage_manifest,
+                    )
+                    task.json_result_path().write_text(json.dumps(command_result, indent=2) + "\n")
+                    task_logger.info(f"Command result saved to: {task.json_result_path()}")
+                task_results.append((task, cmd_success, timing))
                 await _invoke_callback(on_task_done, task, cmd_success, task_logger)
                 continue
 

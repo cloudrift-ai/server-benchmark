@@ -39,6 +39,10 @@ gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 `commands/run.py::bench_lowered_vs_torch`, which sizes its random inputs by hint-resolving symbolic dims). Used to
 benchmark decoded golden programs and in-memory provenance slices against torch.
 
+The strict run path evaluates Emmy and eager on the same inputs and returns a direct `rtol=atol=1e-3` proof with
+error statistics. The isolated CUDA worker transports that proof and the eager reference outputs back to the parent,
+so exact-pinned rows can be checked against the same reference rather than against another Emmy realization.
+
 ## Backend ABC (`base.py`)
 
 `Backend` is an abstract base class with `compile`, `run`, `benchmark`.

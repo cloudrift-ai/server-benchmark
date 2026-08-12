@@ -25,6 +25,7 @@ jobs:
       AGENT_PROMPT: /tmp/emmy-discovery-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_TRANSCRIPT: /tmp/emmy-discovery-transcript-${{ github.run_id }}-${{ github.run_attempt }}.txt
+      AGENT_INVENTORY: /tmp/emmy-discovery-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
     steps:
       - name: Generate GitHub App token
@@ -92,10 +93,12 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
+          ./venv/bin/python .github/scripts/discovery_lifecycle.py inventory > "$AGENT_INVENTORY"
           python3 - <<'PY'
           import os
           from pathlib import Path
 
+          inventory = Path(os.environ["AGENT_INVENTORY"]).read_text()
           Path(os.environ["AGENT_PROMPT"]).write_text(f"""Use the discover-models skill read-only.
 
           Review the existing recipes and current demand for both supported and newly released open-weight models.
@@ -112,11 +115,14 @@ jobs:
           merely because a larger or unquantized recipe exists. If evidence is ambiguous or the model retains a useful
           advantage, use best-effort. Low demand, age, or exclusion from the maintained set is not sufficient. A
           previously obsolete recipe may become maintained or best-effort when the evidence changes. Never classify
-          an onboarding/untested shell. Keep research bounded: use the repository inventory and at most six targeted
-          public-web searches, then write the manifest. Start with one compact inventory containing only recipe path,
-          model ID, tags, task, deployment matrix, and existing rationale; do not read whole recipe bodies unless one
-          needs closer inspection. Do not keep researching once every maintained choice and obsolete proposal has
-          enough evidence for this conservative classification.
+          an onboarding/untested shell. The exhaustive compact repository inventory is included below; do not rebuild
+          it or read individual recipes unless one entry needs closer inspection. Use at most six public-web tool
+          calls total, including calls made in parallel, then write the manifest. Do not keep researching once every
+          maintained choice and obsolete proposal has enough evidence for this conservative classification.
+
+          <repository-inventory>
+          {inventory}
+          </repository-inventory>
 
           Give every maintained, best-effort, obsolete, and onboarding decision a concise evidence-backed rationale.
           For an obsolete recipe, name the superseding model in both replacement_model_id and the rationale, or omit
@@ -183,6 +189,7 @@ jobs:
         id: lifecycle
         run: |
           ./venv/bin/python .github/scripts/discovery_lifecycle.py \
+            apply \
             --input "$AGENT_MANIFEST" \
             --maintained-count "$MAINTAINED_MODEL_COUNT" \
             --summary "$DISCOVERY_SUMMARY"
@@ -262,6 +269,7 @@ jobs:
             "$AGENT_PROMPT" \
             "$AGENT_MANIFEST" \
             "$AGENT_TRANSCRIPT" \
+            "$AGENT_INVENTORY" \
             "$DISCOVERY_SUMMARY" \
             "$AGENT_KEY_FILE"
           git config --unset-all credential.helper || true

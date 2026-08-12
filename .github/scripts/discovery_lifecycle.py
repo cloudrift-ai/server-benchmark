@@ -138,23 +138,63 @@ def _model_ids(decisions: list[dict[str, str]]) -> list[str]:
     return [decision["model_id"] for decision in decisions]
 
 
-def _deployment_footprints(config: dict) -> tuple[int, ...]:
-    """Return total physical VRAM in MiB for every known deployment variant."""
+def _deployment_variants(config: dict) -> list[dict]:
     base = {key: value for key, value in config.items() if key != "matrices"}
     matrices = config.get("matrices")
-    variants = [base]
-    if matrices:
-        variants = [deep_merge(base, build_override(combination)) for combination in expand_matrix(matrices)]
+    if not matrices:
+        return [base]
+    return [deep_merge(base, build_override(combination)) for combination in expand_matrix(matrices)]
 
-    footprints = []
-    for variant in variants:
+
+def _deployment_setups(config: dict) -> list[dict[str, object]]:
+    setups = []
+    seen = set()
+    for variant in _deployment_variants(config):
         deploy = variant.get("deploy") or {}
         gpu_name = deploy.get("gpu")
         gpu_count = deploy.get("gpu_count", 1)
-        spec = gpu_registry.by_name(gpu_name) if isinstance(gpu_name, str) else None
-        if spec is None or spec.vram_mib is None or not isinstance(gpu_count, int) or gpu_count < 1:
+        key = (gpu_name, gpu_count)
+        valid_count = isinstance(gpu_count, int) and not isinstance(gpu_count, bool) and gpu_count >= 1
+        if not isinstance(gpu_name, str) or not valid_count or key in seen:
             continue
-        footprints.append(spec.vram_mib * gpu_count)
+        seen.add(key)
+        setups.append({"deploy.gpu": gpu_name, "deploy.gpu_count": gpu_count})
+    return setups
+
+
+def discovery_inventory(workspace: Path) -> dict:
+    """Render the compact repository context needed by the discovery agent."""
+    records = _inventory(workspace)
+    recipes = []
+    for model_id, record in records.items():
+        config = record["config"]
+        model = config.get("model") or {}
+        recipes.append(
+            {
+                "path": str(record["path"].relative_to(workspace)),
+                "model_id": model_id,
+                "tags": list(record["tags"]),
+                "task": model.get("task", "generate"),
+                "deployments": _deployment_setups(config),
+                "rationale": model.get("rationale") or (config.get("discovery") or {}).get("rationale"),
+            }
+        )
+    canonical_gpus = [
+        {"name": spec.name, "vram_gib": round(spec.vram_mib / 1024, 1) if spec.vram_mib is not None else None}
+        for spec in gpu_registry.KNOWN_GPUS
+    ]
+    return {"canonical_gpus": canonical_gpus, "recipes": recipes}
+
+
+def _deployment_footprints(config: dict) -> tuple[int, ...]:
+    """Return total physical VRAM in MiB for every known deployment variant."""
+
+    footprints = []
+    for setup in _deployment_setups(config):
+        spec = gpu_registry.by_name(setup["deploy.gpu"])
+        if spec is None or spec.vram_mib is None:
+            continue
+        footprints.append(spec.vram_mib * setup["deploy.gpu_count"])
     return tuple(footprints)
 
 
@@ -488,10 +528,14 @@ def _write_outputs(result: dict) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--maintained-count", type=int, required=True)
-    parser.add_argument("--summary", type=Path, required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    inventory = commands.add_parser("inventory", help="print compact repository context for the discovery agent")
+    inventory.add_argument("--workspace", type=Path, default=Path.cwd())
+    apply = commands.add_parser("apply", help="validate and apply a discovery manifest")
+    apply.add_argument("--input", type=Path, required=True)
+    apply.add_argument("--workspace", type=Path, default=Path.cwd())
+    apply.add_argument("--maintained-count", type=int, required=True)
+    apply.add_argument("--summary", type=Path, required=True)
     return parser
 
 
@@ -499,6 +543,9 @@ def main() -> int:
     args = _parser().parse_args()
     try:
         workspace = args.workspace.resolve()
+        if args.command == "inventory":
+            print(json.dumps(discovery_inventory(workspace), sort_keys=True))
+            return 0
         manifest = validate_manifest(args.input, workspace, args.maintained_count)
         result = apply_manifest(manifest, workspace, args.summary)
         _write_outputs(result)

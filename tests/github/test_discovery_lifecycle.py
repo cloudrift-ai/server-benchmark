@@ -129,6 +129,25 @@ def test_extracts_one_lifecycle_object_from_reasoning_text():
     }
 
 
+def test_discovery_inventory_contains_compact_recipe_and_gpu_context(tmp_path):
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=["maintained"], task="embed")
+    recipe.write_text(recipe.read_text().replace("  huggingface: org/ready\n", "  huggingface: org/ready\n  rationale: Useful.\n"))
+
+    inventory = discovery_lifecycle.discovery_inventory(tmp_path)
+
+    assert inventory["recipes"] == [
+        {
+            "path": "recipes/ready/recipe.yaml",
+            "model_id": "org/ready",
+            "tags": ["maintained"],
+            "task": "embed",
+            "deployments": [{"deploy.gpu": GPU, "deploy.gpu_count": 1}],
+            "rationale": "Useful.",
+        }
+    ]
+    assert {gpu["name"] for gpu in inventory["canonical_gpus"]} == {spec.name for spec in discovery_lifecycle.gpu_registry.KNOWN_GPUS}
+
+
 def test_rejects_extra_top_level_manifest_fields():
     text = json.dumps(
         {

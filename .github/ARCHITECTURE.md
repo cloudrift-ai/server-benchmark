@@ -119,10 +119,11 @@ The workflow creates `onboarding`/`untested` shells up to the three-shell total.
 workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and uses
 the API-only `make setup-agent` target for repository setup plus `gh` for rolling-PR discovery and updates. It never
 rents a VM. Discovery uses a bounded research prompt and a workflow-specific model-turn cap so the manifest is written
-before the agent transcript reaches the inference endpoint's context ceiling. The prompt asks for a compact recipe
-inventory rather than loading complete serving configurations into the agent history, and the shared runner retains
-only a bounded recent history. Discovery reserves 4,096 output tokens because its only durable model output is the
-atomic manifest; onboarding retains the larger general-purpose runner default.
+before the agent transcript reaches the inference endpoint's context ceiling. The lifecycle script pre-renders one
+compact inventory of recipe identity, lifecycle, rationale, task, and deployment setups into the prompt rather than
+making the agent load complete serving configurations, and the shared runner retains only a bounded recent history.
+Discovery reserves 4,096 output tokens because its only durable model output is the atomic manifest; onboarding
+retains the larger general-purpose runner default.
 
 ## Credentials, VM ownership, and cleanup
 

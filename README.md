@@ -296,14 +296,6 @@ emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.p
 emmy vm delete cloudrift --instance-id <id>
 ```
 
-## Agent Skills
-
-```bash
-emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
-emmy agent tools # the exact model tool definitions as JSON
-```
-
 ## Development
 
 ```bash
@@ -326,14 +318,13 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 
 ## Project Structure
 
+- [opencode.json](opencode.json) and [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
 - [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
   (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
   - [emmy.py](emmy/emmy.py) — CLI entrypoint
   - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration
   - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
-  - [agent/](emmy/agent/) — tracked-skill runner and bounded model tools
-    (see [ARCHITECTURE.md](emmy/agent/ARCHITECTURE.md))
   - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
   - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))

@@ -52,8 +52,8 @@ jobs:
       RUN_OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
       VM_LEASE: /tmp/emmy-onboard-${{ github.run_id }}-${{ github.run_attempt }}.json
       ONBOARD_SUMMARY: /tmp/emmy-onboard-summary-${{ github.run_id }}-${{ github.run_attempt }}.json
-      AGENT_KEY_FILE: /tmp/emmy-onboard-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
+      AGENT_EVENTS: /tmp/emmy-onboard-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
@@ -61,6 +61,7 @@ jobs:
       GCP_CONFIG_DIR: /tmp/emmy-onboard-gcloud-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -282,20 +283,22 @@ jobs:
           Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
           PY
 
-          printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
-          chmod 600 "$AGENT_KEY_FILE"
-          unset CLOUDRIFT_API_KEY
-          exec env \
-            -u CLOUDRIFT_API_KEY \
+          set +e
+          env \
             -u CLOUDSDK_CONFIG \
             -u GOOGLE_APPLICATION_CREDENTIALS \
             -u GCP_SERVICE_ACCOUNT \
-            bash .github/scripts/run_onboarding_agent.sh "$AGENT_KEY_FILE" \
-            --skill .claude/skills/onboard-model/SKILL.md \
-            --prompt "$AGENT_PROMPT" \
-            --model "$AGENT_MODEL" \
-            --output "$AGENT_OUTPUT" \
-            --allow-write "$ONBOARD_SUMMARY"
+            opencode run \
+              --agent onboard-model \
+              --model cloudrift/agent \
+              --format json \
+              --file "$AGENT_PROMPT" \
+              "Complete the attached onboarding task exactly." > "$AGENT_EVENTS"
+          agent_status=$?
+          set -e
+          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
+            "$AGENT_EVENTS" > "$AGENT_OUTPUT"
+          exit "$agent_status"
 
       - name: Delete workflow-owned VM
         if: always()
@@ -416,9 +419,9 @@ jobs:
         run: |
           rm -f \
             "$APP_KEY_FILE" \
+            "$AGENT_EVENTS" \
             "$AGENT_PROMPT" \
             "$AGENT_OUTPUT" \
-            "$AGENT_KEY_FILE" \
             "$GCP_KEY_FILE" \
             "$ONBOARD_SUMMARY" \
             "$VM_LEASE" \

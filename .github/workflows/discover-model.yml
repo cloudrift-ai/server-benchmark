@@ -21,8 +21,9 @@ jobs:
       MAINTAINED_MODEL_COUNT: 10
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
-      AGENT_KEY_FILE: /tmp/emmy-discovery-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
       AGENT_PROMPT: /tmp/emmy-discovery-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
+      AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_INVENTORY: /tmp/emmy-discovery-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
@@ -211,27 +212,21 @@ jobs:
           maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
           for an embedding model. Copy deploy.gpu values exactly from deployment setups in repository-inventory.
           Return an empty onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
-          repository file. When the runner requires your final response, return the best manifest supported by the
+          repository file. When OpenCode requires your final response, return the best manifest supported by the
           evidence already gathered without making another tool call.
           """)
           PY
-          printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
-          chmod 600 "$AGENT_KEY_FILE"
-          unset CLOUDRIFT_API_KEY
           set +e
-          env -u CLOUDRIFT_API_KEY ./venv/bin/emmy agent run \
-            --api-key-file "$AGENT_KEY_FILE" \
-            --skill .claude/skills/discover-models/SKILL.md \
-            --prompt "$AGENT_PROMPT" \
-            --model "$AGENT_MODEL" \
-            --output "$AGENT_MANIFEST" \
-            --max-turns 48 \
-            --force-final-turn 2 \
-            --disable-thinking \
-            --max-output-tokens 3072 \
-            --request-timeout 180
+          opencode run \
+            --agent discover-models \
+            --model cloudrift/agent \
+            --format json \
+            --file "$AGENT_PROMPT" \
+            "Complete the attached lifecycle task exactly." > "$AGENT_EVENTS"
           agent_status=$?
           set -e
+          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
+            "$AGENT_EVENTS" > "$AGENT_MANIFEST"
           if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_MANIFEST" ]; then
             exit "$agent_status"
           fi
@@ -347,9 +342,9 @@ jobs:
         if: always()
         run: |
           rm -f \
+            "$AGENT_EVENTS" \
             "$AGENT_PROMPT" \
             "$AGENT_MANIFEST" \
             "$AGENT_INVENTORY" \
-            "$DISCOVERY_SUMMARY" \
-            "$AGENT_KEY_FILE"
+            "$DISCOVERY_SUMMARY"
           git config --unset-all credential.helper || true

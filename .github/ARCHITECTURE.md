@@ -66,16 +66,16 @@ compact agent inventory, and tag-filtered list queries enforce the maintained an
 The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
 validates and applies its lifecycle manifest. The helper
 tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
-before validating their contents. The runner disables tools at discovery's result turn and writes the agent's final
-content to the temporary manifest path; the agent cannot write recipe changes itself. The repository validator remains
-the authoritative completion gate. This forced final response occurs before the hard turn limit so bounded research
-yields a manifest instead of consuming the remaining calls on additional exploration. Discovery disables the model's
-chat-template thinking mode for this concise JSON result, and an empty forced response fails the run.
+before validating their contents. The named OpenCode discovery agent denies repository edits and subagents, permits
+only the tracked discovery skill, public-web tools, repository reads, and read-only Git inspection, and caps work at 48
+agentic steps. OpenCode's final completed text event becomes the temporary manifest; the repository validator remains
+the authoritative completion gate. The project provider configuration selects the configurable CloudRift model through
+an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking mode for the concise
+JSON result. Discovery never provisions hardware.
 
-The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
-public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,
-redirects, response sizes, extracted text, command output, and the final transcript are bounded. Discovery never
-provisions hardware. The reusable runner contract is documented in `emmy/agent/ARCHITECTURE.md`.
+OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
+provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
+tracked `.claude/skills/` remain the task definitions loaded through OpenCode's native skill tool.
 
 ### Direct onboarding
 
@@ -127,23 +127,23 @@ The workflow creates `onboarding`/`untested` shells up to the three-shell total 
 backs `emmy recipe create`. Each shell stores its rationale under `model` and a list of one to three candidate
 deployment entries under `matrices`; subsequent runs validate and report the same setups while the shell remains
 pending. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and uses
-the API-only `make setup-agent` target for repository setup plus `gh` for rolling-PR discovery and updates. It never
+the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR discovery and updates. It never
 rents a VM. Network operations use bounded retries, and discovery keeps research, prompt inventory, retained history,
 and final output within the inference endpoint's context limit. The lifecycle helper retains only classification
 policy and manifest application.
 
 ## Credentials, VM ownership, and cleanup
 
-Agent workflows transfer the CloudRift inference key through a mode-`0600`, one-use file, replace the secret-bearing
-shell, and unlink the file before the first agent tool call. Agent tool subprocesses do not inherit CloudRift, GCP, or
-GitHub credentials. Onboarding retains only the explicitly required Hugging Face and Docker Hub credentials. The
-self-hosted runner must not carry unrelated ambient cloud credentials.
+OpenCode inherits the CloudRift inference key only for provider requests. The project plugin removes CloudRift, GCP,
+GitHub Actions, and GitHub CLI credentials from every agent shell subprocess. Onboarding retains only the explicitly
+required Hugging Face and Docker Hub credentials. The self-hosted runner must not carry unrelated ambient cloud
+credentials.
 
 `emmy vm create gpu --lease` writes a run-owned lease as soon as CloudRift returns an instance ID or GCP creates the
 named instance. The lease binds the provider handle, exact request, workflow owner, and SSH target. Cleanup through
 `emmy vm delete lease` accepts only that lease, retries deletion, and audits only the recorded handle; it never
-enumerates or deletes unrelated VMs. Cleanup runs from both the agent shell trap and an `if: always()` workflow step,
-then `emmy vm audit lease` fails the job if its owned VM is still active.
+enumerates or deletes unrelated VMs. An `if: always()` workflow step performs cleanup after OpenCode exits, then
+`emmy vm audit lease` fails the job if its owned VM is still active.
 
 GitHub App credentials are used for long-lived branch writes and PR operations. Private keys and temporary provider
 configuration live only under run-specific `/tmp/emmy-*` paths and are removed by unconditional cleanup steps.

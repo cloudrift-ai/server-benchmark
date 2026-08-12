@@ -10,7 +10,6 @@ commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
 commands/recipe ─► recipe (catalog queries and onboarding shell creation)
-commands/agent ─► agent (tracked skill runner and tool schemas)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
@@ -19,7 +18,6 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   queries, and onboarding shell creation
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
-- `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
 - `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
   runner
 - `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
@@ -557,24 +555,6 @@ filter, fallback can cross providers in hardware-table order; `--provider` restr
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
-
-### `emmy agent`
-
-Runs a tracked repository skill non-interactively through an OpenAI-compatible Chat Completions endpoint. The API key
-must arrive through a one-use mode-`0600` file or inherited file descriptor and is removed from every tool subprocess.
-
-```bash
-emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json \
-  --max-output-tokens 4096 --force-final-turn 8 --disable-thinking
-emmy agent tools --output /tmp/emmy-agent-tools.json
-```
-
-Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
-from the same definitions the runner sends to the model. The optional force-final turn disables tools once so the
-model produces the durable output with evidence already gathered; that request omits tool definitions, and an empty
-forced result fails. `--disable-thinking` requests the endpoint's concise chat-template mode for structured tasks.
-`--max-turns` remains the hard limit. See `emmy/agent/ARCHITECTURE.md` for the security and workflow-ownership boundary.
 
 ### `emmy fit`
 

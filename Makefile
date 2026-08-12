@@ -6,7 +6,7 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
-	@echo "  setup-agent    - Create venv and install the API-only agent runtime"
+	@echo "  setup-agent    - Create venv and install API-agent workflow dependencies"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
 	@echo "  bench          - Run benchmarks in parallel"
@@ -33,7 +33,7 @@ venv/.setup-agent-complete: pyproject.toml
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
-	@echo "Installing agent runtime dependencies..."
+	@echo "Installing API-agent workflow dependencies..."
 	./venv/bin/pip install -e .
 	@touch $@
 

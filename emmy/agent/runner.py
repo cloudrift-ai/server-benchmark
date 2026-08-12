@@ -19,7 +19,7 @@ DEFAULT_ENDPOINT = "https://inference.cloudrift.ai/v1"
 MAX_TOOL_OUTPUT = 12_000
 MAX_TRANSCRIPT_CHARS = 24_000
 MAX_FETCH_BYTES = 256_000
-COMPLETION_REMINDER = (
+FORCE_WRITE_REMINDER = (
     "Stop further exploration. Complete the requested durable output now, using the required write tool before the "
     "final response when applicable."
 )
@@ -148,7 +148,7 @@ class AgentRun:
     endpoint: str = DEFAULT_ENDPOINT
     allow_write: tuple[Path, ...] = ()
     max_turns: int = 160
-    completion_reminder_turn: int | None = None
+    force_write_turn: int | None = None
     max_output_tokens: int = 8192
     request_timeout: float = 600
     api_key_file: Path | None = None
@@ -437,8 +437,11 @@ async def _completion(client: httpx.AsyncClient, endpoint: str, api_key: str, pa
 
 
 async def run(args: AgentRun) -> str:
-    if args.completion_reminder_turn is not None and not 1 <= args.completion_reminder_turn <= args.max_turns:
-        raise ValueError("Completion reminder turn must be between 1 and max turns")
+    if args.force_write_turn is not None:
+        if not 1 <= args.force_write_turn <= args.max_turns:
+            raise ValueError("Force-write turn must be between 1 and max turns")
+        if len(args.allow_write) != 1:
+            raise ValueError("Force-write turn requires exactly one allowed write path")
     api_key = _take_api_key(args)
     if not api_key:
         raise RuntimeError("The API key file or descriptor was empty")
@@ -473,8 +476,10 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:
         for turn in range(1, args.max_turns + 1):
-            if turn == args.completion_reminder_turn:
-                messages.append({"role": "user", "content": COMPLETION_REMINDER})
+            payload["tool_choice"] = "auto"
+            if turn == args.force_write_turn:
+                messages.append({"role": "user", "content": FORCE_WRITE_REMINDER})
+                payload["tool_choice"] = {"type": "function", "function": {"name": "write_file"}}
             messages = _compact_messages(messages)
             payload["messages"] = messages
             message = await _completion(client, args.endpoint, api_key, payload)

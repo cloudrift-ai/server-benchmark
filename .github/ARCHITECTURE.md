@@ -66,8 +66,8 @@ checkout, then
 reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields before validating
 their contents. The agent writes that manifest through the runner to one explicitly allowed temporary path; it cannot
 write recipe changes itself. Once a nonempty manifest exists, an inference failure during the optional confirmation
-turn does not discard it; the repository validator remains the authoritative completion gate. Discovery gives the
-agent one completion reminder before its hard turn limit so bounded research yields a manifest instead of consuming
+turn does not discard it; the repository validator remains the authoritative completion gate. Discovery forces its
+single allowed manifest write before the hard turn limit so bounded research yields a manifest instead of consuming
 the remaining calls on additional exploration.
 
 The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded

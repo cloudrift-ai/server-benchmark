@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+validated_against_commit: 3c54f4dd594a6bd981b357669cd78e5d0a65d804
 title: "From PyTorch to CUDA: Compiler Deep Dive"
 description: Follow Emmy's compiler from PyTorch tracing through graph rewrites, scheduling, CUDA, runtime, and tuning.
 keywords: [Emmy, compiler, IR, CUDA, graph rewriting, scheduling, autotuning]
@@ -962,14 +963,79 @@ from structural identities.
 ## 8. Tile recognition: recover the algebra
 
 **Algebra** here means the mathematical structure of the work—for example, whether a loop is a sum, a pointwise map,
-or matrix multiplication. Loop IR says what iterations and arithmetic occur, but not what high-level algebra they form. `lowering/tile` analyzes
-the statement tree and creates structural nodes:
+or matrix multiplication. Loop IR says what iterations and arithmetic occur, but not what high-level algebra they
+form. `lowering/tile` analyzes the statement tree and creates structural nodes:
 
 - `Map`: pointwise work or a projection around another structural node.
 - `Reduction`: a planar or twisted fold with an axis, per-element partial, carrier, and reduction schedule.
 - `Contraction`: distributive lift-and-fold work with bound operands and output axes.
 
-These names describe algebra, not GPU hardware:
+### Why these names?
+
+The names come from functional programming and tensor algebra. They describe how values relate mathematically, not
+which GPU instruction will execute them:
+
+- **Map** applies a function independently at each output position: `y[i] = f(x[i])`. The function is *mapped over*
+  the elements, so one position does not need a result from another. Emmy also uses `Map` as a projection wrapper
+  around another structural node, such as the normalization performed after a sum.
+- **Reduction** combines many values into fewer values with an associative operation: `y = sum_i x[i]`. It *reduces*
+  the collection, and the reduced axis disappears from the output. Sum, maximum, and minimum are familiar examples.
+- **Contraction** is the tensor-algebra name for pairing indexed operands and reducing a shared index. In
+  `C[m,n] = sum_k A[m,k] * B[k,n]`, `k` occurs in both operands but not in the result: it has been *contracted away*.
+  A contraction is a specialized reduction, but Emmy represents it separately because its reuse and GPU schedules
+  are substantially different.
+
+The three basic shapes are therefore:
+
+```text
+Map:         y[i]   = f(x[i])
+Reduction:   y      = sum_i x[i]
+Contraction: C[m,n] = sum_k A[m,k] * B[k,n]
+```
+
+Here are the smallest useful examples. Start with one vector:
+
+```text
+x = [1, 2, 3]
+```
+
+**Map—double every element:**
+
+```text
+y[0] = 1 * 2
+y[1] = 2 * 2
+y[2] = 3 * 2
+
+y = [2, 4, 6]
+```
+
+Every position produces its own result independently. The input has three elements and the output has three elements.
+
+**Reduction—sum all elements:**
+
+```text
+y = 1 + 2 + 3
+y = 6
+```
+
+Three input values are combined into one output value, so the vector's only axis is reduced away.
+
+**Contraction—take the dot product of two vectors:**
+
+```text
+a = [1, 2, 3]
+b = [4, 5, 6]
+
+y = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+y = 1 * 4       + 2 * 5       + 3 * 6
+y = 32
+```
+
+This is the smallest contraction: pair values that share the index, multiply each pair, and reduce the products by
+addition. The shared vector index disappears from the scalar result. Matrix multiplication performs a similar dot
+product for every output row-and-column pair.
+
+These algebraic forms correspond to the following Loop IR patterns:
 
 | Loop IR shape | Tile IR structure | Meaning |
 |---|---|---|

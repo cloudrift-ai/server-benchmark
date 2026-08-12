@@ -58,10 +58,10 @@ detector constructs the supported Emmy command from validated experiment paths a
 
 All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
 recipes for the maintained set, classifies the remaining complete recipes, and supplies a rationale for every
-lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each new shell
+lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each shell
 contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
-consume the three-shell limit. Discovery remains read-only: the workflow checks that the agent did not modify the
-checkout, then
+consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
+checks that the agent did not modify the checkout, then
 `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
 reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields before validating
 their contents. The runner disables tools at discovery's result turn and writes the agent's final content to the
@@ -110,7 +110,7 @@ recipe should no longer be used. The manifest must classify every complete recip
 conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
 qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
 and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. Unknown
-unknown or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
+or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
 `best-effort`. A checkpoint name is normalized across a missing or incorrect organization only when it uniquely
 identifies one existing recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections
 must resolve exactly. The agent must use
@@ -119,7 +119,8 @@ the current rationale directly under `model`. Obsolete recipes remain in git but
 published, or bundled; a later reassessment may return one to the maintained or best-effort set.
 
 The workflow creates `onboarding`/`untested` shells up to the three-shell total. Each shell stores its rationale under
-`model` and a list of one to three candidate deployment entries under `matrices`; it does not claim qualification. The
+`model` and a list of one to three candidate deployment entries under `matrices`; subsequent runs validate and report
+the same setups while the shell remains pending. A shell does not claim qualification. The
 workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and uses
 the API-only `make setup-agent` target for repository setup plus `gh` for rolling-PR discovery and updates. It never
 rents a VM. Pull-request mutations use `gh api` REST endpoints rather than the deprecated Projects Classic fields in

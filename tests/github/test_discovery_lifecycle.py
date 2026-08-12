@@ -20,10 +20,11 @@ def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=No
     prefix = "# Keep this qualification note.\n" if leading_comment else ""
     tag_text = "" if tags is None else "tags:\n" + "".join(f"  - {tag}\n" for tag in tags)
     task_text = "" if task is None else f"  task: {task}\n"
-    path.write_text(
-        f"{prefix}{tag_text}model:\n  huggingface: {model_id}\n{task_text}engine:\n  llm: {{}}\nmatrices:\n"
-        f"  deploy.gpu: {gpu}\n  deploy.gpu_count: {gpu_count}\n"
-    )
+    if tags and "onboarding" in tags:
+        matrices = f"matrices:\n  - deploy.gpu: {gpu}\n    deploy.gpu_count: {gpu_count}\n"
+    else:
+        matrices = f"matrices:\n  deploy.gpu: {gpu}\n  deploy.gpu_count: {gpu_count}\n"
+    path.write_text(f"{prefix}{tag_text}model:\n  huggingface: {model_id}\n{task_text}engine:\n  llm: {{}}\n{matrices}")
     return path
 
 
@@ -202,9 +203,22 @@ def test_preserves_existing_onboarding_shell(tmp_path):
             "rationale": (
                 "Retained as a useful runnable recipe on a best-effort basis because discovery did not establish that it is obsolete."
             ),
+            "deployments": [{"deploy.gpu": GPU, "deploy.gpu_count": 1}],
         }
     ]
     assert "rationale" in yaml.safe_load(shell.read_text())["model"]
+    assert "`NVIDIA H200 141GB x1`" in (tmp_path / "summary.md").read_text()
+
+
+def test_rejects_existing_onboarding_shell_without_deployment_matrix(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
+    shell.write_text(shell.read_text().replace("matrices:\n  - deploy.gpu: NVIDIA H200 141GB\n    deploy.gpu_count: 1\n", ""))
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"])
+
+    with pytest.raises(ValueError, match="org/pending needs one to 3 deployments"):
+        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):

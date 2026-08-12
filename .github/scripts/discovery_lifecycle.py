@@ -184,6 +184,29 @@ def _deployment_setups(config: dict) -> list[dict[str, object]]:
     return setups
 
 
+def _validated_deployments(value: object, model_id: str) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_DEPLOYMENTS_PER_MODEL:
+        raise ValueError(f"Onboarding model {model_id} needs one to {MAX_DEPLOYMENTS_PER_MODEL} deployments")
+    deployments = []
+    seen = set()
+    for deployment in value:
+        if not isinstance(deployment, dict) or set(deployment) != DEPLOYMENT_FIELDS:
+            raise ValueError(f"Each deployment must contain exactly: {', '.join(sorted(DEPLOYMENT_FIELDS))}")
+        gpu_name = deployment["deploy.gpu"]
+        gpu_count = deployment["deploy.gpu_count"]
+        spec = gpu_registry.by_name(gpu_name) if isinstance(gpu_name, str) else None
+        if spec is None or spec.name != gpu_name:
+            raise ValueError(f"Onboarding model {model_id} selected unknown GPU {gpu_name!r}")
+        if not isinstance(gpu_count, int) or isinstance(gpu_count, bool) or gpu_count < 1:
+            raise ValueError(f"Onboarding model {model_id} needs a positive deploy.gpu_count")
+        key = (gpu_name, gpu_count)
+        if key in seen:
+            raise ValueError(f"Onboarding model {model_id} contains a duplicate deployment")
+        seen.add(key)
+        deployments.append(deployment)
+    return deployments
+
+
 def discovery_inventory(workspace: Path) -> dict:
     """Render the compact repository context needed by the discovery agent."""
     records = _inventory(workspace)
@@ -238,6 +261,14 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
     existing_onboarding = sorted(model_id for model_id, record in records.items() if ONBOARDING_TAG in record["tags"])
     if len(existing_onboarding) > MAX_ONBOARDING_MODELS:
         raise ValueError(f"Existing onboarding shells exceed the limit of {MAX_ONBOARDING_MODELS}")
+    existing_onboarding_models = [
+        {
+            "model_id": model_id,
+            "rationale": _existing_rationale(records[model_id]),
+            "deployments": _validated_deployments(records[model_id]["config"].get("matrices"), model_id),
+        }
+        for model_id in existing_onboarding
+    ]
 
     proposed = [*_model_ids(maintained), *_model_ids(best_effort), *_model_ids(obsolete_decisions)]
     unfinished = set(proposed) & set(existing_onboarding)
@@ -305,26 +336,7 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
             raise ValueError(f"Duplicate onboarding model {model_id}")
         if candidate["task"] not in ("generate", "embed"):
             raise ValueError(f"Invalid task for {model_id}: {candidate['task']!r}")
-        deployments = candidate["deployments"]
-        if not isinstance(deployments, list) or not 1 <= len(deployments) <= MAX_DEPLOYMENTS_PER_MODEL:
-            raise ValueError(f"Onboarding model {model_id} needs one to {MAX_DEPLOYMENTS_PER_MODEL} deployments")
-        normalized_deployments = []
-        seen_deployments = set()
-        for deployment in deployments:
-            if not isinstance(deployment, dict) or set(deployment) != DEPLOYMENT_FIELDS:
-                raise ValueError(f"Each deployment must contain exactly: {', '.join(sorted(DEPLOYMENT_FIELDS))}")
-            gpu_name = deployment["deploy.gpu"]
-            gpu_count = deployment["deploy.gpu_count"]
-            spec = gpu_registry.by_name(gpu_name) if isinstance(gpu_name, str) else None
-            if spec is None or spec.name != gpu_name:
-                raise ValueError(f"Onboarding model {model_id} selected unknown GPU {gpu_name!r}")
-            if not isinstance(gpu_count, int) or isinstance(gpu_count, bool) or gpu_count < 1:
-                raise ValueError(f"Onboarding model {model_id} needs a positive deploy.gpu_count")
-            key = (gpu_name, gpu_count)
-            if key in seen_deployments:
-                raise ValueError(f"Onboarding model {model_id} contains a duplicate deployment")
-            seen_deployments.add(key)
-            normalized_deployments.append(deployment)
+        normalized_deployments = _validated_deployments(candidate["deployments"], model_id)
         candidate_ids.add(model_id)
         normalized_candidates.append(
             {
@@ -339,9 +351,7 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
         "maintained_models": maintained,
         "best_effort_models": best_effort,
         "obsolete_models": obsolete_decisions,
-        "existing_onboarding_models": [
-            {"model_id": model_id, "rationale": _existing_rationale(records[model_id])} for model_id in existing_onboarding
-        ],
+        "existing_onboarding_models": existing_onboarding_models,
         "onboarding_models": normalized_candidates,
     }
 
@@ -460,6 +470,14 @@ def _obsolete_lines(decisions: list[dict[str, str]]) -> list[str]:
     return lines
 
 
+def _onboarding_lines(decisions: list[dict]) -> list[str]:
+    lines = []
+    for decision in decisions:
+        deployments = ", ".join(f"`{deployment['deploy.gpu']} x{deployment['deploy.gpu_count']}`" for deployment in decision["deployments"])
+        lines.append(f"- `{decision['model_id']}` on {deployments} — {decision['rationale']}")
+    return lines
+
+
 def _summary(manifest: dict) -> str:
     lines = [
         "## Automated model lifecycle update",
@@ -484,16 +502,12 @@ def _summary(manifest: dict) -> str:
         "",
     ]
     if manifest["onboarding_models"]:
-        for candidate in manifest["onboarding_models"]:
-            deployments = ", ".join(
-                f"`{deployment['deploy.gpu']} x{deployment['deploy.gpu_count']}`" for deployment in candidate["deployments"]
-            )
-            lines.append(f"- `{candidate['model_id']}` on {deployments} — {candidate['rationale']}")
+        lines.extend(_onboarding_lines(manifest["onboarding_models"]))
     else:
         lines.append("- None in this run.")
     if manifest["existing_onboarding_models"]:
         lines.extend(["", "### Existing onboarding shells", ""])
-        lines.extend(_model_lines(manifest["existing_onboarding_models"]))
+        lines.extend(_onboarding_lines(manifest["existing_onboarding_models"]))
     has_run_url = all(os.environ.get(name) for name in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
     if has_run_url:
         run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"

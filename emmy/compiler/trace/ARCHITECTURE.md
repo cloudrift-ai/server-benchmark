@@ -216,7 +216,9 @@ shared with CausalLM traces.
   every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden YAML. Each
   target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
   post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
-  file is loaded.
+  file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
+  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy, preserving an
+  internal storage boundary without changing an ordinary model call.
   `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,

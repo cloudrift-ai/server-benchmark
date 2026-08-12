@@ -28,6 +28,7 @@
  "tests/compiler/backend/test_bench_worker_recovery.py::test_worker_survives_benign_error": 0.28,
  "tests/compiler/backend/test_emit.py::test_contraction_emits_matmul": 0.18,
  "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes": 7.2,
+ "tests/compiler/backend/test_torch_ref.py::test_dynamic_w8a8_torch_compile_is_fullgraph": 15.1,
  "tests/compiler/cli/test_compare.py::test_compare_full_model_and_kernels": 0.45,
  "tests/compiler/cli/test_compare.py::test_compare_kernel_set_change_listed": 0.39,
  "tests/compiler/cli/test_compare.py::test_compare_missing_dir_errors": 0.42,

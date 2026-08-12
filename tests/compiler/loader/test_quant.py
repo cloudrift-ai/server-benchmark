@@ -9,9 +9,15 @@ import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.frontend.ir import ReshapeOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
+from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.loader.quant import (
+    decode_f8,
+    dequantize,
+    spell_dynamic_fp8_activations,
+    spell_quantized_constants,
+    spell_quantized_inputs,
+)
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 from tests.compiler.helpers import requires_cuda
 
@@ -236,6 +242,102 @@ def test_spell_is_idempotent(tmp_path):
     nodes_after_first = set(g.nodes)
     assert spell_quantized_constants(g, str(tmp_path)) == 0
     assert set(g.nodes) == nodes_after_first
+
+
+def test_spell_dynamic_activations_reuses_one_shared_w8a8_value(tmp_path):
+    bits = _finite_bits((8, 16))
+    scale = np.ones((8, 1), dtype=np.float32)
+    _write_checkpoint(
+        tmp_path,
+        {
+            "layer.a.weight": _fp8_tensor(bits),
+            "layer.a.weight_scale": torch.from_numpy(scale),
+            "layer.b.weight": _fp8_tensor(bits),
+            "layer.b.weight_scale": torch.from_numpy(scale),
+        },
+        _FP8_QC,
+    )
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    for name in ("a", "b"):
+        weight = f"p_{name}"
+        g.add_node(
+            ConstantOp(name=weight, source_path=f"layer.{name}.weight", source_shape=(8, 16), source_dtype="f16"),
+            [],
+            Tensor(weight, (8, 16), "f16"),
+            node_id=weight,
+        )
+        g.add_node(LinearOp(), ["x", weight], Tensor(f"y_{name}", (4, 8), "f16"), node_id=f"y_{name}")
+    g.inputs, g.outputs = ["x"], ["y_a", "y_b"]
+
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 2
+
+    activation_inputs = {g.nodes[name].inputs[0] for name in ("y_a", "y_b")}
+    assert len(activation_inputs) == 1
+    assert len([node for node in _ops_by_type(g, ElementwiseOp) if node.op.op.name == "to_f8e4m3"]) == 1
+    assert len([node for node in _ops_by_type(g, ReduceOp) if node.op.op.name == "maximum"]) == 1
+    materialized = {node.output.dtype.name for node in g.nodes.values() if node.hints.get("trace.materialize")}
+    assert materialized == {"f32", "f8e4m3"}
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
+
+
+def test_spell_dynamic_activations_requires_checkpoint_declaration(tmp_path):
+    qc = {**_FP8_QC, "activation_scheme": "static"}
+    g, _bits, _scale = _spelled(tmp_path, qc=qc)
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
+
+
+def test_spell_dynamic_activations_accepts_compressed_tensors_token_scheme(tmp_path):
+    qc = {
+        "quant_method": "compressed-tensors",
+        "format": "float-quantized",
+        "ignore": [],
+        "config_groups": {
+            "group_0": {
+                "weights": {"num_bits": 8, "type": "float", "strategy": "channel", "dynamic": False},
+                "input_activations": {"num_bits": 8, "type": "float", "strategy": "token", "dynamic": True},
+            }
+        },
+    }
+    bits = _finite_bits((8, 16))
+    _write_checkpoint(
+        tmp_path,
+        {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": torch.ones((8, 1), dtype=torch.float32)},
+        qc,
+    )
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    g.add_node(
+        ConstantOp(name="p_w", source_path="layer.weight", source_shape=(8, 16), source_dtype="f16"),
+        [],
+        Tensor("p_w", (8, 16), "f16"),
+        node_id="p_w",
+    )
+    g.add_node(LinearOp(), ["x", "p_w"], Tensor("y", (4, 8), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 1
+    assert any(node.op.op.name == "to_f8e4m3" for node in _ops_by_type(g, ElementwiseOp))
+
+
+def test_spell_dynamic_activations_rejects_mixed_compressed_tensor_groups(tmp_path):
+    qc = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {
+            "dynamic": {
+                "weights": {"num_bits": 8, "type": "float"},
+                "input_activations": {"num_bits": 8, "type": "float", "strategy": "token", "dynamic": True},
+            },
+            "weight_only": {
+                "weights": {"num_bits": 8, "type": "float"},
+                "input_activations": None,
+            },
+        },
+    }
+    graph, _bits, _scale = _spelled(tmp_path, qc=qc)
+    assert spell_dynamic_fp8_activations(graph, str(tmp_path)) == 0
 
 
 def test_spell_honors_modules_to_not_convert(tmp_path):
@@ -751,9 +853,18 @@ def test_trace_model_spells_cones_and_binds_dequantized_twin(tmp_path):
     for _nid, op in graph.loadable_constants():
         if op.source_path and ("embed_tokens" in op.source_path or "lm_head" in op.source_path):
             assert op.source_dtype != "f8e4m3", f"unexpected spelling on {op.source_path}"
-    # Each bits constant is consumed by its decode cast in-graph.
+    # Each bits constant and every dynamically encoded activation are consumed
+    # by their matching decode cast in-graph.
     decode_ops = [n for n in graph.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.op.decodes is not None]
-    assert len(decode_ops) == len(spelled)
+    weight_decodes = [
+        node
+        for node in decode_ops
+        if isinstance(graph.producer(node.inputs[0]).op, ConstantOp) and graph.producer(node.inputs[0]).output.dtype.name == "f8e4m3"
+    ]
+    activation_encodes = [node for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp) and node.op.op.name == "to_f8e4m3"]
+    assert len(weight_decodes) == len(spelled)
+    assert len(decode_ops) == len(spelled) + len(activation_encodes)
+    assert activation_encodes
 
     params = dict(wrapper.named_parameters())
     for name, ref in ref_sd.items():

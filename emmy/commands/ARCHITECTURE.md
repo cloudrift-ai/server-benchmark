@@ -146,7 +146,8 @@ structurally identical occurrences are not collapsed and a missing cache key nev
 frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
 Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
 stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
-refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
+refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
+checkpoint-declaration digest in the same YAML.
 
 `emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
 calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct

@@ -142,6 +142,13 @@ buffer into its compute dtype. Scale pairing is the general `<key>_scale` / `<ke
 `.weight` → `.weight_scale` convention and covers non-`.weight` leaves (gpt-oss's 3-D expert params,
 `…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
 
+When an official FP8 declaration also specifies dynamic activations, `loader.quant.spell_dynamic_fp8_activations`
+wraps each eligible linear input in the checkpoint's per-row amax, zero-safe scale, encode, decode, and scale algebra.
+Linears sharing one projection input share the spelled value. A normal compile retains the model's original outputs;
+working-golden inventory generation alone promotes the marked bits and scale values to auxiliary outputs so fusion
+preserves the materialized W8A8 boundary. Native FP8 tensor-core enumeration remains explicitly gated by `FP8_MMA`,
+and a conservative compile can still execute the same graph algebra without selecting that hardware path.
+
 **Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
 expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never
 fire; `loader.quant.spell_quantized_inputs(graph, specs)` is the post-trace twin. Each named input keeps its node id

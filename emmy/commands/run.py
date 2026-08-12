@@ -1665,6 +1665,32 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
     return stage, _passes_after_stage(stage)
 
 
+def _random_source_values(rng, shape, dtype):
+    """Return nontrivial deterministic values in a constant's declared storage dtype."""
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
+    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
+
+    canonical = get_dtype(dtype or "f32").name
+    if canonical in {"f8e4m3", "f8e5m2"}:
+        bits = rng.integers(0, 256, shape, dtype=np.uint8)
+        bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
+        return bits
+    return rng.standard_normal(shape, dtype=np.float32) * 0.02
+
+
+def _random_input_values(rng, shape, dtype):
+    """Return random runtime values, preserving exact FP8 input storage bits."""
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
+
+    if get_dtype(dtype).name in {"f8e4m3", "f8e5m2"}:
+        return _random_source_values(rng, shape, dtype)
+    return rng.standard_normal(shape, dtype=np.float32)
+
+
 async def bench_lowered_vs_torch(
     frontend,
     lowered,
@@ -1743,19 +1769,19 @@ async def bench_lowered_vs_torch(
                 continue
             if op.source_path and op.source_path not in sources:
                 shp = _static(op.source_shape or node.output.shape)
-                sources[op.source_path] = rng.standard_normal(shp, dtype=np.float32) * 0.02
+                sources[op.source_path] = _random_source_values(rng, shp, op.source_dtype)
             # A merged (source_parts) constant draws one random source PER PART, keyed by the
             # part path — the same tensors the pre-merge frontend reference binds its separate
             # weights from, so emmy's concat and the torch ref stay numerically aligned.
             for path, shp in op.source_parts:
                 if path not in sources:
-                    sources[path] = rng.standard_normal(_static(shp), dtype=np.float32) * 0.02
+                    sources[path] = _random_source_values(rng, _static(shp), op.source_dtype)
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
-            arr = rng.standard_normal(_static(node.output.shape), dtype=np.float32)
+            arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
             # reads the runtime seq_len off the input array's shape.
             input_data[nid] = arr

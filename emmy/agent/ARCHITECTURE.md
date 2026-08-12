@@ -16,8 +16,10 @@ bounds. Public fetches reject credentials in URLs and every address that is not 
 assistant message is not a successful result; the runner asks for the requested final response again within the same
 bounded turn budget. Retained history stays below the response endpoint's practical context ceiling; older complete
 assistant/tool groups are dropped together, so a tool result is never separated from the call that produced it. The
-caller can lower the per-turn output reservation with `--max-output-tokens` when a workflow has a small atomic result.
-HTTP failures include a bounded response detail in the runner error so endpoint validation failures remain actionable.
+context notice is folded into the original user prompt, preserving the endpoint contract that the one system message
+must come first. The caller can lower the per-turn output reservation with `--max-output-tokens` when a workflow has a
+small atomic result. HTTP failures include a bounded response detail in the runner error so endpoint validation
+failures remain actionable.
 
 Tool descriptions and JSON schemas live beside their handlers in `runner.py`, which is the single source of truth.
 `emmy agent tools` serializes a detached copy of those definitions as JSON for inspection or integration; there is no

@@ -192,7 +192,9 @@ def test_compact_messages_keeps_assistant_tool_groups_intact(monkeypatch):
 
     assert all(message.get("tool_call_id") != "old" for message in compacted)
     assert any(message.get("tool_call_id") == "new" for message in compacted)
-    assert any(message.get("content", "").startswith("Earlier tool transcript") for message in compacted)
+    assert "Earlier tool transcript omitted" in compacted[1]["content"]
+    assert [message["role"] for message in compacted].count("system") == 1
+    assert compacted[0]["role"] == "system"
 
 
 def test_search_parser_returns_bounded_target_fields():

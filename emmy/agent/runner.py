@@ -323,8 +323,11 @@ def _compact_messages(messages: list[dict]) -> list[dict]:
     kept.reverse()
     if len(kept) == len(groups):
         return messages
-    notice = {"role": "system", "content": "Earlier tool transcript omitted to stay within the context budget."}
-    return [*messages[:2], notice, *(message for group in kept for message in group)]
+    notice = "Earlier tool transcript omitted to stay within the context budget."
+    initial = [dict(message) for message in messages[:2]]
+    if notice not in initial[1]["content"]:
+        initial[1]["content"] = f"{initial[1]['content']}\n\n{notice}"
+    return [*initial, *(message for group in kept for message in group)]
 
 
 def _tool_environment() -> dict[str, str]:

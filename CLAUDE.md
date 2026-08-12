@@ -154,7 +154,9 @@ Model- or experiment-dependent judgment—such as interpreting heterogeneous ben
 assemble every possible serving report—belongs in skill instructions and agent reasoning, not in the benchmark
 harness, result validators, or a growing family of one-off scripts. Simple, readable mechanical post-processing may
 be embedded directly in a recipe; if the logic needs a large decision tree or model-specific policy, keep it out of
-code.
+code. It is fine to write code that processes structural data by selecting fields, reshaping rows, sorting, joining,
+or producing a CSV, TSV, or JSON table. Do not write scripts that interpret results or assemble human-readable
+reports; agents perform that reasoning and write the report.
 
 ### Before committing (MANDATORY — do NOT skip these)
 
@@ -183,7 +185,8 @@ You MUST audit the complete diff after the before-committing checks and before r
     simpler shared design replaces parallel or specialized paths?
 15. **Remove obsolete code**: Delete existing code that the PR makes unnecessary. Apply the boy-scout rule within the
     PR's scope and leave touched code cleaner, without expanding into an unrelated refactor.
-16. **Keep reasoning out of code**: Which logic should not be scripted and should become concise agent instructions?
+16. **Keep reasoning and reports out of code**: Which logic should become concise agent instructions? Code may
+    transform structural data, but scripts must not interpret results or assemble human-readable reports.
 17. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
 18. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
     the smaller contract, not preserve unnecessary machinery.

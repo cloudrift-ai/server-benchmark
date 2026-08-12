@@ -257,14 +257,28 @@ A recipe may declare an `aggregate` block for a short local command after its va
 ```yaml
 aggregate:
   run: |
-    printf 'results are in %s\n' "$run_dir"
+    rows="$run_dir/small_m_results.tsv"
+    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
+    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
+      sort |
+      while IFS= read -r result; do
+        jq -r '
+          . as $run
+          | ($run.results // [])[]
+          | select(.dimensions.M <= 128)
+          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
+             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
+          | @tsv
+        ' "$result"
+      done >> "$rows"
   timeout: 60
 ```
 
-The template receives `$run_dir`. Keep the command self-contained and readable in the recipe; do not invoke an
-external result-analysis script. This hook may arrange or summarize files mechanically, but it must not encode
-experiment-specific acceptance logic or generate `RESULTS.md`. Agents inspect the raw run and write model-specific
-reports when richer analysis is required.
+The template receives `$run_dir`. The example performs transparent structural processing: it selects the small-M
+rows from each SGEMM JSON and assembles one TSV table. Keep such commands self-contained and readable in the recipe;
+do not invoke an external result-analysis script. This hook may select fields, reshape rows, sort, join, or tabulate
+structured data, but it must not interpret the results or generate a human-readable report such as `RESULTS.md`.
+Agents inspect the raw run and write model-specific reports when richer analysis is required.
 
 ### Docker Options
 

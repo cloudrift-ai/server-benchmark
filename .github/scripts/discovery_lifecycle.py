@@ -88,7 +88,7 @@ def _rationale(value: object, model_id: str) -> str:
     return value.strip()
 
 
-def _model_decisions(value: object, field: str) -> list[dict[str, str]]:
+def _model_decisions(value: object, field: str, *, ignore_invalid_ids: bool = False) -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise ValueError(f"{field} must be a list")
     decisions = []
@@ -97,6 +97,8 @@ def _model_decisions(value: object, field: str) -> list[dict[str, str]]:
             raise ValueError(f"Each {field} entry must contain exactly: {', '.join(sorted(DECISION_FIELDS))}")
         model_id = decision["model_id"]
         if not isinstance(model_id, str) or not HF_ID.fullmatch(model_id):
+            if ignore_invalid_ids:
+                continue
             raise ValueError(f"Invalid Hugging Face model ID in {field}: {model_id!r}")
         decisions.append({"model_id": model_id, "rationale": _rationale(decision["rationale"], model_id)})
     if len(decisions) != len({decision["model_id"] for decision in decisions}):
@@ -104,7 +106,7 @@ def _model_decisions(value: object, field: str) -> list[dict[str, str]]:
     return decisions
 
 
-def _obsolete_decisions(value: object) -> list[dict[str, str]]:
+def _obsolete_decisions(value: object, *, ignore_invalid_ids: bool = False) -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise ValueError("obsolete_models must be a list")
     decisions = []
@@ -114,11 +116,15 @@ def _obsolete_decisions(value: object) -> list[dict[str, str]]:
             raise ValueError("Each obsolete model must contain model_id, rationale, and an optional replacement_model_id")
         model_id = decision["model_id"]
         if not isinstance(model_id, str) or not HF_ID.fullmatch(model_id):
+            if ignore_invalid_ids:
+                continue
             raise ValueError(f"Invalid obsolete Hugging Face model ID: {model_id!r}")
         normalized = {"model_id": model_id, "rationale": _rationale(decision["rationale"], model_id)}
         replacement = decision.get("replacement_model_id")
         if replacement is not None:
             if not isinstance(replacement, str) or not HF_ID.fullmatch(replacement):
+                if ignore_invalid_ids:
+                    continue
                 raise ValueError(f"Invalid replacement Hugging Face model ID for {model_id}: {replacement!r}")
             normalized["replacement_model_id"] = replacement
         decisions.append(normalized)
@@ -203,8 +209,8 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
     manifest = _extract_object(path.read_text())
     records = _inventory(workspace)
     maintained = _model_decisions(manifest.get("maintained_models"), "maintained_models")
-    best_effort = _model_decisions(manifest.get("best_effort_models"), "best_effort_models")
-    obsolete_decisions = _obsolete_decisions(manifest.get("obsolete_models"))
+    best_effort = _model_decisions(manifest.get("best_effort_models"), "best_effort_models", ignore_invalid_ids=True)
+    obsolete_decisions = _obsolete_decisions(manifest.get("obsolete_models"), ignore_invalid_ids=True)
     if len(maintained) != maintained_count:
         raise ValueError(f"maintained_models must contain exactly {maintained_count} models")
 

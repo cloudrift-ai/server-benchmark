@@ -110,8 +110,8 @@ recipe should no longer be used. The manifest must classify every complete recip
 conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
 qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
 and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. Unknown
-lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to `best-effort`;
-unknown maintained IDs still fail validation because all ten selections must be exact. The agent must use
+unknown or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
+`best-effort`; unknown maintained IDs still fail validation because all ten selections must be exact. The agent must use
 `best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
 the current rationale directly under `model`. Obsolete recipes remain in git but cannot be deployed, benchmarked,
 published, or bundled; a later reassessment may return one to the maintained or best-effort set.

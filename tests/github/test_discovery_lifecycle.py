@@ -317,6 +317,23 @@ def test_unknown_lower_priority_model_defaults_real_recipe_to_best_effort(tmp_pa
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/other"]
 
 
+def test_malformed_lower_priority_ids_default_real_recipes_to_best_effort(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    _recipe(tmp_path, "other", "org/other")
+    selection = tmp_path / "selection.json"
+    _manifest(
+        selection,
+        ["org/ready"],
+        best_effort=["abbreviated-model"],
+        obsolete=[_obsolete("org/other", "abbreviated-replacement")],
+    )
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+
+    assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/other"]
+    assert manifest["obsolete_models"] == []
+
+
 def test_unknown_maintained_model_is_rejected(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     selection = tmp_path / "selection.json"

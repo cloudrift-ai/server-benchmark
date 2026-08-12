@@ -12,7 +12,8 @@ description: >-
 Turn "what models are worth our GPU hours?" into either a concrete shortlist or a refresh of Emmy's recipe
 lifecycle. New open-weight models are filtered to the ones with real demand, then mapped to the GPU configurations
 they fit. Existing recipes are ranked by current community and serving value so the small maintained set stays
-focused while superseded models remain recorded as obsolete.
+focused, useful lower-priority recipes stay available on a best-effort basis, and only technically superseded models
+become obsolete.
 
 Everything here is **keyless and read-only**: `scripts/new_models.py` hits public OpenRouter + HuggingFace
 endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a JSON
@@ -29,8 +30,8 @@ scripts/new_models.py  →  per-model news/hype search  →  rank by demand  →
 ## Step 0 — Choose the output mode
 
 Use **survey mode** for an interactive shortlist or hardware matrix. Use **lifecycle mode** when the prompt requests
-`maintained_models` and `onboarding_models` JSON for repository automation. The prompt owns the exact maintained-set
-size and target hardware; do not ask follow-up questions in lifecycle mode.
+`maintained_models`, `best_effort_models`, `obsolete_models`, and `onboarding_models` JSON for repository automation.
+The prompt owns the exact maintained-set size and target hardware; do not ask follow-up questions in lifecycle mode.
 
 For survey mode, ask only if the user has not already implied it:
 
@@ -47,12 +48,14 @@ For survey mode, ask only if the user has not already implied it:
 In lifecycle mode, read every `recipes/*/recipe.yaml` first. Treat the top-level tags as follows:
 
 - `maintained` — a tested recipe selected for periodic testing and optimization;
-- `obsolete` — retained for history but disabled because demand moved on or a newer model superseded it;
+- `best-effort` — a useful runnable recipe that is not selected for periodic testing and optimization;
+- `obsolete` — retained for history but disabled because an all-around better model for the same task is available at
+  a comparable or lower practical VRAM footprint;
 - `onboarding` + `untested` — a recipe shell that is not eligible for the maintained set yet.
 
-An obsolete recipe can return to the maintained set when current evidence shows a real activity spike. Never select
-an onboarding/untested shell as maintained. Untagged complete recipes are eligible and must be classified on the first
-lifecycle run.
+Low demand, age, and exclusion from the maintained set are not reasons to mark a recipe obsolete. An obsolete recipe
+can return to the maintained or best-effort set when the evidence changes. Never classify an onboarding/untested
+shell. Untagged complete recipes are eligible and must be classified on the first lifecycle run.
 
 Run the discovery script with arena enrichment, capturing JSON for parsing and the table for a human view.
 Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bursts; don't re-run in a loop):
@@ -99,7 +102,7 @@ Distill each into a one-line **demand read**: *strong* (benchmark wins + active 
 *moderate*, or *niche/quiet*. Cross-check against the script signals — a model high on HF trend **and** loud
 online is a strong pick; high downloads but silent is often a small fine-tuning base, not a flagship.
 
-## Step 3 — Select maintained and onboarding models
+## Step 3 — Classify recipes and select onboarding models
 
 Combine signals into a shortlist. A model is **promising** when it scores on several of:
 
@@ -116,8 +119,11 @@ several hardware tiers (don't pick five 400B MoEs).
 In lifecycle mode:
 
 - choose exactly the requested number of existing, fully configured recipes as maintained;
-- treat every other fully configured recipe as obsolete; the workflow derives this complement, so do not return a
-  separate obsolete list;
+- classify every other fully configured recipe as best-effort or obsolete, with every complete recipe appearing in
+  exactly one of the three lifecycle lists;
+- prefer best-effort whenever a recipe remains useful; use obsolete only when a named maintained or best-effort
+  replacement is all-around better for the same task at a comparable or lower practical VRAM footprint;
+- include that replacement and a concise technical rationale for every obsolete decision;
 - choose only enough genuinely new models to keep at most three total onboarding shells on the prompt's exact target;
   existing onboarding/untested shells consume the available slots;
 - use exact `model.huggingface` IDs from recipe YAML for maintained entries;
@@ -189,9 +195,11 @@ Flag any model with **no engine support yet** or **no suitable quant** as "watch
 
 When lifecycle mode is requested, produce exactly the JSON shape in the prompt and no prose or Markdown fence. If the
 prompt supplies a manifest path, use `write_file` to store the JSON there before the final response. Each new
-onboarding row needs the exact target, `generate` or `embed`, and a brief evidence-backed rationale. An empty
-`onboarding_models` list is valid. Do not edit recipe files yourself: the workflow validates exact model IDs, the
-maintained count, current recipe state, target hardware, duplicates, and rationale before making any change.
+onboarding row needs the exact target, `generate` or `embed`, and a brief evidence-backed rationale. Empty
+`best_effort_models`, `obsolete_models`, and `onboarding_models` lists are valid when the complete partition permits
+them. Do not edit recipe files yourself: the workflow validates exact model IDs, the maintained count, the complete
+lifecycle partition, active replacements for obsolete recipes, target hardware, duplicates, and rationale before
+making any change.
 
 ## Step 7 — Hand off in survey mode
 

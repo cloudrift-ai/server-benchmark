@@ -5,10 +5,12 @@ import pytest
 from emmy.recipe.lifecycle import recipe_is_runnable, recipe_lifecycle, validate_recipe_tags
 
 
-def test_legacy_and_maintained_recipes_are_runnable():
+def test_legacy_maintained_and_best_effort_recipes_are_runnable():
     assert recipe_is_runnable({})
     assert recipe_is_runnable({"tags": ["maintained"]})
+    assert recipe_is_runnable({"tags": ["best-effort"]})
     assert recipe_lifecycle({"tags": ["maintained"]}) == "maintained"
+    assert recipe_lifecycle({"tags": ["best-effort"]}) == "best-effort"
 
 
 @pytest.mark.parametrize("tags", [["obsolete"], ["onboarding", "untested"]])
@@ -23,6 +25,7 @@ def test_obsolete_and_onboarding_recipes_are_disabled(tags):
         (["Maintained"], "lowercase kebab-case"),
         (["maintained", "maintained"], "unique"),
         (["maintained", "obsolete"], "at most one lifecycle"),
+        (["maintained", "best-effort"], "at most one lifecycle"),
         (["onboarding"], "must appear together"),
         (["untested"], "must appear together"),
     ],

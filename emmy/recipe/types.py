@@ -310,7 +310,7 @@ class Recipe:
 
     @property
     def lifecycle(self) -> str | None:
-        """The maintained, obsolete, or onboarding lifecycle tag, when present."""
+        """The maintained, best-effort, obsolete, or onboarding lifecycle tag, when present."""
         from emmy.recipe.lifecycle import LIFECYCLE_TAGS
 
         return next((tag for tag in self.tags if tag in LIFECYCLE_TAGS), None)

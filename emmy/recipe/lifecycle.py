@@ -3,11 +3,12 @@
 import re
 
 MAINTAINED_TAG = "maintained"
+BEST_EFFORT_TAG = "best-effort"
 OBSOLETE_TAG = "obsolete"
 ONBOARDING_TAG = "onboarding"
 UNTESTED_TAG = "untested"
 
-LIFECYCLE_TAGS = frozenset({MAINTAINED_TAG, OBSOLETE_TAG, ONBOARDING_TAG})
+LIFECYCLE_TAGS = frozenset({MAINTAINED_TAG, BEST_EFFORT_TAG, OBSOLETE_TAG, ONBOARDING_TAG})
 DISABLED_TAGS = frozenset({OBSOLETE_TAG, ONBOARDING_TAG})
 _TAG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 

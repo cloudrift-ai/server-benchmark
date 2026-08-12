@@ -12,10 +12,20 @@ from pathlib import Path
 
 import yaml
 
-from emmy.recipe.lifecycle import LIFECYCLE_TAGS, ONBOARDING_TAG, UNTESTED_TAG, validate_recipe_tags
+from emmy.recipe.lifecycle import (
+    BEST_EFFORT_TAG,
+    LIFECYCLE_TAGS,
+    MAINTAINED_TAG,
+    OBSOLETE_TAG,
+    ONBOARDING_TAG,
+    UNTESTED_TAG,
+    validate_recipe_tags,
+)
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_ONBOARDING_MODELS = 3
+MANIFEST_FIELDS = frozenset({"maintained_models", "best_effort_models", "obsolete_models", "onboarding_models"})
+OBSOLETE_FIELDS = frozenset({"model_id", "replacement_model_id", "rationale"})
 
 
 def _extract_object(text: str) -> dict:
@@ -35,13 +45,15 @@ def _extract_object(text: str) -> dict:
                 candidate, _ = decoder.raw_decode(stripped, start)
             except json.JSONDecodeError:
                 continue
-            if isinstance(candidate, dict) and set(candidate) == {"maintained_models", "onboarding_models"}:
+            if isinstance(candidate, dict) and set(candidate) == MANIFEST_FIELDS:
                 candidates.append(candidate)
         if len(candidates) != 1:
             raise ValueError("Discovery output must contain exactly one lifecycle JSON object") from None
         value = candidates[0]
-    if not isinstance(value, dict) or set(value) != {"maintained_models", "onboarding_models"}:
-        raise ValueError("Discovery lifecycle object must contain exactly maintained_models and onboarding_models")
+    if not isinstance(value, dict) or set(value) != MANIFEST_FIELDS:
+        raise ValueError(
+            "Discovery lifecycle object must contain exactly maintained_models, best_effort_models, obsolete_models, and onboarding_models"
+        )
     return value
 
 
@@ -73,24 +85,67 @@ def _unique_model_ids(value: object, field: str) -> list[str]:
     return value
 
 
+def _obsolete_decisions(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError("obsolete_models must be a list")
+    decisions = []
+    for decision in value:
+        if not isinstance(decision, dict) or set(decision) != OBSOLETE_FIELDS:
+            raise ValueError(f"Each obsolete model must contain exactly: {', '.join(sorted(OBSOLETE_FIELDS))}")
+        model_id = decision["model_id"]
+        replacement = decision["replacement_model_id"]
+        if not isinstance(model_id, str) or not HF_ID.fullmatch(model_id):
+            raise ValueError(f"Invalid obsolete Hugging Face model ID: {model_id!r}")
+        if not isinstance(replacement, str) or not HF_ID.fullmatch(replacement):
+            raise ValueError(f"Invalid replacement Hugging Face model ID for {model_id}: {replacement!r}")
+        rationale = decision["rationale"]
+        if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 600:
+            raise ValueError(f"Obsolete model {model_id} needs a rationale of at most 600 characters")
+        decisions.append({**decision, "rationale": rationale.strip()})
+    return decisions
+
+
 def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, maintained_count: int) -> dict:
     """Validate one discovery manifest and return its normalized lifecycle decisions."""
     manifest = _extract_object(path.read_text())
     records = _inventory(workspace)
     maintained = _unique_model_ids(manifest.get("maintained_models"), "maintained_models")
+    best_effort = _unique_model_ids(manifest.get("best_effort_models"), "best_effort_models")
+    obsolete_decisions = _obsolete_decisions(manifest.get("obsolete_models"))
+    obsolete = [decision["model_id"] for decision in obsolete_decisions]
     if len(maintained) != maintained_count:
         raise ValueError(f"maintained_models must contain exactly {maintained_count} models")
-
-    missing = set(maintained) - records.keys()
-    if missing:
-        raise ValueError(f"Maintained models must already have recipes: {', '.join(sorted(missing))}")
-    unfinished = [model_id for model_id in maintained if ONBOARDING_TAG in records[model_id]["tags"]]
-    if unfinished:
-        raise ValueError(f"Untested onboarding shells cannot be maintained: {', '.join(unfinished)}")
 
     existing_onboarding = sorted(model_id for model_id, record in records.items() if ONBOARDING_TAG in record["tags"])
     if len(existing_onboarding) > MAX_ONBOARDING_MODELS:
         raise ValueError(f"Existing onboarding shells exceed the limit of {MAX_ONBOARDING_MODELS}")
+
+    classified = [*maintained, *best_effort, *obsolete]
+    if len(classified) != len(set(classified)):
+        raise ValueError("A complete recipe must appear in exactly one lifecycle list")
+    unfinished = set(classified) & set(existing_onboarding)
+    if unfinished:
+        raise ValueError(f"Untested onboarding shells cannot be classified: {', '.join(sorted(unfinished))}")
+    complete_models = records.keys() - set(existing_onboarding)
+    unknown = set(classified) - complete_models
+    if unknown:
+        raise ValueError(f"Lifecycle models must have complete existing recipes: {', '.join(sorted(unknown))}")
+    unclassified = complete_models - set(classified)
+    if unclassified:
+        raise ValueError(f"Every complete recipe must be classified: {', '.join(sorted(unclassified))}")
+
+    replacement_models = set(maintained) | set(best_effort)
+    for decision in obsolete_decisions:
+        model_id = decision["model_id"]
+        replacement = decision["replacement_model_id"]
+        if model_id == replacement:
+            raise ValueError(f"Obsolete model {model_id} cannot replace itself")
+        if replacement not in replacement_models:
+            raise ValueError(f"Replacement for obsolete model {model_id} must be maintained or best-effort")
+        model_task = (records[model_id]["config"].get("model") or {}).get("task", "generate")
+        replacement_task = (records[replacement]["config"].get("model") or {}).get("task", "generate")
+        if model_task != replacement_task:
+            raise ValueError(f"Replacement for obsolete model {model_id} must serve the same task")
 
     candidates = manifest.get("onboarding_models", [])
     available_onboarding = MAX_ONBOARDING_MODELS - len(existing_onboarding)
@@ -119,12 +174,10 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
         candidate_ids.add(model_id)
         normalized_candidates.append({**candidate, "rationale": rationale.strip()})
 
-    obsolete = sorted(
-        model_id for model_id, record in records.items() if model_id not in maintained and ONBOARDING_TAG not in record["tags"]
-    )
     return {
         "maintained_models": maintained,
-        "obsolete_models": obsolete,
+        "best_effort_models": best_effort,
+        "obsolete_models": obsolete_decisions,
         "existing_onboarding_models": existing_onboarding,
         "onboarding_models": normalized_candidates,
     }
@@ -194,20 +247,38 @@ def _create_shell(workspace: Path, candidate: dict) -> Path:
     return recipe
 
 
+def _model_lines(model_ids: list[str]) -> list[str]:
+    return [f"- `{model_id}`" for model_id in model_ids] or ["- None."]
+
+
+def _obsolete_lines(decisions: list[dict[str, str]]) -> list[str]:
+    if not decisions:
+        return ["- None."]
+    lines = []
+    for decision in decisions:
+        lines.append(f"- `{decision['model_id']}` → `{decision['replacement_model_id']}` — {decision['rationale']}")
+    return lines
+
+
 def _summary(manifest: dict) -> str:
     lines = [
         "## Automated model lifecycle update",
         "",
-        f"This rolling PR keeps {len(manifest['maintained_models'])} recipes in the maintained set. ",
-        "Obsolete recipes remain in git but are disabled and excluded from package builds.",
+        f"This rolling PR keeps {len(manifest['maintained_models'])} recipes in the maintained set.",
+        "Best-effort recipes remain runnable but are not selected for periodic testing and optimization. Obsolete recipes",
+        "remain in git but are disabled and excluded from package builds.",
         "",
         "### Maintained",
         "",
-        *(f"- `{model_id}`" for model_id in manifest["maintained_models"]),
+        *_model_lines(manifest["maintained_models"]),
+        "",
+        "### Best effort",
+        "",
+        *_model_lines(manifest["best_effort_models"]),
         "",
         "### Obsolete",
         "",
-        *(f"- `{model_id}`" for model_id in manifest["obsolete_models"]),
+        *_obsolete_lines(manifest["obsolete_models"]),
         "",
         "### New onboarding shells",
         "",
@@ -237,9 +308,11 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
     records = _inventory(workspace)
     changed = False
     for model_id in manifest["maintained_models"]:
-        changed = _set_lifecycle(records[model_id], "maintained") or changed
-    for model_id in manifest["obsolete_models"]:
-        changed = _set_lifecycle(records[model_id], "obsolete") or changed
+        changed = _set_lifecycle(records[model_id], MAINTAINED_TAG) or changed
+    for model_id in manifest["best_effort_models"]:
+        changed = _set_lifecycle(records[model_id], BEST_EFFORT_TAG) or changed
+    for decision in manifest["obsolete_models"]:
+        changed = _set_lifecycle(records[decision["model_id"]], OBSOLETE_TAG) or changed
     for candidate in manifest["onboarding_models"]:
         _create_shell(workspace, candidate)
         changed = True
@@ -251,6 +324,7 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
     return {
         "changed": changed,
         "maintained_count": len(manifest["maintained_models"]),
+        "best_effort_count": len(manifest["best_effort_models"]),
         "obsolete_count": len(manifest["obsolete_models"]),
         "onboarding_count": len(manifest["existing_onboarding_models"]) + len(manifest["onboarding_models"]),
     }

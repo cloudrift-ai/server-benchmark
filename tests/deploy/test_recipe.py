@@ -147,16 +147,17 @@ def test_load_recipe_no_deploy_gpu(tmp_recipe_dir):
     assert recipe.deploy.gpu is None
 
 
-def test_load_recipe_parses_maintained_tag(tmp_recipe_dir):
+@pytest.mark.parametrize("tag", ["maintained", "best-effort"])
+def test_load_recipe_parses_runnable_lifecycle_tag(tmp_recipe_dir, tag):
     recipe_path = Path(tmp_recipe_dir) / "recipe.yaml"
     config = yaml.safe_load(recipe_path.read_text())
-    config["tags"] = ["maintained"]
+    config["tags"] = [tag]
     recipe_path.write_text(yaml.safe_dump(config))
 
     recipe = load_recipe(tmp_recipe_dir)
 
-    assert recipe.tags == ("maintained",)
-    assert recipe.lifecycle == "maintained"
+    assert recipe.tags == (tag,)
+    assert recipe.lifecycle == tag
 
 
 @pytest.mark.parametrize("tags", [["obsolete"], ["onboarding", "untested"]])

@@ -129,8 +129,12 @@ jobs:
           Review the existing recipes and current demand for both supported and newly released open-weight models.
           Select exactly {os.environ['MAINTAINED_MODEL_COUNT']} existing, fully configured recipes for periodic
           testing and optimization. Prefer current community demand, serving value, architecture coverage, and a
-          useful spread of model sizes. A recipe tagged obsolete may return to the maintained set only when there is
-          strong evidence of renewed activity. Never maintain an onboarding/untested shell.
+          useful spread of model sizes. Classify every other complete recipe as best-effort or obsolete. Best-effort
+          means the model remains useful and runnable, but is not selected for periodic optimization. Obsolete is a
+          strict technical judgment: use it only when a named all-around better replacement for the same task is
+          available at a comparable or lower practical VRAM footprint. Low demand, age, or exclusion from the
+          maintained set is not sufficient. A previously obsolete recipe may become maintained or best-effort when
+          the evidence changes. Never classify an onboarding/untested shell.
 
           Also select zero to three new models with no recipe, all suitable for the exact target
           {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}. These will become untested onboarding recipe
@@ -142,6 +146,11 @@ jobs:
           to exactly one JSON object without a Markdown fence:
           {{
             "maintained_models": ["exact/org-model IDs for existing recipes; exactly {os.environ['MAINTAINED_MODEL_COUNT']}"],
+            "best_effort_models": ["exact/org-model IDs for every useful lower-priority complete recipe"],
+            "obsolete_models": [
+              {{"model_id": "org/old-model", "replacement_model_id": "org/better-model",
+                "rationale": "why the replacement is all-around better at comparable or lower practical VRAM"}}
+            ],
             "onboarding_models": [
               {{"model_id": "org/model", "task": "generate", "gpu": "{os.environ['TARGET_GPU']}",
                 "gpu_count": {os.environ['TARGET_GPU_COUNT']}, "rationale": "brief evidence-backed reason"}}
@@ -257,7 +266,7 @@ jobs:
               }
             }
 
-            const title = 'Refresh maintained and onboarding models';
+            const title = 'Refresh model lifecycle and onboarding';
             const body = fs.readFileSync(process.env.DISCOVERY_SUMMARY, 'utf8');
             let pullNumber = Number(process.env.PR_NUMBER || 0);
             if (pullNumber) {

@@ -101,8 +101,9 @@ directly; they never import from another test module or from `conftest.py`.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
 - **No mocking** — dry-run mode is the primary strategy for testing command orchestration without side effects.
 - **Real recipes** — CLI dry-run tests use recipes from the `recipes/` directory to catch config drift.
-- **Recipe lifecycle** — named-model deployment assertions skip when their recipe is disabled; maintained recipes keep
-  the full serving contract coverage, while obsolete recipes remain covered by lifecycle validation.
+- **Recipe lifecycle** — named-model deployment assertions skip when their recipe is disabled; maintained and
+  best-effort recipes keep the full serving contract coverage, while obsolete recipes remain covered by lifecycle
+  validation.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.

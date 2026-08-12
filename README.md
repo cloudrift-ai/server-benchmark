@@ -249,8 +249,9 @@ matrices:
       benchmark.max_concurrency: [128, 512]
 ```
 
-Discovery keeps ten tested recipes tagged `maintained`. Superseded recipes stay in git with `obsolete`; new model
-shells use `onboarding` plus `untested`. Disabled recipes are not deployable or bundled.
+Discovery keeps ten tested recipes tagged `maintained`. Useful lower-priority recipes stay runnable as `best-effort`;
+only models with an all-around better replacement at a comparable VRAM footprint become `obsolete`. New model shells
+use `onboarding` plus `untested`. Disabled recipes are not deployable or bundled.
 
 Generic workload (run any tool on the VM, pull back result files):
 

@@ -261,8 +261,9 @@ jobs:
           existing = os.environ.get("EXISTING_PR")
           plan = (
               f"This is the execution of existing model-onboarding PR #{existing}. Read the matching onboarding "
-              "recipe shell or legacy plan. Replace the shell with the qualified recipe, remove its onboarding and "
-              "untested tags, and delete any matching plans/onboard-*.md file after all artifacts are complete."
+              "recipe shell or legacy plan. Replace the shell with the qualified recipe, replace its onboarding and "
+              "untested tags with best-effort, and delete any matching plans/onboard-*.md file after all artifacts "
+              "are complete."
               if existing
               else "This is a new onboarding; create all required artifacts from the tracked skill."
           )

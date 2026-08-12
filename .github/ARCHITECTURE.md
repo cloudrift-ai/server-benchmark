@@ -57,11 +57,11 @@ detector constructs the supported Emmy command from validated experiment paths a
 ## Model discovery and onboarding
 
 All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
-recipes for the maintained set and keeps at most three total onboarding shells for open-weight Hugging Face models on
-one exact GPU name and count. Existing shells consume those slots. Discovery remains read-only: the workflow checks
-that the agent did not modify the checkout, then
+recipes for the maintained set, classifies the remaining complete recipes, and keeps at most three total onboarding
+shells for open-weight Hugging Face models on one exact GPU name and count. Existing shells consume those slots.
+Discovery remains read-only: the workflow checks that the agent did not modify the checkout, then
 `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper tolerates a model
-reasoning wrapper around the JSON object, but requires exactly the two expected top-level fields before validating
+reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields before validating
 their contents. The agent writes that manifest through the runner to one explicitly allowed temporary path; it cannot
 write recipe changes itself. Once a nonempty manifest exists, an inference failure during the optional confirmation
 turn does not discard it; the repository validator remains the authoritative completion gate.
@@ -76,7 +76,8 @@ provisions hardware. The reusable runner contract is documented in `emmy/agent/A
 **Onboard model** accepts an exact Hugging Face model ID, exact GPU name/count, multimodal qualification mode, optional
 existing onboarding PR, and explicit image-publication authorization. The job has a six-hour limit and gives the
 agent an earlier deadline so artifact validation and cleanup retain time. When the PR contains a discovery shell, the
-qualified recipe replaces it and drops the `onboarding` and `untested` tags.
+qualified recipe replaces it and changes `onboarding`/`untested` to `best-effort`; later discovery runs can promote it
+to the maintained set.
 
 The workflow resolves an existing labeled onboarding PR or creates a new artifact branch, provisions exactly the
 requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
@@ -99,12 +100,14 @@ legacy discovery plan PR is adopted as the rolling PR, and the workflow fails cl
 discovery PR exists. It also adopts one unpaired discovery branch left by an interrupted PR-creation step, while
 failing closed if multiple such branches would make ownership ambiguous.
 
-The validated manifest tags the ten selected complete recipes `maintained`, tags other complete recipes `obsolete`,
-and creates `onboarding`/`untested` recipe shells up to the three-shell total. Obsolete recipes remain in git but
-cannot be deployed, benchmarked, published, or bundled. A current demand spike may return an obsolete recipe to the
-maintained set. The workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling
-branch, and creates or refreshes its body, `model-discovery` label, and `model-onboarding` label through the GitHub API
-on every run. It never rents a VM and does not require the GitHub CLI on the self-hosted runner.
+The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
+`best-effort`, and uses `obsolete` only when the decision names an all-around better maintained or best-effort
+replacement for the same task at a comparable or lower practical VRAM footprint. The manifest must classify every
+complete recipe exactly once. Obsolete recipes remain in git but cannot be deployed, benchmarked, published, or
+bundled; a later reassessment may return one to the maintained or best-effort set. The workflow also creates
+`onboarding`/`untested` shells up to the three-shell total, removes superseded `plans/onboard-*.md` files, commits the
+lifecycle update to the rolling branch, and refreshes its PR body and labels through the GitHub API on every run. It
+never rents a VM and does not require the GitHub CLI on the self-hosted runner.
 
 ## Credentials, VM ownership, and cleanup
 

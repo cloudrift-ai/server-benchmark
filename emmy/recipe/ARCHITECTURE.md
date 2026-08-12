@@ -35,10 +35,12 @@ tags:
 ```
 
 The lifecycle tags are mutually exclusive. `maintained` is a tested recipe selected for periodic testing and
-optimization. `obsolete` preserves a superseded or low-demand recipe in git while disabling deploy, benchmark,
-publish, and wheel staging. A new discovery shell carries both `onboarding` and `untested`; it contains model and
-discovery metadata but is not runnable until onboarding replaces it with a qualified recipe. Untagged recipes remain
-runnable for backward compatibility and are classified by the next discovery lifecycle run.
+optimization. `best-effort` is a useful runnable recipe outside that periodic set. `obsolete` preserves a recipe in
+git while disabling deploy, benchmark, publish, and wheel staging; it is used only when an all-around better model for
+the same task is available at a comparable or lower practical VRAM footprint. Low demand or age alone is not enough.
+A new discovery shell carries both `onboarding` and `untested`; it contains model and discovery metadata but is not
+runnable until onboarding replaces it with a qualified `best-effort` recipe. Untagged recipes remain runnable for
+backward compatibility and are classified by the next discovery lifecycle run.
 
 Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.

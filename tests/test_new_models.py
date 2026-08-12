@@ -60,8 +60,11 @@ def test_supported_base_keys_allows_obsolete_model_to_resurface(tmp_path):
     obsolete = tmp_path / "obsolete" / "recipe.yaml"
     obsolete.parent.mkdir()
     obsolete.write_text("tags:\n  - obsolete\nmodel:\n  huggingface: org/Old-FP8\n")
+    best_effort = tmp_path / "best-effort" / "recipe.yaml"
+    best_effort.parent.mkdir()
+    best_effort.write_text("tags:\n  - best-effort\nmodel:\n  huggingface: org/Useful-FP8\n")
 
-    assert new_models.supported_base_keys(tmp_path) == {"active"}
+    assert new_models.supported_base_keys(tmp_path) == {"active", "useful"}
 
 
 # ── open_source_candidates: keep open-weight, dedup by HF repo ───────────────────────

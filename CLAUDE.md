@@ -6,37 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Emmy is a Python tool for deploying and benchmarking LLM inference on GPU servers. It supports vLLM and SGLang engines, provides a CLI for local and remote (SSH) deployment of models via Docker Compose, plus automated benchmarking across multiple servers.
 
-The `README.md` is intentionally short — example-driven, no narrative. For details, consult the ARCHITECTURE.md files:
+`README.md` is the canonical project overview and architecture index. Read it first, then use its links to locate the
+relevant subsystem documentation. Do not duplicate the architecture index in this file.
 
-- **CLI usage** (deploy local/ssh/cloud, bench, teardown, vm, hardware-aware deploy, fixed-host mode, experiments, CI workflow) → [`emmy/commands/ARCHITECTURE.md`](emmy/commands/ARCHITECTURE.md)
-- **Benchmark orchestration boundary** (generic execution and raw evidence collection; no experiment-specific
-  interpretation) → [`emmy/benchmark/ARCHITECTURE.md`](emmy/benchmark/ARCHITECTURE.md)
-- **Serving** (vLLM out-of-tree embedding plugin — emmy-compiled kernels behind vLLM's `/v1/embeddings`; `serving` extra) → [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md)
-- **Recipes vs experiments** (`recipes/` = the one recommended serving config per model, what `emmy deploy` runs;
-  `experiments/` = benchmark grids, what `emmy bench` runs) → [`recipes/ARCHITECTURE.md`](recipes/ARCHITECTURE.md)
-  and [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md)
-- **Prebuilt serving images** (per-model warm/bake/verify/push release pipeline — `make serve-* MODEL=<hf-id>`, the
-  model-slug naming schema, the cubin cache-key parity contract, the golden coverage gate) →
-  [`docker/vllm-emmy-serve/ARCHITECTURE.md`](docker/vllm-emmy-serve/ARCHITECTURE.md)
-- **Recipe format** (matrices/cross/zip combinators, variant filtering, deep merge, named fields, extra_args validation, command recipes, aggregate, docker_options, driver/cuda pinning, SGLang) → [`emmy/recipe/ARCHITECTURE.md`](emmy/recipe/ARCHITECTURE.md)
-- **Compiler** (Graph IR dialects, passes, backends) → [`emmy/compiler/ARCHITECTURE.md`](emmy/compiler/ARCHITECTURE.md) and child docs
-- **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
-  [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
-- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**). The stored tile IR has
-  exactly ONE node kind, the general `Fold` (`reduce(⊕) ∘ map(f)` in the λ-foldMap spelling); `Map` and `Contraction`
-  are DERIVED READINGS answered by predicates, roles derive from arity, and a node carries no placement and no
-  schedule — the slices live in `TileOp.schedule`, keyed by the tree-path codec. Storage, readings, edges, term
-  identity and the codec → [`emmy/compiler/ir/tile/ARCHITECTURE.md`](emmy/compiler/ir/tile/ARCHITECTURE.md); the
-  schedule value types and their wire formats → [`emmy/compiler/ir/ARCHITECTURE.md`](emmy/compiler/ir/ARCHITECTURE.md).
-  The SCHEDULE step (`020_schedule`) is ONE recursive row enumerator over the site tree — `WORK` chosen at the root,
-  the sites a product under it, term READINGS the one mechanism above that product, and a term it cannot schedule
-  left unmapped (the guardrail contract) →
-  [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
-- **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
-  [`GLOSSARY.md`](GLOSSARY.md)
-
-When the user asks about a CLI flag, recipe field, or matrix combinator, read the relevant ARCHITECTURE.md before
-answering — they hold the detail that is no longer in this file or the README.
+When the user asks about a CLI flag, recipe field, or matrix combinator, use the README index to find and read the
+relevant `ARCHITECTURE.md` before answering.
 
 ## Prerequisites
 
@@ -54,9 +28,8 @@ answering — they hold the detail that is no longer in this file or the README.
   verified tier; consulted, never trained on), then measured reservoir/DB evidence, then the global `Prior` (the
   online prior with its offline cold-start fallback; the old `_best_fork` DB→fork replay was removed). The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
-  accepted) that `tune` writes and
-  `compile` / `run` read. See [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
-  for the prior / two-level autotune story.
+  accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and
+  two-level autotune design.
 
 All `EMMY_*` config env vars are read and written through one module — `emmy/config.py`, the sole owner of
 `os.environ` for these vars (the `EMMY_<KNOB>` namespace is the one exception, owned by
@@ -94,8 +67,7 @@ same worker.
 
 ## CLI Commands
 
-The full CLI reference — every command, subcommand, flag, and example — lives in
-[`emmy/commands/ARCHITECTURE.md`](emmy/commands/ARCHITECTURE.md). Do **not** duplicate that reference here; read
+The full CLI reference is linked from the README architecture index. Do **not** duplicate that reference here; read
 it before answering any CLI-flag question. Quickstart for the common paths:
 
 | Command | Purpose |
@@ -125,10 +97,10 @@ Quick test models / scripts (for local iteration):
 ## Key Make Targets
 
 - `make setup` — create venv and install dependencies (includes ruff)
-- `make test` — run `pytest` using the venv (skips `perf`-marked tests; see `tests/perf/ARCHITECTURE.md`). Compiles
+- `make test` — run `pytest` using the venv (skips `perf`-marked tests; see the `tests/perf` architecture). Compiles
   kernels at `-Xcicc -O1` for ~3× faster nvcc (correctness lane; perf tests use `-O3` via `make bench-kernels`)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
-  xdist workers on (see `tests/ARCHITECTURE.md`); commit the result when the balance has drifted
+  xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`
 - `make format` — auto-format code and fix lint violations
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
@@ -148,8 +120,9 @@ These are invariants — they hold for every doc change, no exceptions:
 - **`ARCHITECTURE.md` files describe concepts, invariants, and the few key entry-point modules — not every file.** Do
   NOT add exhaustive per-file "module tree" tables or `file.py:123` line-number citations; they churn on every refactor
   and rot immediately. Name a module/symbol only when it is a genuine entry point, and refer to it by name, not line.
-- **CLAUDE.md routes; it does not duplicate.** Each subsystem's detail lives in its nearest `ARCHITECTURE.md`; CLAUDE.md
-  points there. Do not re-enumerate the CLI, env vars, or any reference list that already has a canonical home.
+- **README.md routes; CLAUDE.md does not duplicate.** README is the canonical architecture index. Each subsystem's
+  detail lives in its nearest `ARCHITECTURE.md`; do not repeat links, CLI details, environment variables, or reference
+  lists here.
 - **Only use established terminology — [`GLOSSARY.md`](GLOSSARY.md) is the stable vocabulary.** In code comments,
   documentation, reports, commit messages, PR bodies, and when communicating with the user, use glossary terms, other
   established repo/field terms, or plain language. Never coin new labels; replace any invented term with the correct
@@ -183,16 +156,6 @@ harness, result validators, or a growing family of one-off scripts. Simple, read
 be embedded directly in a recipe; if the logic needs a large decision tree or model-specific policy, keep it out of
 code.
 
-Before submitting any PR, audit the complete diff and ask:
-
-- Which new functionality can be removed?
-- Which existing CLI, library, recipe, or skill can be reused instead?
-- Which logic should not be scripted and should become concise agent instructions?
-- Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
-
-Perform the removals and consolidation before requesting review. Tests should protect the smaller contract, not
-preserve unnecessary machinery.
-
 ### Before committing (MANDATORY — do NOT skip these)
 
 You MUST complete ALL of the following checks before every commit. These are not optional:
@@ -210,9 +173,24 @@ You MUST complete ALL of the following checks before every commit. These are not
 10. **Run tests**: `make test` — fix any failures before proceeding
 11. **Run linter**: `make lint` — if it fails, run `make format` and re-check
 
+### Before submitting (MANDATORY — do NOT skip these)
+
+You MUST audit the complete diff after the before-committing checks and before requesting review:
+
+12. **Remove unnecessary functionality**: Which new functionality can be removed?
+13. **Reuse existing mechanisms**: Which existing CLI, library, recipe, or skill can be reused instead?
+14. **Rethink touched functionality**: Can existing functionality be rearchitected around the PR's needs so one
+    simpler shared design replaces parallel or specialized paths?
+15. **Remove obsolete code**: Delete existing code that the PR makes unnecessary. Apply the boy-scout rule within the
+    PR's scope and leave touched code cleaner, without expanding into an unrelated refactor.
+16. **Keep reasoning out of code**: Which logic should not be scripted and should become concise agent instructions?
+17. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
+18. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
+    the smaller contract, not preserve unnecessary machinery.
+
 ### Submitting
 
-12. Push and open a PR
+19. Push and open a PR
 
 # Behavioral Guidelines:
 
@@ -245,14 +223,15 @@ Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, sim
 **Touch only what you must. Clean up only your own mess.**
 
 When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
+- Apply the boy-scout rule within the PR's scope: simplify adjacent functionality exposed by the change when that
+  cleanup reduces the total design and remains covered by tests.
+- Do not turn scoped cleanup into an unrelated refactor.
 - Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+- Remove existing dead code or duplication in the touched path when it is confidently obsolete; otherwise mention it.
 
 When your changes create orphans:
 - Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+- Remove pre-existing code that the new design makes unnecessary.
 
 The test: Every changed line should trace directly to the user's request.
 

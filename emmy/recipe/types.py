@@ -162,11 +162,7 @@ class CommandConfig:
 
 @dataclass
 class AggregateConfig:
-    """Post-processing step that runs locally after all variants complete.
-
-    The ``run`` template receives ``$run_dir`` (the local directory containing
-    all pulled-back result files). Runs on the orchestrator, not on a GPU VM.
-    """
+    """Small, self-contained post-processing step run after a recipe matrix."""
 
     run: str = ""
     timeout: int = 300
@@ -231,6 +227,20 @@ class Recipe:
         )
 
         bench_dict = d.get("benchmark", {})
+        workload_fields = {
+            "max_concurrency",
+            "num_prompts",
+            "random_input_len",
+            "random_output_len",
+            "seed",
+            "temperature",
+            "ignore_eos",
+            "repeats",
+        }
+        unsupported_benchmark_fields = set(bench_dict) - workload_fields
+        if unsupported_benchmark_fields:
+            names = ", ".join(sorted(unsupported_benchmark_fields))
+            raise ValueError(f"unsupported benchmark fields: {names}; benchmark only describes workload generation")
         benchmark = BenchmarkConfig(
             max_concurrency=bench_dict.get("max_concurrency", 128),
             num_prompts=bench_dict.get("num_prompts", 256),

@@ -338,6 +338,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration
   - [provisioning/](emmy/provisioning/) — Cloud provisioning, SSH transport, VM lifecycle
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
+    (see [ARCHITECTURE.md](emmy/benchmark/ARCHITECTURE.md))
   - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
 - [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
   (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
@@ -345,7 +346,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
   [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
-  what `emmy bench` runs
+  what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
 - [kernels/](kernels/) — Standalone CUDA kernel sources
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))

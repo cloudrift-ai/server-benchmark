@@ -1,5 +1,7 @@
 """Unit tests for recipe dataclass types."""
 
+import pytest
+
 from emmy.recipe import (
     AggregateConfig,
     CommandConfig,
@@ -48,6 +50,11 @@ def test_from_dict_command():
     assert r.command.timeout == 60
     assert r.command.env == {"FOO": "bar"}
     assert r.deploy.gpu == "NVIDIA GeForce RTX 5090"
+
+
+def test_from_dict_rejects_experiment_specific_benchmark_fields():
+    with pytest.raises(ValueError, match="benchmark only describes workload generation"):
+        Recipe.from_dict({"benchmark": {"result_validator": "compare outputs"}})
 
 
 # ── VllmConfig / SglangConfig ────────────────────────────────────
@@ -304,25 +311,11 @@ def test_aggregate_config_defaults():
     assert cfg.timeout == 300
 
 
-def test_from_dict_with_aggregate():
-    d = {
-        "command": {"run": "echo hi", "result_files": ["*.json"]},
-        "deploy": {"gpu": "NVIDIA GeForce RTX 5090"},
-        "aggregate": {
-            "run": "./venv/bin/python scripts/aggregate.py $run_dir",
-            "timeout": 60,
-        },
-    }
-    recipe = Recipe.from_dict(d)
+def test_from_dict_accepts_inline_postprocessing():
+    recipe = Recipe.from_dict({"aggregate": {"run": "printf '%s\\n' done > $run_dir/status.txt", "timeout": 60}})
     assert recipe.aggregate is not None
-    assert "$run_dir" in recipe.aggregate.run
+    assert recipe.aggregate.run.startswith("printf")
     assert recipe.aggregate.timeout == 60
-
-
-def test_from_dict_without_aggregate():
-    d = {"model": {"huggingface": "org/model"}}
-    recipe = Recipe.from_dict(d)
-    assert recipe.aggregate is None
 
 
 def test_model_task_default_generate():

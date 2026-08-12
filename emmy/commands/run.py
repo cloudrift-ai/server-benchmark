@@ -186,6 +186,16 @@ def register_run_command(subparsers):
         help="Requested working-golden backend that is recorded as unsupported instead of failing the sweep.",
     )
     parser.add_argument(
+        "--require-kernel-source",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help=(
+            "With --verify-working-golden tune-winners, require every exact winner to contain a generated CUDA "
+            "kernel matching REGEX (repeatable). Match verdicts and source hashes are stored in the A/B evidence."
+        ),
+    )
+    parser.add_argument(
         "--no-record-nodes",
         action="store_true",
         help=(

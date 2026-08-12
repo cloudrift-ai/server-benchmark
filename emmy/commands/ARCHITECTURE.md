@@ -420,6 +420,14 @@ two arms directly without a custom aggregate. Any failed task, built-in gate fai
 nonzero status is authoritative: `emmy bench` finishes the complete run and artifact collection, reports the
 failures, and exits nonzero instead of printing a successful completion.
 
+`benchmark.require_complete_requests` requires every client repeat to report `successful_requests == num_prompts`
+and `failed_requests == 0`. Missing or partial metrics fail the task while preserving the parsed per-repeat verdict.
+
+Inference recipes may also declare `benchmark.required_server_log_patterns` and
+`benchmark.forbidden_server_log_patterns`. After each workload, the harness captures the complete Compose log,
+stores its redacted copy beside the result, and evaluates every regular expression. Log retrieval failure, a missing
+required match, or a forbidden match fails the task while preserving the benchmark and gate verdict.
+
 Command recipes receive the same fail-closed status. Their JSON result records the rendered command, exit code,
 timing, system information, and the content-addressed staged-source manifest; `command.require_clean_stage` rejects
 dirty selected paths before transfer. Result-file collection still runs after a nonzero command so partial evidence

@@ -130,7 +130,12 @@ class BenchmarkConfig:
     ``comparison_arm`` and ``process_repeat`` identify paired fresh-process tasks. When
     ``require_output_equivalence`` is true, ``emmy bench`` requires byte-exact probe outputs
     across the two arms before reporting success. ``comparison_order`` records the planned
-    interleaving order without affecting execution."""
+    interleaving order without affecting execution. ``require_complete_requests`` requires
+    every client repeat to report exactly ``num_prompts`` successful requests and zero failed
+    requests. ``required_server_log_patterns`` and
+    ``forbidden_server_log_patterns`` are regular-expression gates over the complete server
+    log captured after the workload; requesting either makes log retrieval and every verdict
+    fail closed."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -145,6 +150,9 @@ class BenchmarkConfig:
     process_repeat: int | None = None
     comparison_order: int | None = None
     require_output_equivalence: bool = False
+    require_complete_requests: bool = False
+    required_server_log_patterns: list[str] = field(default_factory=list)
+    forbidden_server_log_patterns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -272,6 +280,9 @@ class Recipe:
             process_repeat=bench_dict.get("process_repeat"),
             comparison_order=bench_dict.get("comparison_order"),
             require_output_equivalence=bench_dict.get("require_output_equivalence", False),
+            require_complete_requests=bench_dict.get("require_complete_requests", False),
+            required_server_log_patterns=list(bench_dict.get("required_server_log_patterns", [])),
+            forbidden_server_log_patterns=list(bench_dict.get("forbidden_server_log_patterns", [])),
         )
 
         deploy_dict = d.get("deploy", {})

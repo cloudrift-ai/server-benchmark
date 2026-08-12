@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -151,6 +152,7 @@ def _validate_ab_json(
     *,
     required_backends: tuple[str, ...],
     optional_backends: tuple[str, ...],
+    required_kernel_source_patterns: tuple[str, ...] = (),
 ) -> tuple[float, dict[str, float], list[str]]:
     record = _load_json(path)
     pinned = [row for row in record.get("pinned", []) if row.get("kind") == "ab"]
@@ -173,6 +175,12 @@ def _validate_ab_json(
     if row.get("timing_semantics") != expected_semantics:
         raise WorkingGoldenVerificationError(f"{path} exact-pinned row must use {expected_semantics} timing")
     _require_strict_correctness(row.get("correctness"), label=f"{path} exact-pinned row")
+    kernel_rows = row.get("kernels")
+    if not isinstance(kernel_rows, list) or not kernel_rows:
+        raise WorkingGoldenVerificationError(f"{path} exact-pinned row has no generated kernel inventory")
+    for pattern in required_kernel_source_patterns:
+        if not any(kernel.get("required_source_patterns", {}).get(pattern) is True for kernel in kernel_rows):
+            raise WorkingGoldenVerificationError(f"{path} exact-pinned row has no generated kernel matching {pattern!r}")
 
     latencies: dict[str, float] = {}
     for backend in required_backends:
@@ -218,11 +226,17 @@ def verify_tune_winners(
     cuda_visible_devices: str | None,
     bench_backends: tuple[str, ...],
     optional_backends: tuple[str, ...] = (),
+    required_kernel_source_patterns: tuple[str, ...] = (),
     run: RunCommand = subprocess.run,
 ) -> list[VerificationAttempt]:
     """Replay every directly searched winner in fresh O3 processes."""
     if repeats < 1:
         raise WorkingGoldenVerificationError("process repeats must be at least 1")
+    for pattern in required_kernel_source_patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise WorkingGoldenVerificationError(f"invalid required kernel-source regex {pattern!r}: {exc}") from exc
     winners = searched_winners(load_golden_file(golden_file))
     output_dir.mkdir(parents=True, exist_ok=True)
     environment = _base_environment(cuda_visible_devices)
@@ -258,6 +272,8 @@ def verify_tune_winners(
                 "--json",
                 str(json_path),
             ]
+            for pattern in required_kernel_source_patterns:
+                command.extend(("--require-kernel-source", pattern))
             result = run(command, env=environment, check=False)
             status = "ok"
             error = None
@@ -274,6 +290,7 @@ def verify_tune_winners(
                         json_path,
                         required_backends=required,
                         optional_backends=optional_backends,
+                        required_kernel_source_patterns=required_kernel_source_patterns,
                     )
                     deploy_emmy_us = backend_latencies_us["Emmy"]
                 except WorkingGoldenVerificationError as exc:

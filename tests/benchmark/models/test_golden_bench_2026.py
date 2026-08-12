@@ -1,9 +1,11 @@
 """Configuration gates for the 2026 compiler-submission experiments."""
 
 import json
+import subprocess
 from pathlib import Path
 
 from emmy.benchmark.command_workload import build_substitution_map, render_command
+from emmy.benchmark.execution import validate_server_log_patterns
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe import load_recipe
 
@@ -61,6 +63,46 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "tar -C $task_dir" in run
 
 
+def test_native_fp8_kernel_corpus_is_separate_and_identical(project_root) -> None:
+    tasks = _kernel_tasks(project_root, "fp8-common")
+    assert len(tasks) == 8
+    assert {task.recipe.deploy.gpu for task in tasks} == {
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA GeForce RTX 5090",
+        "NVIDIA H200 141GB",
+        "NVIDIA B200",
+    }
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
+    assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
+    assert {task.variant.params["model_ref"] for task in tasks} == {
+        "RedHatAI/Qwen3-0.6B-FP8-dynamic@068a9040b238d65f5c1064f10232bb15b96c0ff0"
+    }
+    assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in tasks)
+    assert all(task.variant.params["fp8_mma"] == 1 for task in tasks)
+    for task in tasks:
+        command = render_command(
+            task.recipe.command.run,
+            build_substitution_map(task.variant, [0], "/repo", "/task"),
+        )
+        assert "--input-dtype" in command
+        assert "--require-kernel-source" in command
+        assert "EMMY_FP8_MMA=1" in command
+
+
+def test_native_fp8_large_layer_supplement_is_bounded(project_root) -> None:
+    tasks = _kernel_tasks(project_root, "fp8-large-layer")
+    assert len(tasks) == 4
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA H200 141GB", "NVIDIA B200"}
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
+    assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
+    assert {task.variant.params["layer"] for task in tasks} == {0}
+    assert {task.variant.params["model_ref"] for task in tasks} == {
+        "RedHatAI/Qwen3-32B-FP8-dynamic@c6732fc26128341172e4005bad34aafa51c32866"
+    }
+    assert all(task.variant.params["budget"] == 8 for task in tasks)
+    assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in tasks)
+
+
 def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
     systems = {
         "serving_deepseek_v4_flash_0731_v100x16": (
@@ -78,6 +120,12 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
         "serving_qwen36_27b_nvfp4_rtx5090": (
             "nvidia/Qwen3.6-27B-NVFP4",
             "0893e1606ff3d5f97a441f405d5fc541a6bdf404",
+            "NVIDIA GeForce RTX 5090",
+            1,
+        ),
+        "serving_qwen3_8b_nvfp4_rtx5090": (
+            "nvidia/Qwen3-8B-NVFP4",
+            "ccd10a893cbca613259517c3efe08e151ddf2b8e",
             "NVIDIA GeForce RTX 5090",
             1,
         ),
@@ -124,7 +172,7 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
         assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_point.values())
 
 
-def test_qwen_nvfp4_qualification_uses_modelopt(project_root) -> None:
+def test_qwen_nvfp4_qualification_is_w4a16_marlin(project_root) -> None:
     tasks = enumerate_tasks([_experiment(project_root, "serving_qwen36_27b_nvfp4_rtx5090")])
     for task in tasks:
         llm = task.recipe.engine.llm
@@ -132,6 +180,53 @@ def test_qwen_nvfp4_qualification_uses_modelopt(project_root) -> None:
         assert llm.context_length == 32768
         assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
         assert "--quantization modelopt" in llm.vllm.extra_args
+        benchmark = task.recipe.benchmark
+        assert benchmark.required_server_log_patterns
+        assert any("marlin" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
+        assert any("weight-only fp4" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
+        assert any("emulat" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
+
+
+def test_qwen3_native_nvfp4_qualification_requires_optimized_w4a4_kernel(project_root) -> None:
+    tasks = enumerate_tasks([_experiment(project_root, "serving_qwen3_8b_nvfp4_rtx5090")])
+    for task in tasks:
+        llm = task.recipe.engine.llm
+        assert llm.tensor_parallel_size == 1
+        assert "--quantization modelopt" in llm.vllm.extra_args
+        benchmark = task.recipe.benchmark
+        assert any("cutlassnvfp4" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
+        assert any("marlin" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
+        assert any("emulation" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
+        for backend in ("FlashInferCutlassNvFp4LinearKernel", "CutlassNvFp4LinearKernel"):
+            logs = f"Detected ModelOpt NVFP4 checkpoint (quant_algo=NVFP4).\nUsing {backend} for NVFP4 GEMM"
+            assert (
+                validate_server_log_patterns(
+                    logs,
+                    benchmark.required_server_log_patterns,
+                    benchmark.forbidden_server_log_patterns,
+                )["status"]
+                == "pass"
+            )
+        for backend in ("MarlinNvFp4LinearKernel", "EmulationNvFp4LinearKernel"):
+            logs = f"Detected ModelOpt NVFP4 checkpoint (quant_algo=NVFP4).\nUsing {backend} for NVFP4 GEMM"
+            assert (
+                validate_server_log_patterns(
+                    logs,
+                    benchmark.required_server_log_patterns,
+                    benchmark.forbidden_server_log_patterns,
+                )["status"]
+                == "fail"
+            )
+
+
+def test_b200_nvfp4_qualification_requires_native_backend_logs(project_root) -> None:
+    tasks = enumerate_tasks([_experiment(project_root, "serving_glm52_nvfp4_b200x8")])
+    for task in tasks:
+        benchmark = task.recipe.benchmark
+        assert any("vllm_cutlass" in pattern.lower() for pattern in benchmark.required_server_log_patterns)
+        assert all("modeloptnvfp4" not in pattern.lower() for pattern in benchmark.required_server_log_patterns)
+        assert any("falling back" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
+        assert any("marlin" in pattern.lower() for pattern in benchmark.forbidden_server_log_patterns)
 
 
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
@@ -159,6 +254,12 @@ def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert all(task.variant.params["seq_len"] == 512 for task in tasks)
+
+    fp8_tasks = _kernel_tasks(project_root, "fp8-convergence")
+    assert len(fp8_tasks) == 3
+    assert {task.variant.params["seed"] for task in fp8_tasks} == {0, 1, 2}
+    assert all(task.variant.params["model_ref"].startswith("RedHatAI/Qwen3-0.6B-FP8-dynamic@") for task in fp8_tasks)
+    assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in fp8_tasks)
 
 
 def test_h200_independent_compiler_and_search_ablation_are_executable(project_root) -> None:
@@ -198,8 +299,9 @@ def test_every_command_variant_renders(project_root) -> None:
             command = render_command(task.recipe.command.run, substitutions)
             assert "/repo" in command
             assert "/task" in command
+            subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 27
+    assert rendered == 42
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
@@ -226,6 +328,7 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
         }
         assert points == expected_points
         assert all(task.recipe.benchmark.repeats == 1 for task in lane)
+        assert all(task.recipe.benchmark.require_complete_requests is True for task in lane)
         assert all(task.recipe.benchmark.require_output_equivalence is True for task in lane)
         assert all(
             task.recipe.benchmark.output_probe_file == "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl" for task in lane
@@ -258,6 +361,16 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
             == point
         ]
         assert [task.recipe.benchmark.comparison_order for task in point_tasks] == list(range(10))
+
+
+def test_every_publication_serving_recipe_requires_complete_requests(project_root) -> None:
+    root = Path(project_root) / EXP
+    recipe_dirs = sorted(path.parent for path in root.glob("serving_*/recipe.yaml"))
+    assert len(recipe_dirs) == 8
+    for recipe_dir in recipe_dirs:
+        tasks = enumerate_tasks([str(recipe_dir)])
+        assert tasks
+        assert all(task.recipe.benchmark.require_complete_requests is True for task in tasks), recipe_dir.name
 
 
 def test_gemma_image_provenance_pins_shared_vllm_revision(project_root) -> None:

@@ -20,6 +20,7 @@ benchmark:
   temperature: 0
   ignore_eos: true
   repeats: 1
+  require_complete_requests: true
   output_probe_file: "experiments/golden-bench-2026/quality_gemma4_rtx5090/prompts.jsonl"
   require_output_equivalence: true
 

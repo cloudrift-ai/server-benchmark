@@ -112,6 +112,35 @@ def parse_repeat_metrics(output: str) -> list[BenchmarkMetrics]:
     return [parse_benchmark_metrics(c) for c in chunks]
 
 
+def validate_request_completeness(output: str, *, num_prompts: int, repeats: int) -> dict:
+    """Require every benchmark repeat to complete its full request workload."""
+    metrics = parse_repeat_metrics(output) if output.strip() else []
+    expected_repeats = max(1, repeats)
+    errors = []
+    rows = []
+    if len(metrics) != expected_repeats:
+        errors.append(f"expected {expected_repeats} benchmark result stanzas, found {len(metrics)}")
+    for index, row in enumerate(metrics, start=1):
+        rows.append(
+            {
+                "repeat": index,
+                "successful_requests": row.successful_requests,
+                "failed_requests": row.failed_requests,
+            }
+        )
+        if row.successful_requests != num_prompts:
+            errors.append(f"repeat {index}: expected successful_requests={num_prompts}, found {row.successful_requests}")
+        if row.failed_requests != 0:
+            errors.append(f"repeat {index}: expected failed_requests=0, found {row.failed_requests}")
+    return {
+        "status": "pass" if not errors else "fail",
+        "expected_num_prompts": num_prompts,
+        "expected_repeats": expected_repeats,
+        "repeats": rows,
+        "errors": errors,
+    }
+
+
 def aggregate_metrics(repeats: list[BenchmarkMetrics]) -> tuple[BenchmarkMetrics, dict[str, float]]:
     """Per-field mean across repeats, plus sample stddev for fields present in every
     repeat. Fields missing in any repeat stay None (mean) / absent (stddev); values

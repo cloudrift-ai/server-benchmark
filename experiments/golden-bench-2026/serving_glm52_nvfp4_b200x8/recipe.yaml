@@ -1,5 +1,5 @@
 # Primary Blackwell TP8/EP qualification using the same GLM-5.2 architecture as the H200 lane. Runtime metadata must
-# prove ModelOpt NVFP4 kernels; a fallback is reported as compatibility evidence, not native NVFP4 performance.
+# prove a native NVFP4 MoE backend for the checkpoint's W4A4 routed experts; a fallback is compatibility evidence.
 model:
   huggingface: "nvidia/GLM-5.2-NVFP4"
   revision: aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa
@@ -23,6 +23,12 @@ benchmark:
   temperature: 0
   ignore_eos: true
   repeats: 1
+  require_complete_requests: true
+  required_server_log_patterns:
+    - '(?i)Detected ModelOpt NVFP4 checkpoint \(quant_algo=NVFP4\)'
+    - "(?i)Using '(FLASHINFER_TRTLLM|FLASHINFER_CUTEDSL|FLASHINFER_CUTEDSL_BATCHED|FLASHINFER_CUTLASS|VLLM_CUTLASS)' NvFp4 MoE backend"
+  forbidden_server_log_patterns:
+    - "(?i)(Using '(MARLIN|EMULATION)' NvFp4 MoE backend|Using Nvfp4QuantizationEmulationTritonExperts|EmulationNvFp4LinearKernel|NVFP4 linear falling back|does not have native support)"
 
 matrices:
   - cross:

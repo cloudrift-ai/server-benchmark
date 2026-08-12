@@ -206,6 +206,9 @@ def test_from_dict_full():
             "process_repeat": 3,
             "comparison_order": 7,
             "require_output_equivalence": True,
+            "require_complete_requests": True,
+            "required_server_log_patterns": ["native fp4"],
+            "forbidden_server_log_patterns": ["marlin"],
         },
         "deploy": {
             "gpu": "NVIDIA H200",
@@ -227,6 +230,9 @@ def test_from_dict_full():
     assert recipe.benchmark.process_repeat == 3
     assert recipe.benchmark.comparison_order == 7
     assert recipe.benchmark.require_output_equivalence is True
+    assert recipe.benchmark.require_complete_requests is True
+    assert recipe.benchmark.required_server_log_patterns == ["native fp4"]
+    assert recipe.benchmark.forbidden_server_log_patterns == ["marlin"]
     assert recipe.deploy.gpu == "NVIDIA H200"
     assert recipe.deploy.gpu_count == 8
 

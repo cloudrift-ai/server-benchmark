@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from emmy.commands.run import _random_input_values, _random_source_values
 from emmy.compiler.pipeline.search import verification
 
 
@@ -42,6 +44,13 @@ def _pin(*, status: str = "ok", total_us: float | None = 12.5, flags: list[str] 
         "timing_semantics": "single_launch",
         "num_launches": 1,
         "correctness": _proof(),
+        "kernels": [
+            {
+                "kernel": "k_linear",
+                "source_sha256": "0" * 64,
+                "required_source_patterns": {"m16n8k32": True},
+            }
+        ],
     }
 
 
@@ -75,6 +84,24 @@ def _exact_result() -> dict:
         },
         "pinned": [_pin()],
     }
+
+
+def test_random_f8_storage_source_is_nontrivial_finite_bits():
+    from emmy.compiler.dtype import decode_f8
+
+    values = _random_source_values(np.random.default_rng(0), (32, 64), "f8e4m3")
+    assert values.dtype == np.uint8
+    assert np.unique(values).size > 100
+    assert np.isfinite(decode_f8(values, "f8e4m3")).all()
+
+
+def test_random_f8_runtime_input_is_nontrivial_finite_bits():
+    from emmy.compiler.dtype import decode_f8
+
+    values = _random_input_values(np.random.default_rng(0), (32, 64), "f8e4m3")
+    assert values.dtype == np.uint8
+    assert np.unique(values).size > 100
+    assert np.isfinite(decode_f8(values, "f8e4m3")).all()
 
 
 def test_searched_winners_require_direct_measured_knobs():
@@ -181,6 +208,25 @@ def test_validate_ab_json_requires_e2e_timing_for_multi_launch_winner(tmp_path):
             output,
             required_backends=("eager", "tcompile", "emmy"),
             optional_backends=(),
+        )
+
+
+def test_validate_ab_json_requires_declared_kernel_source_pattern(tmp_path):
+    output = tmp_path / "ab.json"
+    output.write_text(json.dumps(_exact_result()), encoding="utf-8")
+
+    verification._validate_ab_json(
+        output,
+        required_backends=("eager", "tcompile", "emmy"),
+        optional_backends=(),
+        required_kernel_source_patterns=("m16n8k32",),
+    )
+    with pytest.raises(verification.WorkingGoldenVerificationError, match="no generated kernel matching"):
+        verification._validate_ab_json(
+            output,
+            required_backends=("eager", "tcompile", "emmy"),
+            optional_backends=(),
+            required_kernel_source_patterns=("wgmma",),
         )
 
 

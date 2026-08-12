@@ -1,0 +1,10 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: meta-models/Muse-Glimmer-30B
+  rationale: "Meta Superintelligence Labs 30B open-weight agentic model (Apache 2.0), trending #1 with 1022 HF score and 1060 likes. vLLM + SGLang supported. 30B params ≈ 60 GB BF16 fits comfortably on 1×H200 (141 GB). Multimodal text+image->text fills a gap in emmy's recipe set."
+  task: generate
+matrices:
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 1

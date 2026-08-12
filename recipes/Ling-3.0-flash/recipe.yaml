@@ -1,0 +1,10 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: inclusionAI/Ling-3.0-flash
+  rationale: "Ant Group's inclusionAI 124B/5.1B-active hybrid-linear MoE with native reasoning. Trending 221, 303 likes, strong agentic benchmark performance (SWE-Bench Pro, Terminal-Bench). vLLM + SGLang supported. 124B BF16 ≈ 248 GB requires FP8 (124 GB) or AWQ (~62 GB) to fit 1×H200; recipe should target FP8 quant for headroom."
+  task: generate
+matrices:
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 2

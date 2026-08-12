@@ -17,8 +17,12 @@
 # where pure FP16 grows an order of magnitude — and GSM8K measures it level with both stock
 # vLLM and standard-fork emmy. So it is faster at numerics the quality gate cannot
 # distinguish, which is what makes it the default rather than an opt-in.
+tags:
+  - best-effort
+
 model:
   huggingface: "google/gemma-4-12B-it"
+  rationale: "Instruction-tuned 12B variant, useful for lightweight tasks on consumer GPUs."
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 
 engine:

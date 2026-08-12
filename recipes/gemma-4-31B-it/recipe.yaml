@@ -1,5 +1,9 @@
+tags:
+  - maintained
+
 model:
   huggingface: "google/gemma-4-31B-it"
+  rationale: "Google's strong 31B model, solid benchmarks, fits 1×H200 efficiently."
 
 engine:
   llm:

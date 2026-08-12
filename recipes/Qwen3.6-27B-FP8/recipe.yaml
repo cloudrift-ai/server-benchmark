@@ -1,5 +1,9 @@
+tags:
+  - maintained
+
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
+  rationale: "Strong mid-size model, FP8 quant fits Pro6000/H200, good serving性价比."
 
 engine:
   llm:

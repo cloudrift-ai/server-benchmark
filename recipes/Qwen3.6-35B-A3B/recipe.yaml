@@ -1,5 +1,9 @@
+tags:
+  - maintained
+
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
+  rationale: "Powerful MoE with 35B total/3B active params, excellent efficiency."
 
 engine:
   llm:

@@ -25,6 +25,9 @@
 # also fit but will queue under heavy concurrency. context_length is the advertised
 # max -- actual KV usage is per-request.
 
+tags:
+  - best-effort
+
 model:
   # 1Cat's README quotes "tclf90/Qwen3.6-35B-A3B-AWQ" as the validated repo, but that
   # one returns 401 on HF (gated/removed, as of May 2026 -- same fate as their 27B
@@ -36,6 +39,7 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
+  rationale: "AWQ quant of 35B MoE useful for low-VRAM deployment on V100."
 
 engine:
   llm:

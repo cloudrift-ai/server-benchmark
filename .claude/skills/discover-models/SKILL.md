@@ -207,9 +207,10 @@ onboarding row needs the exact target, `generate` or `embed`, and a brief eviden
 `best_effort_models`, `obsolete_models`, and `onboarding_models` lists are valid when the complete partition permits
 them. Do not edit recipe files yourself: the workflow validates exact model IDs, the maintained count, the complete
 lifecycle partition, active replacements for obsolete recipes, target hardware, duplicates, and rationale before
-making any change. It also rejects an obsolete decision when the replacement's smallest known qualified deployment
-uses more total physical GPU memory than the old recipe's smallest deployment. If the agent omits a complete recipe,
-the workflow assigns it to best-effort rather than guessing that it is obsolete.
+making any change. It demotes an obsolete decision to best-effort unless the replacement is active, serves the same
+task, and its smallest known qualified deployment uses no more total physical GPU memory than the old recipe's
+smallest deployment. If the agent omits a complete recipe, the workflow also assigns it to best-effort rather than
+guessing that it is obsolete.
 
 ## Step 7 — Hand off in survey mode
 

@@ -157,28 +157,33 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
     best_effort.extend(sorted(unclassified))
 
     replacement_models = set(maintained) | set(best_effort)
+    accepted_obsolete = []
     for decision in obsolete_decisions:
         model_id = decision["model_id"]
         replacement = decision["replacement_model_id"]
         if model_id == replacement:
-            raise ValueError(f"Obsolete model {model_id} cannot replace itself")
+            best_effort.append(model_id)
+            continue
         if replacement not in replacement_models:
-            raise ValueError(f"Replacement for obsolete model {model_id} must be maintained or best-effort")
+            best_effort.append(model_id)
+            continue
         model_task = (records[model_id]["config"].get("model") or {}).get("task", "generate")
         replacement_task = (records[replacement]["config"].get("model") or {}).get("task", "generate")
         if model_task != replacement_task:
-            raise ValueError(f"Replacement for obsolete model {model_id} must serve the same task")
+            best_effort.append(model_id)
+            continue
         model_footprints = _deployment_footprints(records[model_id]["config"])
         replacement_footprints = _deployment_footprints(records[replacement]["config"])
         if not model_footprints or not replacement_footprints:
-            raise ValueError(f"Obsolete model {model_id} and its replacement need known qualified deployment targets")
+            best_effort.append(model_id)
+            continue
         model_min = min(model_footprints)
         replacement_min = min(replacement_footprints)
         if replacement_min > model_min:
-            raise ValueError(
-                f"Replacement for obsolete model {model_id} needs more total VRAM in its smallest qualified deployment "
-                f"({replacement_min} MiB versus {model_min} MiB)"
-            )
+            best_effort.append(model_id)
+            continue
+        accepted_obsolete.append(decision)
+    obsolete_decisions = accepted_obsolete
 
     candidates = manifest.get("onboarding_models", [])
     available_onboarding = MAX_ONBOARDING_MODELS - len(existing_onboarding)

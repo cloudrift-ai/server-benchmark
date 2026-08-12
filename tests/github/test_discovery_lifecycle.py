@@ -234,7 +234,7 @@ def test_rejects_duplicate_lifecycle_classification(tmp_path):
         discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
 
 
-def test_obsolete_recipe_requires_active_replacement(tmp_path):
+def test_obsolete_recipe_without_active_replacement_defaults_to_best_effort(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     _recipe(tmp_path, "old", "org/old")
     _recipe(tmp_path, "older", "org/older")
@@ -245,28 +245,34 @@ def test_obsolete_recipe_requires_active_replacement(tmp_path):
         obsolete=[_obsolete("org/old", "org/older"), _obsolete("org/older", "org/ready")],
     )
 
-    with pytest.raises(ValueError, match="Replacement for obsolete model org/old must be maintained or best-effort"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+    assert manifest["best_effort_models"] == ["org/old"]
+    assert [decision["model_id"] for decision in manifest["obsolete_models"]] == ["org/older"]
 
 
-def test_obsolete_recipe_replacement_must_serve_same_task(tmp_path):
+def test_obsolete_recipe_with_other_task_replacement_defaults_to_best_effort(tmp_path):
     _recipe(tmp_path, "ready", "org/ready", task="embed")
     _recipe(tmp_path, "old", "org/old", task="generate")
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
 
-    with pytest.raises(ValueError, match="must serve the same task"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+    assert manifest["best_effort_models"] == ["org/old"]
+    assert manifest["obsolete_models"] == []
 
 
-def test_obsolete_recipe_replacement_must_fit_same_or_less_total_vram(tmp_path):
+def test_obsolete_recipe_with_larger_replacement_defaults_to_best_effort(tmp_path):
     _recipe(tmp_path, "ready", "org/ready", gpu=GPU)
     _recipe(tmp_path, "old", "org/old", gpu="NVIDIA GeForce RTX 4090")
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
 
-    with pytest.raises(ValueError, match="needs more total VRAM"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+    assert manifest["best_effort_models"] == ["org/old"]
+    assert manifest["obsolete_models"] == []
 
 
 def test_obsolete_recipe_replacement_may_use_less_total_vram(tmp_path):

@@ -275,21 +275,21 @@ jobs:
             --description "Automated model discovery and onboarding" \
             --color 1D76DB --force
           if [ -n "$PR_NUMBER" ]; then
-            retry_gh gh pr edit "$PR_NUMBER" \
-              --title "Refresh model lifecycle and onboarding" \
-              --body-file "$DISCOVERY_SUMMARY" \
-              --add-label model-discovery \
-              --add-label model-onboarding
+            retry_gh gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              -f title="Refresh model lifecycle and onboarding" \
+              -F body=@"$DISCOVERY_SUMMARY" >/dev/null
           else
-            retry_gh gh pr create \
-              --draft \
-              --head "$PLAN_BRANCH" \
-              --base "${{ github.event.repository.default_branch }}" \
-              --title "Refresh model lifecycle and onboarding" \
-              --body-file "$DISCOVERY_SUMMARY" \
-              --label model-discovery \
-              --label model-onboarding
+            PR_NUMBER=$(retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
+              -f head="$PLAN_BRANCH" \
+              -f base="${{ github.event.repository.default_branch }}" \
+              -f title="Refresh model lifecycle and onboarding" \
+              -F body=@"$DISCOVERY_SUMMARY" \
+              -F draft=true \
+              --jq .number)
           fi
+          retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+            -f 'labels[]=model-discovery' \
+            -f 'labels[]=model-onboarding' >/dev/null
 
       - name: Cleanup discovery credentials and output
         if: always()

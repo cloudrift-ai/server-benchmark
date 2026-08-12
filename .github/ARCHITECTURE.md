@@ -111,7 +111,8 @@ conservatively assigns an omitted complete recipe to `best-effort`. For decision
 qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
 and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. Unknown
 unknown or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
-`best-effort`; unknown maintained IDs still fail validation because all ten selections must be exact. The agent must use
+`best-effort`. A bare checkpoint name is normalized only when it uniquely identifies one existing recipe; ambiguous or
+unknown maintained IDs still fail validation because all ten selections must resolve exactly. The agent must use
 `best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
 the current rationale directly under `model`. Obsolete recipes remain in git but cannot be deployed, benchmarked,
 published, or bundled; a later reassessment may return one to the maintained or best-effort set.

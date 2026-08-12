@@ -49,7 +49,9 @@ For survey mode, ask only if the user has not already implied it:
 
 ## Step 1 — Inventory recipes and candidates
 
-In lifecycle mode, read every `recipes/*/recipe.yaml` first. Treat the top-level tags as follows:
+In lifecycle mode, inventory every `recipes/*/recipe.yaml` first. Use one compact query that returns only the recipe
+path, model ID, tags, task, deployment matrix, and existing rationale. Read a complete recipe only when a specific
+classification needs closer inspection. Treat the top-level tags as follows:
 
 - `maintained` — a tested recipe selected for periodic testing and optimization;
 - `best-effort` — a useful runnable recipe that is not selected for periodic testing and optimization;

@@ -113,8 +113,10 @@ jobs:
           advantage, use best-effort. Low demand, age, or exclusion from the maintained set is not sufficient. A
           previously obsolete recipe may become maintained or best-effort when the evidence changes. Never classify
           an onboarding/untested shell. Keep research bounded: use the repository inventory and at most six targeted
-          public-web searches, then write the manifest. Do not keep researching once every maintained choice and
-          obsolete proposal has enough evidence for this conservative classification.
+          public-web searches, then write the manifest. Start with one compact inventory containing only recipe path,
+          model ID, tags, task, deployment matrix, and existing rationale; do not read whole recipe bodies unless one
+          needs closer inspection. Do not keep researching once every maintained choice and obsolete proposal has
+          enough evidence for this conservative classification.
 
           Give every maintained, best-effort, obsolete, and onboarding decision a concise evidence-backed rationale.
           For an obsolete recipe, name the superseding model in both replacement_model_id and the rationale, or omit

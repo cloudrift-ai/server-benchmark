@@ -1129,8 +1129,7 @@ def _write_ab_json(
     golden_benches,
     greedy_fail=None,
     greedy_iso=None,
-    correctness=None,
-    strict_errors=None,
+    greedy_reference_us=None,
 ) -> None:
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
@@ -1151,8 +1150,9 @@ def _write_ab_json(
 
     ``greedy_iso`` (present when pinned rows benched) lands as ``greedy.isolated`` —
     the same graph re-benched emmy-only through the pinned-row path, shaped like a pinned
-    row (``status`` / ``total_us`` / ``kernels`` / ``flags``). Sweep tooling compares
-    pinned ``total_us`` against THIS block; the greedy block's own ``total_us`` is the
+    row (``status`` / ``total_us`` / ``e2e_us`` / ``kernels`` / ``flags``). Sweep tooling
+    compares pinned ``e2e_us`` when a multi-kernel program exposes it, otherwise ``total_us``,
+    against THIS block; the greedy block's own ``total_us`` is the
     interleaved (torch-comparable) number, ~7% apart from pinned-row semantics.
 
     Every pinned row and the greedy block carry a ``lane`` (``"fm"`` / ``"std"``, :func:`_lane`):
@@ -1206,6 +1206,9 @@ def _write_ab_json(
             "num_launches": num_launches,
         }
 
+    def _e2e_us(b) -> float | None:
+        return None if b is None or b.e2e_min_ms is None else b.e2e_min_ms * 1000
+
     pinned = []
     for gb in golden_benches or []:
         sample = gb.sample
@@ -1216,7 +1219,8 @@ def _write_ab_json(
                 "lane": _lane(sample.knobs),
                 "status": gb.status,
                 "pinned_knobs": {k: str(v) for k, v in _sample_replay_knobs(sample).items()},
-                **_timing(gb.bench),
+                "total_us": _total_us(gb.bench),
+                "e2e_us": _e2e_us(gb.bench),
                 "kernels": _kernel_rows(gb.graph, gb.bench),
                 "flags": list(gb.flags),
                 "correctness": gb.correctness,
@@ -1232,10 +1236,13 @@ def _write_ab_json(
     }
     if greedy_fail is not None:
         greedy["error"] = greedy_fail
+    if greedy_reference_us is not None:
+        greedy["reference_run_us"] = greedy_reference_us
     if greedy_iso is not None:
         greedy["isolated"] = {
             "status": greedy_iso.status,
-            **_timing(greedy_iso.bench),
+            "total_us": _total_us(greedy_iso.bench),
+            "e2e_us": _e2e_us(greedy_iso.bench),
             "kernels": _kernel_rows(greedy_iso.graph, greedy_iso.bench),
             "flags": list(greedy_iso.flags),
         }
@@ -1665,32 +1672,6 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
     return stage, _passes_after_stage(stage)
 
 
-def _random_source_values(rng, shape, dtype):
-    """Return nontrivial deterministic values in a constant's declared storage dtype."""
-    import numpy as np  # noqa: PLC0415
-
-    from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
-    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
-
-    canonical = get_dtype(dtype or "f32").name
-    if canonical in {"f8e4m3", "f8e5m2"}:
-        bits = rng.integers(0, 256, shape, dtype=np.uint8)
-        bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
-        return bits
-    return rng.standard_normal(shape, dtype=np.float32) * 0.02
-
-
-def _random_input_values(rng, shape, dtype):
-    """Return random runtime values, preserving exact FP8 input storage bits."""
-    import numpy as np  # noqa: PLC0415
-
-    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
-
-    if get_dtype(dtype).name in {"f8e4m3", "f8e5m2"}:
-        return _random_source_values(rng, shape, dtype)
-    return rng.standard_normal(shape, dtype=np.float32)
-
-
 async def bench_lowered_vs_torch(
     frontend,
     lowered,
@@ -1702,8 +1683,8 @@ async def bench_lowered_vs_torch(
     iters,
     bench_backends,
     capture_graphs=True,
-    strict_accuracy=False,
-    return_reference=False,
+    ref_out=None,
+    ref_us_out=None,
 ):
     """Run + (optionally) benchmark a lowered graph against its torch reference on
     shared random inputs. The common bench primitive behind ``run --ir`` and
@@ -1733,9 +1714,10 @@ async def bench_lowered_vs_torch(
     whether the timings came from graph-captured (pure-GPU) windows, and
     ``accuracy_error`` the non-fatal accuracy verdict (``None`` = passed or no reference;
     also logged here — returned so a worker-side run can ship it back to the parent, whose
-    child logs are invisible). With ``return_reference``, appends the strict correctness
-    proof and ``(input_data, eager_outputs_by_name)`` for same-input pinned replay. Does no
-    printing / dumping — callers own that."""
+    child logs are invisible). When ``ref_out`` is a list, the greedy run's same-input
+    ``(input_data, outputs)`` pair is appended for pinned A/B verification; ``ref_us_out``
+    receives that execution's event timing, which remains valid reference metadata even when
+    the later repeated greedy benchmark fails. Does no printing / dumping — callers own that."""
     import numpy as np
     import torch
 
@@ -1801,6 +1783,10 @@ async def bench_lowered_vs_torch(
             input_data[nid] = arr.flatten().tolist()
 
     result, _ = backend.run(lowered, input_data=input_data)
+    if ref_out is not None:
+        ref_out.append((input_data, result.outputs))
+    if ref_us_out is not None:
+        ref_us_out.append(result.time_ms * 1000)
     for nid, arr in result.outputs.items():
         finite = np.isfinite(arr).all()
         logger.info("Output %s: shape=%s finite=%s mean=%.4f", nid, arr.shape, bool(finite), float(arr.mean()))
@@ -2038,8 +2024,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if args.ab and not tail:
         logger.warning("--ab ignored: %s IR is fully lowered (no forks left to pin)", stage)
 
+    pinned = _pinned_samples_for_ir(args, embedded)
+
     async def _bench_session():
-        greedy_fail = results = bench = accuracy_error = correctness = ab_ref = ab_benches = greedy_iso = None
+        greedy_fail = results = bench = accuracy_error = ab_ref = reference_error = ab_benches = greedy_iso = None
+        greedy_reference_us = None
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
         try:
@@ -2052,40 +2041,71 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(pinned and tail),
-                    strict_accuracy=strict_correctness,
+                    want_ref=bool(pinned),
                 )
             except RuntimeError as exc:
                 greedy_fail = f"greedy run/bench failed: {exc}"
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]
-                correctness, ab_ref = resp.get("correctness"), resp.get("run_io")
-            if pinned and tail and (not strict_correctness or accuracy_error is None):
-                if greedy_fail:
-                    logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
-                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
-                ab_benches = await _bench_golden_variants(
-                    backend,
-                    embedded,
-                    pinned,
-                    warmup=args.warmup,
-                    iters=args.iters,
-                    ref=ab_ref,
-                    strict_correctness=strict_correctness,
-                )
-            elif not pinned and args.ab and tail:
+                ab_ref = resp["run_io"]
+                greedy_reference_us = resp.get("reference_run_us")
+                if resp.get("greedy_error"):
+                    greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
+            if pinned and tail:
+                if ab_ref is None:
+                    reason = greedy_fail or "the greedy worker returned no run outputs"
+                    missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
+                    reference_error = f"{missing}: {reason}"
+                else:
+                    if greedy_fail:
+                        logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
+                    else:
+                        greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
+                    ab_benches = await _bench_golden_variants(
+                        backend,
+                        embedded,
+                        pinned,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        ref=ab_ref,
+                    )
+            elif args.ab and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; --ab rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
                 ab_benches = await _bench_ab_variants_ir(backend, path, tail, args.ab, warmup=args.warmup, iters=args.iters, db=db)
         finally:
             await backend.aclose_async_worker()
-        return greedy_fail, results, bench, torch_available, captured, accuracy_error, correctness, ab_benches, greedy_iso
+        return (
+            greedy_fail,
+            results,
+            bench,
+            torch_available,
+            captured,
+            accuracy_error,
+            reference_error,
+            ab_benches,
+            greedy_iso,
+            greedy_reference_us,
+        )
 
-    greedy_fail, results, bench, torch_available, captured, accuracy_error, correctness, ab_benches, greedy_iso = asyncio.run(
-        _bench_session()
-    )
+    (
+        greedy_fail,
+        results,
+        bench,
+        torch_available,
+        captured,
+        accuracy_error,
+        reference_error,
+        ab_benches,
+        greedy_iso,
+        greedy_reference_us,
+    ) = asyncio.run(_bench_session())
+
+    if reference_error is not None:
+        logger.error(reference_error)
+        sys.exit(1)
 
     if accuracy_error is not None:
         # Random boundary-input reproducers keep their historical informational check, while
@@ -2117,11 +2137,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             ab_benches,
             greedy_fail=greedy_fail,
             greedy_iso=greedy_iso,
-            correctness=correctness,
-            strict_errors=strict_errors,
+            greedy_reference_us=greedy_reference_us,
         )
-    for error in strict_errors or []:
-        logger.error("strict: %s", error)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (

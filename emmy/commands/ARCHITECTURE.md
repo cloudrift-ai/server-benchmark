@@ -185,16 +185,20 @@ With `--bench`, each target's `62_kernel_bench.json` records whether an eager re
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
 
-`emmy compile --golden-file PATH --golden NAME` and `emmy run --golden PATH [--target NAME]` are the verification
-counterparts. They resolve targets only in the explicit working YAML and compile its exact provenance or Loop IR,
-without canonical-corpus or live-card filtering. `run` visits every distinct target sequentially in the current
-process unless `--target` narrows the file to one exact or unambiguous substring match. With several targets,
-`--json DIR` writes one readable JSON record per target; there is no repeat or child-process orchestration layer.
-Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
-graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
-proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
-derived structural stamps, so `run --golden` replays it through the full compiler pipeline. A direct `run --ir` input
-remains a stage-complete artifact and runs only the later passes.
+`emmy compile/run --golden-file PATH --golden NAME` is the verification counterpart: it resolves the name only in
+that explicit working YAML and compiles its exact provenance or Loop IR target, without canonical-corpus or live-card
+filtering. Inventory and proposal rows select the graph but are not trusted as automatic A/B pins; only verified rows
+with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded
+Loop IR stores stable algebra rather than derived structural stamps, so `run --golden` replays it through the full
+compiler pipeline. When that replay has pinned rows, its greedy execution also returns same-input outputs so every
+pinned schedule receives the normal wrong-answer check; the reference backend is `emmy-greedy`, not an unavailable
+Torch twin. A completed reference survives a later greedy timing watchdog: JSON labels the exact greedy failure and
+retains the one-run event timing for measurement provenance, but omits the isolated greedy row so it cannot be selected.
+Pinned schedules still require their normal timed/reference-clean replay, and the command remains nonzero because the
+greedy row failed. Repeated shape names that resolve to different embedded targets remain ambiguous; qualification
+scopes a temporary working YAML to one target instead of guessing. A direct `run --ir` input remains a stage-complete
+artifact and runs only the later passes. The JSON record carries whole-program `e2e_us` for multi-kernel rows, so
+promotion selects the aggregate execution rather than the sum of isolated kernel windows.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

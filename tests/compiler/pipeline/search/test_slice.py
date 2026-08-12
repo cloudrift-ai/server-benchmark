@@ -21,7 +21,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.slice import single_node_graph
+from emmy.compiler.pipeline.search.slice import single_node_graph, topo_order
 from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES
 
 
@@ -47,6 +47,19 @@ def _two_matmul_graph() -> Graph:
     g.inputs = ["a", "b", "d", "e"]
     g.outputs = ["c", "f"]
     return g
+
+
+def test_slice_topological_order_ignores_keep_set_iteration_order() -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("residual", (4,)), node_id="residual")
+    graph.add_node(InputOp(), [], Tensor("to", (4,)), node_id="to")
+    graph.add_node(MatmulOp(), ["residual", "to"], Tensor("root", (4,)), node_id="root")
+
+    class ReverseKeep(set):
+        def __iter__(self):
+            return iter(("to", "residual", "root"))
+
+    assert topo_order(graph, ReverseKeep(graph.nodes)) == ["residual", "to", "root"]
 
 
 def test_slice_is_standalone_and_preserves_loop_key() -> None:

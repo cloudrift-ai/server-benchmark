@@ -23,6 +23,7 @@ config as well as the image repository:
 
 | HF model id | slug | config | image repository |
 | --- | --- | --- | --- |
+| `google/gemma-4-12B` | `gemma-4-12b` | `models/gemma-4-12b.env` | `cloudriftai/vllm-emmy-gemma-4-12b` |
 | `google/gemma-4-12B-it` | `gemma-4-12b-it` | `models/gemma-4-12b-it.env` | `cloudriftai/vllm-emmy-gemma-4-12b-it` |
 | `Qwen/Qwen3-Embedding-0.6B` | `qwen3-embedding-0.6b` | `models/qwen3-embedding-0.6b.env` | `cloudriftai/vllm-emmy-qwen3-embedding-0.6b` |
 

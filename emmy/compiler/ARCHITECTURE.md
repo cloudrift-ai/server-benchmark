@@ -25,6 +25,9 @@ GPU
 
 `Graph` (`compiler/graph.py`) hosts nodes from every dialect; rewrite
 passes swap node ops in place, so there is no separate "program" type.
+Its topological traversal resolves every ready node by node id rather than the hash or insertion order of the
+set-backed graph indexes. Stable traversal is part of the persistence boundary: Torch/Loop wire programs and their
+target indexes must be byte-identical across fresh Python processes, including graph slices assembled from sets.
 
 Nodes are **multi-output**: `Node.outputs` is an ordered, non-empty tuple of `Tensor`s, and `node.output` is a
 read-only alias of slot 0 (the **primary** output), so single-output code reads exactly what it always did.

@@ -68,6 +68,22 @@ def test_python_slug_matches_the_shell_schema():
         assert library_model_slug(model) == slug(model)
 
 
+def test_gemma_base_and_instruction_release_configs_use_distinct_goldens():
+    """Weight siblings may share geometry but cannot share evidence when their serialized targets differ."""
+
+    def values(name: str) -> dict[str, str]:
+        return dict(
+            line.split("=", 1)
+            for line in (SERVE_DIR / "models" / name).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "=" in line
+        )
+
+    base = values("gemma-4-12b.env")
+    instruction = values("gemma-4-12b-it.env")
+    assert base["SERVE_GOLDEN_FILE"].endswith("/rtx5090_sm120_gemma4_base.yaml")
+    assert instruction["SERVE_GOLDEN_FILE"].endswith("/rtx5090_sm120_gemma4.yaml")
+
+
 @pytest.mark.parametrize(
     "golden_model, target, want",
     [

@@ -72,21 +72,7 @@ def collect_kernel_ancestors(
 
 def topo_order(graph: Graph, keep: set[str]) -> list[str]:
     """Topo-sorted node ids restricted to ``keep`` (producers first)."""
-    visited: set[str] = set()
-    order: list[str] = []
-
-    def visit(nid: str) -> None:
-        if nid in visited or nid not in keep:
-            return
-        visited.add(nid)
-        for dep in graph.nodes[nid].inputs:
-            p = graph.producer(dep)
-            visit(p.id if p is not None else dep)
-        order.append(nid)
-
-    for nid in keep:
-        visit(nid)
-    return order
+    return [nid for nid in graph.topological_order() if nid in keep]
 
 
 def single_node_graph(graph: Graph, node_id: str, absorb: frozenset[str] = frozenset()) -> Graph:

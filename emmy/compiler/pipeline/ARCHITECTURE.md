@@ -797,6 +797,8 @@ predicted to be cheaper first.
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
+  It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
+  inputs and persisted Loop programs stay byte-identical across fresh Python processes.
 - One fold-aware exception: a flash fold offer site's slice CARRIES the score producer its fusion consumes
   (`_flash.fused_producer_ids` → `single_node_graph(absorb=…)`), and the absorbed producer loses its own slice. A
   synthetic-input boundary would make `try_flash` unfusable in-slice, silently degrading every tune trajectory to the
@@ -1163,7 +1165,9 @@ they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` v
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
 entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
-self-contradictory during the all-of offer check. Promotion rejects that ambiguity before the offer audit.
+self-contradictory during the all-of offer check. `stamp_schedule_families` drops an earlier bare OFF when a later
+axis-scoped decision exists but preserves a non-OFF primary-site decision for inspection; promotion rejects or
+explicitly re-keys any remaining ambiguity before the offer audit.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose

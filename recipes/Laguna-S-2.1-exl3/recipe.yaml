@@ -1,5 +1,6 @@
-# Reproduce the selected standard-math Emmy lane for the official 2.01 bpw checkpoint on one RTX 5090. The local
-# image is built from this checkout; publication requires separate approval.
+# Qualified on one RTX 5090 with the official 2.01 bpw checkpoint. This standard-math lane uses a width-1 CUDA
+# graph for decode and two-token chunked prefill; FAST_MATH changed the exact top-10 oracle without improving
+# throughput. The local image is built from this checkout; publication requires separate approval.
 model:
   huggingface: "turboderp/Laguna-S-2.1-exl3"
   revision: 348cf8c2cdea2326fde367399c8f0ff6e1dea842
@@ -34,16 +35,6 @@ engine:
         EMMY_GEN_ALIAS_ATTN: "0"
         PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
         PYTORCH_ALLOC_CONF: "expandable_segments:True"
-
-benchmark:
-  random_input_len: 56
-  random_output_len: 64
-  max_concurrency: 1
-  num_prompts: 3
-  repeats: 3
-  seed: 0
-  temperature: 0
-  ignore_eos: true
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"

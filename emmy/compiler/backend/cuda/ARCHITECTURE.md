@@ -69,6 +69,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
   `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`.
+  Native kernels may replace named ABI entries with typed by-value `scalar_args`. These immutable values share the
+  same dispatch and captured replay as buffers and serialize through execution-plan format 4.
 
 `run_program(graph, input_data) → RunResult`:
 

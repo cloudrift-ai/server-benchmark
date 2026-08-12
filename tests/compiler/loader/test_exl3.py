@@ -486,6 +486,84 @@ def test_spell_trellis_builds_generic_cone(tmp_path):
     assert g.outputs == ["y"]
 
 
+@pytest.mark.parametrize(("cc", "K"), [((7, 0), 5), ((7, 0), 2), ((8, 0), 2)])
+def test_checkpoint_static_m1_spelling_keeps_generic_trunk(tmp_path, cc, K):
+    """Checkpoint trunk spelling does not select a native operation without a qualified consumer."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.frontend.ir import Exl3GemvOp
+    from emmy.compiler.loader.quant import spell_trellis_constants
+    from emmy.compiler.pipeline import Pipeline
+
+    tensors, _ref = exl3_linear_tensors("layer", 256, 128, K=K, cb=2)
+    _write_exl3_checkpoint(tmp_path, tensors)
+    graph = _linear_graph((256, 128), dtype="f16", m=1)
+    assert spell_trellis_constants(graph, str(tmp_path)) == 1
+    assert not any(isinstance(node.op, Exl3GemvOp) for node in graph.nodes.values())
+
+    lowered = Pipeline.build(["frontend/decomposition"], select=["038_exl3_gemv"]).run(
+        graph,
+        ctx=Context(compute_capability=cc, sm_count=80),
+    )
+    assert not any(isinstance(node.op, CudaOp) for node in lowered.nodes.values())
+    assert not any(isinstance(node.op, Exl3GemvOp) for node in lowered.nodes.values())
+
+
+def test_mixed_native_and_generic_coded_linears_keep_dependency_order():
+    """A native K5 producer and generic K2 consumer remain one ordered execution plan."""
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.loader.trellis import spell_factored_linear
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+
+    graph = Graph()
+
+    def add_input(name, shape, dtype):
+        graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+
+    add_input("x", (1, 128), "f16")
+    add_input("c5", (8, 16, 80), "i16")
+    add_input("s5", (128,), "f16")
+    add_input("v5", (256,), "f16")
+    y1 = spell_factored_linear(
+        graph,
+        "c5",
+        "s5",
+        "v5",
+        cb=2,
+        weight_shape=(256, 128),
+        x="x",
+        bias=None,
+        out=Tensor("y1", (1, 256), "f16"),
+        weight_name="w5",
+        prefer_native=True,
+    )
+    add_input("c2", (16, 16, 32), "i16")
+    add_input("s2", (256,), "f16")
+    add_input("v2", (256,), "f16")
+    y2 = spell_factored_linear(
+        graph,
+        "c2",
+        "s2",
+        "v2",
+        cb=2,
+        weight_shape=(256, 256),
+        x=y1,
+        bias=None,
+        out=Tensor("y2", (1, 256), "f16"),
+        weight_name="w2",
+    )
+    graph.inputs = ["x", "c5", "s5", "v5", "c2", "s2", "v2"]
+    graph.outputs = [y2]
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(7, 0), sm_count=80))
+    plan = plan_from_graph(lowered)
+    assert plan.launches[0].kernel_name.startswith("_Z24exl3_gemv_int8_sq_kernelILi5")
+    assert len(plan.launches) > 1 and all("exl3_gemv_int8_sq_kernelILi2" not in launch.kernel_name for launch in plan.launches)
+    assert plan.outputs == ["y2"]
+
+
 def test_input_spelling_is_generic_and_matches_reference():
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.graph import Graph, Tensor

@@ -284,8 +284,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 
   **EXL3 trunk.** Serving always requests the coded trunk from `load_quantized_split`; placeholder
   module parameters are never read. Birth-time spelling re-sources the traced constants from the
-  checkpoint and replaces each coded linear directly with generic factorized contractions. Any
-  unmatched coded trunk weight aborts compilation instead of expanding to a dense fallback.
+  checkpoint and keeps trunk linears on generic factorized contractions, never a dense weight. The pinned native coded
+  GEMV remains a compiler operation for explicitly qualified consumers; the coded output head uses its static-M1 Volta
+  K6 residual implementation without changing trunk selection. Any unmatched coded trunk weight aborts compilation.
 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
@@ -332,10 +333,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
   generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
   decode to empty output). The trunk compute (embed + per-layer
-  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head`, and `load_weights` sources it from one of
+  pre/post + final norm) is the `EmmyGenRunner`; the last vLLM stage owns the output-head boundary, and `load_weights`
+  sources it from one of
   three places: `lm_head.weight` in the stream, the tied embed alias, or — on an **EXL3 checkpoint, which has no
-  `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint and decoded in
-  out-feature blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
+  `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint. An eligible
+  untied single-TP coded head remains compressed and runs the same static-M1 native GEMV with fp32 logits;
+  `LogitsProcessor(logits_as_input=True)` then applies scale/softcap. Unsupported coded heads decode in out-feature
+  blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
   Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
   expert codes this model owns none of. **An unsourced head raises**: vLLM's own strict weight-tracking check waives
   any parameter whose quant method defines `process_weights_after_loading`, which `ParallelLMHead`'s does, so nothing
@@ -352,6 +356,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
+  `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
+  owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
+  are filtered before shard files open, so a rank never reads or materializes another stage's coded weights. Execution
+  plan names and pack identity retain absolute layer numbers and the interval, preventing one stage's plans from being
+  replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
+  Laguna EXL3 contract therefore preserves its fp32 residual stream across ranks while q/k/v and attention stay fp16.
+  The coded output head remains whole only on the last rank (`tp_size == 1` within that pipeline stage); no
+  `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the static-M1 program
+  row-by-row, while captured decode requires one sampled row. Speculative decoding is unsupported with pipeline
+  parallelism.
   **Speculative decoding (MTP drafter, vllm#41745 — gemma-4-assistant).** vLLM's drafter shares the target's embedding
   by reaching into `target.model.embed_tokens` (stock model classes nest their trunk under `.model`; the emmy trunk lives
   in the runner instead). So — only when a draft is configured — the model exposes a thin `.model` shim

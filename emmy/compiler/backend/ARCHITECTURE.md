@@ -115,6 +115,11 @@ on-disk format survives compiler changes; only runtime-contract changes bump `PL
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
 
+Static by-value kernel parameters use `LaunchSpec.scalar_args`, with the scalar name retained at its ABI position in
+`arg_names`. Only CUDA's primitive integer and floating-point types are accepted. Plans carrying these arguments use
+format 4, and the source, typed values, launch geometry, and buffer shapes all remain part of the normal plan/pack
+identity. Symbolic `runtime_args` remain a separate tail ABI resolved from the request shape.
+
 `plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
 It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while
 preserving their alias pattern and `source_parts` order. The stored `ExecutionPlan` template carries binding slots;

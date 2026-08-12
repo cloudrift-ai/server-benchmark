@@ -9,6 +9,7 @@ from pathlib import Path
 _ROOT = Path(__file__).parent / "upstream"
 _QUOTED_INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"\s*$')
 _SYMBOL_SUFFIX = "EvPK6__halfPS0_S3_S3_S3_PfPPKtPS2_S8_S7_S8_S8_S7_S8_S8_PKlSA_S2_iiiiiifiiiiPi"
+_GEMV_SYMBOL_SUFFIX = "EvPK6__halfPKtPviiiPiS2_PS0_S2_"
 
 
 def _flatten(path: Path, seen: set[Path]) -> list[str]:
@@ -48,6 +49,45 @@ def source(bits: int, tile_n: int, codebook: int) -> str:
 def symbol(bits: int, tile_n: int, codebook: int) -> str:
     """Itanium ABI name emitted by nvcc for the selected template instantiation."""
     return f"_Z15exl3_moe_kernelILi{bits}ELi{tile_n}ELi{codebook}E{_SYMBOL_SUFFIX}"
+
+
+@cache
+def gemv_source(bits: int, codebook: int, *, c_fp32: bool, residual: bool, compute_capability: tuple[int, int]) -> str:
+    """One pinned static-M1 GEMV instantiation, with Volta-safe weight loads.
+
+    Upstream stages K3/K5/K7 weight rows with ``cp.async``. That instruction begins at
+    SM80, while the header also carries a complete global-load/DP4A narrow unit valid on
+    SM61+. Keep the quoted upstream file byte-exact and patch only the flattened translation
+    unit's compile-time selector below SM80.
+    """
+    if bits not in range(1, 9) or codebook != 2:
+        raise ValueError(f"unsupported EXL3 GEMV: K={bits}, codebook={codebook}")
+    if compute_capability < (7, 0):
+        raise ValueError(f"EXL3 GEMV requires SM70 or newer, got {compute_capability}")
+    if compute_capability < (8, 0) and bits not in (5, 6, 7):
+        raise ValueError(f"SM70 EXL3 GEMV is qualified only for K5/K6/K7, got K{bits}")
+    rendered = "\n".join(_flatten(_ROOT / "quant" / "exl3_gemv_int8_kernel.cuh", set()))
+    selector = "return bits == 3 || bits == 5 || bits == 7;"
+    replacement = "#if __CUDA_ARCH__ >= 800\n    return bits == 3 || bits == 5 || bits == 7;\n#else\n    return false;\n#endif"
+    if rendered.count(selector) != 1:
+        raise RuntimeError("pinned EXL3 GEMV staged-memory selector changed")
+    rendered = rendered.replace(selector, replacement)
+    fp32 = "true" if c_fp32 else "false"
+    shadow = "true" if residual else "false"
+    rendered += (
+        f"\n// Emmy target sm_{compute_capability[0]}{compute_capability[1]}, K{bits}, cb{codebook}, "
+        f"c_fp32={fp32}, residual={shadow}\n"
+        f"template __global__ void exl3_gemv_int8_sq_kernel<{bits}, 1, {fp32}, {shadow}>("
+        "const half*, const uint16_t*, void*, int, int, int, int*, const half*, half*, const half*);\n"
+    )
+    return rendered
+
+
+def gemv_symbol(bits: int, *, c_fp32: bool, residual: bool) -> str:
+    """Itanium ABI name for one pinned static-M1 GEMV template."""
+    fp32 = "Lb1E" if c_fp32 else "Lb0E"
+    shadow = "Lb1E" if residual else "Lb0E"
+    return f"_Z24exl3_gemv_int8_sq_kernelILi{bits}ELi1E{fp32}{shadow}{_GEMV_SYMBOL_SUFFIX}"
 
 
 _ROUTE_SOURCE = r"""

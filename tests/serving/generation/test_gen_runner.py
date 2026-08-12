@@ -169,3 +169,21 @@ def test_native_exl3_source_is_pinned_and_exports_route_kernel():
     assert "791c83073f7f90c44f765a0ceeab7a05fa15b96b" in package.joinpath("README.md").read_text()
     assert package.joinpath("LICENSE.exllamav3").read_text().startswith("MIT License")
     assert symbol(2, 256, 2).startswith("_Z15exl3_moe_kernelILi2ELi256ELi2EE")
+
+
+def test_native_exl3_gemv_source_selects_volta_narrow_path_and_typed_symbol():
+    from emmy.serving.native.exl3 import gemv_source, gemv_symbol
+
+    rendered = gemv_source(5, 2, c_fp32=True, residual=True, compute_capability=(7, 0))
+    assert "#if __CUDA_ARCH__ >= 800" in rendered
+    assert "gemv_int8_unit_narrow<bits, M, residual, false>" in rendered
+    assert "Emmy target sm_70, K5, cb2, c_fp32=true, residual=true" in rendered
+    assert gemv_symbol(5, c_fp32=True, residual=True).startswith("_Z24exl3_gemv_int8_sq_kernelILi5ELi1ELb1ELb1EE")
+
+    ampere = gemv_source(5, 2, c_fp32=True, residual=True, compute_capability=(8, 0))
+    plain = gemv_source(5, 2, c_fp32=True, residual=False, compute_capability=(7, 0))
+    assert rendered != ampere != plain
+    assert "Emmy target sm_80" in ampere and "residual=false" in plain
+
+    with pytest.raises(ValueError, match="qualified only"):
+        gemv_source(2, 2, c_fp32=True, residual=True, compute_capability=(7, 0))

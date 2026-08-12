@@ -53,6 +53,10 @@ PLAN_FORMAT_INDIRECT = 2
 # launches.  Older runtimes reject the plan and safely fall back to a full compile.
 PLAN_FORMAT_GENERATED = 3
 
+# By-value scalar launch arguments. Format 4 is a superset of every earlier plan
+# contract, so generated constants / indirect operands / scalar args may coexist.
+PLAN_FORMAT_SCALARS = 4
+
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
 # factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
 _EXPR_OPS = ("+", "-", "*", "/", "//", "%")
@@ -89,6 +93,7 @@ class LaunchSpec:
     block: tuple
     smem_bytes: int
     zero_outputs: tuple[str, ...]
+    dynamic_smem: bool = False
     zero_prologues: tuple[str, ...] = ()
     tma_descriptors: tuple[TmaDescMeta, ...] = ()
     runtime_args: tuple[str, ...] = ()
@@ -102,6 +107,10 @@ class LaunchSpec:
     # operand's ``arg_names`` position into ``arrays[table_arg], arrays[sel_arg], slot``. A
     # plan carrying any of these serializes as ``PLAN_FORMAT_INDIRECT``.
     indirect_args: tuple[tuple[str, str, str, int], ...] = ()
+    # ``(arg_name, dtype, value)`` entries substituted at their ``arg_names``
+    # positions. Supported dtypes are intentionally the CUDA ABI primitives used by
+    # native kernels; a plan cannot smuggle arbitrary Python objects into a launch.
+    scalar_args: tuple[tuple[str, str, int | float], ...] = ()
 
 
 @dataclass
@@ -202,12 +211,14 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 grid=tuple(_normalize_spec(s) for s in op.grid),
                 block=tuple(_normalize_spec(s) for s in op.block),
                 smem_bytes=op.smem_bytes,
+                dynamic_smem=getattr(op, "dynamic_smem", False),
                 zero_outputs=tuple(op.zero_outputs),
                 zero_prologues=tuple(getattr(op, "zero_prologues", ())),
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
                 writes=node.buffer_names(),
                 indirect_args=tuple(getattr(op, "indirect_args", ())),
+                scalar_args=tuple(getattr(op, "scalar_args", ())),
             )
         )
 
@@ -430,9 +441,12 @@ def _dim_from_json(v) -> Dim:
 
 def plan_to_dict(plan: ExecutionPlan) -> dict:
     has_generated = any(w.generated is not None for w in plan.weights.values())
+    has_scalars = any(lc.scalar_args or lc.dynamic_smem for lc in plan.launches)
     return {
         "format": (
-            PLAN_FORMAT_GENERATED
+            PLAN_FORMAT_SCALARS
+            if has_scalars
+            else PLAN_FORMAT_GENERATED
             if has_generated
             else PLAN_FORMAT_INDIRECT
             if any(lc.indirect_args for lc in plan.launches)
@@ -454,10 +468,12 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "grid": [[_factor_to_json(f) for f in spec] for spec in lc.grid],
                 "block": [[_factor_to_json(f) for f in spec] for spec in lc.block],
                 "smem": lc.smem_bytes,
+                **({"dynamic_smem": True} if lc.dynamic_smem else {}),
                 "zero_outputs": list(lc.zero_outputs),
                 **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 **({"writes": list(lc.writes)} if lc.writes else {}),
                 **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
+                **({"scalars": [[a, dt, v] for a, dt, v in lc.scalar_args]} if lc.scalar_args else {}),
                 "runtime_args": list(lc.runtime_args),
                 "cuda": {
                     "tma": [
@@ -505,10 +521,13 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED):
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_SCALARS):
         raise ValueError(
-            f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION}, {PLAN_FORMAT_INDIRECT}, and {PLAN_FORMAT_GENERATED})"
+            f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION}, {PLAN_FORMAT_INDIRECT}, "
+            f"{PLAN_FORMAT_GENERATED}, and {PLAN_FORMAT_SCALARS})"
         )
+    if fmt != PLAN_FORMAT_SCALARS and any(lc.get("scalars") or lc.get("dynamic_smem") for lc in d.get("launches", ())):
+        raise ValueError(f"plan format {fmt!r} cannot carry scalar arguments or a native dynamic-smem ABI")
     symbols = d.get("symbols", {})
     return ExecutionPlan(
         backend=d["backend"],
@@ -533,10 +552,12 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 grid=tuple(tuple(_factor_from_json(f) for f in spec) for spec in lc["grid"]),
                 block=tuple(tuple(_factor_from_json(f) for f in spec) for spec in lc["block"]),
                 smem_bytes=int(lc["smem"]),
+                dynamic_smem=bool(lc.get("dynamic_smem", False)),
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
                 zero_prologues=tuple(lc.get("zero_prologues", ())),
                 writes=tuple(lc.get("writes", ())),
                 indirect_args=tuple((a, t, s, int(sl)) for a, t, s, sl in lc.get("indirect", ())),
+                scalar_args=tuple((a, dt, int(v) if dt.startswith(("i", "u")) else float(v)) for a, dt, v in lc.get("scalars", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())

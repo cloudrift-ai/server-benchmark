@@ -220,6 +220,32 @@ class LinearOp(Op):
 
 
 @dataclass
+class Exl3GemvOp(Op):
+    """One static single-row trellis-coded linear awaiting native-or-generic lowering.
+
+    The checkpoint loader introduces this only when the packed and logical extents
+    coincide, the codebook is supported, and the activation has exactly one row. The
+    decomposition pass either lowers it to one native ``CudaOp`` for the target or
+    expands the same format-neutral factorized algebra as every other coded linear.
+    """
+
+    bits: int
+    codebook: int
+    weight_shape: tuple[int, int]
+    residual: bool = True
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return tuple(input_shapes[0][:-1]) + (self.weight_shape[0],)
+
+    def forward(self, *inputs):
+        from emmy.compiler.loader.exl3 import decode_exl3_linear  # noqa: PLC0415
+
+        x, trellis, suh, svh = inputs
+        weight = decode_exl3_linear(trellis, suh, svh, mul1=np.array(0, dtype=np.int32) if self.codebook == 2 else None)
+        return x @ weight
+
+
+@dataclass
 class MatmulOp(Op):
     """PyTorch aten.mm/matmul/addmm: output = A @ B [+ bias]."""
 

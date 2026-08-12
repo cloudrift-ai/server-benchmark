@@ -123,8 +123,10 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         grid=grid,
         block=block,
         smem_bytes=kernel.smem_bytes(),
+        dynamic_smem=False,
         comment=name,
         runtime_args=runtime_args,
+        scalar_args=(),
         # Buffers whose zero-init a predecessor carries (``005_delegate_zero_init``) drop off
         # the memset list; the prologue targets this kernel DOES carry are surfaced for the slab
         # planner (their live interval starts at THIS launch, not their own producer's).

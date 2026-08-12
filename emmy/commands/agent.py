@@ -26,6 +26,7 @@ def _handle_run(args) -> None:
                     endpoint=args.endpoint,
                     allow_write=tuple(args.allow_write),
                     max_turns=args.max_turns,
+                    max_output_tokens=args.max_output_tokens,
                     request_timeout=args.request_timeout,
                     api_key_file=args.api_key_file,
                     api_key_fd=args.api_key_fd,
@@ -61,6 +62,7 @@ def register_agent_command(subparsers) -> None:
     run_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     run_parser.add_argument("--endpoint", default=os.environ.get("CLOUDRIFT_INFERENCE_URL", DEFAULT_ENDPOINT))
     run_parser.add_argument("--max-turns", type=int, default=160)
+    run_parser.add_argument("--max-output-tokens", type=int, default=8192)
     run_parser.add_argument("--request-timeout", type=float, default=600)
     api_key = run_parser.add_mutually_exclusive_group(required=True)
     api_key.add_argument("--api-key-file", type=Path)

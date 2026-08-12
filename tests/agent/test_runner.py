@@ -52,6 +52,7 @@ async def test_run_executes_tracked_skill_and_writes_final(monkeypatch, tmp_path
             model="test-model",
             output=output,
             workspace=tmp_path,
+            max_output_tokens=1024,
             api_key_file=key,
         )
     )
@@ -60,6 +61,7 @@ async def test_run_executes_tracked_skill_and_writes_final(monkeypatch, tmp_path
     assert output.read_text() == "complete\n"
     assert not key.exists()
     assert seen["api_key"] == "secret"
+    assert seen["payload"]["max_tokens"] == 1024
     assert seen["payload"]["tools"] == runner.tool_definitions()
 
 

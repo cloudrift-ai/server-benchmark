@@ -165,6 +165,7 @@ jobs:
             --model "$AGENT_MODEL" \
             --output "$AGENT_TRANSCRIPT" \
             --max-turns 32 \
+            --max-output-tokens 4096 \
             --allow-write "$AGENT_MANIFEST"
           agent_status=$?
           set -e

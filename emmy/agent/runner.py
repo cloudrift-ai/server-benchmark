@@ -17,7 +17,7 @@ import httpx
 
 DEFAULT_ENDPOINT = "https://inference.cloudrift.ai/v1"
 MAX_TOOL_OUTPUT = 12_000
-MAX_TRANSCRIPT_CHARS = 48_000
+MAX_TRANSCRIPT_CHARS = 24_000
 MAX_FETCH_BYTES = 256_000
 SECRET_ENV_NAMES = {
     "AGENT_KEY_FILE",
@@ -144,6 +144,7 @@ class AgentRun:
     endpoint: str = DEFAULT_ENDPOINT
     allow_write: tuple[Path, ...] = ()
     max_turns: int = 160
+    max_output_tokens: int = 8192
     request_timeout: float = 600
     api_key_file: Path | None = None
     api_key_fd: int | None = None
@@ -416,7 +417,10 @@ async def _completion(client: httpx.AsyncClient, endpoint: str, api_key: str, pa
         headers={"Authorization": f"Bearer {api_key}"},
         json=payload,
     )
-    response.raise_for_status()
+    if response.is_error:
+        detail = " ".join(response.text[:2000].split())
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"Inference endpoint returned HTTP {response.status_code}{suffix}")
     data = response.json()
     try:
         return data["choices"][0]["message"]
@@ -454,7 +458,7 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
         "tools": tool_definitions(),
         "tool_choice": "auto",
         "temperature": 0.1,
-        "max_tokens": 8192,
+        "max_tokens": args.max_output_tokens,
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:

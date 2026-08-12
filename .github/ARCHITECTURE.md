@@ -68,7 +68,8 @@ validates and applies its lifecycle manifest. The helper
 tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
 before validating their contents. The named OpenCode discovery agent denies repository edits and subagents, permits
 only the tracked discovery skill, public-web tools, repository reads, and read-only Git inspection, and caps work at 48
-agentic steps. OpenCode's final completed text event becomes the temporary manifest; the repository validator remains
+agentic steps. The last complete lifecycle object in OpenCode's final completed text event becomes the temporary
+manifest; the repository validator remains
 the authoritative completion gate. The project provider configuration selects the configurable CloudRift model through
 an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking mode for the concise
 JSON result. Discovery never provisions hardware.
@@ -114,11 +115,12 @@ best-effort replacement for the same task at a comparable or lower practical VRA
 reason the recipe should no longer be used. The manifest must classify every complete recipe at most once; the validator
 conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
 qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
-and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. Unknown
-or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes also default to
-`best-effort`. A checkpoint name is normalized across a missing or incorrect organization only when it uniquely
-identifies one existing recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections
-must resolve exactly. The agent must use
+and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. A
+replacement described as merely comparable, or whose recipe reduces configured context or concurrency, also defaults
+to `best-effort`. Unknown or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes
+also default to `best-effort`. A checkpoint name is normalized across a missing or incorrect organization only when it
+uniquely identifies one existing recipe; ambiguous or unknown maintained IDs still fail validation because all ten
+selections must resolve exactly. The agent must use
 `best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
 the current rationale immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be deployed,
 benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort set.

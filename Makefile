@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -6,6 +6,7 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
+	@echo "  setup-agent    - Create venv and install the API-only agent runtime"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
 	@echo "  bench          - Run benchmarks in parallel"
@@ -24,6 +25,17 @@ help:
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
 setup: venv/.setup-complete
+
+setup-agent: venv/.setup-agent-complete
+
+venv/.setup-agent-complete: pyproject.toml
+	@if [ ! -x "venv/bin/python" ]; then \
+		echo "Creating virtual environment..."; \
+		python3.12 -m venv venv --prompt "emmy"; \
+	fi
+	@echo "Installing agent runtime dependencies..."
+	./venv/bin/pip install -e .
+	@touch $@
 
 # Keep the completion marker inside the venv so an interrupted dependency install
 # cannot leave `make setup` permanently succeeding with an unusable environment.

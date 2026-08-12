@@ -117,9 +117,9 @@ published, or bundled; a later reassessment may return one to the maintained or 
 The workflow creates `onboarding`/`untested` shells up to the three-shell total. Each shell stores its rationale under
 `model` and a list of one to three candidate deployment entries under `matrices`; it does not claim qualification. The
 workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and uses
-`make` for repository setup plus `gh` for rolling-PR discovery and updates. It never rents a VM. Discovery uses a
-bounded research prompt and a workflow-specific model-turn cap so the manifest is written before the agent transcript
-reaches the inference endpoint's context ceiling.
+the API-only `make setup-agent` target for repository setup plus `gh` for rolling-PR discovery and updates. It never
+rents a VM. Discovery uses a bounded research prompt and a workflow-specific model-turn cap so the manifest is written
+before the agent transcript reaches the inference endpoint's context ceiling.
 
 ## Credentials, VM ownership, and cleanup
 

@@ -86,7 +86,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Emmy
-        run: make setup
+        run: make setup-agent
 
       - name: Run discover-models agent
         env:

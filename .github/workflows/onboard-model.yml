@@ -162,7 +162,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Emmy
-        run: make setup
+        run: make setup-agent
 
       - name: Generate ephemeral SSH key
         run: ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q

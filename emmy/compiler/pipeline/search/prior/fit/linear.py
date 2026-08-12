@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -189,47 +189,6 @@ def raw_weights(names, best_w, sd) -> dict[str, float]:
     return {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
 
 
-def _fit_stages(groups, names, *, seed_weights, seed_params, rng, samples, l2, objective):
-    """The static→dynamic chaining: a static fit over the non-dynamic groups seeded from the
-    ``seed_weights`` raw dict (zeros where a name is absent — an empty dict seeds from zero), then
-    the dynamic fit over the dynamic groups seeded from the static result in its z-space (``sd_ref``
-    chaining). ``rng`` is consumed sequentially by both stages. The static group list must be
-    non-empty (the dynamic stage seeds from it) — callers guard, this does not.
-
-    The scalar params (:data:`PARAM_NAMES`, seeded from ``seed_params``) are fitted by the STATIC
-    stage and frozen for the dynamic one: the artifact carries a single params block that both
-    weight sets score under, so the dynamic weights must be fit against the pair that will deploy.
-
-    Returns ``(static_raw, dyn_raw, fitted_params, static_ranks, dyn_ranks)``, with the dynamic
-    entries ``None`` when the input had no dynamic groups."""
-    static_groups = [g for g in groups if not g.dynamic]
-    dyn_groups = [g for g in groups if g.dynamic]
-    seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
-    seed_p = np.array([seed_params[n] for n in PARAM_NAMES])
-    logger.info("== static fit (%d cases) ==", len(static_groups))
-    static_w, params, static_ranks, _, static_sd = fit_weights(
-        static_groups, names, np.ones(len(names)), seed_w=seed_raw, seed_params=seed_p, rng=rng, samples=samples, l2=l2, objective=objective
-    )
-    fitted = {n: float(v) for n, v in zip(PARAM_NAMES, params, strict=True)}
-    static_raw = raw_weights(names, static_w, static_sd)
-    if not dyn_groups:
-        return static_raw, None, fitted, static_ranks, None
-    logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
-    dyn_w, _, dyn_ranks, _, dyn_sd = fit_weights(
-        dyn_groups,
-        names,
-        static_sd,
-        seed_w=static_w,
-        seed_params=params,
-        rng=rng,
-        samples=samples,
-        l2=l2,
-        fit_params=False,
-        objective=objective,
-    )
-    return static_raw, raw_weights(names, dyn_w, dyn_sd), fitted, static_ranks, dyn_ranks
-
-
 @dataclass(frozen=True)
 class LinearTrainer:
     """The offline-prior trainer: hyperparameters in, a fitted :class:`LinearFit` out.
@@ -255,30 +214,58 @@ class LinearTrainer:
     objective: Callable[[list[int]], float] = mean_log_rank
 
     def fit(self, groups: list[Group]) -> LinearFit:
-        """Fit both weight sets over ``groups``. The RNG is built here from
-        :attr:`random_state`, so a fold's fit never depends on how many folds ran before it."""
+        """Fit both weight sets over ``groups``: a static fit over the non-dynamic groups, then the
+        dynamic fit over the rest, seeded from the static result in its own z-space (the ``sd_ref``
+        chaining) and drawing from the same RNG after it. That RNG is built here from
+        :attr:`random_state`, so a fold's fit never depends on how many folds ran before it.
+
+        The scalar params are fitted by the STATIC stage and frozen for the dynamic one: the artifact
+        carries a single params block that both weight sets score under, so the dynamic weights must
+        be fit against the pair that will actually deploy.
+
+        The static group list must be non-empty — the dynamic stage seeds from it. Callers guard
+        that; this does not."""
         names = list(self.feature_names)
-        static_raw, dyn_raw, fitted, static_ranks, dyn_ranks = _fit_stages(
-            groups,
+        static_groups = [g for g in groups if not g.dynamic]
+        dyn_groups = [g for g in groups if g.dynamic]
+        rng = np.random.default_rng(self.random_state)
+        seed_weights = self.init.weights if self.warm_start else {}
+
+        logger.info("== static fit (%d cases) ==", len(static_groups))
+        static_w, params, static_ranks, _, static_sd = fit_weights(
+            static_groups,
             names,
-            seed_weights=self.init.weights if self.warm_start else {},
-            seed_params={
-                "atomic_free_weight": self.init.atomic_free_weight,
-                "atomic_free_split_threshold": self.init.atomic_free_split_threshold,
-            },
-            rng=np.random.default_rng(self.random_state),
+            np.ones(len(names)),
+            seed_w=np.array([seed_weights.get(n, 0.0) for n in names]),
+            seed_params=np.array([getattr(self.init, n) for n in PARAM_NAMES]),
+            rng=rng,
             samples=self.samples,
             l2=self.l2,
             objective=self.objective,
         )
         model = LinearModel(
-            weights=static_raw,
-            weights_dynamic=dyn_raw,
-            scale=self.init.scale,
-            atomic_free_weight=fitted["atomic_free_weight"],
-            atomic_free_split_threshold=fitted["atomic_free_split_threshold"],
+            weights=raw_weights(names, static_w, static_sd),
+            weights_dynamic=None,
+            scale=self.init.scale,  # carried from the incumbent: rank-neutral, so the fit has no opinion on it
+            **{n: float(v) for n, v in zip(PARAM_NAMES, params, strict=True)},
         )
-        return LinearFit(model, static_ranks, dyn_ranks)
+        if not dyn_groups:
+            return LinearFit(model, static_ranks, None)
+
+        logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
+        dyn_w, _, dyn_ranks, _, dyn_sd = fit_weights(
+            dyn_groups,
+            names,
+            static_sd,
+            seed_w=static_w,
+            seed_params=params,
+            rng=rng,
+            samples=self.samples,
+            l2=self.l2,
+            fit_params=False,
+            objective=self.objective,
+        )
+        return LinearFit(replace(model, weights_dynamic=raw_weights(names, dyn_w, dyn_sd)), static_ranks, dyn_ranks)
 
 
 @dataclass(frozen=True)

@@ -151,6 +151,8 @@ class CommandConfig:
             matched file is pulled back as {variant}_{basename}.
         timeout: Per-task command timeout in seconds.
         env: Extra environment variables to set on the remote command.
+        strict: Require a clean staged source tree, every declared result file,
+            and complete source/GPU/CUDA provenance.
     """
 
     stage: list[str] = field(default_factory=list)
@@ -158,6 +160,7 @@ class CommandConfig:
     result_files: list[str] = field(default_factory=list)
     timeout: int = 1800
     env: dict[str, str] = field(default_factory=dict)
+    strict: bool = False
 
 
 @dataclass
@@ -269,6 +272,7 @@ class Recipe:
                 result_files=list(cmd_dict.get("result_files", [])),
                 timeout=cmd_dict.get("timeout", 1800),
                 env=dict(cmd_dict.get("env", {})),
+                strict=cmd_dict.get("strict", False),
             )
 
         aggregate = None

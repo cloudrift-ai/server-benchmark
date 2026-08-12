@@ -209,7 +209,9 @@ printed table carries a `benched at seq_len=… (symbolic hint)` note);
 `("frontend_graph", Graph|None)` → `bench_lowered_vs_torch`. A `trace_args` job honors two run-path
 flags: `accuracy` (bind the rebuilt module's real inputs, run the emmy program on them, compare vs
 eager — the verdict rides back as `accuracy_error` and a numeric failure skips the bench) and
-`want_ref` (return that run's `(inputs, outputs)` as `run_io`). Rebuilding the torch side **in the
+`want_ref` (return that run's `(inputs, outputs)` as `run_io`). A frontend-graph job may also request
+`strict_accuracy`; it returns the direct eager proof and same-input eager outputs used to check exact-pinned rows.
+Rebuilding the torch side **in the
 child** (not pickling a live module) is what lets the interleaved comparison — which couldn't cross a
 subprocess boundary before — run isolated. So `tune --bench` (`commands/tune.py` `_run_bench` /
 `_bench_per_kernel`) and every `run --bench` row go through the worker: a hung kernel

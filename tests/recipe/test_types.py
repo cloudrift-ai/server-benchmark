@@ -20,6 +20,7 @@ def test_command_config_defaults():
     assert cfg.result_files == []
     assert cfg.timeout == 1800
     assert cfg.env == {}
+    assert cfg.strict is False
 
 
 def test_recipe_kind_inference_default():
@@ -39,6 +40,7 @@ def test_from_dict_command():
             "result_files": ["result.csv", "*.log"],
             "timeout": 60,
             "env": {"FOO": "bar"},
+            "strict": True,
         },
         "deploy": {"gpu": "NVIDIA GeForce RTX 5090", "gpu_count": 1},
     }
@@ -49,6 +51,7 @@ def test_from_dict_command():
     assert r.command.result_files == ["result.csv", "*.log"]
     assert r.command.timeout == 60
     assert r.command.env == {"FOO": "bar"}
+    assert r.command.strict is True
     assert r.deploy.gpu == "NVIDIA GeForce RTX 5090"
 
 

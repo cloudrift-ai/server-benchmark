@@ -1819,6 +1819,7 @@ async def benchmark_compare_worker_async(
     seed: int,
     accuracy: bool = False,
     want_ref: bool = False,
+    strict_accuracy: bool = False,
 ) -> dict:
     """``run --bench``'s greedy-row transport: the same comparison job as
     :func:`benchmark_compare_isolated_async` but over a caller-supplied persistent
@@ -1837,6 +1838,7 @@ async def benchmark_compare_worker_async(
             "seed": seed,
             "accuracy": accuracy,
             "want_ref": want_ref,
+            "strict_accuracy": strict_accuracy,
         },
         wall_timeout_s=wall_timeout_s,
     )
@@ -1847,6 +1849,7 @@ async def benchmark_compare_worker_async(
         "captured": resp.get("captured", False),
         "accuracy_error": resp.get("accuracy_error"),
         "run_io": resp.get("run_io"),
+        "correctness": resp.get("correctness"),
     }
 
 

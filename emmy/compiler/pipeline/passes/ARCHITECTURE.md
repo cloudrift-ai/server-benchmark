@@ -221,15 +221,14 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
-Loop fusion's profitability guard follows the same structural rule. `loop/fusion/010_merge_loop_ops` counts aggregate
-arithmetic and reads, and separately counts transcendental executions. The separate count prevents an expensive
-pointwise producer such as GELU's `tanh`, originally evaluated once per `(M,K)` element, from moving under a
-contraction's `N` loop merely because the contraction's much larger cheap-FMA count hides that duplication. Flash
-attention is the structural exception: a merged softmax-then-P@V offer deliberately streams `exp(score)` without
-materializing the probability matrix, so the tile recognizer owns that composite and the generic transcendental
-brake does not split it. The automatic brake is also limited to unary/single-source activation cones. A multi-source
-gated activation such as GeGLU/SwiGLU remains an evidence-controlled placement choice, preserving its GPU golden
-coverage until that entire cone has been measured.
+Loop fusion's materialization policy follows the same structural rule. `loop/fusion/010_merge_loop_ops` keeps two
+guards: the aggregate compute cap (a merge is refused when summed leaf work grows more than 8× over the region's
+own) and the multi-load-of-reducer refusal (a reduce-heavy producer read through more than one `Load` across the
+rest of the region stays materialized — splicing it would re-execute its reduce per demand site, the boundary that
+keeps a fused normalized-linear/MLP cone realizing its recorded goldens). Flash attention is the structural
+exception: a rowmax-bearing sink may swallow its score producer, because the tile recognizer owns that
+softmax-then-P@V composite and re-synthesizes it without the duplication. Every other historical merge gate is
+gone; those boundaries are placement decisions now.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 

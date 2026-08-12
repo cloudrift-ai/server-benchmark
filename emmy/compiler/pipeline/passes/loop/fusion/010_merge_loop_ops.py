@@ -8,10 +8,16 @@ scope/coordinate demand; no frontend treeification is needed. The splicer also
 handles multiple consumer loads and shared external inputs uniformly
 (first-seen slot assignment + splice-edge routing).
 
-The only materialization-policy guard is aggregate compute growth:
+Two materialization-policy guards remain. Aggregate compute growth:
 ``_total_work`` sums the enclosing free×reduce iteration count of every compute
-leaf, and a merge is refused when that grows by more than
-``_BLOWUP_FACTOR``. Structural region ownership, a real splicer rejection,
+leaf, and a merge is refused when that grows by more than ``_BLOWUP_FACTOR``.
+And the multi-load-of-reducer refusal: a reduce-heavy producer read through
+more than one ``Load`` across the rest of the region stays materialized —
+splicing it re-executes its reduce per demand site, which the work ratio only
+sees when the producer is large relative to the consumer; the refusal catches
+it structurally. A rowmax-bearing sink is exempt: the softmax assembly
+swallowing its score producer is a fused root flash recognition accepts and
+re-synthesizes without the duplication. Structural region ownership, a real splicer rejection,
 and the fence around an already-realized ``__cut_`` workspace remain
 invariants rather than candidate-selection gates.
 
@@ -64,6 +70,51 @@ def _total_work(loop_op: LoopOp) -> int:
     return sum(cost for stmt, cost in _walk_leaf_costs(loop_op) if isinstance(stmt, (Assign, Accum))) or 1
 
 
+# Producers with more than a handful of operations per output element are
+# "reduce-heavy": their output at position p requires non-trivial compute,
+# typically a reduce whose body depends on p. Splicing such a producer at
+# several demand sites re-executes that reduce per site. Pure-elementwise
+# chains sit at roughly 1–3 operations per output and softmax's max + exp at
+# roughly 3, while a contraction sits at its reduce extent; a threshold of 4
+# separates the regimes.
+_REDUCE_HEAVY_WORK_PER_OUTPUT = 4
+
+
+def _output_numel(loop_op: LoopOp) -> int:
+    reduce_names = loop_op.reduce_axis_names
+    numel = 1
+    for axis in loop_op.axes:
+        if axis.name not in reduce_names:
+            numel *= axis.extent.as_static() if axis.extent.is_static else 128
+    return numel
+
+
+def _has_rowmax(loop_op: LoopOp) -> bool:
+    """A ``maximum`` Accum — softmax's rowmax signature."""
+    return any(isinstance(stmt, Accum) and stmt.op.reduce_canon == "maximum" for stmt in loop_op.body.iter())
+
+
+def _reduce_heavy(loop_op: LoopOp) -> bool:
+    """More than ``_REDUCE_HEAVY_WORK_PER_OUTPUT`` operations per output element.
+
+    A softmax assembly (rowmax-bearing body) discounts its ``add`` Assigns:
+    they are the score's mask applications — one predicate-add per mask, not
+    real duplicated compute. Without the discount a multi-mask score (a
+    stamped sliding-window SDPA carries up to three) pushes the cheap
+    max + exp reducer past the threshold and the softmax cone never assembles
+    onto its P@V offer site.
+    """
+    work = _total_work(loop_op)
+    if _has_rowmax(loop_op):
+        work -= sum(cost for stmt, cost in _walk_leaf_costs(loop_op) if isinstance(stmt, Assign) and stmt.op.name == "add")
+    return work > _REDUCE_HEAVY_WORK_PER_OUTPUT * _output_numel(loop_op)
+
+
+def _region_loads_from(graph: Graph, region: set[str], producer_id: str) -> int:
+    """Number of ``Load`` stmts across the other region members reading ``producer_id``'s buffer."""
+    return sum(1 for node_id in region - {producer_id} for load in graph.nodes[node_id].op.body.loads if load.input == producer_id)
+
+
 PATTERN = [Pattern("producer", LoopOp)]
 # Region discovery is dynamic. Watching immediate consumers preserves overlap
 # invalidation when matches are enumerated in batches.
@@ -71,10 +122,18 @@ WATCH_CONSUMERS = True
 
 
 def _merge_region(match: Match, region: set[str], sink: Node) -> Graph:
-    """Splice an owned one- or multi-consumer region, capped only by compute growth."""
+    """Splice an owned one- or multi-consumer region; refuse reduce duplication and compute growth."""
     graph = match.graph
-    if any("__cut_" in node_id for node_id in region - {sink.id}):
+    interior = region - {sink.id}
+    if any("__cut_" in node_id for node_id in interior):
         raise RuleSkipped("region crosses a decided placement cut")
+    # A rowmax-bearing sink is exempt: a softmax assembly's repeated reads are its
+    # two-pass max+exp sweep over the one score it swallows, and flash recognition
+    # accepts that fused root and re-synthesizes the unit without the duplication.
+    if not _has_rowmax(sink.op):
+        for node_id in interior:
+            if _reduce_heavy(graph.nodes[node_id].op) and _region_loads_from(graph, region, node_id) > 1:
+                raise RuleSkipped("reduce-heavy producer read through >1 Load — fusion would duplicate the reduce")
 
     merged = _build_merged_region(graph, region, sink)
     if merged is None:

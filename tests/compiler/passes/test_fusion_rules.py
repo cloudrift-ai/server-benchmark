@@ -1004,3 +1004,80 @@ def test_pending_product_exp_residual_correctness():
     w = rng.standard_normal((6, 8)).astype(np.float32)
     r = rng.standard_normal((4, 6)).astype(np.float32)
     _assert_correctness(_make_pending_product_into_exp_residual_add, {"act": act, "w": w, "r": r})
+
+
+# ===================================================================
+# Multi-load-of-reducer refusal: a reduce-heavy producer read through
+# more than one Load stays materialized
+# ===================================================================
+
+
+def _make_rowstat_scale_into_two_slot_mul():
+    """A reduce-heavy producer read twice at different coordinates.
+
+    Producer: an RMSNorm-shaped per-row normalize (squares under the row
+    reduce, a multi-op sweep — above ``_REDUCE_HEAVY_WORK_PER_OUTPUT``).
+    Consumer: ``z[m, j] = y[m, j] * y[m, j + N/2]`` — two Loads of ``y`` at
+    coordinates the load dedup can never unify. Splicing the producer would
+    re-execute its row reduce per load site (the gemma-4 normalized-linear/MLP
+    cone drift: the RMSNorm inlined into both the gate and up contractions)."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import BinaryExpr, Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    M, N = 4, 8
+    a0 = Var("a0")
+    red = Loop(
+        axis=Axis(name="a2", extent=Dim(N)),
+        body=Body(
+            (
+                Load(name="r0", input="x", index=(a0, Var("a2"))),
+                Assign(name="sq", op="multiply", args=("r0", "r0")),
+                Accum(name="acc", value="sq", op="add", axes=("a2",)),
+            )
+        ),
+    )
+    sweep = Loop(
+        axis=Axis(name="a1", extent=Dim(N)),
+        body=Body(
+            (
+                Load(name="s0", input="x", index=(a0, Var("a1"))),
+                Assign(name="v0", op="multiply", args=("s0", "acc")),
+                Assign(name="v1", op="multiply", args=("v0", "s0")),
+                Assign(name="v2", op="multiply", args=("v1", "s0")),
+                Write(output="y", index=(a0, Var("a1")), value="v2"),
+            )
+        ),
+    )
+    producer = LoopOp(body=Body((Loop(axis=Axis(name="a0", extent=Dim(M)), body=Body((red, sweep))),)))
+
+    b0, b1 = Var("b0"), Var("b1")
+    consumer_cell = Body(
+        (
+            Load(name="c0", input="y", index=(b0, b1)),
+            Load(name="c1", input="y", index=(b0, BinaryExpr("+", b1, Literal(N // 2, "int")))),
+            Assign(name="m0", op="multiply", args=("c0", "c1")),
+            Write(output="z", index=(b0, b1), value="m0"),
+        )
+    )
+    consumer = LoopOp(body=_loops2(consumer_cell, "b0", M, "b1", N // 2))
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (M, N)), node_id="x")
+    g.add_node(producer, ["x"], Tensor("y", (M, N)), node_id="y")
+    g.add_node(consumer, ["y"], Tensor("z", (M, N // 2)), node_id="z")
+    g.inputs, g.outputs = ["x"], ["z"]
+    return g
+
+
+def test_reduce_heavy_producer_behind_two_loads_stays_materialized():
+    result = Pipeline.build(["loop/fusion"]).run(_make_rowstat_scale_into_two_slot_mul())
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 2, f"the reducer must stay materialized: {[n.id for n in kernels]}"
+
+
+def test_reduce_heavy_producer_behind_two_loads_correctness():
+    x = rng.standard_normal((4, 8)).astype(np.float32)
+    _assert_correctness(_make_rowstat_scale_into_two_slot_mul, {"x": x})

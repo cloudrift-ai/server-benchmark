@@ -132,9 +132,14 @@ jobs:
           useful spread of model sizes. Classify every other complete recipe as best-effort or obsolete. Best-effort
           means the model remains useful and runnable, but is not selected for periodic optimization. Obsolete is a
           strict technical judgment: use it only when a named all-around better replacement for the same task is
-          available at a comparable or lower practical VRAM footprint. Low demand, age, or exclusion from the
-          maintained set is not sufficient. A previously obsolete recipe may become maintained or best-effort when
-          the evidence changes. Never classify an onboarding/untested shell.
+          available at a comparable or lower practical VRAM footprint. Compare the qualified deployment targets in
+          the recipes: the replacement's smallest target must use no more total physical GPU memory than the old
+          recipe's smallest target. All-around means the old model has no material advantage in quality, context,
+          supported hardware, latency or throughput, operating cost, modality, or licensing. A smaller or quantized
+          recipe is not obsolete merely because a larger or unquantized recipe exists. If evidence is ambiguous or
+          either model retains a useful advantage, use best-effort. Low demand, age, or exclusion from the maintained
+          set is not sufficient. A previously obsolete recipe may become maintained or best-effort when the evidence
+          changes. Never classify an onboarding/untested shell.
 
           Also select zero to three new models with no recipe, all suitable for the exact target
           {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}. These will become untested onboarding recipe
@@ -149,7 +154,7 @@ jobs:
             "best_effort_models": ["exact/org-model IDs for every useful lower-priority complete recipe"],
             "obsolete_models": [
               {{"model_id": "org/old-model", "replacement_model_id": "org/better-model",
-                "rationale": "why the replacement is all-around better at comparable or lower practical VRAM"}}
+                "rationale": "qualified target VRAM comparison and why the old model retains no material advantage"}}
             ],
             "onboarding_models": [
               {{"model_id": "org/model", "task": "generate", "gpu": "{os.environ['TARGET_GPU']}",

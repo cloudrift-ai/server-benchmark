@@ -25,9 +25,10 @@ local benchmark output do not.
 Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. Other
 useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
 work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
-lower practical VRAM footprint. Obsolete recipes are retained rather than deleted, so their configuration and evidence
-stay available and a later reassessment can return one to the maintained or best-effort set. New discoveries start as
-minimal shells:
+lower practical VRAM footprint and no retained material advantage in capability or operation. Discovery compares the
+smallest qualified deployment targets and cannot obsolete a recipe in favor of one that needs more total physical GPU
+memory. Obsolete recipes are retained rather than deleted, so their configuration and evidence stay available and a
+later reassessment can return one to the maintained or best-effort set. New discoveries start as minimal shells:
 
 ```yaml
 tags:

@@ -103,8 +103,11 @@ failing closed if multiple such branches would make ownership ambiguous.
 The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
 `best-effort`, and uses `obsolete` only when the decision names an all-around better maintained or best-effort
 replacement for the same task at a comparable or lower practical VRAM footprint. The manifest must classify every
-complete recipe exactly once. Obsolete recipes remain in git but cannot be deployed, benchmarked, published, or
-bundled; a later reassessment may return one to the maintained or best-effort set. The workflow also creates
+complete recipe exactly once. The validator compares qualified targets and rejects an obsolete decision when the
+replacement's smallest deployment needs more total physical GPU memory than the old recipe's smallest deployment;
+the agent must use `best-effort` when the old model retains any material capability or operating advantage. Obsolete
+recipes remain in git but cannot be deployed, benchmarked, published, or bundled; a later reassessment may return one
+to the maintained or best-effort set. The workflow also creates
 `onboarding`/`untested` shells up to the three-shell total, removes superseded `plans/onboard-*.md` files, commits the
 lifecycle update to the rolling branch, and refreshes its PR body and labels through the GitHub API on every run. It
 never rents a VM and does not require the GitHub CLI on the self-hosted runner.

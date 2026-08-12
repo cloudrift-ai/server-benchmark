@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from emmy import gpu as gpu_registry
 from emmy.recipe.lifecycle import (
     BEST_EFFORT_TAG,
     LIFECYCLE_TAGS,
@@ -21,6 +22,8 @@ from emmy.recipe.lifecycle import (
     UNTESTED_TAG,
     validate_recipe_tags,
 )
+from emmy.recipe.matrix import build_override, expand_matrix
+from emmy.recipe.recipe import deep_merge
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_ONBOARDING_MODELS = 3
@@ -105,6 +108,26 @@ def _obsolete_decisions(value: object) -> list[dict[str, str]]:
     return decisions
 
 
+def _deployment_footprints(config: dict) -> tuple[int, ...]:
+    """Return total physical VRAM in MiB for every known deployment variant."""
+    base = {key: value for key, value in config.items() if key != "matrices"}
+    matrices = config.get("matrices")
+    variants = [base]
+    if matrices:
+        variants = [deep_merge(base, build_override(combination)) for combination in expand_matrix(matrices)]
+
+    footprints = []
+    for variant in variants:
+        deploy = variant.get("deploy") or {}
+        gpu_name = deploy.get("gpu")
+        gpu_count = deploy.get("gpu_count", 1)
+        spec = gpu_registry.by_name(gpu_name) if isinstance(gpu_name, str) else None
+        if spec is None or spec.vram_mib is None or not isinstance(gpu_count, int) or gpu_count < 1:
+            continue
+        footprints.append(spec.vram_mib * gpu_count)
+    return tuple(footprints)
+
+
 def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, maintained_count: int) -> dict:
     """Validate one discovery manifest and return its normalized lifecycle decisions."""
     manifest = _extract_object(path.read_text())
@@ -146,6 +169,17 @@ def validate_manifest(path: Path, workspace: Path, gpu: str, gpu_count: int, mai
         replacement_task = (records[replacement]["config"].get("model") or {}).get("task", "generate")
         if model_task != replacement_task:
             raise ValueError(f"Replacement for obsolete model {model_id} must serve the same task")
+        model_footprints = _deployment_footprints(records[model_id]["config"])
+        replacement_footprints = _deployment_footprints(records[replacement]["config"])
+        if not model_footprints or not replacement_footprints:
+            raise ValueError(f"Obsolete model {model_id} and its replacement need known qualified deployment targets")
+        model_min = min(model_footprints)
+        replacement_min = min(replacement_footprints)
+        if replacement_min > model_min:
+            raise ValueError(
+                f"Replacement for obsolete model {model_id} needs more total VRAM in its smallest qualified deployment "
+                f"({replacement_min} MiB versus {model_min} MiB)"
+            )
 
     candidates = manifest.get("onboarding_models", [])
     available_onboarding = MAX_ONBOARDING_MODELS - len(existing_onboarding)

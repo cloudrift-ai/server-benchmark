@@ -57,6 +57,13 @@ Low demand, age, and exclusion from the maintained set are not reasons to mark a
 can return to the maintained or best-effort set when the evidence changes. Never classify an onboarding/untested
 shell. Untagged complete recipes are eligible and must be classified on the first lifecycle run.
 
+Treat obsolete as a conservative, tradeoff-free decision. Compare the qualified targets in the recipe YAML: the
+replacement's smallest deployment must use no more total physical GPU memory than the old recipe's smallest
+deployment. The old model must retain no material advantage in quality, context, supported hardware, latency or
+throughput, operating cost, modality, or licensing. A smaller or quantized recipe is not obsolete merely because a
+larger or unquantized recipe exists. Prefer best-effort whenever evidence is ambiguous or either model has a useful
+advantage.
+
 Run the discovery script with arena enrichment, capturing JSON for parsing and the table for a human view.
 Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bursts; don't re-run in a loop):
 
@@ -123,7 +130,8 @@ In lifecycle mode:
   exactly one of the three lifecycle lists;
 - prefer best-effort whenever a recipe remains useful; use obsolete only when a named maintained or best-effort
   replacement is all-around better for the same task at a comparable or lower practical VRAM footprint;
-- include that replacement and a concise technical rationale for every obsolete decision;
+- include that replacement and a concise technical rationale with the qualified target VRAM comparison and why the
+  old recipe retains no material advantage for every obsolete decision;
 - choose only enough genuinely new models to keep at most three total onboarding shells on the prompt's exact target;
   existing onboarding/untested shells consume the available slots;
 - use exact `model.huggingface` IDs from recipe YAML for maintained entries;
@@ -199,7 +207,8 @@ onboarding row needs the exact target, `generate` or `embed`, and a brief eviden
 `best_effort_models`, `obsolete_models`, and `onboarding_models` lists are valid when the complete partition permits
 them. Do not edit recipe files yourself: the workflow validates exact model IDs, the maintained count, the complete
 lifecycle partition, active replacements for obsolete recipes, target hardware, duplicates, and rationale before
-making any change.
+making any change. It also rejects an obsolete decision when the replacement's smallest known qualified deployment
+uses more total physical GPU memory than the old recipe's smallest deployment.
 
 ## Step 7 — Hand off in survey mode
 

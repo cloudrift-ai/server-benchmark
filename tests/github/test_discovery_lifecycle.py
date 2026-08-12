@@ -14,13 +14,16 @@ SPEC.loader.exec_module(discovery_lifecycle)
 GPU = "NVIDIA H200 141GB"
 
 
-def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None):
+def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1):
     path = workspace / "recipes" / name / "recipe.yaml"
     path.parent.mkdir(parents=True)
     prefix = "# Keep this qualification note.\n" if leading_comment else ""
     tag_text = "" if tags is None else "tags:\n" + "".join(f"  - {tag}\n" for tag in tags)
     task_text = "" if task is None else f"  task: {task}\n"
-    path.write_text(f"{prefix}{tag_text}model:\n  huggingface: {model_id}\n{task_text}engine:\n  llm: {{}}\n")
+    path.write_text(
+        f"{prefix}{tag_text}model:\n  huggingface: {model_id}\n{task_text}engine:\n  llm: {{}}\nmatrices:\n"
+        f"  deploy.gpu: {gpu}\n  deploy.gpu_count: {gpu_count}\n"
+    )
     return path
 
 
@@ -251,3 +254,24 @@ def test_obsolete_recipe_replacement_must_serve_same_task(tmp_path):
 
     with pytest.raises(ValueError, match="must serve the same task"):
         discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+
+def test_obsolete_recipe_replacement_must_fit_same_or_less_total_vram(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready", gpu=GPU)
+    _recipe(tmp_path, "old", "org/old", gpu="NVIDIA GeForce RTX 4090")
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
+
+    with pytest.raises(ValueError, match="needs more total VRAM"):
+        discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+
+def test_obsolete_recipe_replacement_may_use_less_total_vram(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready", gpu="NVIDIA GeForce RTX 4090")
+    _recipe(tmp_path, "old", "org/old", gpu=GPU)
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, GPU, 1, 1)
+
+    assert manifest["obsolete_models"][0]["model_id"] == "org/old"

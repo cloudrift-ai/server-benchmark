@@ -143,6 +143,11 @@ def _obsolete_decisions(value: object, records: dict[str, dict], *, ignore_inval
                     continue
                 raise ValueError(f"Invalid replacement Hugging Face model ID for {model_id}: {replacement!r}")
             normalized["replacement_model_id"] = replacement
+            if replacement not in normalized["rationale"]:
+                normalized["rationale"] = _rationale(
+                    f"{replacement} supersedes this recipe: {normalized['rationale']}",
+                    model_id,
+                )
         decisions.append(normalized)
     return decisions
 
@@ -395,13 +400,14 @@ def _replace_model_rationale(text: str, rationale: str) -> str:
         (index for index in range(model_start + 1, model_end) if lines[index].startswith("  rationale:")),
         None,
     )
-    if existing is not None:
-        lines[existing] = rationale_line
-        return "".join(lines)
     huggingface = next(
         (index for index in range(model_start + 1, model_end) if lines[index].startswith("  huggingface:")),
         model_start,
     )
+    if existing is not None:
+        lines.pop(existing)
+        if existing < huggingface:
+            huggingface -= 1
     lines.insert(huggingface + 1, rationale_line)
     return "".join(lines)
 

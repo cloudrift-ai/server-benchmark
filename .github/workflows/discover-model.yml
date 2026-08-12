@@ -136,7 +136,7 @@ jobs:
           evidence-backed rationale of at most 20 words.
           Copy every existing model_id exactly from repository-inventory, including its organization; never
           abbreviate or reconstruct an existing ID.
-          For an obsolete recipe, name the superseding model in both replacement_model_id and the rationale, or omit
+          For an obsolete recipe, include the exact replacement_model_id literally in the rationale too, or omit
           replacement_model_id and explain the technical reason the recipe should be dropped when no successor is
           appropriate. Also select zero to three new models with no recipe. For each new model, propose one to three
           useful deployment setups using only canonical deploy.gpu and positive deploy.gpu_count values. These will

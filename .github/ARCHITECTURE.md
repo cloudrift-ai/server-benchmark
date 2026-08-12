@@ -104,9 +104,9 @@ discovery PR exists. It also adopts one unpaired discovery branch left by an int
 failing closed if multiple such branches would make ownership ambiguous.
 
 The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
-`best-effort`, and uses `obsolete` only when the rationale names an all-around better maintained or best-effort
-replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical reason the
-recipe should no longer be used. The manifest must classify every complete recipe at most once; the validator
+`best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or
+best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical
+reason the recipe should no longer be used. The manifest must classify every complete recipe at most once; the validator
 conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
 qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
 and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. Unknown
@@ -115,8 +115,8 @@ or malformed lower-priority model IDs are ignored so the corresponding real, omi
 identifies one existing recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections
 must resolve exactly. The agent must use
 `best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
-the current rationale directly under `model`. Obsolete recipes remain in git but cannot be deployed, benchmarked,
-published, or bundled; a later reassessment may return one to the maintained or best-effort set.
+the current rationale immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be deployed,
+benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort set.
 
 The workflow creates `onboarding`/`untested` shells up to the three-shell total. Each shell stores its rationale under
 `model` and a list of one to three candidate deployment entries under `matrices`; subsequent runs validate and report

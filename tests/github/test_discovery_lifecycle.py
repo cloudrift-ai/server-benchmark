@@ -107,7 +107,9 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     assert shell["matrices"] == _candidate()["deployments"]
     assert yaml.safe_load(first.read_text())["model"]["rationale"] == "Rationale for org/first."
     assert yaml.safe_load(second.read_text())["model"]["rationale"] == "Rationale for org/second."
-    assert yaml.safe_load(third.read_text())["model"]["rationale"] == _obsolete("org/third", "org/first")["rationale"]
+    assert yaml.safe_load(third.read_text())["model"]["rationale"] == (
+        "org/first supersedes this recipe: The replacement is stronger at the same practical VRAM footprint."
+    )
     assert not plan.exists()
     summary = (tmp_path / "summary.md").read_text()
     assert "`org/new-model`" in summary
@@ -248,6 +250,23 @@ def test_moves_legacy_onboarding_rationale_under_model(tmp_path):
     text = shell.read_text()
     assert yaml.safe_load(text)["model"]["rationale"] == "Strong recent adoption."
     assert "discovery:" not in text
+
+
+def test_moves_existing_rationale_immediately_below_model_id(tmp_path):
+    recipe = _recipe(tmp_path, "ready", "org/ready", task="generate")
+    recipe.write_text(recipe.read_text().replace("  task: generate\n", "  task: generate\n  rationale: Old rationale.\n"))
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    model_lines = recipe.read_text().split("model:\n", 1)[1].split("engine:\n", 1)[0].splitlines()
+    assert model_lines[:3] == [
+        "  huggingface: org/ready",
+        '  rationale: "Rationale for org/ready."',
+        "  task: generate",
+    ]
 
 
 def test_rejects_wrong_maintained_count(tmp_path):
@@ -456,3 +475,14 @@ def test_obsolete_recipe_may_include_drop_rationale_without_replacement(tmp_path
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
 
     assert manifest["obsolete_models"] == [{"model_id": "org/old", "rationale": "The checkpoint cannot be served by a supported engine."}]
+
+
+def test_obsolete_rationale_names_exact_replacement_model(tmp_path):
+    _recipe(tmp_path, "ready", "org/ready")
+    _recipe(tmp_path, "old", "org/old")
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], obsolete=[_obsolete()])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+
+    assert manifest["obsolete_models"][0]["rationale"].startswith("org/ready supersedes this recipe:")

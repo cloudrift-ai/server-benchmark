@@ -260,6 +260,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the
   generic factorized contraction from `loader/trellis.py`; all per-expert sources remain
   table-resolved inputs and no decoded dense expert weight exists.
+  Uniform-codebook, uniform-bit EXL3 groups have a narrower single-token tier in `exl3_moe`: one route-preparation
+  launch sorts the fixed top-k assignments and clears the fp32 result, then a pinned fused kernel reads the existing
+  E-leading codes and channel vectors through device pointer tables. It produces the complete fp32 routed sum in one
+  launch instead of replaying top-k expert programs plus a combine. The pointer-table object owns the source tensors,
+  so captured replay cannot outlive their storage. The tier is restricted to fp16 activations and route weights,
+  SiLU, codebook 1 or 2, one bit rate across gate/up/down, and SM80 or newer; every mismatch or build failure retains
+  the graph-compiled fixed-slot path. The pinned source provenance and license live with the CUDA closure under
+  `serving/native/exl3`; no ExLlamaV3 Python or binary dependency is loaded at runtime.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;

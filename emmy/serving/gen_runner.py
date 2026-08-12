@@ -1006,7 +1006,28 @@ class EmmyGenRunner:
                 "aux_examples": aux_examples,
                 "weight_inputs": ind_names,
             }
-            tiers = {"sym": None, "bucket": None, "one": None, "m256": None, "slots": None, "ind_names": ind_names}
+            native_spec = None
+            if trellis:
+                from emmy.serving.exl3_moe import fused_m1_spec
+
+                native_spec = fused_m1_spec(
+                    einputs,
+                    cbs,
+                    hidden_size=hidden_e,
+                    intermediate_size=inter,
+                    top_k=moe_top_k,
+                    activation=getattr(experts, "act_fn", None),
+                )
+            tiers = {
+                "sym": None,
+                "bucket": None,
+                "one": None,
+                "m256": None,
+                "slots": None,
+                "native_spec": native_spec,
+                "native": None,
+                "ind_names": ind_names,
+            }
             with torch.device("cpu"):
                 if not static_only:
                     tiers["sym"] = build(
@@ -1591,6 +1612,31 @@ class EmmyGenRunner:
                     m["gate"] = m["gate"].to("cuda")
                     m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                     m["inputs_cp"] = {n: [cp.from_dlpack(w) for w in t] for n, t in m["inputs"].items()}
+                for g, tiers in enumerate(self._expert_tiers):
+                    if tiers["native_spec"] is None:
+                        continue
+                    try:
+                        from emmy.serving.exl3_moe import Exl3MoeM1
+
+                        tiers["native"] = Exl3MoeM1(tiers["native_spec"])
+                        members = [m for m in self._moe if m is not None and m["group"] == g]
+                        for m in members:
+                            m["native_exl3_ptrs"] = tiers["native"].pointer_tables(m["inputs"])
+                        logger.info(
+                            "[gen_runner] expert group %d (%d layers) uses native EXL3 M1 fused dispatch (K%d, codebook %d)",
+                            g,
+                            len(members),
+                            tiers["native_spec"].bits,
+                            tiers["native_spec"].codebook,
+                        )
+                    except Exception as ex:  # noqa: BLE001 — the graph-compiled slot path remains correct
+                        tiers["native"] = None
+                        logger.warning(
+                            "[gen_runner] native EXL3 M1 fused dispatch unavailable for group %d (%s); "
+                            "keeping the graph-compiled fixed-slot path",
+                            g,
+                            ex,
+                        )
                 if self._slots_ok:
                     # Fixed-slot indirect tables: PER SHAPE GROUP, one flat [group layers * E]
                     # int64 pointer table per expert-input kind (weights, biases, and — on the
@@ -1879,9 +1925,11 @@ class EmmyGenRunner:
         self._ensure_device()
         gated = moe["gate"](xn)
         scores, indices = gated[-2], gated[-1]  # [1, k] each
-        self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
         capturing = torch.cuda.is_current_stream_capturing()
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            if (native := self._expert_tiers[moe["group"]]["native"]) is not None:
+                return native(xn, scores, indices, moe["native_exl3_ptrs"])
+            self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
             x_cp = cp.from_dlpack(xn.detach().contiguous())
             for slot in self._expert_tiers[moe["group"]]["slots"]:
                 p = slot.program

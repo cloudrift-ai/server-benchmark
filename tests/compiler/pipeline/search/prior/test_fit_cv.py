@@ -139,10 +139,22 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
     for case in (static, dyn):
         assert "S_ext_n_symbolic_axis" not in case.feat_names
         assert case.feats.shape[1] == len(case.feat_names)
-    # The tier is now just a label: routing reads the stamp off the rows, so a group whose label and
-    # whose rows disagree follows the rows.
-    mislabelled = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
-    assert mislabelled.dynamic is True
+    # The tier decides nothing, but it still has to AGREE: it and the stamp are the same fact arriving
+    # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
+    # under the wrong weight set with nothing reporting it.
+    with pytest.raises(ValueError, match="disagree about the weight set"):
+        Group.from_dicts("gpuA/x", "x", "warp", "gpuA", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
+    with pytest.raises(ValueError, match="disagree about the weight set"):
+        Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", 0, [{"D_a": 1.0}])
+
+
+def test_no_feature_view_can_drop_the_routing_stamp():
+    """Routing is not a view choice. A spec that names neither the stamp nor a prefix covering it still
+    keeps it — otherwise every pool would route to the static weight set and the run would report a
+    dataset with zero dynamic cases rather than an error."""
+    for spec in (DEFAULT_FEATURES, MATMUL_FEATURES, "D_waves"):
+        assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
+    assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
 
 
 def test_featurizer_preserves_the_routing_stamp():

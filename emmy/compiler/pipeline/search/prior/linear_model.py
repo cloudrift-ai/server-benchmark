@@ -7,11 +7,14 @@ descends on — one fp16 golden enumerates ~78k rows, so the per-dict path is no
 module the two were separate transcriptions of the same formula kept in step by a parity test; drift between them
 would mean the fitter optimizing something other than what deploys.
 
-The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` /
-``mean_scores_features`` / ``explain_features``. That is deliberate: ``FallbackPrior`` and the attribution
-diagnostics already compose priors on exactly those three, so a holder can delegate to any model through them
-without a second vocabulary. :meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only —
-the pre-transform ranking quantity a derivative-free descent walks; a tree model has no equivalent.
+The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` and
+``explain_features``. That is deliberate: ``FallbackPrior`` and the attribution diagnostics already compose priors
+on exactly those, so a holder can delegate to any model through them without a second vocabulary. (``Prior`` also
+declares a batched ``mean_scores_features``; there is no model-side version because this model has no vectorized
+per-dict path — the base's element-wise default over :meth:`~LinearModel.mean_score_features` IS the
+implementation. A model that gains one adds the method then.) :meth:`~LinearModel.quality` /
+:meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking quantity a derivative-free descent
+walks; a tree model has no equivalent.
 
 Weight-set routing is ONE fact read from ONE place: the ``S_ext_n_symbolic_axis`` stamp
 (:data:`ROUTING_FEATURES`). A symbolic-axis (masked-tile) kernel prices differently from its static counterpart —
@@ -36,9 +39,14 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 # feature cannot become a descent coordinate by accident.
 ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 
-# The artifact's ``params`` block in the order it is written. ``storage.write_json`` preserves insertion order,
-# so this tuple is what keeps a re-fit's diff down to the values that actually moved.
-_PARAM_ORDER = ("scale", "atomic_free_weight", "atomic_free_split_threshold")
+# The artifact's ``params`` block: the complete key set, in the order it is written. ``storage.write_json``
+# preserves insertion order. This is also the set ``offline._load_artifact`` requires an artifact to carry, so the
+# writer and the deploy-time completeness check cannot drift — add a scalar param here and both follow.
+#
+# The order matches what the fitter has emitted since the scalar params became fitted coordinates; it is NOT the
+# order in the currently shipped ``offline_weights.json``, which predates that, so the next refit rewrites those
+# two lines once. Reordering to match the shipped file would instead change what a refit emits.
+PARAM_ORDER = ("scale", "atomic_free_weight", "atomic_free_split_threshold")
 
 
 def atomic_free_term(finalize_kernel, splitk, *, weight: float, threshold: float):
@@ -115,7 +123,7 @@ class LinearModel:
         (unit-tested): the terms sum to the quality :meth:`mean_score_features` exponentiates, so a two-row term
         diff is the model's exact preference gap. (The float-safety clip is ignored here — it exists for
         finiteness, never inside the live range.)"""
-        w_set = self._weight_set(self.is_dynamic_row(feats))
+        w_set = self.weight_set(self.is_dynamic_row(feats))
         terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
         if feats.get("D_finalize_kernel", 0.0):
             terms["gate:atomic_free"] = atomic_free_term(
@@ -132,7 +140,7 @@ class LinearModel:
         """The ranking quantity itself (higher = predicted faster), before the monotone ``exp(-scale·)`` wrapper:
         the linear weights over ``feats`` plus the atomic-free interaction. Routes itself on the row's stamp —
         a live candidate always carries the full featurization."""
-        w_set = self._weight_set(self.is_dynamic_row(feats))
+        w_set = self.weight_set(self.is_dynamic_row(feats))
         quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
         return quality + atomic_free_term(
             feats.get("D_finalize_kernel", 0.0),
@@ -147,7 +155,7 @@ class LinearModel:
         The CALLER routes here rather than the row doing it itself: a feature view may legitimately omit the
         stamp column (it is constant within the pool and carries no weight), so the matrix cannot be relied on to
         answer the question. The dataset carries the answer instead."""
-        w_set = self._weight_set(dynamic)
+        w_set = self.weight_set(dynamic)
         vec = np.array([w_set.get(n, 0.0) for n in names])
         return quality_columns(
             mat, vec, gate_columns(mat, names), weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
@@ -158,7 +166,10 @@ class LinearModel:
         """Whether a featurized row takes the dynamic weight set — the ONE reading of the routing stamp."""
         return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 
-    def _weight_set(self, dynamic: bool) -> dict[str, float]:
+    def weight_set(self, dynamic: bool) -> dict[str, float]:
+        """The weight dict a row of this kind scores under — the ONE place the two sets are chosen between.
+        Raises when the dynamic set is asked for and this model has none; callers that must tolerate that
+        (an unfittable CV fold) check :attr:`weights_dynamic` first."""
         w_set = self.weights_dynamic if dynamic else self.weights
         if w_set is None:
             raise ValueError("this model has no dynamic weight set — it came from a fit with no symbolic-axis cases")
@@ -192,6 +203,6 @@ class LinearModel:
             "kind": "linear",
             "weights": self.weights,
             "weights_dynamic": self.weights_dynamic,
-            "params": {name: float(getattr(self, name)) for name in _PARAM_ORDER},
+            "params": {name: float(getattr(self, name)) for name in PARAM_ORDER},
             "provenance": provenance,
         }

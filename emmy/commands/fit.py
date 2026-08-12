@@ -35,7 +35,7 @@ from emmy.compiler.pipeline.search.prior.fit import Group
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
-from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, LinearModel
+from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +145,9 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
         # ``MMA_tier`` — see its rationale in ``prior/fit/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
-        # ROUTING_FEATURES survive any view: they pick the weight set rather than contribute a
-        # term, and ``Group.from_dicts`` lifts them straight out of the matrix. Keeping them
-        # unconditionally means a narrower ``--features`` spec cannot silently misroute a
-        # symbolic-axis pool, and the recorded spec stays comparable with earlier fits.
-        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k) or k in ROUTING_FEATURES} for r in rows]
+        # ``feature_view`` keeps the routing features whatever the spec says, so a narrower
+        # ``--features`` cannot silently misroute a symbolic-axis pool.
+        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
         key = f"{g.gpu_name}/{g.name}"
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
@@ -186,8 +184,11 @@ def handle_fit(args) -> None:
     logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
 
     raw = storage.read_json(config.offline_path() or _DEFAULT_FILE)
-    if not isinstance(raw, dict) or "params" not in raw:
-        raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
+    if not isinstance(raw, dict) or "scale" not in (raw.get("params") or {}):
+        raise SystemExit(
+            f"no usable incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE} "
+            f"(needs a 'params' block carrying 'scale')"
+        )
     # Lenient read (``LinearModel.from_artifact`` does not version-gate): a refit after a featurizer
     # change is exactly when versions mismatch, and a stale key simply seeds 0.0. A pre-2026-08-05
     # artifact whose params block still lists the retired gate weights simply loses them here — they
@@ -213,9 +214,9 @@ def handle_fit(args) -> None:
         "trainer_params": {
             "samples": args.samples,
             "l2": args.l2,
-            "objective": trainer.objective.__name__,
-            "full_train_seed_weights": "incumbent",
-            "fold_seed_weights": "zeros",
+            "objective": getattr(trainer.objective, "__name__", repr(trainer.objective)),
+            "full_train_seed_weights": "incumbent" if trainer.warm_start else "zeros",
+            "fold_seed_weights": "incumbent" if fold_trainer.warm_start else "zeros",
         },
     }
     import datetime  # noqa: PLC0415
@@ -227,8 +228,12 @@ def handle_fit(args) -> None:
     # incumbent's forward — loudly, in the provenance notes, never silently.
     model, notes = fit.model, fit.notes
     if model.weights_dynamic is None:
-        model = replace(model, weights_dynamic=incumbent.weights_dynamic or model.weights)
-        notes = f"{notes}; dynamic set carried from incumbent"
+        # ``is not None``, not truthiness: an incumbent that legitimately pruned every dynamic
+        # coordinate carries an EMPTY set, and that is still its answer, not a missing one.
+        carried = incumbent.weights_dynamic if incumbent.weights_dynamic is not None else model.weights
+        source = "incumbent" if incumbent.weights_dynamic is not None else "the static fit"
+        model = replace(model, weights_dynamic=carried)
+        notes = f"{notes}; dynamic set carried from {source}"
     artifact = model.to_artifact(
         provenance={
             "fitted": datetime.date.today().isoformat(),

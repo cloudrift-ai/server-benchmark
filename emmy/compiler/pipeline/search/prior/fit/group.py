@@ -93,10 +93,16 @@ def feature_view(spec: str):
     """A feature-view spec — comma-separated feature names, a trailing ``*`` making a prefix glob
     (``"D_*,MMA_tier"``) — parsed into a ``keep(name) -> bool`` predicate. The view a fit trained
     under is recorded in its metrics header and artifact provenance, so two fits are only comparable
-    when the recorded specs match."""
+    when the recorded specs match.
+
+    :data:`~..linear_model.ROUTING_FEATURES` are kept by EVERY view, named or not. They select a weight
+    set rather than contribute a term, and :meth:`Group.from_dicts` lifts them out of the matrix
+    afterwards, so keeping them costs a view nothing. A view that could drop them would instead route
+    every pool to the static weight set and report a fit with zero dynamic cases — silently, since
+    nothing downstream can tell an unfittable dynamic set from a genuinely static dataset."""
     pats = [p.strip() for p in spec.split(",") if p.strip()]
     prefixes = tuple(p[:-1] for p in pats if p.endswith("*"))
-    exact = frozenset(p for p in pats if not p.endswith("*"))
+    exact = frozenset(p for p in pats if not p.endswith("*")) | frozenset(ROUTING_FEATURES)
     return lambda name: name in exact or name.startswith(prefixes)
 
 
@@ -127,8 +133,19 @@ class Group:
         The routing features (:data:`~..linear_model.ROUTING_FEATURES`) are read off the pool into
         :attr:`dynamic` and then LEFT OUT of ``feat_names``, so a weight-set selector can never
         become a descent coordinate. Reading row 0 is exact: the stamp comes from the shape, which
-        every candidate in a pool shares."""
+        every candidate in a pool shares.
+
+        The stamp must agree with ``tier``, and disagreeing is a hard error. The two reach here by
+        different routes — the stamp through the featurizer, the tier from the source record's own
+        flag — and they are the same fact, so a mismatch means one of them is wrong and this pool
+        would otherwise train and be scored under the wrong weight set with nothing reporting it.
+        This is what keeps ``tier``, a label that decides nothing, honest."""
         dynamic = bool(feats) and LinearModel.is_dynamic_row(feats[0])
+        if dynamic != (tier == "dyn"):
+            raise ValueError(
+                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
+                f"the source record's flag and its featurized rows disagree about the weight set"
+            )
         names = tuple(sorted({k for f in feats for k in f} - set(ROUTING_FEATURES)))
         return cls(key, name, tier, gpu, dynamic, pinned_idx, names, feature_matrix(feats, list(names)))
 

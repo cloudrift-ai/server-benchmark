@@ -43,7 +43,7 @@ from pathlib import Path
 from emmy import config, storage
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
 from emmy.compiler.pipeline.search.prior.base import Prior
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+from emmy.compiler.pipeline.search.prior.linear_model import PARAM_ORDER, LinearModel
 
 _DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
 
@@ -51,11 +51,10 @@ _DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
 # ``OfflinePrior.__init__`` kwargs. ``scale`` is rank-neutral (a monotone transform of quality) and
 # fixed; the two ``atomic_free_*`` params ARE fitted — they are the one term the fit cannot express as
 # a linear weight, so ``emmy fit`` searches them as descent coordinates alongside the weights.
-_PARAM_KEYS = (
-    "scale",
-    "atomic_free_split_threshold",
-    "atomic_free_weight",
-)
+#
+# Derived from the writer's own key set rather than re-spelled: what a fit emits and what a deploy load
+# demands must not be able to drift, or a new scalar param ships unvalidated and silently defaults to 0.0.
+_PARAM_KEYS = PARAM_ORDER
 
 
 @functools.lru_cache(maxsize=8)
@@ -91,9 +90,11 @@ class OfflinePrior(Prior):
     also optimizes), and this class adds what ``Prior`` needs around it — knob-dict featurization
     plus the training surface (``fit`` / ``add_rows`` / ``maybe_refit`` / ``to_json``), which are
     no-ops here (it has nothing to learn) so it composes cleanly under :class:`FallbackPrior`.
-    Pass a ready ``model``, or let the weights and scalar scoring params resolve from the weights
-    artifact (``config.offline_path()`` override → the repo-checked default); explicit per-field
-    kwargs win over the file, field by field."""
+    Two ways to construct, and they do not mix: pass a ready ``model``, or let the weights and scalar
+    scoring params resolve from the weights artifact (``config.offline_path()`` override → the
+    repo-checked default) with explicit per-field kwargs winning over the file, field by field.
+    Combining the two raises rather than silently ignoring the overrides — an A/B that quietly
+    measured the unmodified model would measure nothing."""
 
     def __init__(
         self,
@@ -106,8 +107,10 @@ class OfflinePrior(Prior):
         atomic_free_weight: float | None = None,
     ) -> None:
         super().__init__()
+        given = (weights, weights_dynamic, scale, atomic_free_split_threshold, atomic_free_weight)
+        if model is not None and any(v is not None for v in given):
+            raise ValueError("OfflinePrior takes either a ready model= or per-field overrides, not both")
         if model is None:
-            given = (weights, weights_dynamic, scale, atomic_free_split_threshold, atomic_free_weight)
             art = None if all(v is not None for v in given) else _load_artifact(str(config.offline_path() or _DEFAULT_FILE))
             params = art["params"] if art is not None else {}
             model = LinearModel(

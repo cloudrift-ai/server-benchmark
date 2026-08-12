@@ -55,7 +55,7 @@ DEFAULT_L2 = 1e-6
 
 
 # The scalar scoring params the descent fits alongside the weights, in coordinate order. These are the
-# offline prior's non-linear term (:func:`~..offline.atomic_free_term`) — everything else in the deployed
+# offline prior's non-linear term (:func:`~..linear_model.atomic_free_term`) — everything else in the deployed
 # quality IS a linear weight, so it lives in the weight vector and needs no separate coordinate.
 PARAM_NAMES = ("atomic_free_weight", "atomic_free_split_threshold")
 
@@ -98,7 +98,7 @@ def fit_weights(
     ``objective + l2 * l2_penalty`` (the ranking loss plus the raw-space L2 — see :data:`DEFAULT_L2`
     for why the loss carries the penalty).
 
-    The optimized quantity is :func:`quality_rows` — the linear weights AND the atomic-free
+    The optimized quantity is :func:`~..linear_model.quality_columns` — the linear weights AND the atomic-free
     interaction's ``(weight, threshold)`` pair, which ride the descent as :data:`PARAM_NAMES`
     coordinates past the feature block. Fitting them is only possible because the optimizer is
     derivative-free: a threshold has no useful gradient, but a coordinate step over it is ordinary.
@@ -283,12 +283,13 @@ class LinearFit:
     def score_rows(self, group: Group) -> np.ndarray | None:
         """The group's per-row quality (higher = predicted faster), scored exactly as the shipped
         prior ranks. ``None`` when the group needs the dynamic set and this fit has none."""
-        w = self.model.weights_dynamic if group.dynamic else self.model.weights
-        if w is None:
+        if group.dynamic and self.model.weights_dynamic is None:
             return None
         # The gate columns must be present whether or not the weight dict names them (a pruned
-        # zero weight drops the key), so score over the union.
-        names = sorted(set(w) | {"D_finalize_kernel", "D_splitk"})
+        # zero weight drops the key), so score over the union. The weight set itself comes from
+        # the model, which is where the static-vs-dynamic choice is made — this must not become a
+        # second copy of that routing.
+        names = sorted(set(self.model.weight_set(group.dynamic)) | {"D_finalize_kernel", "D_splitk"})
         return self.model.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
 
     @property

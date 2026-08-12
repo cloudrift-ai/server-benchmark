@@ -109,6 +109,21 @@ def test_one_trainer_instance_refits_identically():
     assert "no dynamic cases" in static_only.notes and "dynamic top1" in first.notes
 
 
+def test_fitting_one_slice_does_not_perturb_the_next():
+    """Fold independence. ``run_axis`` used to hand each fold a fresh ``default_rng(seed)``; that
+    guarantee now lives inside ``fit``, which builds its own RNG from ``random_state``. So fitting
+    slice A and then slice B must give B exactly what fitting B alone gives — otherwise a fold's
+    result would depend on how many folds ran before it, and adding one golden family would silently
+    move every later fold's numbers."""
+    cases, names = _synthetic_cases()
+    trainer = _trainer(names, samples=20)
+    a, b = cases[:4], cases[2:]
+    trainer.fit(a)
+    after_a = trainer.fit(b)
+    assert after_a.model == trainer.fit(b).model  # same trainer, no carried RNG state
+    assert after_a.model == _trainer(names, samples=20).fit(b).model  # and none carried on the object either
+
+
 def test_built_artifact_loads_through_offline_prior(tmp_path, monkeypatch):
     """The assembled artifact is loadable by the deployed prior's strict loader
     (current feat_ver, complete params) — a fit output is never a dead file."""

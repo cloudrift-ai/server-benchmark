@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "nvidia/DeepSeek-V4-Pro-NVFP4"
-  rationale: "deepseek-ai/DeepSeek-V4-Flash supersedes this recipe: NVFP4 Pro requires 8×B200 vs Flash 2×H200; Flash offers better性价比 and lower VRAM."
+  rationale: "deepseek-ai/DeepSeek-V4-Flash supersedes this recipe: NVFP4 Pro requires 8×B200 vs Flash 2×H200; Flash offers better serving value and lower VRAM."
 
 # DeepSeek-V4-Pro: 1.6T / 49B-active MoE, CSA+HCA hybrid attention, MIT, native 1M ctx.
 # Engine = vLLM (NOT SGLang): SGLang #25704 produces NaN/garbage on DeepSeek-V4-Pro NVFP4 on

@@ -15,7 +15,7 @@ engine:
     vllm:
       # Local, release-qualified image retained on kenshin. Publication was intentionally
       # omitted; rebuild it from docker/vllm-emmy-serve/models/gemma-4-12b.env when absent.
-      image: "cloudriftai/vllm-emmy-gemma-4-12b:0.23.0-dd32f916"
+      image: "cloudriftai/vllm-emmy-gemma-4-12b:0.23.0-5208dcf6"
       extra_args: >-
         --runner generate
         --dtype float16

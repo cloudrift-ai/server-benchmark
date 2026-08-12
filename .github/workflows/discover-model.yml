@@ -164,7 +164,7 @@ jobs:
             --prompt "$AGENT_PROMPT" \
             --model "$AGENT_MODEL" \
             --output "$AGENT_TRANSCRIPT" \
-            --max-turns 32 \
+            --max-turns 48 \
             --max-output-tokens 4096 \
             --allow-write "$AGENT_MANIFEST"
           agent_status=$?

@@ -219,6 +219,7 @@ jobs:
         if: steps.lifecycle.outputs.changed == 'true'
         id: branch
         env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
           EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
         run: |
           branch="$EXISTING_BRANCH"

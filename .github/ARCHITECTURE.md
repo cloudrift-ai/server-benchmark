@@ -61,8 +61,10 @@ recipes for the maintained set, classifies the remaining complete recipes, and s
 lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each shell
 contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
 consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
-ignores otherwise valid new candidates beyond the remaining shell slots. It checks that the agent did not modify the
-checkout, then `.github/scripts/discovery_lifecycle.py` validates and applies its lifecycle manifest. The helper
+ignores otherwise valid new candidates beyond the remaining shell slots. `emmy recipe list --json` supplies the
+compact agent inventory, and tag-filtered list queries enforce the maintained and onboarding counts after application.
+The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
+validates and applies its lifecycle manifest. The helper
 tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
 before validating their contents. The runner disables tools at discovery's result turn and writes the agent's final
 content to the temporary manifest path; the agent cannot write recipe changes itself. The repository validator remains
@@ -118,20 +120,21 @@ must resolve exactly. The agent must use
 the current rationale immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be deployed,
 benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort set.
 
-The workflow creates `onboarding`/`untested` shells up to the three-shell total. Each shell stores its rationale under
-`model` and a list of one to three candidate deployment entries under `matrices`; subsequent runs validate and report
-the same setups while the shell remains pending. A shell does not claim qualification. The
+The workflow creates `onboarding`/`untested` shells up to the three-shell total through the same catalog library that
+backs `emmy recipe create`. Each shell stores its rationale under `model` and a list of one to three candidate
+deployment entries under `matrices`; subsequent runs validate and report the same setups while the shell remains
+pending. A shell does not claim qualification. The
 workflow removes superseded `plans/onboard-*.md` files, commits the lifecycle update to the rolling branch, and uses
 the API-only `make setup-agent` target for repository setup plus `gh` for rolling-PR discovery and updates. It never
 rents a VM. Pull-request mutations use `gh api` REST endpoints rather than the deprecated Projects Classic fields in
 the CLI's GraphQL edit path. GitHub CLI reads and writes plus the recipe push get three bounded attempts so a transient
 transport error does not fail discovery or strand a pushed recipe commit. Discovery uses a bounded research prompt
 and a workflow-specific model-turn cap so the manifest is written before the agent transcript reaches the inference
-endpoint's context ceiling. The lifecycle script pre-renders one compact inventory of recipe identity, lifecycle,
-rationale, task, and deployment setups into the prompt rather than making the agent load complete serving
-configurations, and the shared runner retains only a bounded recent history. Discovery reserves 3,072 output tokens
-because its only durable model output is the atomic manifest; onboarding retains the larger general-purpose runner
-default.
+endpoint's context ceiling. The recipe catalog renders one compact inventory of identity, lifecycle, rationale, task,
+and deployment setups into the prompt rather than making the agent load complete serving configurations; the
+lifecycle helper retains only the classification policy and manifest application. The shared runner retains only a
+bounded recent history. Discovery reserves 3,072 output tokens because its only durable model output is the atomic
+manifest; onboarding retains the larger general-purpose runner default.
 
 ## Credentials, VM ownership, and cleanup
 

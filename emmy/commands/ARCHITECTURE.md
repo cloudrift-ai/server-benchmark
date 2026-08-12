@@ -9,12 +9,14 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
+commands/recipe ─► recipe (catalog queries and onboarding shell creation)
 commands/agent ─► agent (tracked skill runner and tool schemas)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
-- `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
+- `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping, catalog
+  queries, and onboarding shell creation
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
 - `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
@@ -39,9 +41,9 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 ### `emmy/recipe/` — Recipe Library
 
 Recipe loading, configuration dataclasses (`Recipe`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`,
-`SglangConfig`, `BenchmarkConfig`), deep merge / hardware resolution / extra-arg validation, and engine flag mapping
-(`VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`). `load_recipe()` returns a `Recipe` dataclass; all consumers use attribute access
-(e.g. `recipe.engine.llm.tensor_parallel_size`).
+`SglangConfig`, `BenchmarkConfig`), deep merge / hardware resolution / extra-arg validation, engine flag mapping
+(`VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`), compact catalog queries, and onboarding shell creation. `load_recipe()` returns a
+`Recipe` dataclass; all consumers use attribute access (e.g. `recipe.engine.llm.tensor_parallel_size`).
 
 ### `emmy/deploy/` — Deploy Library
 
@@ -303,6 +305,9 @@ emmy
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
++-- recipe
+|   +-- list      -- inspect and filter compact recipe metadata
+|   +-- create    -- create a validated onboarding shell
 +-- vm
     +-- create
     |   +-- gpu        -- name a GPU from the hardware table (orchestrator: retries + fallback)
@@ -322,6 +327,20 @@ Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` v
 positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
 installed package, copying it into the current directory first. An existing path always wins over a bundled name.
 See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
+
+### `emmy recipe`
+
+`recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
+Repeat `--tag` to require several tags; `--json` makes the result suitable for lifecycle counts and agent input.
+`recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
+table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
+directory.
+
+```bash
+emmy recipe list [ROOT] [--tag TAG]... [--json]
+emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
+  --deployment GPU COUNT [--deployment GPU COUNT]... [--json]
+```
 
 ### `emmy deploy local`
 

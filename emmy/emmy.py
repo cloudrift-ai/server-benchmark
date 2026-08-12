@@ -17,6 +17,7 @@ from emmy.commands.generate import register_generate_command
 from emmy.commands.inspect_graph import register_inspect_command
 from emmy.commands.publish import register_publish_command
 from emmy.commands.pull import register_pull_command
+from emmy.commands.recipe import register_recipe_command
 from emmy.commands.run import register_run_command
 from emmy.commands.serve import register_serve_command
 from emmy.commands.teardown import register_teardown_command
@@ -54,6 +55,7 @@ def main():
     register_vm_command(subparsers)
     register_agent_command(subparsers)
     register_publish_command(subparsers)
+    register_recipe_command(subparsers)
 
     # compiler workflow commands
     register_pull_command(subparsers)

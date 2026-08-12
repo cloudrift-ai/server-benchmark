@@ -213,6 +213,15 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 ## Recipe
 
+```bash
+# Inspect recipe metadata or count one lifecycle group in automation.
+emmy recipe list recipes --tag maintained --json
+
+# Create an untested onboarding shell with one to three proposed deployments.
+emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
+  --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
+```
+
 ```yaml
 tags:
   - maintained

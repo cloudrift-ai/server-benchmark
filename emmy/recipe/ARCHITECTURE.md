@@ -2,13 +2,16 @@
 
 ## Overview
 
-The `recipe` package owns all recipe-related logic: YAML loading, matrix expansion for benchmark parameter sweeps, typed configuration dataclasses, engine flag mapping, and extra_args validation.
+The `recipe` package owns all recipe-related logic: YAML loading, matrix expansion for benchmark parameter sweeps,
+typed configuration dataclasses, engine flag mapping, catalog queries, onboarding shell creation, and `extra_args`
+validation.
 
 ## Modules
 
 - `types.py` — dataclasses: `Recipe`, `DeployConfig`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`,
   `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
 - `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
+- `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
@@ -49,6 +52,11 @@ rejects direct use of disabled recipes, while bulk benchmark enumeration and pac
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
 does not affect engine arguments, deployment, or benchmark behavior.
+
+`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. Its compact
+records contain only the identity, tags, task, rationale, and expanded deployment setups needed for lifecycle work.
+`create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
+GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 
 ### Matrix Expansion for Benchmark Sweeps
 

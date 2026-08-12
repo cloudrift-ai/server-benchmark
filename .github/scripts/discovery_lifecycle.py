@@ -6,13 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
-import yaml
-
 from emmy import gpu as gpu_registry
+from emmy.recipe.catalog import HF_ID, create_recipe_stub, deployment_setups, recipe_catalog, validate_stub_deployments
 from emmy.recipe.lifecycle import (
     BEST_EFFORT_TAG,
     LIFECYCLE_TAGS,
@@ -20,19 +18,13 @@ from emmy.recipe.lifecycle import (
     OBSOLETE_TAG,
     ONBOARDING_TAG,
     UNTESTED_TAG,
-    validate_recipe_tags,
 )
-from emmy.recipe.matrix import build_override, expand_matrix
-from emmy.recipe.recipe import deep_merge
 
-HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_ONBOARDING_MODELS = 3
-MAX_DEPLOYMENTS_PER_MODEL = 3
 MANIFEST_FIELDS = frozenset({"maintained_models", "best_effort_models", "obsolete_models", "onboarding_models"})
 DECISION_FIELDS = frozenset({"model_id", "rationale"})
 OBSOLETE_FIELDS = frozenset({"model_id", "replacement_model_id", "rationale"})
 ONBOARDING_FIELDS = frozenset({"model_id", "task", "rationale", "deployments"})
-DEPLOYMENT_FIELDS = frozenset({"deploy.gpu", "deploy.gpu_count"})
 
 
 def _extract_object(text: str) -> dict:
@@ -62,24 +54,6 @@ def _extract_object(text: str) -> dict:
             "Discovery lifecycle object must contain exactly maintained_models, best_effort_models, obsolete_models, and onboarding_models"
         )
     return value
-
-
-def _inventory(workspace: Path) -> dict[str, dict]:
-    records: dict[str, dict] = {}
-    for path in sorted(workspace.glob("recipes/*/recipe.yaml")):
-        config = yaml.safe_load(path.read_text()) or {}
-        if not isinstance(config, dict):
-            raise ValueError(f"Recipe must contain a YAML object: {path.relative_to(workspace)}")
-        tags = validate_recipe_tags(config.get("tags"))
-        model_id = (config.get("model") or {}).get("huggingface")
-        if not model_id:
-            continue
-        if not isinstance(model_id, str) or not HF_ID.fullmatch(model_id):
-            raise ValueError(f"Invalid Hugging Face model ID in {path.relative_to(workspace)}: {model_id!r}")
-        if model_id in records:
-            raise ValueError(f"Multiple recipes use Hugging Face model ID {model_id}")
-        records[model_id] = {"path": path, "config": config, "tags": tags}
-    return records
 
 
 def _rationale(value: object, model_id: str) -> str:
@@ -165,82 +139,11 @@ def _model_ids(decisions: list[dict[str, str]]) -> list[str]:
     return [decision["model_id"] for decision in decisions]
 
 
-def _deployment_variants(config: dict) -> list[dict]:
-    base = {key: value for key, value in config.items() if key != "matrices"}
-    matrices = config.get("matrices")
-    if not matrices:
-        return [base]
-    return [deep_merge(base, build_override(combination)) for combination in expand_matrix(matrices)]
-
-
-def _deployment_setups(config: dict) -> list[dict[str, object]]:
-    setups = []
-    seen = set()
-    for variant in _deployment_variants(config):
-        deploy = variant.get("deploy") or {}
-        gpu_name = deploy.get("gpu")
-        gpu_count = deploy.get("gpu_count", 1)
-        key = (gpu_name, gpu_count)
-        valid_count = isinstance(gpu_count, int) and not isinstance(gpu_count, bool) and gpu_count >= 1
-        if not isinstance(gpu_name, str) or not valid_count or key in seen:
-            continue
-        seen.add(key)
-        setups.append({"deploy.gpu": gpu_name, "deploy.gpu_count": gpu_count})
-    return setups
-
-
-def _validated_deployments(value: object, model_id: str) -> list[dict[str, object]]:
-    if not isinstance(value, list) or not 1 <= len(value) <= MAX_DEPLOYMENTS_PER_MODEL:
-        raise ValueError(f"Onboarding model {model_id} needs one to {MAX_DEPLOYMENTS_PER_MODEL} deployments")
-    deployments = []
-    seen = set()
-    for deployment in value:
-        if not isinstance(deployment, dict) or set(deployment) != DEPLOYMENT_FIELDS:
-            raise ValueError(f"Each deployment must contain exactly: {', '.join(sorted(DEPLOYMENT_FIELDS))}")
-        gpu_name = deployment["deploy.gpu"]
-        gpu_count = deployment["deploy.gpu_count"]
-        spec = gpu_registry.by_name(gpu_name) if isinstance(gpu_name, str) else None
-        if spec is None or spec.name != gpu_name:
-            raise ValueError(f"Onboarding model {model_id} selected unknown GPU {gpu_name!r}")
-        if not isinstance(gpu_count, int) or isinstance(gpu_count, bool) or gpu_count < 1:
-            raise ValueError(f"Onboarding model {model_id} needs a positive deploy.gpu_count")
-        key = (gpu_name, gpu_count)
-        if key in seen:
-            raise ValueError(f"Onboarding model {model_id} contains a duplicate deployment")
-        seen.add(key)
-        deployments.append(deployment)
-    return deployments
-
-
-def discovery_inventory(workspace: Path) -> dict:
-    """Render the compact repository context needed by the discovery agent."""
-    records = _inventory(workspace)
-    recipes = []
-    for model_id, record in records.items():
-        config = record["config"]
-        model = config.get("model") or {}
-        recipes.append(
-            {
-                "path": str(record["path"].relative_to(workspace)),
-                "model_id": model_id,
-                "tags": list(record["tags"]),
-                "task": model.get("task", "generate"),
-                "deployments": _deployment_setups(config),
-                "rationale": model.get("rationale") or (config.get("discovery") or {}).get("rationale"),
-            }
-        )
-    canonical_gpus = [
-        {"name": spec.name, "vram_gib": round(spec.vram_mib / 1024, 1) if spec.vram_mib is not None else None}
-        for spec in gpu_registry.KNOWN_GPUS
-    ]
-    return {"canonical_gpus": canonical_gpus, "recipes": recipes}
-
-
 def _deployment_footprints(config: dict) -> tuple[int, ...]:
     """Return total physical VRAM in MiB for every known deployment variant."""
 
     footprints = []
-    for setup in _deployment_setups(config):
+    for setup in deployment_setups(config):
         spec = gpu_registry.by_name(setup["deploy.gpu"])
         if spec is None or spec.vram_mib is None:
             continue
@@ -248,10 +151,10 @@ def _deployment_footprints(config: dict) -> tuple[int, ...]:
     return tuple(footprints)
 
 
-def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dict:
+def validate_manifest(path: Path, workspace: Path) -> dict:
     """Validate one discovery manifest and return its normalized lifecycle decisions."""
     manifest = _extract_object(path.read_text())
-    records = _inventory(workspace)
+    records = recipe_catalog(workspace / "recipes")
     maintained = _model_decisions(manifest.get("maintained_models"), "maintained_models", records)
     best_effort = _model_decisions(
         manifest.get("best_effort_models"),
@@ -260,9 +163,6 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
         ignore_invalid_ids=True,
     )
     obsolete_decisions = _obsolete_decisions(manifest.get("obsolete_models"), records, ignore_invalid_ids=True)
-    if len(maintained) != maintained_count:
-        raise ValueError(f"maintained_models must contain exactly {maintained_count} models")
-
     existing_onboarding = sorted(model_id for model_id, record in records.items() if ONBOARDING_TAG in record["tags"])
     if len(existing_onboarding) > MAX_ONBOARDING_MODELS:
         raise ValueError(f"Existing onboarding shells exceed the limit of {MAX_ONBOARDING_MODELS}")
@@ -270,7 +170,7 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
         {
             "model_id": model_id,
             "rationale": _existing_rationale(records[model_id]),
-            "deployments": _validated_deployments(records[model_id]["config"].get("matrices"), model_id),
+            "deployments": validate_stub_deployments(records[model_id]["config"].get("matrices"), model_id),
         }
         for model_id in existing_onboarding
     ]
@@ -342,7 +242,7 @@ def validate_manifest(path: Path, workspace: Path, maintained_count: int) -> dic
             raise ValueError(f"Duplicate onboarding model {model_id}")
         if candidate["task"] not in ("generate", "embed"):
             raise ValueError(f"Invalid task for {model_id}: {candidate['task']!r}")
-        normalized_deployments = _validated_deployments(candidate["deployments"], model_id)
+        normalized_deployments = validate_stub_deployments(candidate["deployments"], model_id)
         candidate_ids.add(model_id)
         normalized_candidates.append(
             {
@@ -437,31 +337,6 @@ def _set_lifecycle(record: dict, lifecycle: str, rationale: str, *, remove_disco
     return True
 
 
-def _shell_directory(workspace: Path, model_id: str) -> Path:
-    organization, name = model_id.split("/", 1)
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
-    path = workspace / "recipes" / slug
-    if path.exists():
-        organization_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", organization).strip("-")
-        path = workspace / "recipes" / f"{organization_slug}--{slug}"
-    if path.exists():
-        raise ValueError(f"Cannot choose a unique recipe directory for {model_id}")
-    return path
-
-
-def _create_shell(workspace: Path, candidate: dict) -> Path:
-    path = _shell_directory(workspace, candidate["model_id"])
-    path.mkdir(parents=True)
-    config = {
-        "tags": [ONBOARDING_TAG, UNTESTED_TAG],
-        "model": {"huggingface": candidate["model_id"], "rationale": candidate["rationale"], "task": candidate["task"]},
-        "matrices": candidate["deployments"],
-    }
-    recipe = path / "recipe.yaml"
-    recipe.write_text(yaml.safe_dump(config, sort_keys=False, width=116))
-    return recipe
-
-
 def _model_lines(decisions: list[dict[str, str]]) -> list[str]:
     return [f"- `{decision['model_id']}` — {decision['rationale']}" for decision in decisions] or ["- None."]
 
@@ -529,7 +404,7 @@ def _summary(manifest: dict) -> str:
 
 def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
     """Apply a validated manifest and return change/count outputs."""
-    records = _inventory(workspace)
+    records = recipe_catalog(workspace / "recipes")
     changed = False
     for decision in manifest["maintained_models"]:
         changed = _set_lifecycle(records[decision["model_id"]], MAINTAINED_TAG, decision["rationale"]) or changed
@@ -548,7 +423,13 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
             or changed
         )
     for candidate in manifest["onboarding_models"]:
-        _create_shell(workspace, candidate)
+        create_recipe_stub(
+            workspace / "recipes",
+            candidate["model_id"],
+            candidate["rationale"],
+            candidate["task"],
+            candidate["deployments"],
+        )
         changed = True
     for plan in workspace.glob("plans/onboard-*.md"):
         plan.unlink()
@@ -576,14 +457,9 @@ def _write_outputs(result: dict) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    inventory = commands.add_parser("inventory", help="print compact repository context for the discovery agent")
-    inventory.add_argument("--workspace", type=Path, default=Path.cwd())
-    apply = commands.add_parser("apply", help="validate and apply a discovery manifest")
-    apply.add_argument("--input", type=Path, required=True)
-    apply.add_argument("--workspace", type=Path, default=Path.cwd())
-    apply.add_argument("--maintained-count", type=int, required=True)
-    apply.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument("--summary", type=Path, required=True)
     return parser
 
 
@@ -591,10 +467,7 @@ def main() -> int:
     args = _parser().parse_args()
     try:
         workspace = args.workspace.resolve()
-        if args.command == "inventory":
-            print(json.dumps(discovery_inventory(workspace), sort_keys=True))
-            return 0
-        manifest = validate_manifest(args.input, workspace, args.maintained_count)
+        manifest = validate_manifest(args.input, workspace)
         result = apply_manifest(manifest, workspace, args.summary)
         _write_outputs(result)
         print(json.dumps({**manifest, **result}, sort_keys=True))

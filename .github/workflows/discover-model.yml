@@ -101,7 +101,7 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/python .github/scripts/discovery_lifecycle.py inventory > "$AGENT_INVENTORY"
+          ./venv/bin/emmy recipe list recipes --json > "$AGENT_INVENTORY"
           python3 - <<'PY'
           import os
           from pathlib import Path
@@ -165,8 +165,8 @@ jobs:
             ]
           }}
           maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
-          for an embedding model. Use exact canonical GPU names from the repository hardware registry. Return an empty
-          onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
+          for an embedding model. Copy deploy.gpu values exactly from deployment setups in repository-inventory.
+          Return an empty onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
           repository file. When the runner requires your final response, return the best manifest supported by the
           evidence already gathered without making another tool call.
           """)
@@ -202,10 +202,18 @@ jobs:
         id: lifecycle
         run: |
           ./venv/bin/python .github/scripts/discovery_lifecycle.py \
-            apply \
             --input "$AGENT_MANIFEST" \
-            --maintained-count "$MAINTAINED_MODEL_COUNT" \
             --summary "$DISCOVERY_SUMMARY"
+          maintained_count="$(./venv/bin/emmy recipe list recipes --tag maintained --json | jq 'length')"
+          if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
+            echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
+            exit 1
+          fi
+          onboarding_count="$(./venv/bin/emmy recipe list recipes --tag onboarding --json | jq 'length')"
+          if [ "$onboarding_count" -gt 3 ]; then
+            echo "Expected at most 3 onboarding recipes, found $onboarding_count" >&2
+            exit 1
+          fi
           git diff --check
 
       - name: Refresh GitHub App token

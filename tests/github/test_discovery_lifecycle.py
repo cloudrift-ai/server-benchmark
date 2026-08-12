@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from emmy.recipe.catalog import MAX_STUB_DEPLOYMENTS
+
 MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "discovery_lifecycle.py"
 SPEC = importlib.util.spec_from_file_location("discovery_lifecycle", MODULE_PATH)
 discovery_lifecycle = importlib.util.module_from_spec(SPEC)
@@ -84,7 +86,7 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
         onboarding=[_candidate()],
     )
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     result = discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert result == {
@@ -132,25 +134,6 @@ def test_extracts_one_lifecycle_object_from_reasoning_text():
     }
 
 
-def test_discovery_inventory_contains_compact_recipe_and_gpu_context(tmp_path):
-    recipe = _recipe(tmp_path, "ready", "org/ready", tags=["maintained"], task="embed")
-    recipe.write_text(recipe.read_text().replace("  huggingface: org/ready\n", "  huggingface: org/ready\n  rationale: Useful.\n"))
-
-    inventory = discovery_lifecycle.discovery_inventory(tmp_path)
-
-    assert inventory["recipes"] == [
-        {
-            "path": "recipes/ready/recipe.yaml",
-            "model_id": "org/ready",
-            "tags": ["maintained"],
-            "task": "embed",
-            "deployments": [{"deploy.gpu": GPU, "deploy.gpu_count": 1}],
-            "rationale": "Useful.",
-        }
-    ]
-    assert {gpu["name"] for gpu in inventory["canonical_gpus"]} == {spec.name for spec in discovery_lifecycle.gpu_registry.KNOWN_GPUS}
-
-
 def test_rejects_extra_top_level_manifest_fields():
     text = json.dumps(
         {
@@ -171,7 +154,7 @@ def test_obsolete_recipe_can_become_maintained_again(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/old"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert yaml.safe_load(recipe.read_text())["tags"] == ["maintained"]
@@ -183,7 +166,7 @@ def test_obsolete_recipe_can_become_best_effort_again(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], best_effort=["org/old"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert yaml.safe_load(recipe.read_text())["tags"] == ["best-effort"]
@@ -195,7 +178,7 @@ def test_preserves_existing_onboarding_shell(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert yaml.safe_load(shell.read_text())["tags"] == ["onboarding", "untested"]
@@ -220,7 +203,7 @@ def test_rejects_existing_onboarding_shell_without_deployment_matrix(tmp_path):
     _manifest(selection, ["org/ready"])
 
     with pytest.raises(ValueError, match="org/pending needs one to 3 deployments"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):
@@ -230,7 +213,7 @@ def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert yaml.safe_load(shell.read_text())["tags"] == ["onboarding", "untested"]
@@ -244,7 +227,7 @@ def test_moves_legacy_onboarding_rationale_under_model(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     text = shell.read_text()
@@ -258,7 +241,7 @@ def test_moves_existing_rationale_immediately_below_model_id(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     model_lines = recipe.read_text().split("model:\n", 1)[1].split("engine:\n", 1)[0].splitlines()
@@ -269,22 +252,13 @@ def test_moves_existing_rationale_immediately_below_model_id(tmp_path):
     ]
 
 
-def test_rejects_wrong_maintained_count(tmp_path):
-    _recipe(tmp_path, "one", "org/one")
-    selection = tmp_path / "selection.json"
-    _manifest(selection, ["org/one"])
-
-    with pytest.raises(ValueError, match="exactly 2"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 2)
-
-
 def test_rejects_onboarding_shell_as_maintained(tmp_path):
     _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/pending"])
 
     with pytest.raises(ValueError, match="cannot be classified"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_rejects_new_model_with_existing_recipe(tmp_path):
@@ -293,7 +267,7 @@ def test_rejects_new_model_with_existing_recipe(tmp_path):
     _manifest(selection, ["org/ready"], onboarding=[_candidate("org/ready")])
 
     with pytest.raises(ValueError, match="recipe already exists"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_rejects_candidate_with_unknown_hardware(tmp_path):
@@ -304,20 +278,18 @@ def test_rejects_candidate_with_unknown_hardware(tmp_path):
     _manifest(selection, ["org/ready"], onboarding=[candidate])
 
     with pytest.raises(ValueError, match="selected unknown GPU"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_rejects_more_than_three_candidate_deployments(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     selection = tmp_path / "selection.json"
     candidate = _candidate()
-    candidate["deployments"] = [
-        {"deploy.gpu": GPU, "deploy.gpu_count": count} for count in range(1, discovery_lifecycle.MAX_DEPLOYMENTS_PER_MODEL + 2)
-    ]
+    candidate["deployments"] = [{"deploy.gpu": GPU, "deploy.gpu_count": count} for count in range(1, MAX_STUB_DEPLOYMENTS + 2)]
     _manifest(selection, ["org/ready"], onboarding=[candidate])
 
     with pytest.raises(ValueError, match="one to 3 deployments"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_rejects_lifecycle_decision_without_rationale(tmp_path):
@@ -326,7 +298,7 @@ def test_rejects_lifecycle_decision_without_rationale(tmp_path):
     _manifest(selection, [{"model_id": "org/ready"}])
 
     with pytest.raises(ValueError, match="must contain exactly"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_existing_onboarding_shells_discard_candidates_beyond_the_pending_limit(tmp_path):
@@ -336,7 +308,7 @@ def test_existing_onboarding_shells_discard_candidates_beyond_the_pending_limit(
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], onboarding=[_candidate()])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert manifest["onboarding_models"] == []
 
@@ -347,7 +319,7 @@ def test_rejects_more_than_three_onboarding_candidates(tmp_path):
     _manifest(selection, ["org/ready"], onboarding=[_candidate(f"org/new-{index}") for index in range(4)])
 
     with pytest.raises(ValueError, match="at most 3 candidates"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_unclassified_complete_recipe_defaults_to_best_effort(tmp_path):
@@ -356,7 +328,7 @@ def test_unclassified_complete_recipe_defaults_to_best_effort(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/other"]
@@ -369,7 +341,7 @@ def test_unknown_lower_priority_model_defaults_real_recipe_to_best_effort(tmp_pa
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], best_effort=["org/typo"])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/other"]
 
@@ -385,7 +357,7 @@ def test_malformed_lower_priority_ids_default_real_recipes_to_best_effort(tmp_pa
         obsolete=[_obsolete("org/other", "abbreviated-replacement")],
     )
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/other"]
     assert manifest["obsolete_models"] == []
@@ -397,7 +369,7 @@ def test_unknown_maintained_model_is_rejected(tmp_path):
     _manifest(selection, ["org/typo"])
 
     with pytest.raises(ValueError, match="Maintained models must have complete existing recipes: org/typo"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 @pytest.mark.parametrize("selected", ["ready", "wrong-org/ready"])
@@ -406,7 +378,7 @@ def test_unique_checkpoint_name_in_maintained_set_is_normalized(tmp_path, select
     selection = tmp_path / "selection.json"
     _manifest(selection, [selected])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert manifest["maintained_models"] == [_decision("org/ready", f"Rationale for {selected}.")]
 
@@ -417,7 +389,7 @@ def test_rejects_duplicate_lifecycle_classification(tmp_path):
     _manifest(selection, ["org/ready"], best_effort=["org/ready"])
 
     with pytest.raises(ValueError, match="exactly one lifecycle list"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+        discovery_lifecycle.validate_manifest(selection, tmp_path)
 
 
 def test_obsolete_recipe_without_active_replacement_defaults_to_best_effort(tmp_path):
@@ -431,7 +403,7 @@ def test_obsolete_recipe_without_active_replacement_defaults_to_best_effort(tmp_
         obsolete=[_obsolete("org/old", "org/older"), _obsolete("org/older", "org/ready")],
     )
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/old"]
     assert [decision["model_id"] for decision in manifest["obsolete_models"]] == ["org/older"]
@@ -443,7 +415,7 @@ def test_obsolete_recipe_with_other_task_replacement_defaults_to_best_effort(tmp
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/old"]
     assert manifest["obsolete_models"] == []
@@ -455,7 +427,7 @@ def test_obsolete_recipe_with_larger_replacement_defaults_to_best_effort(tmp_pat
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/old"]
     assert manifest["obsolete_models"] == []
@@ -467,7 +439,7 @@ def test_obsolete_recipe_replacement_may_use_less_total_vram(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert manifest["obsolete_models"][0]["model_id"] == "org/old"
 
@@ -482,7 +454,7 @@ def test_obsolete_recipe_may_include_drop_rationale_without_replacement(tmp_path
         obsolete=[{"model_id": "org/old", "rationale": "The checkpoint cannot be served by a supported engine."}],
     )
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert manifest["obsolete_models"] == [{"model_id": "org/old", "rationale": "The checkpoint cannot be served by a supported engine."}]
 
@@ -493,6 +465,6 @@ def test_obsolete_rationale_names_exact_replacement_model(tmp_path):
     selection = tmp_path / "selection.json"
     _manifest(selection, ["org/ready"], obsolete=[_obsolete()])
 
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
 
     assert manifest["obsolete_models"][0]["rationale"].startswith("org/ready supersedes this recipe:")

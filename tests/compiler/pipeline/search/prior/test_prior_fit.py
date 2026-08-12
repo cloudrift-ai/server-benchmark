@@ -21,8 +21,8 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_L2,
     Group,
+    LinearFit,
     LinearTrainer,
-    TwoStageFit,
     feature_matrix,
     fit_weights,
     gate_columns,
@@ -170,8 +170,9 @@ def test_dict_and_matrix_paths_score_identically(dynamic, monkeypatch):
     monkeypatch.delenv("EMMY_OFFLINE_FILE", raising=False)
     art = json.loads(_DEFAULT_FILE.read_text())
     params = {"atomic_free_weight": 5.0, "atomic_free_split_threshold": 4.0}
-    prior = OfflinePrior(weights=art["weights"], weights_dynamic=art["weights_dynamic"], scale=0.1, **params)
-    fit = TwoStageFit(art["weights"], [], art["weights_dynamic"], [], params)
+    # ONE model object behind both paths — the prior scores dicts through it, the fit scores matrices.
+    model = LinearModel(weights=art["weights"], weights_dynamic=art["weights_dynamic"], scale=0.1, **params)
+    prior, fit = OfflinePrior(model=model), LinearFit(model, [], [])
 
     rng = np.random.default_rng(11)
     names = sorted(set(art["weights"]) | _INTERACTION_FEATURES)

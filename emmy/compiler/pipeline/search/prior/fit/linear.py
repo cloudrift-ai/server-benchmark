@@ -1,26 +1,26 @@
-"""The linear trainer and its fitted model — the offline learning-to-rank fit of the
-:class:`OfflinePrior` weights.
+"""The linear trainer — the offline learning-to-rank fit of the :class:`OfflinePrior` weights.
 
-This module owns everything specific to the linear model class: the loss (:func:`objective` — mean golden
-rank — plus :func:`l2_penalty`, the raw-space L2 regularizer), the optimizer (:func:`fit_weights` —
-random search + coordinate descent), the static/dyn
-two-stage chaining (:func:`fit_two_stage`), and the fitted model (:class:`TwoStageFit`, whose
-:meth:`~TwoStageFit.score_rows` is the single fit-side home of the static-vs-dynamic weight-set split — the
-CV harness and any other consumer score through it and never touch weight dicts). The dataset representation
-lives in :mod:`.group`, the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in
-:mod:`.cv`; the trainer is importable library code with the one featurization and one artifact format shared
-by every caller of ``emmy fit``.
+:class:`LinearTrainer` holds the hyperparameters and :meth:`~LinearTrainer.fit` turns a
+:class:`~.group.Group` list into a :class:`LinearFit`. The trainer is immutable and its ``fit`` is pure, so a
+fit is a function of ``(groups, hyperparameters)`` alone: the same inputs give a byte-identical artifact, one
+instance serves every cross-validation fold without copying, and an A/B between two fits measures the fit
+inputs rather than run-to-run noise.
 
-What is optimized is the **deployed** scoring function, not a linear proxy for it: :func:`quality_rows` is the
-vector form of :meth:`~..offline.OfflinePrior.quality`, sharing the one
-:func:`~..offline.atomic_free_term` definition, and the interaction's ``(weight, threshold)`` pair are descent
-coordinates alongside the feature weights (:data:`PARAM_NAMES`). Because the optimizer is derivative-free,
-fitting a threshold costs nothing extra — and a scoring constant the fit cannot see is a constant the fit
-optimizes around, which is what the hand-set gates were doing until 2026-08-05.
+This module owns what is specific to the linear model class: the default loss (:func:`mean_log_rank`) and the
+raw-space L2 regularizer (:func:`l2_penalty`), the optimizer (:func:`fit_weights` — random search plus
+coordinate descent), and the static→dynamic chaining. Anything a different model class would also need lives
+elsewhere: the scoring function itself in :mod:`..linear_model`, the dataset representation in :mod:`.group`,
+the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in :mod:`.cv`.
 
-The fit consumes :class:`~.group.Group` lists directly. Each fit z-scores over its own candidate pool;
-``seed_w`` arrives scaled by ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to chain
-fits). Deterministic for a given seeded ``rng``.
+What is optimized is the **deployed** scoring function, not a proxy for it. The descent scores through
+:func:`~..linear_model.quality_columns`, the same arithmetic ``OfflinePrior`` ranks with, and the atomic-free
+interaction's ``(weight, threshold)`` pair ride the descent as coordinates alongside the feature weights
+(:data:`PARAM_NAMES`). Because the optimizer is derivative-free, fitting a threshold costs nothing extra — and
+a scoring constant the fit cannot see is a constant the fit optimizes around, which is what the hand-set gates
+were doing until 2026-08-05.
+
+Each fit z-scores over its own candidate pool; ``seed_w`` arrives scaled by ``sd_ref`` (``ones`` for a
+raw-weight seed, the previous fit's ``sd`` to chain fits).
 """
 
 from __future__ import annotations
@@ -189,52 +189,6 @@ def raw_weights(names, best_w, sd) -> dict[str, float]:
     return {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
 
 
-@dataclass
-class TwoStageFit:
-    """One trainer invocation's fitted weight sets, in raw-feature space
-    (:func:`raw_weights` — the format the artifact stores). ``dyn_raw`` / ``dyn_ranks`` are
-    ``None`` when the input had no dynamic cases: the CALLER decides the fallback
-    (the script carries the incumbent's dynamic set forward; a CV fold treats the
-    set as unfittable rather than silently substituting a stale vector)."""
-
-    static_raw: dict[str, float]
-    static_ranks: list[int]
-    dyn_raw: dict[str, float] | None
-    dyn_ranks: list[int] | None
-    params: dict[str, float]
-
-    def score_rows(self, group: Group) -> np.ndarray | None:
-        """The group's per-row quality (higher = predicted faster) under the raw weight sets
-        and this fit's params — scored exactly as the shipped prior ranks, interaction term
-        included. ``None`` when the group needs the dynamic set and this fit has none (an
-        unfittable fold — callers exclude it up front)."""
-        w = self.dyn_raw if group.dynamic else self.static_raw
-        if w is None:
-            return None
-        # The gate columns must be present whether or not the weight dict names them (a pruned
-        # zero weight drops the key), so score over the union.
-        names = sorted(set(w) | {"D_finalize_kernel", "D_splitk"})
-        mat = group.matrix(names)
-        vec = np.array([w.get(n, 0.0) for n in names])
-        return quality_columns(
-            mat,
-            vec,
-            gate_columns(mat, names),
-            weight=self.params["atomic_free_weight"],
-            threshold=self.params["atomic_free_split_threshold"],
-        )
-
-    def to_artifact(self, *, params: dict, provenance: dict) -> dict:
-        """This fit as the ``OfflinePrior`` weights artifact dict. ``params`` supplies the
-        NON-fitted scoring params (``scale``); this fit's own :attr:`params` override the
-        fitted ones. Both weight sets must be present — a caller shipping a fit with no
-        dynamic set substitutes its fallback (e.g. the incumbent's) into ``dyn_raw`` first."""
-        assert self.dyn_raw is not None, "no dynamic weight set — substitute a fallback before assembling the artifact"
-        return build_artifact(
-            weights=self.static_raw, weights_dynamic=self.dyn_raw, params={**params, **self.params}, provenance=provenance
-        )
-
-
 def _fit_stages(groups, names, *, seed_weights, seed_params, rng, samples, l2, objective):
     """The static→dynamic chaining: a static fit over the non-dynamic groups seeded from the
     ``seed_weights`` raw dict (zeros where a name is absent — an empty dict seeds from zero), then
@@ -274,17 +228,6 @@ def _fit_stages(groups, names, *, seed_weights, seed_params, rng, samples, l2, o
         objective=objective,
     )
     return static_raw, raw_weights(names, dyn_w, dyn_sd), fitted, static_ranks, dyn_ranks
-
-
-def fit_two_stage(
-    groups: list[Group], names, *, seed_weights: dict[str, float], seed_params: dict[str, float], rng, samples: int, l2: float = DEFAULT_L2
-) -> TwoStageFit:
-    """The pre-:class:`LinearTrainer` entry point onto :func:`_fit_stages`, kept while its callers
-    migrate. New code builds a :class:`LinearTrainer` and calls :meth:`LinearTrainer.fit`."""
-    static_raw, dyn_raw, fitted, static_ranks, dyn_ranks = _fit_stages(
-        groups, names, seed_weights=seed_weights, seed_params=seed_params, rng=rng, samples=samples, l2=l2, objective=mean_log_rank
-    )
-    return TwoStageFit(static_raw, static_ranks, dyn_raw, dyn_ranks, fitted)
 
 
 @dataclass(frozen=True)
@@ -368,20 +311,3 @@ class LinearFit:
         dyn = f"dynamic {topk_table(self.dyn_ranks)}" if self.dyn_ranks is not None else "no dynamic cases"
         params = ", ".join(f"{n}={getattr(self.model, n):g}" for n in sorted(PARAM_NAMES))
         return f"static {topk_table(self.static_ranks)}; {dyn}; params {params}"
-
-
-def build_artifact(*, weights: dict[str, float], weights_dynamic: dict[str, float], params: dict, provenance: dict) -> dict:
-    """Assemble the ``OfflinePrior`` weights artifact dict in its checked-in shape.
-    ``params`` is the complete scoring-param block — the caller merges the fit's own fitted
-    params over whatever it carries forward (``scale``); ``provenance`` is caller-supplied whole
-    (fitted date, script, args, case counts, notes) so the assembly stays a pure, deterministic
-    function. The shape itself belongs to :meth:`~..linear_model.LinearModel.to_artifact`, so a
-    fit and a round-tripped model serialize identically."""
-    model = LinearModel(
-        weights=weights,
-        weights_dynamic=weights_dynamic,
-        scale=float(params["scale"]),
-        atomic_free_weight=float(params["atomic_free_weight"]),
-        atomic_free_split_threshold=float(params["atomic_free_split_threshold"]),
-    )
-    return model.to_artifact(provenance=provenance)

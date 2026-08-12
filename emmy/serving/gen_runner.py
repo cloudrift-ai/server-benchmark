@@ -42,6 +42,26 @@ def _generation_precision_contract(model_type, expert_store):
     return None
 
 
+def _program_config_sha(config) -> str:
+    """Hash only config fields that can change the compiled twin programs.
+
+    ``eos_token_id`` is generation policy consumed by the scheduler after the model forward;
+    it changes no tensor geometry or algebra.  Base and instruction-tuned checkpoints may differ
+    only in that field, so retaining it here needlessly prevents their weight-independent plans
+    from sharing an execution-pack identity.  All architecture/geometry fields remain hashed.
+    """
+    import hashlib
+    import json
+
+    cfg_dict = config.to_dict()
+    for non_program in ("_name_or_path", "transformers_version", "eos_token_id"):
+        cfg_dict.pop(non_program, None)
+        for sub in cfg_dict.values():
+            if isinstance(sub, dict):
+                sub.pop(non_program, None)
+    return hashlib.sha1(json.dumps(cfg_dict, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
 class _Program:
     """One compiled dynamic-``num_tokens`` split subgraph, run via the host ``rebind`` path."""
 
@@ -899,30 +919,23 @@ class EmmyGenRunner:
         # validity key is the model's config hash + the serving shape — deliberately NO model
         # id/path: the baked image resolves the model to a snapshot *path* offline while the
         # warm boot uses the hub id, and the config hash already pins identity.
-        import hashlib
-
         # The config hash must strip the VOLATILE fields or the path sneaks back in:
         # ``_name_or_path`` records the load spelling (the hub id at warm time, the snapshot
         # path on a baked offline boot), so hashing to_json_string() keyed the warm pack and
         # the baked boot APART — the 2026-07-24 verify failure (66 runtime recompiles on an
         # image whose warm had converged). ``transformers_version`` churns the same way.
-        import json as _json
+        # ``eos_token_id`` is generation policy, not program structure: excluding only that
+        # semantic field lets base/IT checkpoints with identical tensor geometry share plans.
 
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
         from emmy.compiler.backend.plan_cache import PlanTemplateCache
         from emmy.compiler.loader.quant import checkpoint_quant_digest
 
-        cfg_dict = model.config.to_dict()
-        for volatile in ("_name_or_path", "transformers_version"):
-            cfg_dict.pop(volatile, None)
-            for sub in cfg_dict.values():
-                if isinstance(sub, dict):
-                    sub.pop(volatile, None)
         pack_key = {
             "kind": "gen-split",
             "model": str(getattr(text_config, "model_type", "gen")),  # label + key; config-derived, path-stable
-            "config_sha": hashlib.sha1(_json.dumps(cfg_dict, sort_keys=True, default=str).encode()).hexdigest()[:16],
+            "config_sha": _program_config_sha(model.config),
             "dtype": dtype_str,
             "decode_bucket": int(decode_bucket or 0),
             "max_tokens": int(max_tokens or 0),

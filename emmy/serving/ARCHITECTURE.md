@@ -499,8 +499,11 @@ Recorded follow-ups, in impact order:
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
   a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
-  the warm boot uses the hub id) and adds `quant_sha`, the loader's digest of the checkpoint's compression
-  declaration. That entry is load-bearing, not defensive: the twin is built from a config **stripped** of its
+  the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy
+  consumed after the forward and cannot change a twin program, so base/IT checkpoints with identical tensor geometry
+  share their weight-independent plans. Architecture and geometry fields remain in the digest. The key also adds
+  `quant_sha`, the loader's digest of the checkpoint's compression declaration. That entry is load-bearing, not
+  defensive: the twin is built from a config **stripped** of its
   compression scheme, so two rungs of one coded conversion — same architecture, different per-tensor rates and
   therefore different coded extents — hash identically on `config_sha` alone and would share one pack, each warm
   overwriting the other's plans. A marked architecture precision rewrite that runs before trellis spelling also adds

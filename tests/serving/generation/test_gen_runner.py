@@ -4,7 +4,36 @@ correctness are covered on GPU by ``test_gen_runner_gpu.py`` / ``test_vllm_plugi
 import numpy as np
 import pytest
 
-from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _static_decode_covers_capacity
+from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _program_config_sha, _static_decode_covers_capacity
+
+
+class _Config:
+    def __init__(self, data):
+        self.data = data
+
+    def to_dict(self):
+        import copy
+
+        return copy.deepcopy(self.data)
+
+
+def test_program_config_identity_ignores_only_generation_eos_policy():
+    base = {
+        "model_type": "gemma4_unified_text",
+        "text_config": {"hidden_size": 3840, "intermediate_size": 15360},
+        "eos_token_id": 1,
+    }
+    instruction = {**base, "eos_token_id": [1, 106]}
+    assert _program_config_sha(_Config(base)) == _program_config_sha(_Config(instruction))
+
+    different_architecture = {**instruction, "model_type": "gemma4_other_text"}
+    assert _program_config_sha(_Config(base)) != _program_config_sha(_Config(different_architecture))
+
+    different_geometry = {
+        **instruction,
+        "text_config": {**instruction["text_config"], "hidden_size": 4096},
+    }
+    assert _program_config_sha(_Config(base)) != _program_config_sha(_Config(different_geometry))
 
 
 def test_pad_rows_pads_with_zeros_and_preserves_real_rows():

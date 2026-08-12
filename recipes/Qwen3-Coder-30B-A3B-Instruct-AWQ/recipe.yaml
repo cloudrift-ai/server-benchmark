@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Coder-specialized MoE, AWQ fits consumer GPU, strong coding benchmarks."
+  rationale: "Coder-specialized MoE in AWQ fits consumer RTX 5090 with strong coding benchmarks."
 
 engine:
   llm:

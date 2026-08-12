@@ -22,7 +22,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "12B multimodal instruction model useful for lightweight consumer GPU workloads."
+  rationale: "12B multimodal instruction model with prebuilt fast-math image for lightweight RTX 5090."
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 
 engine:

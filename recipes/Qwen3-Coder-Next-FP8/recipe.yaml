@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Next-gen coder useful but Qwen3-Coder-30B AWQ covers the consumer tier."
+  rationale: "Next-gen coder useful on Pro6000 for longer context though 30B-A3B covers consumer."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-  rationale: "FP8 variant reduces VRAM significantly vs BF16 with no quality loss."
+  rationale: "FP8 variant enables H200 single-GPU and Pro6000 multi-GPU deployment at lower VRAM."
 
 engine:
   llm:

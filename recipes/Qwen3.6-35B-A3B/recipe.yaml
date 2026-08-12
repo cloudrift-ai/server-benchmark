@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "New flagship MoE, 5.3M HF downloads, top agentic coding benchmarks."
+  rationale: "New flagship MoE with 5.3M HF downloads, top agentic coding benchmarks, multi-hardware coverage."
 
 engine:
   llm:

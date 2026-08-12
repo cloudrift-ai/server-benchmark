@@ -1,9 +1,9 @@
 tags:
-  - obsolete
+  - best-effort
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "google/gemma-4-31B-it supersedes this recipe: Standard Gemma 4-31B-it on same hardware supersedes the Dynamic FP8 variant."
+  rationale: "FP8 dynamic variant retains 262K context advantage over standard gemma-4-31B-it on same hardware."
 
 engine:
   llm:

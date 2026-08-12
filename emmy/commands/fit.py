@@ -23,6 +23,7 @@ import json
 import logging
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from emmy import config, storage
@@ -30,11 +31,11 @@ from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
-from emmy.compiler.pipeline.search.prior.fit import Group, fit_two_stage, topk_table
+from emmy.compiler.pipeline.search.prior.fit import Group
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
-from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES
+from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, LinearModel
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ def _repo_commit() -> str:
 
 
 def handle_fit(args) -> None:
-    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, _PARAM_KEYS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
 
     if args.trainer != "linear" or args.data != "golden":
         raise SystemExit(
@@ -184,36 +185,22 @@ def handle_fit(args) -> None:
     n_dyn = sum(1 for c in cases if c.dynamic)
     logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
 
-    incumbent = storage.read_json(config.offline_path() or _DEFAULT_FILE)
-    if not isinstance(incumbent, dict) or "params" not in incumbent:
+    raw = storage.read_json(config.offline_path() or _DEFAULT_FILE)
+    if not isinstance(raw, dict) or "params" not in raw:
         raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
-    # The fitted scalar params seed from the incumbent; the rest of its params block (``scale``,
-    # rank-neutral) carries through to the artifact unchanged. A pre-2026-08-05 artifact whose block
-    # still lists the retired gate weights simply loses them here — they are linear terms now.
-    seed_params = {n: float(incumbent["params"].get(n, 0.0)) for n in fit_linear.PARAM_NAMES}
-    carried = {k: v for k, v in incumbent["params"].items() if k not in fit_linear.PARAM_NAMES and k in _PARAM_KEYS}
+    # Lenient read (``LinearModel.from_artifact`` does not version-gate): a refit after a featurizer
+    # change is exactly when versions mismatch, and a stale key simply seeds 0.0. A pre-2026-08-05
+    # artifact whose params block still lists the retired gate weights simply loses them here — they
+    # are linear terms now. ``scale`` rides along on the model, rank-neutral and never fitted.
+    incumbent = LinearModel.from_artifact(raw)
 
-    # Full-train: the incumbent process exactly — seeded from the shipped artifact's
-    # weights (lenient read: a refit after a featurizer change is exactly when versions
-    # mismatch, and a stale key simply seeds 0.0). A fit with no dynamic cases carries
-    # the incumbent's dynamic set forward into the shippable model.
-    def full_train_fit(groups, rng):
-        full = fit_two_stage(
-            groups, names, seed_weights=incumbent.get("weights", {}), seed_params=seed_params, rng=rng, samples=args.samples, l2=args.l2
-        )
-        dyn_raw = full.dyn_raw if full.dyn_raw is not None else incumbent.get("weights_dynamic", full.static_raw)
-        dyn_note = f"dynamic {topk_table(full.dyn_ranks)}" if full.dyn_ranks is not None else "carried from incumbent (no dynamic cases)"
-        shipped = fit_linear.TwoStageFit(full.static_raw, full.static_ranks, dyn_raw, full.dyn_ranks, full.params)
-        params_note = ", ".join(f"{k}={v:g}" for k, v in sorted(full.params.items()))
-        return shipped, f"static {topk_table(full.static_ranks)}; {dyn_note}; params {params_note}"
-
-    # Fold-seeding policy lives here (recorded in the header): fold models seed from
-    # ZEROS — the incumbent's weights were fit on every golden, so seeding folds from
-    # them would leak each held-out golden into its own holdout model. The scoring params
-    # seed from the incumbent in both cases: they are two scalars the fold fits re-derive,
-    # not a per-golden memory.
-    def fit_model(groups, rng):
-        return fit_two_stage(groups, names, seed_weights={}, seed_params=seed_params, rng=rng, samples=args.samples, l2=args.l2)
+    # Full-train seeds from the incumbent's weights; fold models seed from ZEROS
+    # (``warm_start=False``) — the incumbent's weights were fit on every golden, so warm-starting a
+    # fold from them would leak each held-out golden into its own holdout model. The scalar params
+    # seed from the incumbent either way: two numbers a fold fit re-derives, not a per-golden memory.
+    # Both policies are recorded in the header below.
+    trainer = fit_linear.LinearTrainer(feature_names=tuple(names), init=incumbent, samples=args.samples, l2=args.l2, random_state=args.seed)
+    fold_trainer = replace(trainer, warm_start=False)
 
     header = {
         "trainer": args.trainer,
@@ -223,25 +210,34 @@ def handle_fit(args) -> None:
         "features": args.features,
         "fold_axes": axes,
         "repo_commit": _repo_commit(),
-        "trainer_params": {"samples": args.samples, "l2": args.l2, "full_train_seed_weights": "incumbent", "fold_seed_weights": "zeros"},
+        "trainer_params": {
+            "samples": args.samples,
+            "l2": args.l2,
+            "objective": trainer.objective.__name__,
+            "full_train_seed_weights": "incumbent",
+            "fold_seed_weights": "zeros",
+        },
     }
     import datetime  # noqa: PLC0415
 
-    metrics, artifact = run_fit(
-        cases,
-        skipped,
-        full_train_fit=full_train_fit,
-        fit_model=fit_model,
-        axes=axes,
-        seed=args.seed,
-        header=header,
-        params=carried,
+    metrics, fit = run_fit(cases, skipped, trainer=trainer, fold_trainer=fold_trainer, axes=axes, header=header)
+
+    # Shipping policy, and the reason ``run_fit`` hands back a fit rather than an artifact: a fit
+    # with no dynamic cases would otherwise ship with no dynamic weight set at all, so carry the
+    # incumbent's forward — loudly, in the provenance notes, never silently.
+    model, notes = fit.model, fit.notes
+    if model.weights_dynamic is None:
+        model = replace(model, weights_dynamic=incumbent.weights_dynamic or model.weights)
+        notes = f"{notes}; dynamic set carried from incumbent"
+    artifact = model.to_artifact(
         provenance={
             "fitted": datetime.date.today().isoformat(),
             "script": "emmy fit",
             "args": {"samples": args.samples, "l2": args.l2, "seed": args.seed},
             "features": args.features,
-        },
+            "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
+            "notes": notes,
+        }
     )
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     storage.write_json(out_dir / "weights.json", artifact, indent=2)

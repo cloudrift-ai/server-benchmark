@@ -113,7 +113,9 @@ in git but cannot be deployed, benchmarked, published, or bundled; a later reass
 maintained or best-effort set. The workflow also creates
 `onboarding`/`untested` shells up to the three-shell total, removes superseded `plans/onboard-*.md` files, commits the
 lifecycle update to the rolling branch, and refreshes its PR body and labels through the GitHub API on every run. It
-never rents a VM and does not require the GitHub CLI on the self-hosted runner.
+never rents a VM and does not require the GitHub CLI on the self-hosted runner. Discovery uses a bounded research
+prompt and a workflow-specific model-turn cap so the manifest is written before the agent transcript reaches the
+inference endpoint's context ceiling.
 
 ## Credentials, VM ownership, and cleanup
 

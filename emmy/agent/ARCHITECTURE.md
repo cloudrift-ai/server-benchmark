@@ -14,7 +14,8 @@ workspace. Writes stay inside that workspace except for paths explicitly named w
 web responses, redirects, extracted text, individual tool results, and retained message history all have fixed
 bounds. Public fetches reject credentials in URLs and every address that is not globally routable. An empty terminal
 assistant message is not a successful result; the runner asks for the requested final response again within the same
-bounded turn budget.
+bounded turn budget. Retained history stays below the response endpoint's practical context ceiling; older complete
+assistant/tool groups are dropped together, so a tool result is never separated from the call that produced it.
 
 Tool descriptions and JSON schemas live beside their handlers in `runner.py`, which is the single source of truth.
 `emmy agent tools` serializes a detached copy of those definitions as JSON for inspection or integration; there is no

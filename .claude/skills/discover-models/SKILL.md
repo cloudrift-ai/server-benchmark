@@ -32,6 +32,8 @@ scripts/new_models.py  →  per-model news/hype search  →  rank by demand  →
 Use **survey mode** for an interactive shortlist or hardware matrix. Use **lifecycle mode** when the prompt requests
 `maintained_models`, `best_effort_models`, `obsolete_models`, and `onboarding_models` JSON for repository automation.
 The prompt owns the exact maintained-set size and target hardware; do not ask follow-up questions in lifecycle mode.
+Keep lifecycle research bounded by the prompt. Prefer repository inventory and a few targeted searches over an
+exhaustive survey, and write the required manifest as soon as the conservative partition is supported.
 
 For survey mode, ask only if the user has not already implied it:
 

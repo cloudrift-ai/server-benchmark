@@ -547,13 +547,14 @@ must arrive through a one-use mode-`0600` file or inherited file descriptor and 
 ```bash
 emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
   --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json \
-  --max-output-tokens 4096 --force-final-turn 8
+  --max-output-tokens 4096 --force-final-turn 8 --disable-thinking
 emmy agent tools --output /tmp/emmy-agent-tools.json
 ```
 
 Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
 from the same definitions the runner sends to the model. The optional force-final turn disables tools once so the
-model produces the durable output with evidence already gathered; `--max-turns` remains the hard limit. See
+model produces the durable output with evidence already gathered; an empty forced result fails. `--disable-thinking`
+requests the endpoint's concise chat-template mode for structured tasks. `--max-turns` remains the hard limit. See
 `emmy/agent/ARCHITECTURE.md` for the security and workflow-ownership boundary.
 
 ### `emmy fit`

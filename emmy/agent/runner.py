@@ -147,6 +147,7 @@ class AgentRun:
     allow_write: tuple[Path, ...] = ()
     max_turns: int = 160
     force_final_turn: int | None = None
+    disable_thinking: bool = False
     max_output_tokens: int = 8192
     request_timeout: float = 600
     api_key_file: Path | None = None
@@ -473,11 +474,14 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
         "temperature": 0.1,
         "max_tokens": args.max_output_tokens,
     }
+    if args.disable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(args.request_timeout, connect=30)) as client:
         for turn in range(1, args.max_turns + 1):
             payload["tool_choice"] = "auto"
-            if turn == args.force_final_turn:
+            force_final = turn == args.force_final_turn
+            if force_final:
                 messages.append({"role": "user", "content": FORCE_FINAL_REMINDER})
                 payload["tool_choice"] = "none"
             messages = _compact_messages(messages)
@@ -491,6 +495,8 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
             if not tool_calls:
                 final = message.get("content") or ""
                 if not final.strip():
+                    if force_final:
+                        raise RuntimeError("The inference endpoint returned an empty forced final response")
                     messages.append(
                         {
                             "role": "user",

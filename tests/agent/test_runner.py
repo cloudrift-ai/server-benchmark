@@ -149,13 +149,47 @@ async def test_run_can_force_the_final_response(monkeypatch, tmp_path):
             workspace=tmp_path,
             max_turns=2,
             force_final_turn=2,
+            disable_thinking=True,
             api_key_file=key,
         )
     )
 
     assert payloads[1]["messages"][-1] == {"role": "user", "content": runner.FORCE_FINAL_REMINDER}
     assert payloads[1]["tool_choice"] == "none"
+    assert payloads[1]["chat_template_kwargs"] == {"enable_thinking": False}
     assert output.read_text() == '{"complete": true}\n'
+
+
+async def test_run_rejects_an_empty_forced_final_response(monkeypatch, tmp_path):
+    skill = tmp_path / "SKILL.md"
+    prompt = tmp_path / "prompt.md"
+    output = tmp_path / "result.txt"
+    key = tmp_path / "key"
+    skill.write_text("# Test skill\n")
+    prompt.write_text("Return JSON.\n")
+    key.write_text("secret\n")
+    key.chmod(0o600)
+
+    async def complete(_client, _endpoint, _api_key, _payload):
+        return {"role": "assistant", "content": ""}
+
+    monkeypatch.setattr(runner, "_completion", complete)
+
+    with pytest.raises(RuntimeError, match="empty forced final response"):
+        await runner.run(
+            runner.AgentRun(
+                skill=skill,
+                prompt=prompt,
+                model="test-model",
+                output=output,
+                workspace=tmp_path,
+                max_turns=1,
+                force_final_turn=1,
+                api_key_file=key,
+            )
+        )
+
+    assert not output.exists()
 
 
 async def test_completion_retries_a_transient_server_error(monkeypatch):

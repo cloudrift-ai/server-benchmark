@@ -67,7 +67,8 @@ reasoning wrapper around the JSON object, but requires exactly the four expected
 their contents. The runner disables tools at discovery's result turn and writes the agent's final content to the
 temporary manifest path; the agent cannot write recipe changes itself. The repository validator remains the
 authoritative completion gate. This forced final response occurs before the hard turn limit so bounded research yields
-a manifest instead of consuming the remaining calls on additional exploration.
+a manifest instead of consuming the remaining calls on additional exploration. Discovery disables the model's
+chat-template thinking mode for this concise JSON result, and an empty forced response fails the run.
 
 The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
 public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,
@@ -123,7 +124,7 @@ rents a VM. Discovery uses a bounded research prompt and a workflow-specific mod
 before the agent transcript reaches the inference endpoint's context ceiling. The lifecycle script pre-renders one
 compact inventory of recipe identity, lifecycle, rationale, task, and deployment setups into the prompt rather than
 making the agent load complete serving configurations, and the shared runner retains only a bounded recent history.
-Discovery reserves 4,096 output tokens because its only durable model output is the atomic manifest; onboarding
+Discovery reserves 3,072 output tokens because its only durable model output is the atomic manifest; onboarding
 retains the larger general-purpose runner default.
 
 ## Credentials, VM ownership, and cleanup

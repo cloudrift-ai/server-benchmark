@@ -289,11 +289,11 @@ jobs:
             -u GOOGLE_APPLICATION_CREDENTIALS \
             -u GCP_SERVICE_ACCOUNT \
             opencode run \
+              "Complete the attached onboarding task exactly." \
               --agent onboard-model \
               --model cloudrift/agent \
               --format json \
-              --file "$AGENT_PROMPT" \
-              "Complete the attached onboarding task exactly." > "$AGENT_EVENTS"
+              --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
           agent_status=$?
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \

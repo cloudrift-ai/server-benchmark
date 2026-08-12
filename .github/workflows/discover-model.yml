@@ -218,11 +218,11 @@ jobs:
           PY
           set +e
           opencode run \
+            "Complete the attached lifecycle task exactly." \
             --agent discover-models \
             --model cloudrift/agent \
             --format json \
-            --file "$AGENT_PROMPT" \
-            "Complete the attached lifecycle task exactly." > "$AGENT_EVENTS"
+            --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
           agent_status=$?
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \

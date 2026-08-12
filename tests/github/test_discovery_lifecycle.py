@@ -16,6 +16,21 @@ SPEC.loader.exec_module(discovery_lifecycle)
 GPU = "NVIDIA H200 141GB"
 
 
+@pytest.mark.parametrize(
+    ("workflow", "message"),
+    [
+        ("discover-model.yml", '"Complete the attached lifecycle task exactly."'),
+        ("onboard-model.yml", '"Complete the attached onboarding task exactly."'),
+    ],
+)
+def test_opencode_message_precedes_variadic_file_option(workflow, message):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text())
+    scripts = [step.get("run", "") for job in document["jobs"].values() for step in job["steps"]]
+    script = next(script for script in scripts if "opencode run" in script)
+
+    assert script.index(message) < script.index('--file "$AGENT_PROMPT"')
+
+
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1):
     path = workspace / "recipes" / name / "recipe.yaml"
     path.parent.mkdir(parents=True)

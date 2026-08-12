@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Small embedding model useful for lightweight retrieval on consumer GPUs."
+  rationale: "Lightweight embedding model useful for edge deployments alongside 8B."
   task: embed
 
 engine:

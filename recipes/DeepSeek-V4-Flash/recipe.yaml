@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Flagship open model, strong arena Elo, efficient FP8 deployment on 2×H200."
+  rationale: "Flagship open model, SOTA reasoning, FP8 efficient on 2xH200 serving value."
 
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).

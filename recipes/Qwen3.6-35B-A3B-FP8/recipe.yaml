@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "FP8 quant of 35B MoE useful for Pro6000/A100/H200 deployment flexibility."
+  rationale: "FP8 quant of maintained 35B MoE provides useful Pro6000/H200 flexibility."
 
 engine:
   llm:

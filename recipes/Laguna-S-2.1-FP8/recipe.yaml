@@ -4,7 +4,7 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Strong instruction-following, proven FP8 quant, valuable for serving workloads."
+  rationale: "Strongest local agentic coder at 120B, HF trending, unique FP8 KV cache."
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 

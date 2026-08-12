@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "google/gemma-4-31B-it supersedes this recipe: Dynamic FP8 on 1×H200 vs standard 31B-it on same hardware; standard variant has no quality disadvantage."
+  rationale: "google/gemma-4-31B-it supersedes this recipe: Standard Gemma 4-31B-it on same hardware supersedes the Dynamic FP8 variant."
 
 engine:
   llm:

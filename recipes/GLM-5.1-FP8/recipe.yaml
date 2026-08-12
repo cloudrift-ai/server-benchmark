@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Top-tier Chinese/English model, strong benchmarks, efficient FP8 on 8×H200."
+  rationale: "SWE-Bench Pro leader, top agentic engineering, strong coding and long context."
 
 engine:
   llm:

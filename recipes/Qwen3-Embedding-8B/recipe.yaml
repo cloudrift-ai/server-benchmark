@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "High-quality embedding model, fits consumer GPUs, strong retrieval performance."
+  rationale: "Maintained emmy embedding plugin benchmark for serving kernel validation."
   task: embed
 
 engine:

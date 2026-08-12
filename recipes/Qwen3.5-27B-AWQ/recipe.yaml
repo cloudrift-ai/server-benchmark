@@ -24,7 +24,7 @@ model:
   # build uses real `quant_method="awq"`, group_size=128, dense 27B with Gated DeltaNet
   # + Gated Attention. That AWQ path is the one 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.5-27B-AWQ"
-  rationale: "AWQ quant of 27B model useful for low-VRAM deployment on V100."
+  rationale: "AWQ quant of Qwen3.5 27B useful for deprecated V100 fleet serving."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Google's strong 31B model, solid benchmarks, fits 1×H200 efficiently."
+  rationale: "Google 31B multimodal, 9.9M HF downloads, strong reasoning and vision."
 
 engine:
   llm:

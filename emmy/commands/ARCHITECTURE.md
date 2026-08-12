@@ -429,10 +429,10 @@ stores its redacted copy beside the result, and evaluates every regular expressi
 required match, or a forbidden match fails the task while preserving the benchmark and gate verdict.
 
 Command recipes receive the same fail-closed status. Their JSON result records the rendered command, exit code,
-timing, system information, and the content-addressed staged-source manifest; `command.require_clean_stage` rejects
-dirty selected paths before transfer. Result-file collection still runs after a nonzero command so partial evidence
-is retained, and later matrix tasks continue. `command.require_result_files` makes a missing or failed artifact
-transfer authoritative, while `command.require_provenance` requires source, GPU, and CUDA-compiler records.
+timing, system information, and the content-addressed staged-source manifest. `command.strict` rejects dirty selected
+paths before transfer, makes every declared artifact authoritative, and requires source, GPU, and CUDA-compiler
+provenance. Result-file collection still runs after a nonzero command so partial evidence is retained, and later
+matrix tasks continue.
 
 ```bash
 emmy bench recipes/*                                    # All recipes

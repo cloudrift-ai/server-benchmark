@@ -7,9 +7,7 @@ command:
     - requirements.txt
     - Makefile
     - experiments/golden-bench-2026/kernels/recipe.yaml
-  require_clean_stage: true
-  require_result_files: true
-  require_provenance: true
+  strict: true
   run: |
     set -uo pipefail
     export PATH=/usr/local/cuda/bin:$$PATH
@@ -52,10 +50,6 @@ command:
     devices="$gpu_device_ids"
     first_device=$${devices%%,*}
 
-    if [ "$optional_backend" = "hidet" ]; then
-      ./venv/bin/pip install "hidet==0.6.1" || true
-    fi
-
     trace_args=(
       ./venv/bin/emmy trace "$model_ref" --layer "$layer" --seq-len "$seq_len"
       --model-provenance "$model_ref" --output $task_dir/working.yaml
@@ -86,20 +80,11 @@ command:
     if [ "$$trace_status" -ne 0 ]; then
       verification_status=$$trace_status
       echo "verification skipped because tracing failed" | tee $task_dir/verification.log
-    elif [ "$verification_mode" = "cold-greedy" ]; then
-      CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
-        --golden-file $task_dir/working.yaml --verify-working-golden cold-greedy \
-        --process-repeats 5 --verification-dir $task_dir/verification --warmup 10 --iters 100 \
-        2>&1 | tee $task_dir/verification.log || verification_status=$$?
     elif [ "$$tune_status" -eq 0 ]; then
       verify_args=(
-        ./venv/bin/emmy run --golden-file $task_dir/working.yaml --verify-working-golden tune-winners
-        --process-repeats 5 --verification-dir $task_dir/verification --warmup 10 --iters 100
-        --bench-backends eager,tcompile,emmy
+        ./venv/bin/emmy run --golden-file $task_dir/working.yaml --all --repeats 5 --bench --strict
+        --json $task_dir/verification --warmup 10 --iters 100 --bench-backends eager,tcompile,emmy
       )
-      if [ "$optional_backend" = "hidet" ]; then
-        verify_args+=(--bench-backends eager,tcompile,hidet,emmy --optional-bench-backend hidet)
-      fi
       if [ "$required_kernel_source" != "none" ]; then
         verify_args+=(--require-kernel-source "$required_kernel_source")
       fi
@@ -132,7 +117,6 @@ matrices:
       budget: 12
       patience: 4
       seed: 0
-      verification_mode: tune-winners
       input_dtype: none
       required_kernel_source: none
       fp8_mma: 0
@@ -145,7 +129,6 @@ matrices:
           - "NVIDIA H200 141GB"
           - "NVIDIA B200"
         deploy.gpu_count: 1
-        optional_backend: [none, none, none, none, hidet, none]
 
   # Native W8A8 FP8 extension: identical checkpoint-derived contraction targets on FP8-capable GPUs.
   - cross:
@@ -156,11 +139,9 @@ matrices:
       budget: 12
       patience: 4
       seed: 0
-      verification_mode: tune-winners
       input_dtype: f8e4m3
       required_kernel_source: 'mma\.sync\.aligned\.m16n8k32'
       fp8_mma: 1
-      optional_backend: none
       zip:
         deploy.gpu:
           - "NVIDIA GeForce RTX 4090"
@@ -178,11 +159,9 @@ matrices:
       budget: 8
       patience: 3
       seed: 0
-      verification_mode: tune-winners
       input_dtype: f8e4m3
       required_kernel_source: 'mma\.sync\.aligned\.m16n8k32'
       fp8_mma: 1
-      optional_backend: none
       zip:
         deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
         deploy.gpu_count: 1
@@ -196,8 +175,6 @@ matrices:
       budget: 8
       patience: 3
       seed: 0
-      verification_mode: tune-winners
-      optional_backend: none
       input_dtype: none
       required_kernel_source: none
       fp8_mma: 0
@@ -214,8 +191,6 @@ matrices:
       budget: 12
       patience: 4
       seed: [0, 1, 2]
-      verification_mode: tune-winners
-      optional_backend: none
       input_dtype: none
       required_kernel_source: none
       fp8_mma: 0
@@ -231,11 +206,9 @@ matrices:
       budget: 12
       patience: 4
       seed: [0, 1, 2]
-      verification_mode: tune-winners
       input_dtype: f8e4m3
       required_kernel_source: 'mma\.sync\.aligned\.m16n8k32'
       fp8_mma: 1
-      optional_backend: none
       deploy.gpu: "NVIDIA H200 141GB"
       deploy.gpu_count: 1
 
@@ -245,7 +218,6 @@ matrices:
     layer: 0
     seq_len: 512
     seed: 0
-    optional_backend: none
     input_dtype: none
     required_kernel_source: none
     fp8_mma: 0
@@ -254,4 +226,3 @@ matrices:
     zip:
       budget: [0, 4, 12, 48]
       patience: [0, 4, 4, 12]
-      verification_mode: [cold-greedy, tune-winners, tune-winners, tune-winners]

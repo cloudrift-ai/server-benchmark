@@ -23,19 +23,20 @@ def _kernel_tasks(project_root: str, study: str):
 
 def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     platforms = {
-        "NVIDIA Tesla V100 SXM3 32GB": (1, "none"),
-        "NVIDIA A100 80GB": (1, "none"),
-        "NVIDIA GeForce RTX 4090": (1, "none"),
-        "NVIDIA GeForce RTX 5090": (1, "none"),
-        "NVIDIA H200 141GB": (1, "hidet"),
-        "NVIDIA B200": (1, "none"),
+        "NVIDIA Tesla V100 SXM3 32GB",
+        "NVIDIA A100 80GB",
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA GeForce RTX 5090",
+        "NVIDIA H200 141GB",
+        "NVIDIA B200",
     }
     recipe_dir = _experiment(project_root, "kernels")
     recipe = load_recipe(recipe_dir)
     tasks = _kernel_tasks(project_root, "common")
     assert recipe.kind == "command"
     assert len(tasks) == len(platforms) * 2
-    assert {task.recipe.deploy.gpu: (task.recipe.deploy.gpu_count, task.variant.params["optional_backend"]) for task in tasks} == platforms
+    assert {task.recipe.deploy.gpu for task in tasks} == platforms
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
     assert {task.variant.params["model_ref"] for task in tasks} == {"Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca"}
     assert all(task.variant.params["budget"] == 12 for task in tasks)
@@ -45,8 +46,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
-    assert "--verify-working-golden tune-winners" in run
-    assert 'pip install "hidet==0.6.1"' in run
+    assert "--all --repeats 5 --bench --strict" in run
     assert "scripts/" not in run
     assert recipe.command.stage == [
         "emmy",
@@ -55,9 +55,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "Makefile",
         "experiments/golden-bench-2026/kernels/recipe.yaml",
     ]
-    assert recipe.command.require_clean_stage is True
-    assert recipe.command.require_result_files is True
-    assert recipe.command.require_provenance is True
+    assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
     assert "pip freeze --all" in run
     assert "tar -C $task_dir" in run
@@ -243,7 +241,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
             build_substitution_map(task.variant, list(range(8)), "/repo", "/task"),
         )
         assert "--loop-targets" not in command
-        assert "--verify-working-golden tune-winners" in command
+        assert "--all --repeats 5 --bench --strict" in command
         assert "--bench-backends eager,tcompile,emmy" in command
 
 
@@ -262,13 +260,7 @@ def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
     assert all(task.variant.params["input_dtype"] == "f8e4m3" for task in fp8_tasks)
 
 
-def test_h200_independent_compiler_and_search_ablation_are_executable(project_root) -> None:
-    common_dir = _experiment(project_root, "kernels")
-    common = load_recipe(common_dir).command.run
-    h200 = next(task for task in _kernel_tasks(project_root, "common") if task.recipe.deploy.gpu == "NVIDIA H200 141GB")
-    assert 'pip install "hidet==0.6.1"' in common
-    assert h200.variant.params["optional_backend"] == "hidet"
-
+def test_search_ablation_is_executable(project_root) -> None:
     tasks = _kernel_tasks(project_root, "search-ablation")
     assert len(tasks) == 4
     assert {(task.variant.params["budget"], task.variant.params["patience"]) for task in tasks} == {
@@ -277,8 +269,7 @@ def test_h200_independent_compiler_and_search_ablation_are_executable(project_ro
         (12, 4),
         (48, 12),
     }
-    cold = next(task for task in tasks if task.variant.params["budget"] == 0)
-    assert cold.variant.params["verification_mode"] == "cold-greedy"
+    assert all("--all --repeats 5 --bench --strict" in task.recipe.command.run for task in tasks)
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 

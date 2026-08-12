@@ -56,20 +56,17 @@ content-addressed file manifest, package freeze, GPU UUID/state, driver, CUDA co
 checkpoint, and raw tuning artifacts. Every matrix row is a separate task, so a failed case preserves its partial
 evidence and does not prevent later rows from running.
 
-The directly searched winner must match its measured knob map exactly. `emmy run --verify-working-golden` launches
-five fresh processes at
+The directly searched winner must match its measured knob map exactly. `emmy run --all --strict --repeats 5`
+launches five fresh processes at
 deployable `-O3`, with 10 warmups and 100 measured iterations. It records the exact searched winner and deploy-path
 Emmy timing and compares with eager PyTorch and Inductor. Inductor uses the installed PyTorch equivalent of
-`mode="max-autotune"`: max autotune, coordinate-descent tuning, and CUDA graphs are all enabled before process start.
+`mode="max-autotune"` with `fullgraph=True`.
 Inductor must compile the full graph and match eager output on the same inputs before its latency is accepted. Any
 failed, ambiguous, unmatched, uncaptured, or non-whole-program winner fails after archiving diagnostics.
 
 Report per-kernel latency distributions and a per-platform geometric mean over the identical common corpus. Report
 the three-seed convergence distribution separately. Do not pool platforms or count the large-layer supplement in the
-headline mean. Eager PyTorch supplies the framework/vendor-library reference; Inductor is the all-platform compiler
-comparison. Hidet 0.6.1 with search space 2 is an independent compiler comparison on the H200 common corpus. It also
-must compile the full graph and match eager output. Keep all traced targets in its denominator and report unsupported
-or failed targets instead of dropping them.
+headline mean. Eager PyTorch supplies the framework/vendor-library reference; Inductor is the compiler comparison.
 
 The `search-ablation` tasks execute the only search ablation: cold deploy greedy (budget zero), bounded budgets 4 and
 12, and budget 48 with patience 12, all on the sequence-512 common family. Budget zero runs before tuning in fresh
@@ -86,12 +83,10 @@ paired ratios. The per-platform headline is `exp(mean(log(r[t,b])))` over the fi
 weighted once. Do not pool platforms or weight by runtime.
 
 Eager, Inductor, and the exact Emmy winner must succeed with the frozen timing/correctness semantics for every traced
-common target. The verifier runs `--strict-correctness`: deploy Emmy and every exact O3 winner must match eager on the
+common target. `run --strict` requires deploy Emmy and every exact O3 winner to match eager on the
 same deterministic inputs at `rtol=atol=1e-3`, with max/mean/relative errors recorded. Otherwise that platform is
 incomplete: publish its failures and coverage denominator, but publish no headline geometric mean or superiority
-claim. Hidet is explicitly conditional coverage; report its successful/total
-count and a common-support geometric mean without treating missing targets as wins. Descriptive win/tie/loss uses
-`r > 1.02`, `0.98 <= r <= 1.02`, and `r < 0.98`.
+claim. Descriptive win/tie/loss uses `r > 1.02`, `0.98 <= r <= 1.02`, and `r < 0.98`.
 
 Report all five paired ratios, the target median and range, and a two-stage percentile bootstrap interval for the
 platform geometric mean: resample targets, then the five paired process repeats within each sampled target, for
@@ -191,7 +186,6 @@ fix, restart the entire 40-task matrix under a new source ID.
   declaration digest, and requires native W8A8 instruction evidence in every exact winner.
 - The FP8 large-layer table is supplemental and includes all retained targets from the one pinned Qwen3-32B layer;
   it is not pooled into the portable FP8 geometric mean.
-- The H200 Hidet table uses the identical common targets and counts every missing/failed target against coverage.
 - The H200 convergence diagnostic reports all three seeds, including failures.
 - Every serving image is resolved to a digest in the evidence manifest; the private V100 recipe tag must be resolved
   on the authorized host before publication.

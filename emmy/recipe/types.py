@@ -296,6 +296,10 @@ class Recipe:
         command = None
         cmd_dict = d.get("command")
         if cmd_dict is not None:
+            removed_strict_fields = {"require_clean_stage", "require_result_files", "require_provenance"} & cmd_dict.keys()
+            if removed_strict_fields:
+                names = ", ".join(sorted(removed_strict_fields))
+                raise ValueError(f"command fields {names} were replaced by the single 'strict' field")
             command = CommandConfig(
                 stage=list(cmd_dict.get("stage", [])),
                 run=cmd_dict.get("run", ""),

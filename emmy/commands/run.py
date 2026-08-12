@@ -160,39 +160,23 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument(
-        "--verify-working-golden",
-        choices=["tune-winners", "cold-greedy"],
+        "--all",
+        dest="all_targets",
+        action="store_true",
         help=(
-            "Verify every target in --golden-file in fresh processes. ``tune-winners`` exact-pins each directly "
-            "searched winner; ``cold-greedy`` gives every repeat empty local DB, online, and cubin state."
+            "Run every target in --golden-file in a fresh process. Replays the one direct tune winner per target "
+            "when present; otherwise uses isolated empty local evidence. With --all, --json names an output directory."
         ),
     )
-    parser.add_argument(
-        "--process-repeats",
-        type=int,
-        default=5,
-        help="Fresh process count for --verify-working-golden (default: 5).",
-    )
-    parser.add_argument(
-        "--verification-dir",
-        type=Path,
-        help="Output directory for --verify-working-golden JSON evidence.",
-    )
-    parser.add_argument(
-        "--optional-bench-backend",
-        action="append",
-        default=[],
-        choices=["hidet"],
-        help="Requested working-golden backend that is recorded as unsupported instead of failing the sweep.",
-    )
+    parser.add_argument("--repeats", type=int, default=1, help="Fresh process count for --all (default: 1).")
     parser.add_argument(
         "--require-kernel-source",
         action="append",
         default=[],
         metavar="REGEX",
         help=(
-            "With --verify-working-golden tune-winners, require every exact winner to contain a generated CUDA "
-            "kernel matching REGEX (repeatable). Match verdicts and source hashes are stored in the A/B evidence."
+            "With --strict, require the deployed or exact-pinned program to contain a generated CUDA kernel matching "
+            "REGEX (repeatable). Match verdicts and source hashes are stored in --json."
         ),
     )
     parser.add_argument(

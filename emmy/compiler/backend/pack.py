@@ -59,8 +59,8 @@ def _environment() -> dict:
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
         F16_MMA_F32_ACC,
-        F16_REDUCE_F32_ACC,
         FAST_EXP,
+        FP8_MMA,
         precision_pin,
     )
 
@@ -69,7 +69,7 @@ def _environment() -> dict:
         "arch": nvcc.device_arch(False),
         "toolkit": nvcc._toolkit_tag(),
         "nvcc_flags": nvcc.effective_flags(),
-        "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC, F16_REDUCE_F32_ACC)},
+        "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)},
     }
 
 

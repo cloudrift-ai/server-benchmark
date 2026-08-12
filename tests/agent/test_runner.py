@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 
@@ -178,6 +179,35 @@ async def test_completion_retries_a_transient_server_error(monkeypatch):
 
     assert message["content"] == "complete"
     assert sleeps == [1]
+
+
+async def test_run_enforces_request_timeout_as_a_wall_clock_deadline(monkeypatch, tmp_path):
+    skill = tmp_path / "SKILL.md"
+    prompt = tmp_path / "prompt.md"
+    output = tmp_path / "result.txt"
+    key = tmp_path / "key"
+    skill.write_text("# Test skill\n")
+    prompt.write_text("Finish.\n")
+    key.write_text("secret\n")
+    key.chmod(0o600)
+
+    async def complete(*_args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner, "_completion", complete)
+
+    with pytest.raises(RuntimeError, match="did not complete within 0.01 seconds"):
+        await runner.run(
+            runner.AgentRun(
+                skill=skill,
+                prompt=prompt,
+                model="test-model",
+                output=output,
+                workspace=tmp_path,
+                request_timeout=0.01,
+                api_key_file=key,
+            )
+        )
 
 
 def test_tool_environment_removes_cloud_and_github_credentials(monkeypatch):

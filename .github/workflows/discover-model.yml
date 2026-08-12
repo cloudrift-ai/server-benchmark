@@ -172,7 +172,7 @@ jobs:
             --output "$AGENT_MANIFEST" \
             --max-turns 48 \
             --force-final-turn 2 \
-            --max-output-tokens 4096 \
+            --max-output-tokens 3072 \
             --request-timeout 180
           agent_status=$?
           set -e

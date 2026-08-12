@@ -482,7 +482,10 @@ credentials, keep changes scoped, and clean exploratory output before finishing.
                 payload["tool_choice"] = "none"
             messages = _compact_messages(messages)
             payload["messages"] = messages
-            message = await _completion(client, args.endpoint, api_key, payload)
+            try:
+                message = await asyncio.wait_for(_completion(client, args.endpoint, api_key, payload), timeout=args.request_timeout)
+            except TimeoutError as exc:
+                raise RuntimeError(f"Inference endpoint did not complete within {args.request_timeout:g} seconds") from exc
             tool_calls = message.get("tool_calls") or []
             messages.append(message)
             if not tool_calls:

@@ -22,7 +22,8 @@ small atomic result. A caller can use `--force-final-turn` to append one user me
 the resulting assistant content is written through the normal final-output path. Later turns return to automatic tool
 selection if the model returns an empty response, and the maximum turn count remains the hard limit. HTTP failures
 include a bounded response detail in the runner error so endpoint validation failures remain actionable. Rate limits
-and server errors get three bounded attempts before the runner reports that error.
+and server errors get three bounded attempts before the runner reports that error. `--request-timeout` is a wall-clock
+deadline for one completion, including a response that continues streaming data.
 
 Tool descriptions and JSON schemas live beside their handlers in `runner.py`, which is the single source of truth.
 `emmy agent tools` serializes a detached copy of those definitions as JSON for inspection or integration; there is no

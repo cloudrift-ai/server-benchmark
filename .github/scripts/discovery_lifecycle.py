@@ -93,9 +93,8 @@ def _resolve_existing_model_id(value: object, records: dict[str, dict]) -> objec
         return value
     if value in records:
         return value
-    if "/" in value:
-        return value
-    matches = [model_id for model_id in records if model_id.rsplit("/", 1)[-1] == value]
+    checkpoint = value.rsplit("/", 1)[-1]
+    matches = [model_id for model_id in records if model_id.rsplit("/", 1)[-1] == checkpoint]
     return matches[0] if len(matches) == 1 else value
 
 

@@ -357,14 +357,15 @@ def test_unknown_maintained_model_is_rejected(tmp_path):
         discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
 
 
-def test_unique_bare_checkpoint_name_in_maintained_set_is_normalized(tmp_path):
+@pytest.mark.parametrize("selected", ["ready", "wrong-org/ready"])
+def test_unique_checkpoint_name_in_maintained_set_is_normalized(tmp_path, selected):
     _recipe(tmp_path, "ready", "org/ready")
     selection = tmp_path / "selection.json"
-    _manifest(selection, ["ready"])
+    _manifest(selection, [selected])
 
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path, 1)
 
-    assert manifest["maintained_models"] == [_decision("org/ready", "Rationale for ready.")]
+    assert manifest["maintained_models"] == [_decision("org/ready", f"Rationale for {selected}.")]
 
 
 def test_rejects_duplicate_lifecycle_classification(tmp_path):

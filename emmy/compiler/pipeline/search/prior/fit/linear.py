@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -76,19 +77,25 @@ def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
     return float(np.sum((w / sd) ** 2))
 
 
-def objective(ranks: list[int]) -> float:
-    # Mean log2(rank+1) over the cases, unweighted: rewards pushing every golden up, dominated
-    # by the worst offenders. Lower is better. Cases count ONE each — the retired ``1/count(tier)``
-    # weighting gave every tier an equal share of the loss regardless of size, so with 396 warp
-    # against 13 thread cases a single fp32 golden outweighed 30 fp16 ones (and on a single-tier
-    # slice one case could carry half the loss). Its comment justified that by "fp16 warp is only
-    # ~7/32 cases" — a ratio that inverted long ago.
+def mean_log_rank(ranks: list[int]) -> float:
+    """The default fit loss: mean ``log2(rank+1)`` over the cases, unweighted. Lower is better.
+
+    Rewards pushing every golden up and is dominated by the worst offenders. Cases count ONE each —
+    the retired ``1/count(tier)`` weighting gave every tier an equal share of the loss regardless of
+    size, so with 396 warp against 13 thread cases a single fp32 golden outweighed 30 fp16 ones (and
+    on a single-tier slice one case could carry half the loss). Its comment justified that by "fp16
+    warp is only ~7/32 cases" — a ratio that inverted long ago.
+
+    Any ``list[int] -> float`` may replace it via :attr:`LinearTrainer.objective`; the fit records
+    which one it ran under, since two fits are only comparable under the same loss."""
     return float(sum(math.log2(r + 1) for r in ranks) / len(ranks))
 
 
-def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng, samples, l2=DEFAULT_L2, fit_params=True):
+def fit_weights(
+    groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng, samples, l2=DEFAULT_L2, fit_params=True, objective=mean_log_rank
+):
     """Random-search + coordinate-descent the deployed scoring function over ``groups``, minimizing
-    ``objective + l2 * l2_penalty`` (the golden rank plus the raw-space L2 — see :data:`DEFAULT_L2`
+    ``objective + l2 * l2_penalty`` (the ranking loss plus the raw-space L2 — see :data:`DEFAULT_L2`
     for why the loss carries the penalty).
 
     The optimized quantity is :func:`quality_rows` — the linear weights AND the atomic-free
@@ -228,37 +235,139 @@ class TwoStageFit:
         )
 
 
-def fit_two_stage(
-    groups: list[Group], names, *, seed_weights: dict[str, float], seed_params: dict[str, float], rng, samples: int, l2: float = DEFAULT_L2
-) -> TwoStageFit:
-    """The incumbent trainer's full chaining as one call: a static fit over the
-    non-``dyn`` groups seeded from the ``seed_weights`` raw dict (zeros where a name is
-    absent — an empty dict seeds from zero), then the dynamic fit over the ``dyn``
-    groups seeded from the static result in its z-space (``sd_ref`` chaining). ``rng``
-    is consumed sequentially by both stages, matching the script's draw order. The
-    static group list must be non-empty (the dynamic stage seeds from it) — callers
-    guard, this function does not.
+def _fit_stages(groups, names, *, seed_weights, seed_params, rng, samples, l2, objective):
+    """The static→dynamic chaining: a static fit over the non-dynamic groups seeded from the
+    ``seed_weights`` raw dict (zeros where a name is absent — an empty dict seeds from zero), then
+    the dynamic fit over the dynamic groups seeded from the static result in its z-space (``sd_ref``
+    chaining). ``rng`` is consumed sequentially by both stages. The static group list must be
+    non-empty (the dynamic stage seeds from it) — callers guard, this does not.
 
     The scalar params (:data:`PARAM_NAMES`, seeded from ``seed_params``) are fitted by the STATIC
     stage and frozen for the dynamic one: the artifact carries a single params block that both
-    weight sets score under, so the dynamic weights must be fit against the pair that will deploy."""
+    weight sets score under, so the dynamic weights must be fit against the pair that will deploy.
+
+    Returns ``(static_raw, dyn_raw, fitted_params, static_ranks, dyn_ranks)``, with the dynamic
+    entries ``None`` when the input had no dynamic groups."""
     static_groups = [g for g in groups if not g.dynamic]
     dyn_groups = [g for g in groups if g.dynamic]
     seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
     seed_p = np.array([seed_params[n] for n in PARAM_NAMES])
     logger.info("== static fit (%d cases) ==", len(static_groups))
     static_w, params, static_ranks, _, static_sd = fit_weights(
-        static_groups, names, np.ones(len(names)), seed_w=seed_raw, seed_params=seed_p, rng=rng, samples=samples, l2=l2
+        static_groups, names, np.ones(len(names)), seed_w=seed_raw, seed_params=seed_p, rng=rng, samples=samples, l2=l2, objective=objective
     )
     fitted = {n: float(v) for n, v in zip(PARAM_NAMES, params, strict=True)}
     static_raw = raw_weights(names, static_w, static_sd)
     if not dyn_groups:
-        return TwoStageFit(static_raw, static_ranks, None, None, fitted)
+        return static_raw, None, fitted, static_ranks, None
     logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
     dyn_w, _, dyn_ranks, _, dyn_sd = fit_weights(
-        dyn_groups, names, static_sd, seed_w=static_w, seed_params=params, rng=rng, samples=samples, l2=l2, fit_params=False
+        dyn_groups,
+        names,
+        static_sd,
+        seed_w=static_w,
+        seed_params=params,
+        rng=rng,
+        samples=samples,
+        l2=l2,
+        fit_params=False,
+        objective=objective,
     )
-    return TwoStageFit(static_raw, static_ranks, raw_weights(names, dyn_w, dyn_sd), dyn_ranks, fitted)
+    return static_raw, raw_weights(names, dyn_w, dyn_sd), fitted, static_ranks, dyn_ranks
+
+
+def fit_two_stage(
+    groups: list[Group], names, *, seed_weights: dict[str, float], seed_params: dict[str, float], rng, samples: int, l2: float = DEFAULT_L2
+) -> TwoStageFit:
+    """The pre-:class:`LinearTrainer` entry point onto :func:`_fit_stages`, kept while its callers
+    migrate. New code builds a :class:`LinearTrainer` and calls :meth:`LinearTrainer.fit`."""
+    static_raw, dyn_raw, fitted, static_ranks, dyn_ranks = _fit_stages(
+        groups, names, seed_weights=seed_weights, seed_params=seed_params, rng=rng, samples=samples, l2=l2, objective=mean_log_rank
+    )
+    return TwoStageFit(static_raw, static_ranks, dyn_raw, dyn_ranks, fitted)
+
+
+@dataclass(frozen=True)
+class LinearTrainer:
+    """The offline-prior trainer: hyperparameters in, a fitted :class:`LinearFit` out.
+
+    Immutable, and :meth:`fit` never touches ``self`` — so ONE instance serves every
+    cross-validation fold with no copying, and a fit is a pure function of
+    ``(groups, hyperparameters)``. That is what makes a refit reproducible and an A/B between two
+    fits a measurement of the fit inputs rather than of run-to-run noise.
+
+    ``init`` is the incumbent model this fit chains from. It always seeds the scalar params (two
+    numbers a fit re-derives, not a per-golden memory) and, when ``warm_start``, the feature weights
+    too. Fold models set ``warm_start=False``: the incumbent's weights were themselves fit on every
+    golden, so seeding a fold from them would leak each held-out golden into the model that is
+    supposed to have never seen it. ``init.scale`` carries into the fitted model unchanged — it is
+    rank-neutral, so the fit has no opinion on it."""
+
+    feature_names: tuple[str, ...]
+    init: LinearModel
+    samples: int = 0
+    l2: float = DEFAULT_L2
+    random_state: int = 0
+    warm_start: bool = True
+    objective: Callable[[list[int]], float] = mean_log_rank
+
+    def fit(self, groups: list[Group]) -> LinearFit:
+        """Fit both weight sets over ``groups``. The RNG is built here from
+        :attr:`random_state`, so a fold's fit never depends on how many folds ran before it."""
+        names = list(self.feature_names)
+        static_raw, dyn_raw, fitted, static_ranks, dyn_ranks = _fit_stages(
+            groups,
+            names,
+            seed_weights=self.init.weights if self.warm_start else {},
+            seed_params={
+                "atomic_free_weight": self.init.atomic_free_weight,
+                "atomic_free_split_threshold": self.init.atomic_free_split_threshold,
+            },
+            rng=np.random.default_rng(self.random_state),
+            samples=self.samples,
+            l2=self.l2,
+            objective=self.objective,
+        )
+        model = LinearModel(
+            weights=static_raw,
+            weights_dynamic=dyn_raw,
+            scale=self.init.scale,
+            atomic_free_weight=fitted["atomic_free_weight"],
+            atomic_free_split_threshold=fitted["atomic_free_split_threshold"],
+        )
+        return LinearFit(model, static_ranks, dyn_ranks)
+
+
+@dataclass(frozen=True)
+class LinearFit:
+    """One :meth:`LinearTrainer.fit` result: the fitted model plus the golden ranks it reached.
+
+    ``model.weights_dynamic`` / :attr:`dyn_ranks` are ``None`` when the input had no dynamic groups.
+    The CALLER decides what to do about that — the shipping path substitutes the incumbent's dynamic
+    set, a CV fold treats the set as unfittable rather than silently scoring under a stale vector."""
+
+    model: LinearModel
+    static_ranks: list[int]
+    dyn_ranks: list[int] | None
+
+    def score_rows(self, group: Group) -> np.ndarray | None:
+        """The group's per-row quality (higher = predicted faster), scored exactly as the shipped
+        prior ranks. ``None`` when the group needs the dynamic set and this fit has none."""
+        w = self.model.weights_dynamic if group.dynamic else self.model.weights
+        if w is None:
+            return None
+        # The gate columns must be present whether or not the weight dict names them (a pruned
+        # zero weight drops the key), so score over the union.
+        names = sorted(set(w) | {"D_finalize_kernel", "D_splitk"})
+        return self.model.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
+
+    @property
+    def notes(self) -> str:
+        """The one-line provenance summary the artifact records — rank tables per weight set plus
+        the fitted scalar params."""
+        dyn = f"dynamic {topk_table(self.dyn_ranks)}" if self.dyn_ranks is not None else "no dynamic cases"
+        params = ", ".join(f"{n}={getattr(self.model, n):g}" for n in sorted(PARAM_NAMES))
+        return f"static {topk_table(self.static_ranks)}; {dyn}; params {params}"
 
 
 def build_artifact(*, weights: dict[str, float], weights_dynamic: dict[str, float], params: dict, provenance: dict) -> dict:

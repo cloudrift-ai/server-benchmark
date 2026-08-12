@@ -9,6 +9,8 @@ from emmy.compiler.pipeline.search.prior.fit.group import (
 from emmy.compiler.pipeline.search.prior.fit.linear import (
     DEFAULT_L2,
     PARAM_NAMES,
+    LinearFit,
+    LinearTrainer,
     TwoStageFit,
     build_artifact,
     eval_weights,
@@ -16,7 +18,7 @@ from emmy.compiler.pipeline.search.prior.fit.linear import (
     fit_weights,
     gate_columns,
     l2_penalty,
-    objective,
+    mean_log_rank,
     raw_weights,
 )
 from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank, rank_of_golden, topk_table
@@ -27,6 +29,8 @@ __all__ = [
     "MATMUL_FEATURES",
     "PARAM_NAMES",
     "Group",
+    "LinearFit",
+    "LinearTrainer",
     "TwoStageFit",
     "build_artifact",
     "dual_rank",
@@ -37,7 +41,7 @@ __all__ = [
     "fit_weights",
     "gate_columns",
     "l2_penalty",
-    "objective",
+    "mean_log_rank",
     "op_family",
     "rank_of_golden",
     "raw_weights",

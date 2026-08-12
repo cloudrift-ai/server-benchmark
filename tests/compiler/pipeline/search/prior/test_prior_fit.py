@@ -20,14 +20,13 @@ import pytest
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_L2,
-    PARAM_NAMES,
     Group,
+    LinearTrainer,
     TwoStageFit,
-    build_artifact,
     feature_matrix,
     fit_weights,
     gate_columns,
-    objective,
+    mean_log_rank,
     rank_of_golden,
     raw_weights,
 )
@@ -63,26 +62,24 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
     return cases, names
 
 
+# The incumbent a synthetic fit chains from: no weights to warm-start (the fits below set
+# ``warm_start=False`` anyway), the interaction seeded OFF at the shipped threshold, and the shipped
+# exp scale — which the trainer carries into the fitted model rather than fitting.
+SEED_MODEL = LinearModel(
+    weights={}, weights_dynamic=None, scale=0.1, atomic_free_weight=float(SEED_PARAMS[0]), atomic_free_split_threshold=float(SEED_PARAMS[1])
+)
+
+
+def _trainer(names, samples=200, **kwargs):
+    return LinearTrainer(feature_names=tuple(names), init=SEED_MODEL, samples=samples, random_state=0, warm_start=False, **kwargs)
+
+
 def _run_fit(samples=200):
-    """The script's two-stage fit (static, then dynamic seeded from static) on the
-    fixed synthetic case set, assembled into artifact JSON bytes."""
+    """One trainer invocation on the fixed synthetic case set, as artifact JSON bytes."""
     cases, names = _synthetic_cases()
-    static_cases = [c for c in cases if not c.dynamic]
-    dyn_cases = [c for c in cases if c.dynamic]
-    rng = np.random.default_rng(0)
-    static_w, params, _, _, static_sd = fit_weights(
-        static_cases, names, np.ones(len(names)), seed_w=np.zeros(len(names)), seed_params=SEED_PARAMS, rng=rng, samples=samples
-    )
-    dyn_w, _, _, _, dyn_sd = fit_weights(
-        dyn_cases, names, static_sd, seed_w=static_w, seed_params=params, rng=rng, samples=samples, fit_params=False
-    )
-    artifact = build_artifact(
-        weights=raw_weights(names, static_w, static_sd),
-        weights_dynamic=raw_weights(names, dyn_w, dyn_sd),
-        params={"scale": 0.1, **dict(zip(PARAM_NAMES, params, strict=True))},
-        provenance={"fitted": "2026-01-01", "script": "test", "args": {"samples": samples, "seed": 0}},
-    )
-    return json.dumps(artifact, indent=2)
+    fit = _trainer(names, samples).fit(cases)
+    provenance = {"fitted": "2026-01-01", "script": "test", "args": {"samples": samples, "seed": 0}}
+    return json.dumps(fit.model.to_artifact(provenance=provenance), indent=2)
 
 
 # --- determinism / byte-identity ---------------------------------------------------
@@ -93,6 +90,23 @@ def test_fit_twice_is_byte_identical():
     assert a == b
     art = json.loads(a)
     assert art["weights"] and art["weights_dynamic"]  # a real fit, not an empty pass-through
+
+
+def test_one_trainer_instance_refits_identically():
+    """``fit`` is pure: the same trainer instance fitted twice returns equal models, and fitting
+    does not mutate the trainer. That is what lets ONE instance serve every cross-validation fold
+    with no copying — the property an sklearn-style ``clone`` would otherwise have to provide."""
+    cases, names = _synthetic_cases()
+    trainer = _trainer(names, samples=20)
+    first, second = trainer.fit(cases), trainer.fit(cases)
+    assert first.model == second.model
+    assert first.static_ranks == second.static_ranks
+    assert trainer == _trainer(names, samples=20)
+    # A fit with no dynamic groups leaves that weight set unfitted rather than substituting one,
+    # and says so in the provenance line the artifact records.
+    static_only = trainer.fit([c for c in cases if not c.dynamic])
+    assert static_only.model.weights_dynamic is None and static_only.dyn_ranks is None
+    assert "no dynamic cases" in static_only.notes and "dynamic top1" in first.notes
 
 
 def test_built_artifact_loads_through_offline_prior(tmp_path, monkeypatch):
@@ -242,7 +256,7 @@ def test_l2_heals_poisoned_seed_on_rank_flat_feature():
         healed[l2] = (raw_weights(names, w, sd), ranks)
     assert abs(healed[0.0][0]["D_flat"] - 5.0) < 1e-9  # unregularized: the poison survives
     assert abs(healed[DEFAULT_L2][0].get("D_flat", 0.0)) < 0.5  # regularized: walked to ~zero
-    assert objective(healed[DEFAULT_L2][1]) <= objective(base_ranks) + 1e-9  # rank quality held or improved
+    assert mean_log_rank(healed[DEFAULT_L2][1]) <= mean_log_rank(base_ranks) + 1e-9  # rank quality held or improved
 
 
 def test_l2_default_is_rank_neutral_on_random_restart():
@@ -265,4 +279,4 @@ def test_l2_default_is_rank_neutral_on_random_restart():
             l2=l2,
         )
         ranks[l2] = r
-    assert objective(ranks[DEFAULT_L2]) <= objective(ranks[0.0]) + 1e-9
+    assert mean_log_rank(ranks[DEFAULT_L2]) <= mean_log_rank(ranks[0.0]) + 1e-9

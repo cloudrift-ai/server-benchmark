@@ -1,0 +1,35 @@
+# FP16 Llama 3.1 8B Instruct on one 32 GB Volta GPU. The public mirror's
+# config and all four model shards are byte-identical to Meta's gated release.
+tags:
+  - best-effort
+
+model:
+  huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
+  revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
+  rationale: >-
+    FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned
+    public mirror is byte-identical to the official Meta model payload.
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 65536
+    max_concurrent_requests: 8
+    vllm:
+      image: "cloudriftai/1cat-vllm-sm70@sha256:8405bb60d24610417d0d6da278a753e2c968bfd1e0d7ff7f79cd6601a038b2be"
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --attention-backend FLASH_ATTN_V100
+        --max-num-batched-tokens 4096
+        --tokenizer hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+        --tokenizer-revision db1f81ad4b8c7e39777509fac66c652eb0a52f91
+        --enable-auto-tool-choice
+        --tool-call-parser llama3_json
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

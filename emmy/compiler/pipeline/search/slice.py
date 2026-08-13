@@ -36,8 +36,8 @@ def _kernel_compute_types() -> tuple[type, ...]:
 def collect_kernel_ancestors(
     graph: Graph, root_id: str, compute_types: tuple[type, ...], absorb: frozenset[str] = frozenset()
 ) -> tuple[set[str], set[str]]:
-    """Collect ``root_id`` + its transitive ``ConstantOp`` / ``InputOp``
-    ancestors. Compute-op ancestors (another kernel feeding this one) are
+    """Collect ``root_id`` + its transitive Loop / leaf ancestors.
+    Compute-op ancestors (another kernel feeding this one) are
     returned in the ``synthetic`` set — they become synthetic ``InputOp``
     boundaries in the slice and their own producers are NOT walked — EXCEPT
     the ``absorb`` set: a producer a fusion of the root would consume (the
@@ -67,6 +67,14 @@ def collect_kernel_ancestors(
             continue
         if isinstance(node.op, (ConstantOp, InputOp)):
             stack.extend(node.inputs)
+            continue
+        # Cast/layout sentinels can deliberately survive between LoopOps (for
+        # example a compact AWQ integer decode followed by a value cast). Loop
+        # wire format intentionally carries only LoopOp compute, so such a
+        # node becomes a synthetic boundary just like an upstream kernel.
+        # Retaining it without marking it synthetic leaves its own input
+        # unbound and produces an invalid slice.
+        synthetic.add(cur)
     return keep, synthetic
 
 

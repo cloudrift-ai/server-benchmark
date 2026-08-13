@@ -193,9 +193,7 @@ def dequantize_awq4(qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray,
     qzeros = np.asarray(qzeros)
     scales = np.asarray(scales)
     if qweight.ndim != 2 or qzeros.ndim != 2 or scales.ndim != 2:
-        raise ValueError(
-            f"AWQ qweight/qzeros/scales must be rank-2, got {qweight.shape}, {qzeros.shape}, {scales.shape}"
-        )
+        raise ValueError(f"AWQ qweight/qzeros/scales must be rank-2, got {qweight.shape}, {qzeros.shape}, {scales.shape}")
     k, packed_n = qweight.shape
     groups, zero_packed_n = qzeros.shape
     n = packed_n * 8
@@ -203,9 +201,7 @@ def dequantize_awq4(qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray,
     if effective_group <= 0 or groups * effective_group != k:
         raise ValueError(f"AWQ group geometry {groups} x {effective_group} does not cover input size {k}")
     if zero_packed_n != packed_n or scales.shape != (groups, n):
-        raise ValueError(
-            f"AWQ sibling geometry mismatch: qweight={qweight.shape}, qzeros={qzeros.shape}, scales={scales.shape}"
-        )
+        raise ValueError(f"AWQ sibling geometry mismatch: qweight={qweight.shape}, qzeros={qzeros.shape}, scales={scales.shape}")
     integers = unpack_awq4(qweight).astype(np.float32)
     zeros = np.repeat(unpack_awq4(qzeros), effective_group, axis=0).astype(np.float32)
     scale_values = np.repeat(scales.astype(np.float32), effective_group, axis=0)
@@ -597,9 +593,7 @@ def _spell_awq4_weight(
     )
     graph_scale_dtype = "f32" if scale_dtype == "bf16" else scale_dtype
     scales = frag.add_node(
-        op=ConstantOp(
-            name=f"{op.name}_scales", source_path=base + ".scales", source_shape=scales_shape, source_dtype=scale_dtype
-        ),
+        op=ConstantOp(name=f"{op.name}_scales", source_path=base + ".scales", source_shape=scales_shape, source_dtype=scale_dtype),
         inputs=[],
         output=Tensor(f"{out.name}_scales", scales_shape, graph_scale_dtype),
     )

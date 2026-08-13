@@ -427,9 +427,7 @@ def _handle_run_once(args):
         notes = [n for n in (_symbolic_bench_note(_collect_sym_env([compiled])), capture_note) if n]
         _print_table(results, note="\n".join(notes) if notes else None)
     _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
-    strict_errors = (
-        _strict_benchmark_errors(args, results, bench, captured, correctness, golden_benches) if strict_correctness else None
-    )
+    strict_errors = _strict_benchmark_errors(args, results, bench, captured, correctness, golden_benches) if strict_correctness else None
     if getattr(args, "json", None):
         _write_ab_json(
             args,

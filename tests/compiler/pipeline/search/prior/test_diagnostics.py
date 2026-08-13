@@ -384,12 +384,12 @@ def test_offline_explain_sums_to_the_scored_quality():
     # The retired hand gates are linear terms now: they decompose under their own feature names,
     # priced by the fitted weight and nothing else.
     assert "gate:scalar_on_warp" not in terms and "gate:splitk_roundtrip" not in terms
-    assert math.isclose(p.mean_score_features(feats), math.exp(-p._scale * sum(terms.values())))
+    assert math.isclose(p.mean_score_features(feats), math.exp(-p.model.scale * sum(terms.values())))
     # Below the split threshold the gate flips to a penalty — and the sum still matches.
     narrow = {**feats, "D_splitk": 2.0}
     terms_n = p.explain_features(narrow)
     assert terms_n["gate:atomic_free"] < 0
-    assert math.isclose(p.mean_score_features(narrow), math.exp(-p._scale * sum(terms_n.values())))
+    assert math.isclose(p.mean_score_features(narrow), math.exp(-p.model.scale * sum(terms_n.values())))
 
 
 def test_offline_explain_selects_the_dynamic_weight_set():
@@ -401,11 +401,12 @@ def test_offline_explain_selects_the_dynamic_weight_set():
     # A sentinel key the two shipped sets genuinely differ on — found, not hardcoded: the
     # dynamic fit chains from the static one, so any coordinate it never moves carries the
     # static raw weight verbatim and would make a fixed key's selection assert vacuous.
-    key = next(k for k in sorted(p._w) if k in p._w_dyn and p._w[k] != p._w_dyn[k])
+    w, w_dyn = p.model.weights, p.model.weights_dynamic
+    key = next(k for k in sorted(w) if k in w_dyn and w[k] != w_dyn[k])
     static = p.explain_features({key: 1.0})
     dyn = p.explain_features({key: 1.0, "S_ext_n_symbolic_axis": 1.0})
-    assert static[key] == p._w[key]
-    assert dyn[key] == p._w_dyn[key]
+    assert static[key] == w[key]
+    assert dyn[key] == w_dyn[key]
 
 
 def _planted_fork():

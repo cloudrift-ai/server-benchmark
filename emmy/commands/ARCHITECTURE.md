@@ -573,9 +573,18 @@ block per fold axis (pooled holdout / train tables, per-card gap, per-fold detai
 artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
 `scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
-(`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring and file writing; the run
-harness and fold/metrics machinery are library code in `emmy/compiler/pipeline/search/prior/fit/` (`run.py` /
-`cv.py`), documented there and in the pipeline ARCHITECTURE's prior sections.
+(`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and
+the file writing; the run harness and fold/metrics machinery are library code in
+`emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline
+ARCHITECTURE's prior sections.
+
+The command layer builds two `LinearTrainer` objects from these flags — the full-train one, warm-started from the
+incumbent artifact, and the fold one derived as `replace(trainer, warm_start=False)` so no held-out golden leaks
+into the model that is supposed to have never seen it. `run_fit` returns the fit rather than an artifact, because
+deciding what a fit with no dynamic cases ships with (it carries the incumbent's dynamic weight set forward, and
+says so in the provenance notes) is a shipping choice, not part of the shape of a run. The metrics header records
+both seeding policies and the ranking loss the fit ran under; two fits are only comparable when those match, the
+same way they must match on `--features`.
 
 ```bash
 emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/

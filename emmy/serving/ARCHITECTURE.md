@@ -521,8 +521,9 @@ Recorded follow-ups, in impact order:
   allocation sidecar, the `lm_head` siblings and the pack key all land on the same commit. It matters for a repo that
   publishes one rung of a conversion per branch — the rungs differ in exactly the per-tensor bit allocation the shape
   keys, the goldens and the coded twins carry. An unpinned load of such a repo warns loudly and names the branches
-  (`warn_if_unpinned`, the library half of `warm.sh`'s hard refusal); a local checkpoint path is revision-free and
-  passes through untouched. The boot logs the RESOLVED snapshot directory, the scheme summary and the digest, which is
+  (`warn_if_unpinned`, the library half of `warm.sh`'s hard refusal). A local checkpoint path passes through untouched,
+  including when vLLM's offline resolver retains the original revision after replacing the repository id with an
+  absolute snapshot path. The boot logs the RESOLVED snapshot directory, the scheme summary and the digest, which is
   how a running server can be checked against the rung it was asked for.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower

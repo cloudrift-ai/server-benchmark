@@ -211,9 +211,13 @@ flags: `accuracy` (bind the rebuilt module's real inputs, run the emmy program o
 eager — the verdict rides back as `accuracy_error` and a numeric failure skips the bench) and
 `want_ref` (return that run's `(inputs, outputs)` as `run_io`). A frontend-graph job may also request
 `strict_accuracy`; it returns the direct eager proof and same-input eager outputs used to check exact-pinned rows.
-Rebuilding the torch side **in the
-child** (not pickling a live module) is what lets the interleaved comparison — which couldn't cross a
-subprocess boundary before — run isolated. So `tune --bench` (`commands/tune.py` `_run_bench` /
+Embedded Loop replay has no Torch twin, so its Emmy-only greedy execution returns that same-input reference too. If
+this execution completes but later repeated timing crosses the watchdog, the worker returns the reference, single-run
+timing, and exact timing error. The command marks greedy ineligible while still reference-checking pinned rows; the
+parent retires that child before any pinned job, so a still-running kernel cannot share its context. It never raises
+the watchdog or treats the single run as a candidate. Rebuilding the torch side **in the child** (not pickling a live
+module) is what lets the interleaved comparison — which could not cross a subprocess boundary before — run isolated.
+So `tune --bench` (`commands/tune.py` `_run_bench` /
 `_bench_per_kernel`) and every `run --bench` row go through the worker: a hung kernel
 hangs the child, the parent SIGKILLs it at `wall_timeout_s`, the device is freed, and the sweep / A/B
 **continues** to the next reproducer or row (no device-poisoning wedge, no skip). The worker starts by

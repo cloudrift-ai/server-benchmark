@@ -41,6 +41,8 @@ def _bench_args(recipe: Recipe) -> list[str]:
     ]
     if bench.seed is not None:
         args.append(f"--seed {bench.seed}")
+    if bench.num_warmups:
+        args.append(f"--num-warmups {bench.num_warmups}")
     if not recipe.is_embedding:
         args.append(f"--random-output-len {bench.random_output_len}")
         if bench.temperature is not None:

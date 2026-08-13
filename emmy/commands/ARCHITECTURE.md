@@ -193,8 +193,17 @@ process unless `--target` narrows the file to one exact or unambiguous substring
 Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
 graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
 proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
-derived structural stamps, so `run --golden` replays it through the full compiler pipeline. A direct `run --ir` input
-remains a stage-complete artifact and runs only the later passes.
+derived structural stamps, so `run --golden` replays it through the full compiler pipeline. When that replay has
+pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
+check; the reference backend is `emmy-greedy` when no Torch twin exists. A completed reference survives a later greedy
+timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
+nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
+request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
+of each boundary input; full-program price probes therefore retain the execution path's device-memory contract.
+Repeated names that resolve to different embedded targets remain ambiguous;
+qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
+stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
+rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

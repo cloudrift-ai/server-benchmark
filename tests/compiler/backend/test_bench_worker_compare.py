@@ -186,6 +186,34 @@ def test_worker_chatty_stderr_does_not_block_the_job() -> None:
     assert len(worker._stderr_tail) <= worker._STDERR_TAIL_CHARS
 
 
+def test_preserved_reference_retires_worker_before_next_job() -> None:
+    """A successful preserved-reference response still forces a fresh child for candidates."""
+    child = textwrap.dedent(
+        """
+        import os
+        import emmy.compiler.backend.cuda._bench_worker as w
+        async def _retire(req):
+            return {"pid": os.getpid(), "_retire_worker": True}
+        w._run_job = _retire
+        w.main()
+        """
+    )
+    worker = _scripted_worker(child)
+
+    async def _two_jobs():
+        try:
+            first = await worker.run_job({"job": 1}, wall_timeout_s=60.0)
+            assert worker._proc is None
+            second = await worker.run_job({"job": 2}, wall_timeout_s=60.0)
+            return first, second
+        finally:
+            await worker.aclose()
+
+    first, second = asyncio.run(_two_jobs())
+    assert first["pid"] != second["pid"]
+    assert "_retire_worker" not in first and "_retire_worker" not in second
+
+
 def test_worker_wall_timeout_error_carries_stderr_tail() -> None:
     """The SIGKILL-on-wall-timeout error includes the drained stderr tail — exactly the
     context that matters when a hung kernel took the child down."""
@@ -446,6 +474,43 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     resp = asyncio.run(_run_job(dict(req)))
     assert resp["accuracy_error"] is None and resp["run_io"] == ({"x": [0.0]}, {"n0": [2.0]})
     assert benched and resp["results"] == {"Emmy": 1.0}
+
+
+def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) -> None:
+    """A completed Loop reference remains usable, but its failed greedy timing remains explicit."""
+    from emmy.commands import run as run_mod
+    from emmy.compiler.backend.cuda import _bench_worker
+    from emmy.compiler.backend.cuda import backend as backend_mod
+
+    class _FakeBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+    async def _reference_then_fail(*_args, ref_out, ref_us_out, **_kwargs):
+        ref_out.append(({"x": [1.0]}, {"y": [2.0]}))
+        ref_us_out.append(4_000_000.0)
+        raise RuntimeError("repeated greedy timing crossed the watchdog")
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", _reference_then_fail)
+    response = asyncio.run(
+        _bench_worker._run_job(
+            {
+                "graph": "LOOP",
+                "torch_spec": ("frontend_graph", None),
+                "bench_backends": "emmy",
+                "warmup": 5,
+                "iters": 20,
+                "seed": 0,
+                "want_ref": True,
+            }
+        )
+    )
+
+    assert response["run_io"] == ({"x": [1.0]}, {"y": [2.0]})
+    assert response["reference_run_us"] == 4_000_000.0
+    assert response["greedy_error"] == "RuntimeError: repeated greedy timing crossed the watchdog"
+    assert response["result"] is None and response["results"] is None
 
 
 @requires_cuda

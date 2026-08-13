@@ -31,3 +31,11 @@ def test_suppressed_ids_are_neg_inf_others_untouched():
 def test_no_suppress_list_is_noop():
     out = _model_with(None).compute_logits(torch.zeros((2, 8)))
     assert (out == 0).all()
+
+
+def test_coded_head_supplies_logits_before_the_processor():
+    model = _model_with(None)
+    model._coded_head_spec = object()
+    model._coded_head = lambda hidden: hidden + 7
+    out = model.compute_logits(torch.zeros((2, 8)))
+    assert (out == 7).all()

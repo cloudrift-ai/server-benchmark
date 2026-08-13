@@ -221,7 +221,12 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
-Loop fusion's profitability guard follows the same structural rule. `loop/fusion/010_merge_loop_ops` counts aggregate
+Loop fusion first keeps a contraction producer materialized when it fans out into the statistic and value paths of a
+downstream normalization. The N-way splicer shares repeated equal-coordinate demands, but this fan-out would duplicate
+the whole contraction. Reductions that are not contractions remain fusible: softmax intentionally reuses QK inside
+max-shift-exp and then reuses the exponentials for normalization and P@V, and retaining either buffer would prevent
+flash recognition. The remaining profitability guard follows the same structural rule.
+`loop/fusion/010_merge_loop_ops` counts aggregate
 arithmetic and reads, and separately counts transcendental executions. The separate count prevents an expensive
 pointwise producer such as GELU's `tanh`, originally evaluated once per `(M,K)` element, from moving under a
 contraction's `N` loop merely because the contraction's much larger cheap-FMA count hides that duplication. Flash
@@ -230,6 +235,10 @@ materializing the probability matrix, so the tile recognizer owns that composite
 brake does not split it. The automatic brake is also limited to unary/single-source activation cones. A multi-source
 gated activation such as GeGLU/SwiGLU remains an evidence-controlled placement choice, preserving its GPU golden
 coverage until that entire cone has been measured.
+
+Fusion also lets a decomposed contraction's pointwise product reunite with its sole sum-reduction consumer before an
+upstream activation-bearing cone is spliced into the product. Otherwise pass order can materialize the full M×K×N
+product, whose work-growth then prevents the reduction merge; ordinary softmax/attention reduction order is unchanged.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 

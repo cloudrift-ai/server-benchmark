@@ -256,6 +256,15 @@ def test_registry_lookup_failure_is_not_treated_as_an_absent_destination():
         publish_recipe_image(_recipe(), dry_run=True, runner=runner)
 
 
+def test_buildx_not_found_is_an_absent_destination():
+    runner = RecordingRunner(remote_error="ERROR: docker.io/cloudriftai/model-name:0.23.0-abcdef123: not found")
+
+    plan = publish_recipe_image(_recipe(), dry_run=True, runner=runner)
+
+    assert plan.registry_digest is None
+    assert plan.commands == (("docker", "push", "cloudriftai/vllm-emmy-model-name:0.23.0-abcdef123"),)
+
+
 def test_missing_buildx_is_not_treated_as_an_absent_destination():
     runner = RecordingRunner(remote_error="docker-buildx: executable file not found in $PATH")
 

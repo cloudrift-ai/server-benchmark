@@ -97,6 +97,8 @@ tune-kernels: setup
 
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
+VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
+VLLM_EMMY_CUPY_PACKAGE ?= cupy-cuda13x
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
 wheel: setup
@@ -112,7 +114,8 @@ git-sha-guard:
 		 echo "  likely fix: git config --global --add safe.directory $(CURDIR)"; exit 1)
 
 vllm-emmy-image: wheel git-sha-guard
-	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) \
+	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) --build-arg BASE_IMAGE=$(VLLM_BASE_IMAGE) \
+		--build-arg CUPY_PACKAGE=$(VLLM_EMMY_CUPY_PACKAGE) \
 		-t $(VLLM_EMMY_TAG) .
 
 vllm-emmy-push: vllm-emmy-image
@@ -219,6 +222,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
 		--build-arg M1_TIER=$(SERVE_M1_TIER) \
+		--build-arg V2_MODEL_RUNNER=$(SERVE_V2_MODEL_RUNNER) \
 		-t $(SERVE_TAG) $(SERVE_DIR)
 
 serve-verify: serve-config-guard

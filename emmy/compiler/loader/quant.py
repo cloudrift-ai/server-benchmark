@@ -35,10 +35,9 @@ architecture-twin construction). Two checkpoint families share the design — FP
   semantics, consumed scales dropped, have no graph counterpart).
 - :func:`spell_trellis_constants` and :func:`spell_trellis_inputs`: EXL3
   checkpoint siblings and their sole linear consumer are rewritten together at
-  graph birth into the format-neutral factorized algebra in loader/trellis.py.
-  No materialized decoded-weight fallback enters the compiler. Checkpoint
-  metadata stops in the loader; only generic tensor and layout operations enter
-  decomposition.
+  graph birth in loader/trellis.py. The serving trunk, experts, and coded output
+  head all use the same format-neutral factorized algebra. No materialized
+  decoded-weight fallback enters the compiler.
   :func:`load_dequantized_state_dict` uses the same decode for the eager twin.
 """
 

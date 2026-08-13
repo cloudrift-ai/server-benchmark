@@ -4,7 +4,36 @@ correctness are covered on GPU by ``test_gen_runner_gpu.py`` / ``test_vllm_plugi
 import numpy as np
 import pytest
 
-from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _static_decode_covers_capacity
+from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _program_config_sha, _static_decode_covers_capacity
+
+
+class _Config:
+    def __init__(self, data):
+        self.data = data
+
+    def to_dict(self):
+        import copy
+
+        return copy.deepcopy(self.data)
+
+
+def test_program_config_identity_ignores_only_generation_eos_policy():
+    base = {
+        "model_type": "gemma4_unified_text",
+        "text_config": {"hidden_size": 3840, "intermediate_size": 15360},
+        "eos_token_id": 1,
+    }
+    instruction = {**base, "eos_token_id": [1, 106]}
+    assert _program_config_sha(_Config(base)) == _program_config_sha(_Config(instruction))
+
+    different_architecture = {**instruction, "model_type": "gemma4_other_text"}
+    assert _program_config_sha(_Config(base)) != _program_config_sha(_Config(different_architecture))
+
+    different_geometry = {
+        **instruction,
+        "text_config": {**instruction["text_config"], "hidden_size": 4096},
+    }
+    assert _program_config_sha(_Config(base)) != _program_config_sha(_Config(different_geometry))
 
 
 def test_pad_rows_pads_with_zeros_and_preserves_real_rows():
@@ -51,6 +80,8 @@ def test_static_only_runner_counts_layers_without_symbolic_programs():
         prefill_capacity=1,
     )
     assert runner.num_layers == 2
+    assert runner.global_layer_id(0) == 0
+    assert runner.global_layer_id(1) == 1
     assert runner.prefill_capacity == 1
     assert runner.has_device_decode
     with pytest.raises(RuntimeError, match="token width 2 exceeds static-only capacity 1"):
@@ -61,6 +92,27 @@ def test_static_only_runner_counts_layers_without_symbolic_programs():
             np.zeros((2, 1), dtype=np.float16),
             np.zeros((2, 1), dtype=np.float16),
         )
+
+
+def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
+    runner = EmmyGenRunner(
+        embed_weight=None,
+        norm=None,
+        hidden_size=8,
+        layer_ids=[7, 8],
+        pre=[],
+        post=[],
+        attn_meta=[(2, 4, 1, 0.5), (2, 4, 1, 0.5)],
+        np_dtype=np.dtype("float16"),
+    )
+
+    assert runner.num_layers == 2
+    assert runner.global_layer_id(0) == 7
+    assert runner.global_layer_id(1) == 8
+    with pytest.raises(RuntimeError, match="does not own the token embedding"):
+        runner.embed([0])
+    with pytest.raises(RuntimeError, match="does not own the final norm"):
+        runner.final_norm(np.zeros((1, 8), dtype=np.float16))
 
 
 @pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("fp8", False)])
@@ -80,8 +132,15 @@ def test_create_keeps_only_exl3_trunk_coded(tmp_path, monkeypatch, quant_method,
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False):
-        seen.update(path=path, dtype=dtype, compress_trunk=compress_trunk)
+    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True):
+        seen.update(
+            path=path,
+            dtype=dtype,
+            compress_trunk=compress_trunk,
+            layer_range=layer_range,
+            include_embed=include_embed,
+            include_norm=include_norm,
+        )
         return fake_model, fake_store
 
     monkeypatch.setattr(huggingface, "load_quantized_split", fake_load)

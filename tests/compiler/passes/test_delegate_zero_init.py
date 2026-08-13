@@ -16,17 +16,21 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
 
 def _compile_chain(n: int):
-    """``(x @ w1) @ w2`` fp16 with ``REDUCE=g4a`` pinned on every matmul — two atomic kernels
-    whose outputs are ``32×n`` (the delegation-cap lever: 512 → 32 KB per accumulator, well
-    under ``_MAX_DELEGATED_WORDS``; 3840 → 240 KB, past it)."""
+    """``(x @ w1) @ w2`` fp16 with the matmul seam cut and ``REDUCE=g4a`` pinned on each
+    piece — two atomic kernels whose outputs are ``32×n`` (the delegation-cap lever:
+    512 → 32 KB per accumulator, well under ``_MAX_DELEGATED_WORDS``; 3840 → 240 KB,
+    past it)."""
     mp = pytest.MonkeyPatch()
     # Per-knob vars, NOT EMMY_KNOBS: the aggregate splat runs at knob-module IMPORT time, long
     # before this fixture — and calling apply_knobs_env here would write env keys monkeypatch
     # never cleans up.
-    mp.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4")
+    mp.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k4")
+    mp.setenv("EMMY_WORK", "w1x8")
     mp.setenv("EMMY_REDUCE", "g4a")
+    # Gate-free loop fusion composes the two matmuls. This test is about CUDA zero-init
+    # delegation between kernels, so route the recognized contraction seam back to two pieces.
+    mp.setenv("EMMY_PLACE", "cut")
     mp.setenv("EMMY_RASTER", "")
-    mp.setenv("EMMY_WSPEC", "")
     try:
         from emmy.commands.trace import graph_from_code
 

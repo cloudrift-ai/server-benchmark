@@ -383,59 +383,6 @@ def test_node_feat_ver_defaults_to_legacy_on_pre_stamp_db(tmp_path) -> None:
     assert n.feat_ver == 1
 
 
-_SPEC = {"kernel": "matmul", "M": 64, "N": 64, "K": 64, "dtype": "fp32", "trans_b": False, "dynamic": False}
-
-
-def test_record_nodes_shape_spec_roundtrips(tmp_path) -> None:
-    """The declarative identity round-trips as a dict; identity-less rows read back ``None``."""
-    db = SearchDB(tmp_path / "t.db")
-    db.record_nodes([_node_row("tagged", 5.0, shape_spec=_SPEC), _node_row("legacy", 6.0)])
-    by_key = {n.node_key: n for n in db.iter_nodes()}
-    assert by_key["tagged"].shape_spec == _SPEC
-    assert by_key["legacy"].shape_spec is None
-
-
-def test_shape_spec_readonly_pre_column_degrades(tmp_path) -> None:
-    """A read-only open of a pre-``shape_spec`` DB degrades the field to ``None`` (legacy)
-    rather than raising — the additive ALTER is writer-side only."""
-    path = tmp_path / "ro.db"
-    con = sqlite3.connect(path)
-    con.executescript(_PRE_GPU_NODE_SCHEMA)
-    con.commit()
-    con.close()
-    assert list(SearchDB.open_readonly(path).iter_nodes())[0].shape_spec is None
-
-
-def test_shape_spec_survives_identity_less_replacement() -> None:
-    """Identity is config-intrinsic: a newer identity-less leaf re-measurement replaces the
-    value but COALESCE keeps the stored ``shape_spec`` — freezability is never erased."""
-    db = SearchDB()
-    db.record_nodes([_node_row("n1", 5.0, is_leaf=True, measured_at="2026-07-01T00:00:00", shape_spec=_SPEC)])
-    db.record_nodes([_node_row("n1", 4.0, is_leaf=True, measured_at="2026-07-02T00:00:00")])
-    (n,) = list(db.iter_nodes())
-    assert n.value_us == 4.0  # newer measurement won
-    assert n.shape_spec == _SPEC  # identity kept
-
-
-def test_shape_spec_filled_by_non_replacing_row() -> None:
-    """A non-replacing identity-carrying bench (older measurement, value untouched) still
-    proves the config's shape: the NULL ``shape_spec`` fills in."""
-    db = SearchDB()
-    db.record_nodes([_node_row("n1", 5.0, is_leaf=True, measured_at="2026-07-02T00:00:00")])
-    db.record_nodes([_node_row("n1", 9.0, is_leaf=True, measured_at="2026-07-01T00:00:00", shape_spec=_SPEC)])
-    (n,) = list(db.iter_nodes())
-    assert n.value_us == 5.0  # stale measurement never resurrects
-    assert n.shape_spec == _SPEC  # but its identity lands
-
-
-def test_merge_nodes_carries_shape_spec(tmp_path) -> None:
-    src = SearchDB(tmp_path / "src.db")
-    src.record_nodes([_node_row("n1", 5.0, gpu="NVIDIA GeForce RTX 4090", shape_spec=_SPEC)])
-    dst = SearchDB(tmp_path / "dst.db")
-    assert dst.merge_nodes(tmp_path / "src.db") == 1
-    assert list(dst.iter_nodes())[0].shape_spec == _SPEC
-
-
 _PRE_GPU_NODE_SCHEMA = (
     "CREATE TABLE node (node_key TEXT PRIMARY KEY, parent_key TEXT, context_key TEXT NOT NULL, "
     "op_sig TEXT NOT NULL, features TEXT NOT NULL DEFAULT '{}', value_us REAL NOT NULL, "

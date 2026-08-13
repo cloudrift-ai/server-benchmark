@@ -4,10 +4,10 @@ The two ``loop/stamp`` rules are thin rewrite wrappers around the functions
 here: ``010_stamp_loop_names`` calls :func:`name_for_loop`, and
 ``020_stamp_structural_features`` calls :func:`structure_features`. Factoring
 the logic out lets callsites that build LoopOps *outside* the pass pipeline —
-e.g. the ``lowering/tile/split/010_split_demoted`` fragment assembler — name
-and re-stamp their kernels with a plain import instead of reaching into a
-leading-digit pass module via ``importlib`` (a pass file's ``NNN_…`` stem
-isn't a legal import name).
+e.g. the placement realizer's cut fragment assembler — name and re-stamp their
+kernels with a plain import instead of reaching into a leading-digit pass
+module via ``importlib`` (a pass file's ``NNN_…`` stem isn't a legal import
+name).
 """
 
 from __future__ import annotations
@@ -34,8 +34,18 @@ def name_for_loop(op: LoopOp, node: Node, graph: Graph) -> str:
     """The provenance-derived ``k_…`` kernel label ``010_stamp_loop_names``
     stamps onto ``op``, factored out so fragment builders name their LoopOps
     the same way. Threads the node id + per-node provenance + graph-wide
-    coverage totals into :func:`provenance.name_for`."""
-    return provenance.name_for(op, node.id, provenance.get(node), provenance.totals(graph))
+    coverage totals into :func:`provenance.name_for`, plus the io dtype
+    signature — the body carries no buffer decls, so without it two kernels
+    identical except for an operand/output dtype hash to the same name and the
+    plan's per-name kernel dedup hands one of them the other's code (an
+    f32-writing twin storing f16 bytes)."""
+
+    def _dt(buf: str) -> str:
+        t = graph.buffer(buf)
+        return str(t.dtype) if t is not None else "?"
+
+    dtype_sig = ",".join(_dt(ld.input) for ld in op.body.loads) + "->" + ",".join(_dt(w.output) for w in op.body.writes)
+    return provenance.name_for(op, node.id, provenance.get(node), provenance.totals(graph), dtype_sig=dtype_sig)
 
 
 # ---------------------------------------------------------------------------

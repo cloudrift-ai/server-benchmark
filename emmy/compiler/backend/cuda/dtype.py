@@ -20,10 +20,20 @@ from emmy.compiler.dtype import DataType
 _CUDA_NAME: dict[DataType, str] = {
     _dtype.F32: "float",
     _dtype.F16: "__half",
+    _dtype.F64: "double",
     _dtype.BF16: "__nv_bfloat16",
+    # Registry completeness only in M1 — no kernel computes on fp8 yet;
+    # the M2 fragment-path convert is what first emits these in source.
+    _dtype.F8E4M3: "__nv_fp8_e4m3",
+    _dtype.F8E5M2: "__nv_fp8_e5m2",
     _dtype.F16x2: "__half2",
+    # Raw int16 checkpoint carriers are represented directly in generic tensor algebra.
+    _dtype.I16: "short",
     _dtype.I32: "int",
     _dtype.I64: "long long",
+    _dtype.U16: "unsigned short",
+    _dtype.U32: "unsigned int",
+    _dtype.U64: "unsigned long long",
     _dtype.BOOL: "bool",
 }
 
@@ -46,6 +56,8 @@ _CUDA_INCLUDE: dict[DataType, str | None] = {
     _dtype.F32: None,
     _dtype.F16: "<cuda_fp16.h>",
     _dtype.BF16: "<cuda_bf16.h>",
+    _dtype.F8E4M3: "<cuda_fp8.h>",
+    _dtype.F8E5M2: "<cuda_fp8.h>",
     _dtype.F16x2: "<cuda_fp16.h>",
 }
 
@@ -63,6 +75,7 @@ _CUDA_INCLUDE: dict[DataType, str | None] = {
 _C_NAME_BYTES: dict[str, int] = {
     "float": _dtype.F32.nbytes,
     "double": 8,
+    "short": 2,
     "int": 4,
     "half": _dtype.F16.nbytes,
     "__half": _dtype.F16.nbytes,
@@ -70,9 +83,14 @@ _C_NAME_BYTES: dict[str, int] = {
     "__nv_bfloat16": 2,
     "bfloat16": 2,
     "bf16": 2,
+    "__nv_fp8_e4m3": _dtype.F8E4M3.nbytes,
+    "__nv_fp8_e5m2": _dtype.F8E5M2.nbytes,
+    "i16": 2,
     "i32": 4,
     "i64": 8,
     "f64": 8,
+    "unsigned short": 2,
+    "unsigned int": 4,
     "unsigned long long": 8,
 }
 

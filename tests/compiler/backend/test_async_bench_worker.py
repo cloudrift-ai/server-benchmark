@@ -10,11 +10,11 @@ or touching CUDA.
 from __future__ import annotations
 
 import os
+from unittest.mock import AsyncMock
 
 from emmy import config
 from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def test_child_env_pins_device_without_mutating_os_environ() -> None:
@@ -51,6 +51,13 @@ def test_child_env_no_lock_suffix_when_base_unset(monkeypatch) -> None:
     assert "EMMY_GPU_LOCK" not in env
 
 
+async def test_worker_warmup_uses_separate_readiness_request() -> None:
+    worker = _AsyncBenchWorker(device_id=1)
+    worker.run_job = AsyncMock(return_value={"warmed": True})
+    await worker.warmup(wall_timeout_s=45.0)
+    worker.run_job.assert_awaited_once_with({"worker_warmup": True}, wall_timeout_s=45.0)
+
+
 @requires_cuda
 def test_async_worker_real_roundtrip_single_gpu() -> None:
     """Smoke the real transport: the async inner-reward pool benches a tiny matmul
@@ -65,7 +72,7 @@ def test_async_worker_real_roundtrip_single_gpu() -> None:
     from emmy.compiler.ir.frontend.ir import MatmulOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
     from emmy.compiler.pipeline.search.db import SearchDB
-    from tests.compiler.conftest import run_inner_reward
+    from tests.compiler.helpers import run_inner_reward
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (64, 128)), node_id="a")

@@ -7,7 +7,7 @@ linear); the MONOID producer (RMSNorm → Linear) is the one special case (its s
 structural pin lives with ``test_fused_prologue_compiles_in_budget``).
 
 The **warp tier** engages under a warp ``TILE`` pin: the demoted cone nodifies to a computed-A
-``Contraction`` (``_schedule._demoted_warp_option``) and the producer COMPUTE-FILLS the A slab the
+bilinear ``Fold`` (the demoted warp option) and the producer COMPUTE-FILLS the A slab the
 ``ldmatrix`` drain reads (the mma tier's ``sync`` transport). The MONOID (rmsnorm) cone is
 recognize-nodified (``010_recognize``'s ``bind_prologue_contraction`` merge): its statistic reduce
 rides the A cone as a per-row prologue (``sync_stat_fill``), the warp rows are real fork siblings
@@ -25,12 +25,22 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.conftest import requires_cuda, requires_sm90
+from tests.compiler.helpers import requires_cuda, requires_sm90
 
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
 
-_WARP_TILE = "a:mma_m16n8k16_f16_f32/w1x1/f2x2/k2"  # tile 32x16, bk 32 — exact cover of the 32x64x32 shape
+# The site-local TILE value + the ONE worker inventory its unit widths read off (the step-7
+# split — a TILE value never spells a worker token): one warp, tile 32x16, bk 32 — an exact
+# cover of the 32x64x32 shape.
+_WARP_TILE = "mma_m16n8k16_f16_f32/f2x2/k2"
+_WARP_WORK = "w1x1"
+
+
+def _pin_warp(monkeypatch) -> None:
+    """Pin the one-warp mma tier — the TILE value at its site, the warps in WORK."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    monkeypatch.setenv("EMMY_WORK", _WARP_WORK)
 
 
 def _sigmoid(x):
@@ -90,7 +100,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     the ``warp`` cells additionally demand the ``mma.sync`` tier (the compute-filled A slab;
     the broadcast cell is xfailed — its producer recognizes as a flat un-annotated ``Map``)."""
     if tier == "warp":
-        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        _pin_warp(monkeypatch)
     g, extra = _producer_graph(producer)
     g.add_node(InputOp(), [], Tensor("w", (_K, _N), F16), node_id="w")
     g.add_node(MatmulOp(), ["xn", "w"], Tensor("o", (_M, _N), F16), node_id="o")
@@ -103,7 +113,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     # materialized intermediate: neither the graph's own ``xn`` buffer nor a cut workspace
     # (``020_cut_edge``'s ``<out>__cone`` / ``<out>__stat`` — a cut realization materializes the
     # cone under those names, so a name-anchored ``xn`` check alone would miss it). Kernel COUNT
-    # is not the invariant: a stat-free cone binds as a computed-A ``Contraction``, which
+    # is not the invariant: a stat-free cone binds as a computed-A bilinear ``Fold``, which
     # legitimately offers split-K REDUCE rows, and a chosen one emits a ``__partial`` + finalize
     # pair that still carries the cone inline.
     sigs = [s.split("{")[0] for s in srcs]
@@ -123,10 +133,10 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     numpy reference (whether the linear's N axis rides the grid or a tail sweep is the schedule's
     choice — the staged-shared-row structural pin lives with `test_fused_prologue_compiles_in_budget`,
     whose shape keeps the sweep in-tail). The ``warp`` cell demands the mma tier on the fused
-    matmul — the recognize-nodified computed-A ``Contraction`` (the statistic prologue rides the
+    matmul — the recognize-nodified computed-A bilinear ``Fold`` (the statistic prologue rides the
     A cone, run once per tile row by the sync stat fill)."""
     if tier == "warp":
-        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        _pin_warp(monkeypatch)
     # Pin the serial fold in BOTH cells: the computed-A form offers redundant-statistic split-K
     # siblings on this decode-M shape, and this test pins the ONE-kernel fused form. The scalar
     # cell is an unpinned greedy compile, so without the pin the device's evidence may steer it
@@ -191,13 +201,13 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
 
 @requires_cuda
 @pytest.mark.parametrize(
-    "tile",
+    ("tile", "work"),
     [
-        "a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4",  # bk 64 elems + tile_n 128 → both slabs B128
-        "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2",  # bk 32 elems + tile_n 32 → both slabs B64
+        ("mma_m16n8k16_f16_f32/f2x4/k4", "w2x4"),  # bk 64 elems + tile_n 128 → both slabs B128
+        ("mma_m16n8k16_f16_f32/f2x2/k2", "w2x2"),  # bk 32 elems + tile_n 32 → both slabs B64
     ],
 )
-def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
+def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     """The sync compute-fill's slab swizzle round-trips — fill-side ``Write`` XOR = drain-side
     ``ldmatrix`` XOR, at both derived modes (B64 / B128). Regression for the silent fill-side
     drop (a pass reconstructing ``Write`` without ``swizzle`` left the fill row-major under a
@@ -208,6 +218,7 @@ def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
     the same static 2-D block-tile grid, and the grouped launch order is its B-re-streaming
     fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
     monkeypatch.setenv("EMMY_TILE", tile)
+    monkeypatch.setenv("EMMY_WORK", work)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
@@ -298,44 +309,6 @@ def test_place_cone_cut_degenerate_m1(monkeypatch):
 
 
 @requires_cuda
-def test_place_cone_cut_splits_multi_fold(monkeypatch):
-    """``PLACE@cone=cut`` on the MULTI-FOLD gate/up edge — ``swiglu(x̂@Wg, x̂@Wu)`` — splits the ONE
-    fused megakernel into the norm producer (stat + cone materialize) PLUS one plain single-channel
-    matmul PER ⊗-fold (each reads the shared workspace A, so it rides the staged cp.async/TMA tiers a
-    computed A can never ride — the whole point) PLUS a downstream pointwise combine carrying the
-    SwiGLU ⊗-combine tail. That's ≥4 kernels vs the fused form's 1; each channel matmul beats cuBLAS
-    on ``d2/tma/ring`` at prefill M (the fused computed-A form provably cannot). Numerics match the
-    same numpy reference as the fused multi-fold edge."""
-    monkeypatch.setenv("EMMY_PLACE", "cut")
-    S, H, inter = 64, 256, 512
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
-    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
-    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
-    g.add_node(InputOp(), [], Tensor("wu", (inter, H), F16), node_id="wu")
-    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
-    g.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (1, S, inter), F16), node_id="gate")
-    g.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (1, S, inter), F16), node_id="up")
-    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, S, inter), F16), node_id="sg")
-    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, S, inter), F16), node_id="o")
-    g.inputs, g.outputs = ["x", "nw", "wg", "wu"], ["o"]
-    rng = np.random.default_rng(0)
-    ins = {
-        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
-        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
-        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
-        "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
-    }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) >= 4, f"PLACE@cone=cut on gate/up must split into per-channel matmuls + combine, got {len(srcs)} kernel(s)"
-    x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
-    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
-    gate, up = rms @ wg.T, rms @ wu.T
-    ref = gate * _sigmoid(gate) * up
-    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)
-
-
-@requires_cuda
 @requires_sm90
 @pytest.mark.parametrize("runtime_s", [31, 130])
 def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
@@ -343,7 +316,8 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
     at the hint and run at off-hint sizes straddling the 64-row tile (31 under, 130 over + tail):
     the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
     discards their store."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the ONE-masked-kernel contract is what's under test
     H, inter = 256, 512
     g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
@@ -353,7 +327,7 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
 @requires_cuda
 def test_fused_rmsnorm_linear_unpinned():
     """UNPINNED greedy on the fused norm→linear: the merged fork (coop ``Map`` rows + the
-    computed-A Contraction's warp rows) lowers and matches numpy whichever row the prior picks —
+    computed-A bilinear fold's warp rows) lowers and matches numpy whichever row the prior picks —
     the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row). The pick may
     be the 1-kernel fused row or a 2-kernel redundant-statistic split row; both are legal fork
     members on this decode-M shape."""
@@ -370,7 +344,8 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     fragment feeding per-fold B slabs / C fragments) and the SwiGLU combine rides the store's
     fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
     64-row tile)."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — ONE masked kernel is the contract; the split form has its own test
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
@@ -409,12 +384,12 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     """An **f32-A × f16-B** matmul — the erased-downcast signature (torch cannot execute a mixed
     matmul, so the model itself rounded A; the tracer maps ``to``/``type_as`` to pass-throughs,
     e.g. Gemma's ``self._norm(x.float()).type_as(x)`` feeding every f16-weight projection) —
-    reaches the mma tier through the demoting cone wrap (``_demote_mixed_a``): the sync
+    reaches the mma tier through the demoting cone wrap: the sync
     compute-fill converts the f32 value on the slab store, since the copy transports move raw
     bytes and cannot. The scalar cell pins nothing and just checks the mixed kernel still
     compiles and matches; both compare against the f16-rounded-A reference."""
     if tier == "warp":
-        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        _pin_warp(monkeypatch)
     F32 = _dt.get("f32")
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (_M, _K), F32), node_id="x")
@@ -441,10 +416,10 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     warp ``TILE`` pin. The flash rewrite splices a REBUILT projection op into the graph mid-batch;
     a later match applying against the swapped op used to read ``_seed_io_placeholders``'
     ``(f32, ())`` stubs (``Match.is_alive`` snapshots node identity and cannot see an op swap), so
-    ``_warp_atoms`` refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
+    the warp atom gate refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
     own measured mma rows on the gemma-4-12B layer. ``Candidate.try_rewrite``'s apply-time
     ``populate_io`` refresh restores the graph-true dtypes; this pins it."""
-    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    _pin_warp(monkeypatch)
     B, H, S, D = 1, 4, 64, 64
     NO = 96  # projection out-features
     Sd = Dim("seq_len", hint=S)
@@ -484,7 +459,8 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     the projection — the output must match the fp32 reference. Parametrized over both sync
     depths (``d1`` + the asymmetric B-only prefetch ring ``d2``). The decode-M shape class
     (M=32) is where this split pays: the un-split cone grid starves the SMs."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x4/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w1x4")
     monkeypatch.setenv("EMMY_REDUCE", "g4k")
     monkeypatch.setenv("EMMY_STAGE", stage)
     S, H, inter = 32, 1024, 3072
@@ -522,7 +498,8 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     deferred finalize folds the 2-component carrier and applies the SwiGLU ⊗-combine ONCE after
     the cross-partition sums — the output must match the fp32 reference. The decode-M shape
     class (M=32) is where the multi-channel split pays (the gemma gate⊗up twin)."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x4/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w1x4")
     monkeypatch.setenv("EMMY_REDUCE", "g4k")
     S, H, inter = 32, 256, 512
     g = Graph()

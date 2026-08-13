@@ -16,6 +16,7 @@ under a ``"cuda"`` key so another backend can add its own namespace.
 
 from __future__ import annotations
 
+import base64
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -38,6 +39,19 @@ logger = logging.getLogger(__name__)
 # NOT bump this — a stored plan keeps serving its frozen snapshot; bump only when the runtime's
 # interpretation of the plan changes.
 PLAN_FORMAT_VERSION = 1
+
+# Arg-passing extension: a plan whose launches carry INDIRECT OPERANDS (a base pointer resolved
+# in-kernel from a device table — the MoE fixed-slot dispatch) serializes as format 2, because a
+# runtime that ignored the field would pass the wrong arg pack. Plans without the field keep
+# format 1 byte-identically, so existing packs and readers are untouched; an old runtime reading
+# a format-2 plan rejects it and falls back to the full compile (the pack loader's contract).
+PLAN_FORMAT_INDIRECT = 2
+
+# Self-contained generated constants: a deterministic source-free ``ConstantOp.source_graph``
+# is evaluated once while projecting the graph, and its bytes ride the plan.  Format 3 is a
+# superset of the indirect ABI, so a plan may carry both generated constants and indirect
+# launches.  Older runtimes reject the plan and safely fall back to a full compile.
+PLAN_FORMAT_GENERATED = 3
 
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
 # factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
@@ -82,6 +96,12 @@ class LaunchSpec:
     # Empty on plans stored before the field existed — readers fall back to
     # ``(node_id,)``. ``node_id`` itself stays for naming / diagnostics.
     writes: tuple[str, ...] = ()
+    # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input arg. The
+    # kernel takes ``(const T* const* table, const int* sel, int slot)`` in place of the plain
+    # pointer and resolves ``table[sel[slot]]`` in a body preamble; ``_launch`` expands the
+    # operand's ``arg_names`` position into ``arrays[table_arg], arrays[sel_arg], slot``. A
+    # plan carrying any of these serializes as ``PLAN_FORMAT_INDIRECT``.
+    indirect_args: tuple[tuple[str, str, str, int], ...] = ()
 
 
 @dataclass
@@ -103,12 +123,15 @@ class WeightSpec:
     grammar can't express — such a plan still runs, but can't rebind weights from a pack.
     ``source_parts`` mirrors ``ConstantOp.source_parts`` — ``(path, shape)`` pairs the binder
     concatenates along axis 0 before the chain (``merge_sibling_linears``' weight concat);
-    exactly one of ``source_path`` / ``source_parts`` is set. Assemble the pre-chain source
-    via ``loader.binder.assemble_source`` (duck-typed over both specs)."""
+    exactly one of ``source_path`` / ``source_parts`` is set. ``generated`` is the third,
+    self-contained alternative for deterministic source-free bind records: ``(numpy dtype
+    string, shape, raw bytes)``. Assemble the pre-chain source via
+    ``loader.binder.assemble_source`` (duck-typed over both specs)."""
 
     source_path: str | None
     load_ops: tuple[tuple, ...] | None = ()
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    generated: tuple[str, tuple[int, ...], bytes] | None = None
 
 
 @dataclass
@@ -184,15 +207,35 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
                 writes=node.buffer_names(),
+                indirect_args=tuple(getattr(op, "indirect_args", ())),
             )
         )
 
     weights: dict[str, WeightSpec] = {}
     for nid, op in graph.loadable_constants():
+        load_ops = _encode_load_ops(op.load_ops)
+        generated = None
+        if op.source_graph is not None:
+            # A source-free deterministic record is a generated constant: evaluate it once on
+            # CPU and carry its compact bytes in the plan. Records with checkpoint/input leaves
+            # still require sources the plan grammar cannot express and remain unbindable.
+            from emmy.compiler.loader.binder import evaluate_source_graph  # noqa: PLC0415
+
+            try:
+                value = evaluate_source_graph(op.source_graph, {})
+            except (KeyError, ValueError, TypeError, RuntimeError, NotImplementedError):
+                value = None
+            if value is not None:
+                value = np.ascontiguousarray(value)
+                generated = (value.dtype.str, tuple(int(d) for d in value.shape), value.tobytes())
+            else:
+                logger.warning("plan: constant %r rides a bind record with unresolved leaves; weight will not rebind from a pack", nid)
+                load_ops = None
         weights[nid] = WeightSpec(
             source_path=op.source_path,
-            load_ops=_encode_load_ops(op.load_ops),
+            load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
+            generated=generated,
         )
 
     return ExecutionPlan(
@@ -234,12 +277,55 @@ def _normalize_spec(spec) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def _encode_index_map(op) -> tuple | None:
+    """Encode a single-source ``IndexMapOp`` as ``("slice", (start, step, extent, ...))`` when
+    it is a per-axis affine read of its input — the form a folded ``SliceOp`` takes.
+    ``None`` for anything richer (a cat's ``select``, an axis
+    permutation, a coord that mixes axes).
+
+    Detection is by CONSTRUCTION, not by sampling: each output axis' coord expression must be
+    affine in its OWN placeholder alone, which is checked by substituting the other axes' vars
+    away and requiring the residual to evaluate to ``a·i + b`` at every i in range."""
+    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
+
+    if len(op.sources) != 1 or op.sources[0].select is not None:
+        return None
+    shape = [d.as_static() if d.is_static else None for d in op.out_shape]
+    if any(d is None for d in shape) or len(op.sources[0].coord_map) != len(shape):
+        return None
+    spans: list[int] = []
+    for axis, coord in enumerate(op.sources[0].coord_map):
+        env = {f"{PLACEHOLDER_PREFIX}{i}": 0 for i in range(len(shape))}
+        try:
+            base = int(coord.eval(env))
+            env[f"{PLACEHOLDER_PREFIX}{axis}"] = 1
+            step = int(coord.eval(env)) - base if shape[axis] > 1 else 1
+            for i in range(shape[axis]):
+                env[f"{PLACEHOLDER_PREFIX}{axis}"] = i
+                if int(coord.eval(env)) != base + step * i:
+                    return None
+            # Independence from the other axes: a mixing coord (a reshape/transpose) is not a slice.
+            for other in range(len(shape)):
+                if other == axis or shape[other] < 2:
+                    continue
+                probe = dict(env, **{f"{PLACEHOLDER_PREFIX}{axis}": 0, f"{PLACEHOLDER_PREFIX}{other}": shape[other] - 1})
+                if int(coord.eval(probe)) != base:
+                    return None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+        if step < 1:
+            return None
+        spans += [base, step, shape[axis]]
+    return ("slice", tuple(spans))
+
+
 def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
     """Encode a ``ConstantOp.load_ops`` chain into the plan's vocabulary
-    (``("transpose", axes)`` / ``("reshape", shape)``), or ``None`` when a chain member isn't
-    expressible — the plan still runs (binding came from the live module), it just can't rebind
-    that weight from a pack."""
+    (``("transpose", axes)`` / ``("reshape", shape)`` / ``("slice", spans)``), or ``None`` when a
+    chain member isn't expressible — the plan still runs (binding came from the live module), it
+    just can't rebind that weight from a pack."""
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import IndexMapOp  # noqa: PLC0415
 
     out: list[tuple] = []
     for op in load_ops:
@@ -247,6 +333,8 @@ def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
             out.append(("transpose", tuple(int(a) for a in op.axes)))
         elif isinstance(op, ReshapeOp) and all(isinstance(d, int) for d in op.shape):
             out.append(("reshape", tuple(op.shape)))
+        elif isinstance(op, IndexMapOp) and (enc := _encode_index_map(op)) is not None:
+            out.append(enc)
         else:
             logger.warning("plan: load op %r not expressible in the pack vocabulary; weight will not rebind from a pack", op)
             return None
@@ -263,6 +351,9 @@ def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.nd
             a = np.swapaxes(a, arg[0] % a.ndim, arg[1] % a.ndim) if len(arg) == 2 else np.transpose(a, arg)
         elif kind == "reshape":
             a = a.reshape(arg)
+        elif kind == "slice":
+            spans = [tuple(arg[i : i + 3]) for i in range(0, len(arg), 3)]
+            a = a[tuple(slice(start, start + step * extent, step) for start, step, extent in spans)]
         else:
             raise ValueError(f"apply_weight_loads: unknown load op kind {kind!r}")
     return np.ascontiguousarray(a)
@@ -338,8 +429,15 @@ def _dim_from_json(v) -> Dim:
 
 
 def plan_to_dict(plan: ExecutionPlan) -> dict:
+    has_generated = any(w.generated is not None for w in plan.weights.values())
     return {
-        "format": PLAN_FORMAT_VERSION,
+        "format": (
+            PLAN_FORMAT_GENERATED
+            if has_generated
+            else PLAN_FORMAT_INDIRECT
+            if any(lc.indirect_args for lc in plan.launches)
+            else PLAN_FORMAT_VERSION
+        ),
         "backend": plan.backend,
         "inputs": list(plan.inputs),
         "outputs": list(plan.outputs),
@@ -359,6 +457,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "zero_outputs": list(lc.zero_outputs),
                 **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 **({"writes": list(lc.writes)} if lc.writes else {}),
+                **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
                 "runtime_args": list(lc.runtime_args),
                 "cuda": {
                     "tma": [
@@ -381,6 +480,17 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             nid: {
                 **({"path": w.source_path} if w.source_path is not None else {}),
                 **({"parts": [[p, list(s)] for p, s in w.source_parts]} if w.source_parts else {}),
+                **(
+                    {
+                        "generated": {
+                            "dtype": w.generated[0],
+                            "shape": list(w.generated[1]),
+                            "data": base64.b64encode(w.generated[2]).decode("ascii"),
+                        }
+                    }
+                    if w.generated is not None
+                    else {}
+                ),
                 **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {}),
             }
             for nid, w in plan.weights.items()
@@ -395,8 +505,10 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt != PLAN_FORMAT_VERSION:
-        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION})")
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED):
+        raise ValueError(
+            f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION}, {PLAN_FORMAT_INDIRECT}, and {PLAN_FORMAT_GENERATED})"
+        )
     symbols = d.get("symbols", {})
     return ExecutionPlan(
         backend=d["backend"],
@@ -424,6 +536,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
                 zero_prologues=tuple(lc.get("zero_prologues", ())),
                 writes=tuple(lc.get("writes", ())),
+                indirect_args=tuple((a, t, s, int(sl)) for a, t, s, sl in lc.get("indirect", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())
@@ -441,6 +554,15 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 source_path=w.get("path"),
                 load_ops=tuple((k, tuple(a)) for k, a in w["ops"]) if "ops" in w else None,
                 source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in w.get("parts", ())),
+                generated=(
+                    (
+                        w["generated"]["dtype"],
+                        tuple(int(d) for d in w["generated"]["shape"]),
+                        base64.b64decode(w["generated"]["data"], validate=True),
+                    )
+                    if "generated" in w
+                    else None
+                ),
             )
             for nid, w in d.get("weights", {}).items()
         },

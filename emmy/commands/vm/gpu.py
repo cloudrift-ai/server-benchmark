@@ -12,13 +12,16 @@ hardware table and tries them in preference order.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 from emmy.benchmark.config import load_config
 from emmy.provisioning.cloud import provision_cloud_vm, read_public_key_files
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
+from emmy.provisioning.lease import VmLeaseObserver, load_owned_lease
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ def handle_create(args):
 
 async def _handle_create(args):
     ssh_key = os.path.expanduser(args.ssh_key)
+
+    if bool(args.lease) != bool(args.owner):
+        logger.error("--lease and --owner must be supplied together")
+        sys.exit(1)
 
     try:
         extra_authorized_keys = read_public_key_files(args.authorized_key)
@@ -51,6 +58,10 @@ async def _handle_create(args):
         if args.network:
             providers_config["cloudrift"]["network"] = args.network
 
+    observer = None
+    if args.lease is not None and not args.dry_run:
+        observer = VmLeaseObserver(args.lease, args.owner, args.gpu, args.gpu_count)
+
     try:
         conn = await provision_cloud_vm(
             gpu_name=args.gpu,
@@ -62,8 +73,10 @@ async def _handle_create(args):
             provider=args.provider,
             extra_authorized_keys=extra_authorized_keys,
             provisioning_model=args.provisioning_model,
+            allocation_observer=observer,
+            exact_gpu_count=args.exact_gpu_count,
         )
-    except (CapacityExhausted, TerminalProvisionError) as exc:
+    except (CapacityExhausted, TerminalProvisionError, RuntimeError, ValueError) as exc:
         logger.error(f"{exc}")
         sys.exit(1)
 
@@ -72,6 +85,21 @@ async def _handle_create(args):
         sys.exit(1)
 
     logger.info(f"VM ready at {conn.address}:{conn.ssh_port}")
+    if args.json:
+        if args.lease is not None and not args.dry_run:
+            payload = load_owned_lease(args.lease, args.owner)
+        else:
+            ssh_target = conn.address
+            if conn.ssh_port != 22:
+                ssh_target = f"{ssh_target}:{conn.ssh_port}"
+            payload = {
+                "delete_info": list(conn.delete_info),
+                "ssh_host": conn.host,
+                "ssh_port": conn.ssh_port,
+                "ssh_target": ssh_target,
+                "ssh_user": conn.username,
+            }
+        logger.info(json.dumps(payload, sort_keys=True))
 
 
 def register_create_target(subparsers):
@@ -82,6 +110,11 @@ def register_create_target(subparsers):
     )
     parser.add_argument("--gpu", required=True, help="GPU name from hardware table (e.g. 'NVIDIA H200 141GB')")
     parser.add_argument("--gpu-count", type=int, default=1, help="Number of GPUs (default: 1)")
+    parser.add_argument(
+        "--exact-gpu-count",
+        action="store_true",
+        help="Reject provider instances that contain more GPUs than requested",
+    )
     parser.add_argument("--ssh-key", default="~/.ssh/id_ed25519", help="SSH private key path")
     parser.add_argument(
         "--authorized-key",
@@ -115,4 +148,7 @@ def register_create_target(subparsers):
         help="CloudRift network name (must exist in target datacenter; default: provider picks a public network)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
+    parser.add_argument("--lease", type=Path, help="Atomically persist the allocation handle and connection details")
+    parser.add_argument("--owner", help="Exact owner recorded in --lease; required with --lease")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable connection details after provisioning")
     parser.set_defaults(func=handle_create)

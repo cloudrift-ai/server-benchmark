@@ -1,682 +1,1774 @@
 gpu_name: NVIDIA GeForce RTX 4090
-compute_cap: [8, 9]
+compute_cap:
+- 8
+- 9
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [{sym: seq_len, hint: 512}, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [{sym: seq_len, hint: 512}, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 16384]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 16384]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 16384]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 16384]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 512}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 512}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: seq_len, hint: 512}}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: seq_len, hint: 512}}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [4096]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [8192]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [8192]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [4096]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [8192]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [8192]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [3840]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [3840]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 3840]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [256]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [256]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4096, 256]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [4096, 256]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [3840]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [3840]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 3840]]]
 configs:
-  - kernel: matmul
-    name: matmul.square.512
-    M: 512
-    N: 512
-    K: 512
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 10.1
-    cublas_us: 10.8
-  # 2026-07-15 cold golden sweep (rented 4090): the deeper f4x10 register tile replaces n32x8/f2x8 —
-  # pinned-vs-pinned 58.5 vs the old config's live 61.6-63.2 (2x --ab reps + 3x greedy reps, ab row
-  # stable at 58.4-58.5; the old entry's recorded 57.9 no longer replays). ~5-8% win, above the 3% gate.
-  - kernel: matmul
-    name: matmul.square.1024
-    M: 1024
-    N: 1024
-    K: 1024
-    knobs: {TILE: 'n32x8/f4x10', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
-    emmy_us: 58.5
-    cublas_us: 45.4
-  - kernel: matmul
-    name: matmul.square.2048
-    M: 2048
-    N: 2048
-    K: 2048
-    knobs: {TILE: 'n32x16/f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 359.1
-    cublas_us: 320.0
-  - kernel: matmul
-    name: matmul.square.4096
-    M: 4096
-    N: 4096
-    K: 4096
-    knobs: {TILE: 'n32x8/f4x26', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 2727.9
-    cublas_us: 2458.6
-  - kernel: matmul
-    name: matmul.square.512.fp16
-    M: 512
-    N: 512
-    K: 512
-    dtype: fp16
-    # 2026-07-12 post-swizzle refresh (cp.async slab swizzle, PR #351): 6.1 -> 4.9 (3x at zero spread).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f2x2/k4', RASTER: '', STAGE: 'd2/cp/ring/p2'}
-    emmy_us: 4.9
-    cublas_us: 5.8
-  - kernel: matmul
-    name: matmul.square.512.fp16
-    M: 512
-    N: 512
-    K: 512
-    dtype: fp16
-    # 2026-07-12 post-swizzle refresh: 6.3 -> 6.0 total (4.5 + 1.5 finalize, 3x).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x2/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 6.0
-    cublas_us: 5.8
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the p2 standard golden.
-  # 4.8 µs (3x at zero spread) vs the standard's live 4.9 — the fm twin the 5090 file also carries.
-  # 2026-07-12 post-swizzle manual refresh.
-  - kernel: matmul
-    name: matmul.square.512.fp16
-    M: 512
-    N: 512
-    K: 512
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
-    emmy_us: 4.8
-    cublas_us: 5.8
-  - kernel: matmul
-    name: matmul.square.1024.fp16
-    M: 1024
-    N: 1024
-    K: 1024
-    dtype: fp16
-    # 2026-07-12 manual sweep: REDUCE stamped '' (replayed fill-free); emmy_us refreshed 22.2 -> 24.0.
-    # Post-swizzle refresh (same day, PR #351): 24.0 -> 20.4 (2 passes 20.2/20.4).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 20.4
-    cublas_us: 18.1
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the standard golden.
-  # 2026-07-12 manual sweep on a rented 4090; kept beside the standard entry — gate-off compiles
-  # can't reach it. Post-swizzle refresh (same day): 19.9 -> 15.8 (3x at zero spread), 0.87x cuBLAS.
-  - kernel: matmul
-    name: matmul.square.1024.fp16
-    M: 1024
-    N: 1024
-    K: 1024
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 15.8
-    cublas_us: 18.1
-  - kernel: matmul
-    name: matmul.square.2048.fp16
-    M: 2048
-    N: 2048
-    K: 2048
-    dtype: fp16
-    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free); emmy_us refreshed 116.0 -> 123.4
-    # (live median, 4 passes at 123.1-123.9 — consistent +6% drift).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 123.4
-    cublas_us: 115.2
-  # Fast-math sibling (FAST_MATH lane). 2026-07-12 post-swizzle manual refresh (PR #351): the
-  # bank-conflict fix flipped the optimum to the wide-N f4x8 register tile — w2x2/f4x8/k2 at 82.7
-  # (2x, 82.4/82.7) replaces the old w1x4/f4x4 fm entry (live 106.7, 29% slower, pruned). 0.72x vs
-  # cuBLAS HGEMM — beats cuBLAS. Accuracy vs torch passes.
-  - kernel: matmul
-    name: matmul.square.2048.fp16
-    M: 2048
-    N: 2048
-    K: 2048
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 82.7
-    cublas_us: 115.2
-  - kernel: matmul
-    name: matmul.square.4096.fp16
-    M: 4096
-    N: 4096
-    K: 4096
-    dtype: fp16
-    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us left at 869.4 — live replays
-    # wobbled 840-919 around it (median 841, -3.3%, under the 5% refresh gate).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 869.4
-    cublas_us: 822.3
-  # Fast-math sibling (FAST_MATH lane). 2026-07-12 post-swizzle manual refresh (PR #351): w2x2/f4x8/k2
-  # at 603.1 (3x, 602.1-611.8) replaces the old w1x4/f4x8/k2 fm entry (live 634-639, 5.5% slower,
-  # pruned). 0.73x vs cuBLAS HGEMM. Accuracy vs torch passes.
-  - kernel: matmul
-    name: matmul.square.4096.fp16
-    M: 4096
-    N: 4096
-    K: 4096
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 603.1
-    cublas_us: 822.3
-  - kernel: matmul
-    name: matmul.square.512.dynM
-    M: 512
-    N: 512
-    K: 512
-    dynamic: true
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 10.6
-    cublas_us: 10.8
-  - kernel: matmul
-    name: matmul.qkv.h4096
-    M: 512
-    N: 12288
-    K: 4096
-    dtype: fp16
-    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). Post-swizzle refresh (PR #351):
-    # 374.1 -> 343.7 (4 passes 343.0-353.6).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 343.7
-    cublas_us: 328.0
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 336.8 µs total (324.2 + 12.6 finalize;
-  # 3x at <0.5% spread) vs the standard's live ~374 (0.90x), parity with cuBLAS HGEMM. 2026-07-12.
-  # Same day: RASTER 'gm8' recorded (the launch-order codec, grouped M stripes for L2 B-reuse) —
-  # 322.4/323.5 total through the codec pin, matching the pre-codec probe (324.1) and 0.99x vs
-  # cuBLAS. The one shape where rasterization measurably won on this card.
-  - kernel: matmul
-    name: matmul.qkv.h4096
-    M: 512
-    N: 12288
-    K: 4096
-    dtype: fp16
-    # Post-swizzle refresh (2026-07-12, PR #351): 323.5 -> 267.7 total (255.2 + 12.5 finalize, 3x
-    # at <0.3% spread), 0.82x vs cuBLAS — beats cuBLAS.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: 'gm8', STAGE: 'd2/cp/ring'}
-    emmy_us: 267.7
-    cublas_us: 328.0
-  - kernel: matmul
-    name: matmul.qkv.h4096
-    M: 512
-    N: 12288
-    K: 4096
-    dtype: fp16
-    # Post-swizzle refresh (2026-07-12, PR #351): 380.3 -> 362.0 total (3 tight passes).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 362.0
-    cublas_us: 328.0
-  - kernel: matmul
-    name: matmul.o_proj.h4096
-    M: 512
-    N: 4096
-    K: 4096
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 119.9
-    cublas_us: 119.0
-  - kernel: matmul
-    name: matmul.o_proj.h4096
-    M: 512
-    N: 4096
-    K: 4096
-    dtype: fp16
-    # 2026-07-12 manual sweep: REDUCE stamped '' (replayed fill-free at 117.4, 2x). Post-swizzle
-    # refresh (same day, PR #351): 121.6 -> 108.7 (4 passes 108.5-108.8).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
-    emmy_us: 108.7
-    cublas_us: 119.0
-  # Fast-math sibling (FAST_MATH lane), first fm entry for this shape — pre-swizzle the fm atom was
-  # parity here and went unrecorded; the bank-conflict fix (2026-07-12 post-swizzle manual refresh,
-  # PR #351) makes the wide-N f4x8 tile win outright: 88.4 total (83.6 + 4.8 finalize; 3x at <0.2%
-  # spread) vs the standard's live 108.7 (0.81x), 0.74x vs cuBLAS HGEMM — beats cuBLAS. Accuracy vs
-  # torch passes.
-  - kernel: matmul
-    name: matmul.o_proj.h4096
-    M: 512
-    N: 4096
-    K: 4096
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 88.4
-    cublas_us: 119.0
-  # 2026-07-15 cold golden sweep (rented 4090): the narrow-N w2x2/f2x8/k2 tile through the gm8 raster
-  # codec (grouped-M stripes, L2 B-reuse) replaces the wide-N w4x1/f4x8/k2 (919.5 recorded / 917.5
-  # live) — 803.8 pinned-vs-pinned, 0.876x, identical across 2 --ab reps + 3 greedy reps (751-794
-  # greedy-row). Second shape where rasterization wins on this card (after qkv fm gm8).
-  - kernel: matmul
-    name: matmul.mlp_gate_up.h4096
-    M: 512
-    N: 28672
-    K: 4096
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x8/k2', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
-    emmy_us: 803.8
-    cublas_us: 721.0
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the atom-swap of the standard golden —
-  # the f16 accumulator's 2x HMMA rate on this mma-bound wide-N shape. Accuracy vs torch passes.
-  # 2026-07-12. Post-swizzle refresh (same day, PR #351): 786.9 -> 664.6 (7 passes 662.0-667.6),
-  # 0.92x vs cuBLAS HGEMM — beats cuBLAS.
-  - kernel: matmul
-    name: matmul.mlp_gate_up.h4096
-    M: 512
-    N: 28672
-    K: 4096
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 664.6
-    cublas_us: 721.0
-  # Fast-math parity sibling: same tile through the /p2 smem->register double-buffer — 648.2 (3x,
-  # 647.7-649.2), 2.5% under the plain-ring fm twin (inside the 3% gate, kept as a parity entry).
-  # 2026-07-12 post-swizzle manual refresh.
-  - kernel: matmul
-    name: matmul.mlp_gate_up.h4096
-    M: 512
-    N: 28672
-    K: 4096
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
-    emmy_us: 648.2
-    cublas_us: 721.0
-  - kernel: matmul
-    name: matmul.mlp_down.h4096
-    M: 512
-    N: 4096
-    K: 14336
-    dtype: fp16
-    # 2026-07-12 manual sweep: emmy_us refreshed 397.5 -> 371.0 (live median of 4 passes at
-    # 370.0-372.9 — the recorded value was 6.7% pessimistic).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 371.0
-    cublas_us: 388.0
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): beats cuBLAS on the deep-K (14336)
-  # shape. Accuracy vs torch passes. 2026-07-12 manual sweep. Post-swizzle refresh (same day,
-  # PR #351): 348.5 -> 274.0 total (269.1 + 4.9 finalize, 3x), 0.71x vs cuBLAS HGEMM.
-  - kernel: matmul
-    name: matmul.mlp_down.h4096
-    M: 512
-    N: 4096
-    K: 14336
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 274.0
-    cublas_us: 388.0
-  - kernel: matmul
-    name: matmul.qkv.h4096.dynM
-    M: 512
-    N: 12288
-    K: 4096
-    dtype: fp16
-    dynamic: true
-    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). Post-swizzle refresh (same day,
-    # PR #351): 370.0 -> 343.0 (3 passes 342.7-351.6).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 343.0
-    cublas_us: 330.0
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin.
-  # 2026-07-12 manual sweep. Post-swizzle refresh (same day, PR #351): 332.0 -> 298.9 total
-  # (286.4 + 12.5 finalize, 3 passes), 0.91x vs cuBLAS — beats cuBLAS.
-  - kernel: matmul
-    name: matmul.qkv.h4096.dynM
-    M: 512
-    N: 12288
-    K: 4096
-    dtype: fp16
-    dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 298.9
-    cublas_us: 330.0
-  - kernel: matmul
-    name: matmul.o_proj.h4096.dynM
-    M: 512
-    N: 4096
-    K: 4096
-    dtype: fp16
-    dynamic: true
-    # Post-swizzle refresh (2026-07-12, PR #351): 123.3 -> 119.5 (4 tight passes 119.0-119.5).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 119.5
-    cublas_us: 112.0
-  # Fast-math sibling (FAST_MATH lane), first fm entry for this shape — the static twin's
-  # post-swizzle winner transfers with no masked-tile penalty: 89.3 total (84.5 + 4.8 finalize; 3x)
-  # vs the standard's live 119.5 (0.75x), 0.80x vs cuBLAS — beats cuBLAS. 2026-07-12 post-swizzle
-  # manual refresh (PR #351). Accuracy vs torch passes.
-  - kernel: matmul
-    name: matmul.o_proj.h4096.dynM
-    M: 512
-    N: 4096
-    K: 4096
-    dtype: fp16
-    dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 89.3
-    cublas_us: 112.0
-  - kernel: matmul
-    name: matmul.mlp_gate_up.h4096.dynM
-    M: 512
-    N: 28672
-    K: 4096
-    dtype: fp16
-    dynamic: true
-    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us kept — live wobbled 904-985.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 923.6
-    cublas_us: 742.0
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 2026-07-12.
-  # Post-swizzle refresh (same day, PR #351): 802.8 -> 665.6 (3 passes 665.5-668.7), 0.90x vs
-  # cuBLAS — beats cuBLAS; no masked-tile penalty (static twin 664.6).
-  - kernel: matmul
-    name: matmul.mlp_gate_up.h4096.dynM
-    M: 512
-    N: 28672
-    K: 4096
-    dtype: fp16
-    dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 665.6
-    cublas_us: 742.0
-  # 2026-07-15 cold golden sweep (rented 4090): converges to the static twin's family — w2x2/f4x8 g2k
-  # replaces the long-wobbly w2x4/f4x4 (recorded 425.2, live 427.3): 375.6/377.1 pinned-vs-pinned
-  # (0.88x), 3 greedy reps 380-399. No masked-tile penalty vs the static twin (371.0).
-  - kernel: matmul
-    name: matmul.mlp_down.h4096.dynM
-    M: 512
-    N: 4096
-    K: 14336
-    dtype: fp16
-    dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
-    emmy_us: 376.4
-    cublas_us: 388.0
-  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 2026-07-12
-  # manual sweep. Post-swizzle refresh (same day, PR #351): 332.8 -> 275.5 total (270.6 + 4.8
-  # finalize, 3 passes), 0.71x vs cuBLAS HGEMM — beats cuBLAS.
-  - kernel: matmul
-    name: matmul.mlp_down.h4096.dynM
-    M: 512
-    N: 4096
-    K: 14336
-    dtype: fp16
-    dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 275.5
-    cublas_us: 388.0
-  # 2026-07-14 audit (post-#355 rebase): same-knobs replay runs 4.6 (3x, zero spread — now matching
-  # its .dynM twin's recorded 4.6); emmy_us refreshed from 5.0.
-  - kernel: pointwise
-    name: pointwise.n4096
-    M: 512
-    N: 4096
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
-    emmy_us: 4.6
-    cublas_us: 5.0
-  # 2026-07-14 audit: same-knobs replay runs 16.2-16.3 (3x); emmy_us refreshed from 17.4.
-  - kernel: pointwise
-    name: pointwise.n16384
-    M: 512
-    N: 16384
-    knobs: {TILE: 'f4'}
-    emmy_us: 16.3
-    cublas_us: 18.0
-  - kernel: pointwise
-    name: pointwise.n4096.dynM
-    M: 512
-    N: 4096
-    dynamic: true
-    knobs: {TILE: 'f2'}
-    emmy_us: 4.6
-    cublas_us: 5.0
-  - kernel: pointwise
-    name: pointwise.n16384.dynM
-    M: 512
-    N: 16384
-    dynamic: true
-    knobs: {TILE: 'f4'}
-    emmy_us: 16.5
-    cublas_us: 19.0
-  - kernel: softmax
-    name: softmax.k2048
-    M: 512
-    K: 2048
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 3.5
-    cublas_us: 6.0
-  - kernel: softmax
-    name: softmax.k8192
-    M: 512
-    K: 8192
-    knobs: {REDUCE: 'b512'}
-    emmy_us: 12.4
-    cublas_us: 14.0
-  - kernel: softmax
-    name: softmax.k2048.dynM
-    M: 512
-    K: 2048
-    dynamic: true
-    knobs: {REDUCE: 'b128'}
-    emmy_us: 3.6
-    cublas_us: 6.0
-  - kernel: softmax
-    name: softmax.k8192.dynM
-    M: 512
-    K: 8192
-    dynamic: true
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 13.2
-    cublas_us: 14.0
-  - kernel: reduce
-    name: reduce.k2048
-    M: 512
-    K: 2048
-    knobs: {REDUCE: 'b128'}
-    emmy_us: 2.1
-    cublas_us: 4.0
-  - kernel: reduce
-    name: reduce.k8192
-    M: 512
-    K: 8192
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 4.5
-    cublas_us: 7.0
-  - kernel: reduce
-    name: reduce.k2048.dynM
-    M: 512
-    K: 2048
-    dynamic: true
-    knobs: {REDUCE: 'b128'}
-    emmy_us: 2.1
-    cublas_us: 4.0
-  - kernel: reduce
-    name: reduce.k8192.dynM
-    M: 512
-    K: 8192
-    dynamic: true
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 4.6
-    cublas_us: 7.0
-  - kernel: rms_norm
-    name: rms_norm.k2048
-    M: 512
-    K: 2048
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 4.1
-    cublas_us: 4.0
-  - kernel: rms_norm
-    name: rms_norm.k4096
-    M: 512
-    K: 4096
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 7.2
-    cublas_us: 7.0
-  - kernel: rms_norm
-    name: rms_norm.k8192
-    M: 512
-    K: 8192
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 13.8
-    cublas_us: 13.0
-  - kernel: rms_norm
-    name: rms_norm.k2048.dynM
-    M: 512
-    K: 2048
-    dynamic: true
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 4.1
-    cublas_us: 4.0
-  - kernel: rms_norm
-    name: rms_norm.k4096.dynM
-    M: 512
-    K: 4096
-    dynamic: true
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 7.2
-    cublas_us: 7.0
-  - kernel: rms_norm
-    name: rms_norm.k8192.dynM
-    M: 512
-    K: 8192
-    dynamic: true
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 13.8
-    cublas_us: 13.0
-  - kernel: attention
-    name: attention.hd64
-    n_heads: 8
-    seq: 512
-    head_dim: 64
-    dtype: 'fp16'
-    causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
-    emmy_us: 10.6
-    cublas_us: 10.0
-  # FAST_MATH-lane pair (2026-07-14, 3x reproduced): the f16acc-PV sibling beats the std golden
-  # outright (9.6 ring / 9.3 alt vs 10.5), and within the fm lane the alternating single-slab
-  # staging wins the fork (9.3 vs 9.6 — cp.async alt, sm_89 has no TMA). std-lane alt is parity
-  # (10.6 vs 10.5) — not recorded; hd64 keeps the ring there, as on the 5090.
-  - kernel: attention
-    name: attention.hd64
-    n_heads: 8
-    seq: 512
-    head_dim: 64
-    dtype: 'fp16'
-    causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
-    emmy_us: 9.6
-    cublas_us: 10.0
-  - kernel: attention
-    name: attention.hd64
-    n_heads: 8
-    seq: 512
-    head_dim: 64
-    dtype: 'fp16'
-    causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd1/cp/alt'}
-    emmy_us: 9.3
-    cublas_us: 10.0
-  - kernel: attention
-    name: attention.hd128
-    n_heads: 8
-    seq: 512
-    head_dim: 128
-    dtype: 'fp16'
-    causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
-    emmy_us: 19.9
-    cublas_us: 18.0
-  # FAST_MATH-lane pair (2026-07-14, 3x reproduced): fm-alt 17.7 is the hd128 frontier on this card
-  # — past torch SDPA (18.0) and the std golden (19.5 live / 19.9 recorded); fm-ring 18.2 kept as
-  # the fork sibling. cp.async alt (per-operand commit groups — sm_89 has no TMA); the 5090-winning
-  # w2x1 alt geometry loses here in the std lane (22.3) and ties fm (17.8) — w4x1 recorded.
-  # std-lane alt is parity (19.4 vs 19.5) — not recorded.
-  - kernel: attention
-    name: attention.hd128
-    n_heads: 8
-    seq: 512
-    head_dim: 128
-    dtype: 'fp16'
-    causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
-    emmy_us: 18.2
-    cublas_us: 18.0
-  - kernel: attention
-    name: attention.hd128
-    n_heads: 8
-    seq: 512
-    head_dim: 128
-    dtype: 'fp16'
-    causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
-    emmy_us: 17.7
-    cublas_us: 18.0
-  - kernel: attention
-    name: attention.hd64.dynM
-    n_heads: 8
-    seq: 512
-    head_dim: 64
-    dtype: 'fp16'
-    causal: false
-    dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
-    emmy_us: 10.7
-    cublas_us: 11.0
-  - kernel: attention
-    name: attention.hd128.dynM
-    n_heads: 8
-    seq: 512
-    head_dim: 128
-    dtype: 'fp16'
-    causal: false
-    dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
-    emmy_us: 20.3
-    cublas_us: 19.0
-  # FAST_MATH-lane pair on the symbolic twin (2026-07-14 — the alternating pipeline now resolves on
-  # a symbolic kv): fm-alt 18.1 is the dynM frontier (fm-ring 18.6, std ring 20.0 live / 20.3
-  # recorded); std-alt loses (21.8). Mirrors the static hd128 fm pair above; cp.async only (sm_89).
-  - kernel: attention
-    name: attention.hd128.dynM
-    n_heads: 8
-    seq: 512
-    head_dim: 128
-    dtype: 'fp16'
-    causal: false
-    dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
-    emmy_us: 18.6
-    cublas_us: 19.0
-  - kernel: attention
-    name: attention.hd128.dynM
-    n_heads: 8
-    seq: 512
-    head_dim: 128
-    dtype: 'fp16'
-    causal: false
-    dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
-    emmy_us: 18.1
-    cublas_us: 19.0
-  # Values re-measured 2026-07-13 after the causal tile-skip (3x reproduced): nt=2 44.1 → 40.4, and
-  # the nt=4 streaming block (below) is the new twin frontier at 1.11x past torch SDPA — post-skip
-  # the nt=4 form realizes on sm_89 (the pre-skip realize-back-to-nt2 note is obsolete).
-  - kernel: attention
-    name: attention.hd256.dynM
-    n_heads: 16
-    seq: 512
-    head_dim: 256
-    dtype: 'fp16'
-    causal: true
-    dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x2/k16', STAGE: 'd2/cp/ring'}
-    emmy_us: 40.4
-    cublas_us: 42.0
-  - kernel: attention
-    name: attention.hd256.dynM
-    n_heads: 16
-    seq: 512
-    head_dim: 256
-    dtype: 'fp16'
-    causal: true
-    dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x4/k16', STAGE: 'd2/cp/ring'}
-    emmy_us: 38.0
-    cublas_us: 42.0
-  - kernel: rms_norm
-    name: rms_norm.k3840
-    M: 512
-    K: 3840
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 6.9
-    cublas_us: 7.0
-  - kernel: rms_norm
-    name: gemma4_12b.qknorm.k256
-    M: 4096
-    K: 256
-    knobs: {REDUCE: 'b64'}
-    emmy_us: 3.7
-    cublas_us: 5.0
-  - kernel: rms_norm
-    name: rms_norm.k3840.dynM
-    M: 512
-    K: 3840
-    dynamic: true
-    knobs: {REDUCE: 'b256'}
-    emmy_us: 6.9
-    cublas_us: 7.0
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.1
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 1
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.1024
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x10
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 58.5
+      reference_us: 45.4
+      reference_backend: cublas
+- program: 2
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x8
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 359.1
+      reference_us: 320.0
+      reference_backend: cublas
+- program: 3
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x26
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 2727.9
+      reference_us: 2458.6
+      reference_backend: cublas
+- program: 4
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 4.9
+      reference_us: 5.8
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 6.0
+      reference_us: 5.8
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 4.8
+      reference_us: 5.8
+      reference_backend: cublas
+- program: 5
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 20.4
+      reference_us: 18.1
+      reference_backend: cublas
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 15.8
+      reference_us: 18.1
+      reference_backend: cublas
+- program: 6
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 123.4
+      reference_us: 115.2
+      reference_backend: cublas
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 82.7
+      reference_us: 115.2
+      reference_backend: cublas
+- program: 7
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 869.4
+      reference_us: 822.3
+      reference_backend: cublas
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 603.1
+      reference_us: 822.3
+      reference_backend: cublas
+- program: 8
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.6
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 9
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 343.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 267.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 362.0
+      reference_us: 328.0
+      reference_backend: cublas
+- program: 10
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 119.9
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 108.7
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 88.4
+      reference_us: 119.0
+      reference_backend: cublas
+- program: 11
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 803.8
+      reference_us: 721.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 664.6
+      reference_us: 721.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp/p2
+    measurements:
+      emmy_us: 648.2
+      reference_us: 721.0
+      reference_backend: cublas
+- program: 12
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 371.0
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 274.0
+      reference_us: 388.0
+      reference_backend: cublas
+- program: 13
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 343.0
+      reference_us: 330.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 298.9
+      reference_us: 330.0
+      reference_backend: cublas
+- program: 14
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 119.5
+      reference_us: 112.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 89.3
+      reference_us: 112.0
+      reference_backend: cublas
+- program: 15
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 923.6
+      reference_us: 742.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 665.6
+      reference_us: 742.0
+      reference_backend: cublas
+- program: 16
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 376.4
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 275.5
+      reference_us: 388.0
+      reference_backend: cublas
+- program: 17
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      INTERLEAVE_LOADS: true
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 4.6
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 18
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n16384
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+    measurements:
+      emmy_us: 16.3
+      reference_us: 18.0
+      reference_backend: torch-eager
+- program: 19
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f2
+    measurements:
+      emmy_us: 4.6
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 20
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n16384.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+    measurements:
+      emmy_us: 16.5
+      reference_us: 19.0
+      reference_backend: torch-eager
+- program: 21
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.5
+      reference_us: 6.0
+      reference_backend: torch-eager
+- program: 22
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+    measurements:
+      emmy_us: 12.4
+      reference_us: 14.0
+      reference_backend: torch-eager
+- program: 23
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.6
+      reference_us: 6.0
+      reference_backend: torch-eager
+- program: 24
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 13.2
+      reference_us: 14.0
+      reference_backend: torch-eager
+- program: 25
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 2.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 26
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.5
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 27
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+    measurements:
+      emmy_us: 2.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 28
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.6
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 29
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 30
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 7.2
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 31
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 13.8
+      reference_us: 13.0
+      reference_backend: torch-eager
+- program: 32
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 4.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 33
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 7.2
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 34
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 13.8
+      reference_us: 13.0
+      reference_backend: torch-eager
+- program: 35
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f32/f1x8/k8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.6
+      reference_us: 10.0
+      reference_backend: torch-eager
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 9.6
+      reference_us: 10.0
+      reference_backend: torch-eager
+  - name: attention.hd64
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
+      STAGE: d1/cp/split
+    measurements:
+      emmy_us: 9.3
+      reference_us: 10.0
+      reference_backend: torch-eager
+- program: 36
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 19.9
+      reference_us: 18.0
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 18.2
+      reference_us: 18.0
+      reference_backend: torch-eager
+  - name: attention.hd128
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d1/cp/split
+    measurements:
+      emmy_us: 17.7
+      reference_us: 18.0
+      reference_backend: torch-eager
+- program: 37
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd64.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 10.7
+      reference_us: 11.0
+      reference_backend: torch-eager
+- program: 38
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 20.3
+      reference_us: 19.0
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 18.6
+      reference_us: 19.0
+      reference_backend: torch-eager
+  - name: attention.hd128.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f1x16/k4
+      STAGE: d1/cp/split
+    measurements:
+      emmy_us: 18.1
+      reference_us: 19.0
+      reference_backend: torch-eager
+- program: 39
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd256.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x2/k16
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 40.4
+      reference_us: 42.0
+      reference_backend: torch-eager
+  - name: attention.hd256.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x4/k16
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 38.0
+      reference_us: 42.0
+      reference_backend: torch-eager
+- program: 40
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k3840
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 6.9
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 41
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.qknorm.k256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+    measurements:
+      emmy_us: 3.7
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 42
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k3840.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+    measurements:
+      emmy_us: 6.9
+      reference_us: 7.0
+      reference_backend: torch-eager

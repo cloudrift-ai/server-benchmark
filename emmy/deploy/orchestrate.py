@@ -25,6 +25,24 @@ from emmy.timing import (
 logger = logging.getLogger(__name__)
 
 
+async def _baked_hf_cache(run_cmd, image):
+    """The image's own HF cache directory, when it ships one — else None.
+
+    A prebuilt per-model serving image (``docker/vllm-emmy-serve/``) bakes the model
+    snapshot under its own HF_HOME and sets HF_HUB_OFFLINE=1, so it never reaches the
+    hub. That pair is the image declaring itself self-contained: pointing HF_HOME at a
+    host cache instead hides the baked snapshot while offline mode stays on, which makes
+    the download step fail outright — and would re-fetch the full weights if it didn't.
+    """
+    fmt = "{{range .Config.Env}}{{println .}}{{end}}"
+    # stream=False is what makes run_cmd return stdout rather than pass it through.
+    rc, out, _ = await run_cmd(f"docker image inspect {image} --format '{fmt}'", stream=False, timeout=60)
+    if rc != 0 or not out:
+        return None
+    env = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return env.get("HF_HOME") if env.get("HF_HUB_OFFLINE") == "1" else None
+
+
 async def run_deploy(
     run_cmd,
     write_file,
@@ -36,6 +54,7 @@ async def run_deploy(
     gpu_device_ids=None,
     port_mappings=None,
     timer: PhaseTimer | None = None,
+    check_smoke_output: bool = True,
 ):
     """Shared deploy orchestration.
 
@@ -51,6 +70,9 @@ async def run_deploy(
         port_mappings: optional list of (internal, external) port tuples
         timer: optional PhaseTimer; deploy step durations are recorded into it. A
             throwaway timer is used when None, so the timing log lines still print.
+        check_smoke_output: whether a valid smoke response must also satisfy the
+            model-specific deployment check. Benchmark orchestration disables this
+            semantic judgment and uses the probe only for API readiness.
     """
     timer = timer or PhaseTimer()
     num_instances = calculate_num_instances(recipe)
@@ -85,7 +107,10 @@ async def run_deploy(
     logger.info("Pulling images...")
     async with timer.ameasure(PHASE_IMAGE_PULL):
         rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=1800, log_output=True)
-    _, images_out, _ = await run_cmd("docker compose config --images", timeout=60)
+    # stream=False, else run_cmd passes stdout through and returns "" — which left this
+    # guard iterating an empty list, so a genuinely missing image fell through to the
+    # confusing later failure the check exists to replace.
+    _, images_out, _ = await run_cmd("docker compose config --images", stream=False, timeout=60)
     missing = []
     for image in images_out.split():
         rc_i, _, _ = await run_cmd(f"docker image inspect {image}", timeout=60)
@@ -97,22 +122,34 @@ async def run_deploy(
     if rc != 0:
         logger.warning("Image pull reported failures, but every image exists locally — proceeding (local copies may be stale)")
 
-    # Step 2: Download model via hf CLI in container
-    logger.info(f"Downloading model {model_name}...")
-    dl_cmd = (
-        f"docker run --rm"
-        f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
-        f" -e HF_HOME={model_dir}"
-        f" -v {model_dir}:{model_dir}"
-        f" --entrypoint bash"
-        f" {image}"
-        f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}'"
-    )
-    async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
-        rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
-    if rc != 0:
-        logger.error("Failed to download model")
-        return False
+    # Step 2: Model weights. An image that ships its own snapshot needs none of this —
+    # and cannot do it, since it runs offline by construction. Defer to its cache and
+    # rewrite the compose file so the service keeps the baked HF_HOME too (the first
+    # write had to happen before the pull, which is what `docker compose pull` reads).
+    baked_hf_home = await _baked_hf_cache(run_cmd, image)
+    if baked_hf_home:
+        logger.info(f"Image ships its model cache at {baked_hf_home} (offline) — skipping download")
+        compose_content = generate_compose(
+            recipe, model_dir, hf_token, num_instances=num_instances, gpu_device_ids=gpu_device_ids, baked_hf_home=baked_hf_home
+        )
+        await write_file("docker-compose.yaml", compose_content)
+    else:
+        logger.info(f"Downloading model {model_name}...")
+        revision_arg = f" --revision {recipe.model.revision}" if recipe.model.revision else ""
+        dl_cmd = (
+            f"docker run --rm"
+            f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
+            f" -e HF_HOME={model_dir}"
+            f" -v {model_dir}:{model_dir}"
+            f" --entrypoint bash"
+            f" {image}"
+            f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}{revision_arg}'"
+        )
+        async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
+            rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
+        if rc != 0:
+            logger.error("Failed to download model")
+            return False
 
     # Step 3: Clean up old containers
     logger.info("Cleaning up old containers...")
@@ -165,28 +202,33 @@ async def run_deploy(
     logger.info(f"Instances: {num_instances}")
     logger.info(f"Status: {status}")
 
-    # Step 7: Smoke test inference (retry — first request may be slow due to warmup)
-    # Chat models: asks a trivial factual question and checks the answer to detect
-    # broken models (e.g. wrong quantization producing garbage output). Embedding
-    # models: requests one embedding and checks it's a unit-norm finite vector.
+    # Step 7: Probe inference (retry — first request may be slow due to warmup).
+    # Standalone deploy checks model-specific content; benchmark callers request
+    # transport readiness only and retain the response for later review.
     if not dry_run:
         logger.info("\nRunning smoke test...")
         async with timer.ameasure(PHASE_SMOKE_TEST):
             if recipe.is_embedding:
                 smoke_cmd = (
-                    f"curl -s http://localhost:{internal_port}/v1/embeddings"
+                    f"curl --fail-with-body -s http://localhost:{internal_port}/v1/embeddings"
                     f" -H 'Content-Type: application/json'"
                     f''' -d '{{"model":"{model_name}","input":"What is 2+2?"}}' '''
                 )
-                check = _check_embedding_response
+            elif recipe.model.smoke_test == "completion":
+                prompt = "2 + 2 ="
+                smoke_cmd = (
+                    f"curl --fail-with-body -s http://localhost:{internal_port}/v1/completions"
+                    f" -H 'Content-Type: application/json'"
+                    f''' -d '{{"model":"{model_name}","prompt":"{prompt}","max_tokens":16,"temperature":0}}' '''
+                )
             else:
                 prompt = "What is 2+2? Answer with just the number."
                 smoke_cmd = (
-                    f"curl -s http://localhost:{internal_port}/v1/chat/completions"
+                    f"curl --fail-with-body -s http://localhost:{internal_port}/v1/chat/completions"
                     f" -H 'Content-Type: application/json'"
                     f''' -d '{{"model":"{model_name}","messages":[{{"role":"user","content":"{prompt}"}}],"max_tokens":128}}' '''
                 )
-                check = _check_chat_response
+            check = _smoke_response_check(recipe, check_smoke_output=check_smoke_output)
             smoke_timeout = 600
             smoke_interval = 10
             deadline = asyncio.get_event_loop().time() + smoke_timeout
@@ -196,6 +238,8 @@ async def run_deploy(
                     # Server not ready yet, keep retrying
                     await asyncio.sleep(smoke_interval)
                     continue
+                if not check_smoke_output:
+                    logger.info("Smoke response: %s", stdout)
                 verdict, detail = check(stdout)
                 if verdict == "retry":
                     # Malformed/empty response, server may still be starting
@@ -226,6 +270,16 @@ async def run_deploy(
             f'      "input": "Hello"\n'
             f"    }}'"
         )
+    elif recipe.model.smoke_test == "completion":
+        logger.info(
+            f"  curl http://{host}:{external_port}/v1/completions \\\n"
+            f"    -H 'Content-Type: application/json' \\\n"
+            f"    -d '{{\n"
+            f'      "model": "{model_name}",\n'
+            f'      "prompt": "Hello",\n'
+            f'      "max_tokens": 64\n'
+            f"    }}'"
+        )
     else:
         logger.info(
             f"  curl http://{host}:{external_port}/v1/chat/completions \\\n"
@@ -249,6 +303,39 @@ def _check_chat_response(stdout: str) -> tuple[str, str]:
         body = json.loads(stdout)
         message = body["choices"][0]["message"]
         answer = message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return "retry", ""
+    if not answer:
+        return "retry", ""
+    if "4" in answer:
+        return "pass", ""
+    return "fail", f"model returned wrong answer: {answer!r}"
+
+
+def _check_readiness_response(stdout: str) -> tuple[str, str]:
+    """Accept any nonempty JSON API response without interpreting model content."""
+    try:
+        body = json.loads(stdout)
+    except json.JSONDecodeError:
+        return "retry", ""
+    return ("pass", "") if body else ("retry", "")
+
+
+def _smoke_response_check(recipe: Recipe, *, check_smoke_output: bool):
+    """Select semantic deployment checking or protocol-only benchmark readiness."""
+    if not check_smoke_output:
+        return _check_readiness_response
+    if recipe.is_embedding:
+        return _check_embedding_response
+    if recipe.model.smoke_test == "completion":
+        return _check_completion_response
+    return _check_chat_response
+
+
+def _check_completion_response(stdout: str) -> tuple[str, str]:
+    """Validate the base-model completion smoke response."""
+    try:
+        answer = json.loads(stdout)["choices"][0]["text"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
         return "retry", ""
     if not answer:
@@ -287,7 +374,7 @@ async def run_teardown(run_cmd):
     return rc == 0
 
 
-async def deploy(params: DeployParams, timer: PhaseTimer | None = None) -> bool:
+async def deploy(params: DeployParams, timer: PhaseTimer | None = None, *, check_smoke_output: bool = True) -> bool:
     """Deploy a recipe to a server via SSH. Single entry point."""
     run_cmd = make_run_cmd(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
     write_file = make_write_file(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
@@ -303,6 +390,7 @@ async def deploy(params: DeployParams, timer: PhaseTimer | None = None) -> bool:
         gpu_device_ids=params.gpu_device_ids,
         port_mappings=params.port_mappings,
         timer=timer,
+        check_smoke_output=check_smoke_output,
     )
 
 

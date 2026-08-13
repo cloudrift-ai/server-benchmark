@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from emmy.compiler.backend.loop.render_target import LoopRenderTarget
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 
 if TYPE_CHECKING:
@@ -60,6 +61,13 @@ PRELUDE = """\
 #include <cmath>
 #include <algorithm>
 static inline float rsqrtf_(float x) { return 1.0f / sqrtf(x); }
+template <typename To, typename From>
+static inline To emmy_bitcast(From value) {
+    static_assert(sizeof(To) == sizeof(From), "emmy_bitcast requires equal widths");
+    union { From from; To to; } bits;
+    bits.from = value;
+    return bits.to;
+}
 """
 
 
@@ -71,7 +79,7 @@ def render_loopop_cpp(loop: LoopOp, fn_name: str, input_shapes: dict[str, tuple[
     """
     output_name = next(iter(loop.outputs))
     shapes: dict[str, tuple[int, ...]] = {**input_shapes, output_name: output_shape}
-    ctx = RenderCtx(shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
+    ctx = RenderCtx(target=LoopRenderTarget(), shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
 
     sig_parts = [f"const float* {n}" for n in loop.inputs]
     sig_parts.append(f"float* {output_name}")

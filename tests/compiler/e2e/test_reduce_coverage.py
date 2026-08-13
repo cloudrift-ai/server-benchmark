@@ -32,10 +32,10 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop.ir import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse, online_softmax_combine
+from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
+from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.trace.torch import trace_module
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 # --------------------------------------------------------------------------- #
 # Shared harness: code → graph → compiled kernel, plus a torch reference.
@@ -142,15 +142,31 @@ def _compile_run(
 # Cooperative combine matrix — op type × reduction variant × shape mode.
 # --------------------------------------------------------------------------- #
 
-# Reduce-partition variants, pinned via the ``REDUCE`` codec (the schedule's ``020_schedule``
-# decision, authoritative when pinned). Each has a distinct lowering STRUCTURE, asserted below
-# (not just output accuracy):
-#   serial (``""``)        — one thread per cell, no cross-thread / register fold
-#   coop_warp (``b32``)    — a single-warp ``__shfl_xor_sync`` butterfly
-#   coop_hier (``b128``)   — the 4-warp hierarchical shuffle→smem-tree
-#   ilp (``r4``)           — standalone ILP: 4 register accumulators + a register tree (no coop)
-#   ilp_coop (``r2/b32``)  — ILP composed with coop: 2 register accs, register tree, then shuffle
-_COOP_VARIANTS = {"serial": "", "coop_warp": "b32", "coop_hier": "b128", "ilp": "r4", "ilp_coop": "r2/b32"}
+# Reduce-partition variants, pinned as ``(REDUCE, WORK)`` — the step-7 value grammar, where the
+# cooperative WIDTH lives in the kernel-global ``WORK`` inventory and ``REDUCE`` keeps only the
+# site-local partition kind. Each has a distinct lowering STRUCTURE, asserted below (not just
+# output accuracy):
+#   serial   (``""``)             — one thread per cell, no cross-thread / register fold
+#   coop_warp (``coop`` @ t32)    — a single-warp ``__shfl_xor_sync`` butterfly
+#   coop_hier (``coop`` @ t128)   — the 4-warp hierarchical shuffle→smem-tree
+#   ilp      (``r4``)             — standalone ILP: 4 register accumulators + a register tree
+#   ilp_coop (``r2/coop`` @ t32)  — ILP composed with coop: 2 register accs, tree, then shuffle
+_COOP_VARIANTS = {
+    "serial": ("", ""),
+    "coop_warp": ("coop", "t32"),
+    "coop_hier": ("coop", "t128"),
+    "ilp": ("r4", ""),
+    "ilp_coop": ("r2/coop", "t32"),
+}
+
+
+def _reduce_env(variant: str) -> dict[str, str]:
+    """The ``(REDUCE, WORK)`` pin pair for a variant — ``WORK`` only when the partition has a
+    cooperative width to carry (a serial / pure-ILP row's launch geometry stays derived)."""
+    spec, work = _COOP_VARIANTS[variant]
+    return {"EMMY_REDUCE": spec, **({"EMMY_WORK": work} if work else {})}
+
+
 # Degenerate (mean / amax), twisted full-row (softmax), and the prologue / prologue+epilogue
 # carriers (sumsq / l2) — the pre-map and projection ride the same cooperative combine.
 _REDUCE_OPS = ("mean", "amax", "softmax", "sumsq", "l2")
@@ -205,7 +221,7 @@ def test_cooperative_combine_accuracy(op, variant, shape, monkeypatch):
     divisor is the runtime extent too (a ``context_value`` constant resolved at launch), so
     dynamic ``mean`` divides by the right count."""
     code, ref_fn = _OPS[op]
-    got, xs, src = _compile_run(code, {"EMMY_REDUCE": _COOP_VARIANTS[variant]}, monkeypatch, dynamic=_SHAPES[shape], seq=_DYNAMIC_SEQ)
+    got, xs, src = _compile_run(code, _reduce_env(variant), monkeypatch, dynamic=_SHAPES[shape], seq=_DYNAMIC_SEQ)
     want = ref_fn(xs).reshape(got.shape)
     diff = float(np.abs(got - want).max())
     assert diff < 1e-3, f"{op}/{variant}/{shape}: combine mismatch (max abs err {diff})"
@@ -236,7 +252,7 @@ def test_symbolic_cooperative_softmax_sweep(monkeypatch, seq):
     carries the runtime ``seq_len`` arg + the cooperative ``__shfl_xor_sync`` combine over the
     strided ``< seq_len`` bound (vs the old degenerate per-thread serial reduce), in a 2-warp
     block."""
-    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "b64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
+    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "coop", "EMMY_WORK": "t64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
     want = _ref_softmax(xs).reshape(got.shape)
     assert got.shape == (8, seq)
     diff = float(np.abs(got - want).max())
@@ -257,8 +273,8 @@ def test_symbolic_cooperative_softmax_sweep(monkeypatch, seq):
 def test_attention_combine_accuracy(variant, monkeypatch):
     """The flash ``(m, l, O)`` twisted-monoid carrier is accurate AND emits the pinned combine
     serially and with a cooperative-KV combine — a 3-component warp butterfly over the static
-    KV axis (the same carrier-generic combine, ``coop_warp`` = ``b32``)."""
-    env = {"EMMY_REDUCE": _COOP_VARIANTS[variant]}
+    KV axis (the same carrier-generic combine, ``coop_warp`` = ``coop`` at ``WORK=t32``)."""
+    env = _reduce_env(variant)
     code, ref_fn = _OPS["attention"]
     got, xs, src = _compile_run(code, env, monkeypatch)
     want = ref_fn(xs).reshape(got.shape)
@@ -277,7 +293,7 @@ def test_attention_combine_accuracy(variant, monkeypatch):
 # The carrier-generic cross-CTA producer + finalize, one case per (carrier × finalize). The
 # additive carriers (matmul split-K, ``sum`` split-reduce) take BOTH finalize folds; the twisted
 # flash ``(m, l, O)`` carrier is **kernel-only** (the ``e^{Δm}`` rescale can't be an ``atomicAdd``).
-# ``flash`` marks the fused streaming flash op (fusion is the default; ``PLACE@fold`` is the escape); all split the reduce/KV axis
+# ``flash`` marks the fused streaming flash op (fusion is unconditional); all split the reduce/KV axis
 # across 2 CTAs via the native ``REDUCE`` ``c2`` codec, the same knob for matmul / reduce / flash.
 _CROSS_CTA = {
     "matmul": {"op": "matmul", "flash": False, "tol": 1e-2, "finalizes": ("atomic", "kernel")},
@@ -399,18 +415,20 @@ def _unrelated_reduce_pair() -> Body:
     return Body.coerce((rowmax, plainsum))
 
 
-def test_online_softmax_combine_builds_asymmetric_monoid() -> None:
-    # state (m, d), partial (s); the asymmetric LSE monoid derives combine_states (the
-    # cross-partition state⊕state combine) from its exp-family spec.
-    mono = online_softmax_combine("m", "d", "s")
-    assert mono.state.names == ("m", "d") and mono.partial_names() == ("s",)
-    assert mono.combine_states, "combine_states must be derived for the asymmetric LSE monoid"
+def test_exp_family_generator_builds_asymmetric_monoid() -> None:
+    # state (m, d), partial (s); the asymmetric LSE monoid's streaming merge folds exactly the
+    # injected score, and the cross-partition state⊕state combine is generated from the same spec.
+    from emmy.compiler.ir.stmt.leaves import _merge_reads
+
+    merge = exp_merge(("m", "d"), ("s", 1.0), key="m")
+    assert _merge_reads(merge, ("m", "d")) == ("s",)
+    assert exp_combine_states(("m", "d"), ("m__o", "d__o")), "combine_states must be derived for the asymmetric LSE monoid"
 
 
 @pytest.mark.parametrize("kind,should_fuse", [("softmax_pair", True), ("unrelated_pair", False)])
 def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
     """``_fuse`` collapses the decomposed two-pass softmax (row-max + ``Σ exp(x − max)``) into one
-    online-softmax loop + monoid (carrier keeps the original ``acc`` names), and is a no-op on an
+    online-softmax loop (the body's merge keeps the original ``acc`` names), and is a no-op on an
     unrelated row-max + plain-sum pair."""
     body = _softmax_body() if should_fuse else _unrelated_reduce_pair()
     fused, changed = _fuse(body)
@@ -419,8 +437,9 @@ def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
         loops = [s for s in fused if isinstance(s, Loop)]
         assert len(loops) == 1, "the two reduce loops fuse into one online-softmax loop"
         fused_loop = loops[0]
-        assert fused_loop.role is AxisRole.TWISTED and fused_loop.carrier is not None, "the fused loop is a TWISTED carrier"
-        assert fused_loop.carrier.state.names == ("acc0", "acc1"), "carrier keeps the original acc names"
+        assert fused_loop.role is AxisRole.TWISTED, "the fused loop is TWISTED"
+        accums = {a.name for a in fused_loop.body if isinstance(a, Accum)}
+        assert accums == {"acc0", "acc1"}, "the body's merge keeps the original acc names"
 
 
 @requires_cuda

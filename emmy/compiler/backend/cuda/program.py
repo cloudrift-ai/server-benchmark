@@ -154,10 +154,9 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
     base = ("--use_fast_math",)
     if not uses_tma:
         return base
-    import cupy as cp
+    from emmy.compiler.target import compute_capability  # noqa: PLC0415
 
-    cap_str = str(cp.cuda.Device().compute_capability)  # e.g. "120" for sm_12.0
-    major, minor = cap_str[:-1], cap_str[-1]
+    major, minor = compute_capability()
     return (*base, f"--gpu-architecture=sm_{major}{minor}a")
 
 
@@ -394,7 +393,22 @@ def _launch(
     kernel = compiled.kernels[launch.kernel_name]
     desc_args = desc_args or {}
     sym_values = sym_values or {}
-    args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
+    if launch.indirect_args:
+        # Indirect operands: the marked arg's position expands in place to (table, sel, slot)
+        # — the kernel resolves ``table[sel[slot]]`` in its body preamble. Table/selector are
+        # device arrays the caller binds into ``arrays`` under the spec's names; the slot is a
+        # plain ``int`` arg (same packing as the runtime-arg tail).
+        indirect = {a: (t, s, sl) for a, t, s, sl in launch.indirect_args}
+        parts: list = []
+        for name in launch.arg_names:
+            entry = indirect.get(name)
+            if entry is not None:
+                parts.extend((arrays[entry[0]], arrays[entry[1]], entry[2]))
+            else:
+                parts.append(desc_args.get(name) if name in desc_args else arrays[name])
+        args = tuple(parts)
+    else:
+        args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
     # Symbolic axes appear as ``int`` kernel params after buffers + TMA
     # descriptors — append their resolved values to the arg pack.
     if launch.runtime_args:
@@ -1695,6 +1709,12 @@ class _AsyncBenchWorker:
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 
+    async def warmup(self, *, wall_timeout_s: float = 60.0) -> None:
+        """Initialize the child CUDA context outside a candidate's wall budget."""
+        response = await self.run_job({"worker_warmup": True}, wall_timeout_s=wall_timeout_s)
+        if not response.get("warmed"):
+            raise RuntimeError("bench worker did not acknowledge CUDA warmup")
+
     def _tail_suffix(self) -> str:
         """The drained stderr tail as an error-message suffix ('' when the child was quiet)."""
         return f"; child stderr tail:\n{self._stderr_tail}" if self._stderr_tail.strip() else ""
@@ -1799,6 +1819,7 @@ async def benchmark_compare_worker_async(
     seed: int,
     accuracy: bool = False,
     want_ref: bool = False,
+    strict_accuracy: bool = False,
 ) -> dict:
     """``run --bench``'s greedy-row transport: the same comparison job as
     :func:`benchmark_compare_isolated_async` but over a caller-supplied persistent
@@ -1817,6 +1838,7 @@ async def benchmark_compare_worker_async(
             "seed": seed,
             "accuracy": accuracy,
             "want_ref": want_ref,
+            "strict_accuracy": strict_accuracy,
         },
         wall_timeout_s=wall_timeout_s,
     )
@@ -1827,16 +1849,18 @@ async def benchmark_compare_worker_async(
         "captured": resp.get("captured", False),
         "accuracy_error": resp.get("accuracy_error"),
         "run_io": resp.get("run_io"),
+        "correctness": resp.get("correctness"),
     }
 
 
-async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float) -> dict:
-    """Spawn a fresh (unpinned) ``_AsyncBenchWorker``, run one job, tear it down.
+async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float, device_id: int | None = None) -> dict:
+    """Spawn a fresh ``_AsyncBenchWorker``, run one job, tear it down.
     The transport for the synchronous one-shot bridges below — they each wrap this
     in ``asyncio.run`` (the worker's streams bind to the loop, so it can't persist
     across ``asyncio.run`` calls; the per-call ~0.2 s spawn is negligible against a
-    deployable ``--bench``)."""
-    worker = _AsyncBenchWorker()
+    deployable ``--bench``). ``device_id`` keeps the comparison on the selected
+    tune GPU instead of silently falling back to ordinal 0."""
+    worker = _AsyncBenchWorker(device_id=device_id)
     try:
         return await worker.run_job(request_obj, wall_timeout_s=wall_timeout_s)
     finally:
@@ -1853,6 +1877,7 @@ async def benchmark_compare_isolated_async(
     iters: int,
     seed: int,
     nvcc_flags: str | None = None,
+    device_id: int | None = None,
 ) -> tuple:
     """Run the deployable eager / torch.compile / emmy comparison in the
     SIGKILL-able worker, awaiting a fresh one-shot :class:`_AsyncBenchWorker`
@@ -1871,9 +1896,10 @@ async def benchmark_compare_isolated_async(
     - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer; ``None``
       benches emmy-only when the graph isn't torch-runnable).
 
-    Returns ``(results, bench, torch_available, captured)`` — the shape ``bench_lowered_vs_torch``
-    returns (``captured``: all backends were timed under CUDA graph capture; False means the
-    all-or-nothing fallback ran and the timings include host dispatch)."""
+    Returns ``(results, bench, torch_available, captured, accuracy_error)`` — the shape
+    ``bench_lowered_vs_torch`` returns (``captured``: all backends were timed under CUDA graph
+    capture; False means the all-or-nothing fallback ran and the timings include host dispatch).
+    ``accuracy_error`` is the non-fatal eager-reference verdict for a frontend reproducer."""
     resp = await _run_job_oneshot(
         {
             "graph": lowered,
@@ -1885,5 +1911,6 @@ async def benchmark_compare_isolated_async(
             "seed": seed,
         },
         wall_timeout_s=wall_timeout_s,
+        device_id=device_id,
     )
-    return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False)
+    return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False), resp.get("accuracy_error")

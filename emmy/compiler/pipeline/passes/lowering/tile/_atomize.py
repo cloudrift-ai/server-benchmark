@@ -2,25 +2,25 @@
 
 The warp matmul materializer needs to know which operand is the mma ``a`` vs ``b`` (by
 axis-in-index), the fold accumulator, and the projection epilogue.
-:func:`semiring_binding` reads them **structurally** off the lowered ``CONTRACTION`` reduce loop
+:func:`bind_contraction` reads them **structurally** off the annotated ``CONTRACTION`` reduce loop
 — the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
-the ``(a_load, b_load, acc, epilogue)`` facts that ``_schedule._contraction_node`` stamps onto the
-:class:`~emmy.compiler.ir.tile.ir.Contraction` structural node at fork-emit (the node
-is then the single source of truth — it re-derives ``b_trans`` off ``b_load`` itself). Reading the
+the ``(a_load, b_load, acc, epilogue)`` facts ``010_recognize._nodify_contraction`` stamps onto the
+contraction structural node at RECOGNIZE time (the node
+is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕
 algebra a property of the loop, so no per-algebra op-tree node class is needed. The cooperative reduce
 needs no binding here — its accumulator dtype + shuffle/tree
 mechanism are derived at materialize time (``emit_combine`` off the carrier + ``ReduceStage.combine``).
 
-**Called from ``_schedule`` (inside ``010_recognize``), not a standalone pass.** The binding is resolved when the tiled
-contraction leaf is built (``_warp_option`` / the tiled ``_tile_option``) — so an atom that
+**Called when a tiled option is built, not a standalone pass.** The binding is resolved when the tiled
+contraction leaf is built (the warp / tiled contraction options) — so an atom that
 **cannot** be bound (e.g. a non-``Load`` operand: a computed-cone / demoted matmul) is rejected at
-fork construction, alongside ``_check_warp_static_k``, instead of failing several passes later.
+fork construction, alongside the warp static-K divisibility check, instead of failing several passes later.
 Leading ``_`` so the pass loader skips this module.
 
 **Flash contractions are not recursively atomized.** Flash is a ``TWISTED`` kv
-``Reduction`` over a ``Q@K`` :class:`~emmy.compiler.ir.tile.ir.Contraction` ``source`` +
-a ``P@V`` one in the ``partial``, lowered on the scalar tier (block=1) — each contraction carries a
+``Fold`` over a ``Q@K`` contraction ``source`` +
+a ``P@V`` one in the ``step``, lowered on the scalar tier (block=1) — each contraction carries a
 scalar ``TilePlan()`` and factorizes through the one ``_factor`` contraction path. A tensor-core
 flash tier would attach an mma ``TilePlan`` to those same nodes and route through that same path (no
 bespoke emitter); ``bind_contraction`` stays loop-addressable (it binds the root contraction
@@ -33,7 +33,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile import Contraction, Map, Reduction, TilePlan
+from emmy.compiler.ir.tile import Channel, Fold, Store
+from emmy.compiler.ir.tile.ir import refs_axis
 from emmy.compiler.pipeline.pipeline import LoweringError
 
 
@@ -71,6 +72,12 @@ def map_cone(body: list, root: str) -> list | None:
         seen.add(id(st))
         if isinstance(st, Load):
             cone.append(st)
+            # A data-dependent gather/index load consumes SSA values through its INDEX rather
+            # than through ``Assign.args``. Those definitions are part of the producer cone too;
+            # dropping them leaves an apparently pure map with undefined index temporaries once
+            # the operand is compute-filled. Axis names are harmless here because ``defs.get``
+            # simply ignores names not defined by the body.
+            need.extend(st.deps())
             continue
         if isinstance(st, Assign):
             cone.append(st)
@@ -81,7 +88,126 @@ def map_cone(body: list, root: str) -> list | None:
     return sorted(cone, key=lambda st: order[id(st)])
 
 
-def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load, Load, str, Body]:
+def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
+    """Build a computed-A **cone** as a real node tree — the inline node its consuming operand edge
+    stores (there is no let table: sharing is the product contraction's channel arity).
+
+    The K seam is decided HERE, once, and lives ON the node: the maximal leading run of cone stmts
+    that never index the contraction axis is **row-invariant**, so it joins the per-row statistic
+    (``stat``, the :class:`Fold`, plus its scalar ``sweep``) in the cone's SOURCE node — one
+    projected reduce, exactly the RMSNorm shape; the k-varying remainder is the cone's ``body``, the
+    per-cell normalize. Everything downstream then READS that boundary (``ops.cone_seam``) instead of
+    re-scanning stmts: the scheduler sizes the stat smem rows off it, the materializer runs the
+    prologue once per tile row and the body per cell."""
+    pro: list = []
+    rest = list(cell)
+    while rest and not refs_axis(rest[0], k_name):
+        pro.append(rest.pop(0))
+    prologue = Fold.projection(body=Body((*sweep, *pro)), operands=() if stat is None else (stat,))
+    src = (prologue,) if (pro or sweep or stat is not None) else ()
+    return Fold.projection(body=Body(tuple(rest)), operands=src)
+
+
+def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
+    """Bind a computed operand (either side — or BOTH, the W8A8 shape) whose cone is a storage
+    decode times k-invariant multiplicative factors — the mul-hoist. Each lift argument must be
+    the operand ``Load`` itself, or factor as ``(storage decode of that side's load) ⊗ k-invariant
+    factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT along the reduce
+    axis commutes out of the fold (``Σ_k a·(s·w) = s·Σ_k a·w`` — the same reassociation category as
+    split-K), so the factors move onto the accumulator in the EPILOGUE, and the decode is ABSORBED
+    by the load's own storage dtype (every consumer converts a bits-carrier element by dtype: the
+    render's promote on the scalar tier, the per-element convert — or the fp8 atoms' raw byte
+    gather — of the gmem-direct fragment load on the warp tier). B-side factors are the M2b
+    scale; A-side factors are the W8A8 activation scale, and both hoist into ONE epilogue
+    chain (the two scale factors composed on the f32 accumulator).
+
+    The chain's leaf is recognized by TRAIT, never by op name: ``ElementwiseImpl.decodes`` names
+    the storage dtype an op is the decode cast for (the fp8 family today) — a new storage format
+    registers its decode op there and this arm covers it without change. The arm's boundary is the
+    ALGEBRA, not the format list: a k-varying (2-D block) scale is k-indexed, so its factor does
+    not commute and the arm declines (the term derives PLANAR); an ADDITIVE zero-point makes the
+    cone affine, and a codebook decode is a gather, not an elementwise cast — both are
+    mathematically outside the multiplicative form and are deliberately not bound here.
+
+    Returns ``(a_leaf, b_leaf, raw_acc, epilogue')`` — the channel accumulator renamed to
+    ``<acc>__mh`` so the epilogue's factor chain can DEFINE ``acc`` and every downstream reader of
+    the fold's output (the projection stmts, the root ``Write``, the bare-case store glue) sees the
+    scaled value without a rename walk — or ``None`` (not this shape)."""
+    if a_leaf is None or b_leaf is None:
+        return None
+    defs = {s.name: s for s in body if isinstance(s, Assign)}
+
+    def cone_names(name: str) -> set[str] | None:
+        cone = map_cone(body, name)
+        return None if cone is None else {n for st in cone for n in st.defines()}
+
+    def k_free(name: str) -> bool:
+        cone = map_cone(body, name)
+        return cone is not None and not any(refs_axis(st, k_name) for st in cone)
+
+    factors: list[tuple[str, str]] = []  # (op, ssa) applied to the accumulator, outer chain first
+    for arg in lift.args:
+        if arg in (a_leaf.names[0], b_leaf.names[0]):
+            continue  # a directly-named operand — nothing to decode or hoist on this side
+        names = cone_names(arg)
+        if names is None:
+            return None
+        in_a, in_b = a_leaf.names[0] in names, b_leaf.names[0] in names
+        if in_a == in_b:
+            return None  # both leaves in one cone / neither — not the decode-times-factors chain
+        leaf = a_leaf if in_a else b_leaf
+        bits = leaf.names[0]
+        cur = arg
+        while True:
+            st = defs.get(cur)
+            if st is None:
+                return None
+            if st.op.name in ("multiply", "divide") and len(st.args) == 2:
+                x, y = st.args
+                xs, ys = cone_names(x), cone_names(y)
+                if xs is None or ys is None or (bits in xs) == (bits in ys):
+                    return None  # the operand on both sides / neither — not the decode-times-factors chain
+                w_side, s_side = (x, y) if bits in xs else (y, x)
+                if st.op.name == "divide" and bits not in xs:
+                    return None  # ``s / w`` — the divide does not commute out of the fold
+                if not k_free(s_side):
+                    return None  # a k-varying factor (2-D block scale) stays in the fold — decline
+                factors.append((st.op.name, s_side))
+                cur = w_side
+                continue
+            storage = st.op.decodes
+            if storage is not None and st.args == (bits,) and (leaf.dtype is None or leaf.dtype.name == storage):
+                # The chain's leaf IS the registered decode for the load's storage dtype (the
+                # dtype is unstamped at recognize time — the kernel-IR stamp pass runs later — so
+                # an absent dtype defers to the trait alone). Absorbed by the load's dtype.
+                break
+            return None
+    # Full coverage: every body stmt is the lift, the fold, an operand leaf, or a member of a
+    # bound cone — an unaccounted stmt is a shape this binding does not understand.
+    bound: set[int] = {id(st) for st in map_cone(body, lift.args[0]) or ()}
+    bound |= {id(st) for st in map_cone(body, lift.args[1]) or ()}
+    if any(isinstance(s, (Load, Assign)) and id(s) not in bound and s is not lift for s in body):
+        return None
+    if not factors:  # bare decode(s) — the operands bind as the raw storage-dtype loads, nothing to hoist
+        return a_leaf, b_leaf, acc, epilogue
+    hoisted: list[Stmt] = []
+    seen: set[int] = set()
+    for _opn, nm in factors:
+        for st in map_cone(body, nm) or ():
+            if id(st) not in seen:
+                seen.add(id(st))
+                hoisted.append(st)
+    raw = f"{acc}__mh"
+    chain: list[Stmt] = []
+    cur_val = raw
+    for i, (opn, nm) in enumerate(factors):
+        out_nm = acc if i == len(factors) - 1 else f"{raw}{i}"
+        chain.append(Assign(name=out_nm, op=opn, args=(cur_val, nm)))
+        cur_val = out_nm
+    return a_leaf, b_leaf, raw, Body((*hoisted, *chain, *epilogue))
+
+
+def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load | list, str, Body]:
     """Resolve the ``(a_load, b_load, acc, epilogue)`` operand→role facts for a ``CONTRACTION``
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
     ``m_name`` / ``n_name``, with projection ``epilogue``.
@@ -89,8 +215,10 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     Reads the facts straight off the loop body — no op-tree node: the operands are named by the ⊗
     **lift** (the ``Assign`` the fold accumulates), B is its (n, k)-indexed ``Load``, and A is the
     lift's other argument — a plain ``Load`` (the clean gmem-direct contraction) or, when loop
-    fusion has inlined an operand cone, the cone itself as a ``Body`` (the computed-A form, which
-    rides the ``sync`` compute-fill). The fold accumulator is the loop body's ``Accum`` target.
+    fusion has inlined an operand cone, the cone itself as a zero-axis ``Fold`` NODE (the computed-A form,
+    which rides the ``sync`` compute-fill; the caller shapes it into the inline cone node via
+    :func:`make_cone`, which also puts the K seam on the node). The fold accumulator is the loop
+    body's ``Accum`` target.
 
     Binding A off the LIFT and not off "the first (m, k)-indexed load" is load-bearing: a
     cone-INTERNAL load is (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as
@@ -98,8 +226,8 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     up projection silently dropped. A stat-bearing cone still binds through
     :func:`bind_prologue_contraction` (it carries a statistic prologue and a column loop this shape
     has no notion of); flash's PV binds at fusion. An unbindable body raises, matching the warp
-    gmem-direct guard. ``b_trans`` is not returned — the ``Contraction`` node re-derives it off its
-    fold's ``b_load``."""
+    gmem-direct guard. ``b_trans`` is not returned — the contraction re-derives it off its
+    fold's ``b``."""
     k_name = loop.axis.name
     body = list(loop.body)
     loads = [s for s in body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
@@ -118,39 +246,47 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     # (the clean gmem-direct contraction) or a computed cone (which rides the sync compute-fill,
     # exactly like the norm→linear cone, just with no statistic prologue).
     lift = next((s for s in body if isinstance(s, Assign) and s.name == fold.value), None)
-    if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None and b_leaf.names[0] in lift.args:
-        a_arg = next(a for a in lift.args if a != b_leaf.names[0])
-        if a_leaf is not None and a_arg == a_leaf.names[0]:
-            return a_leaf, b_leaf, acc, epilogue
-        cone = map_cone(body, a_arg)
-        if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
-            return Body(tuple(cone)), b_leaf, acc, epilogue
-        # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
-        # n-indexed load riding it) — falling through to the positional (m, k) rule below would
-        # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
-        # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
-        # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
-        raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
+    if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None:
+        if b_leaf.names[0] in lift.args:
+            a_arg = next(a for a in lift.args if a != b_leaf.names[0])
+            if a_leaf is not None and a_arg == a_leaf.names[0]:
+                return a_leaf, b_leaf, acc, epilogue
+            # A rides a computed cone. A storage decode times k-invariant multiplicative factors
+            # binds through the mul-hoist FIRST (the raw storage-dtype A load — the W8A8
+            # activation side; the fp8 warp tier needs the materialized bits, and the scalar
+            # tier's per-element promote converts them identically); any other pure MAP cone is
+            # the computed-A form and rides the sync compute-fill.
+            hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+            if hoist is not None:
+                return hoist
+            cone = map_cone(body, a_arg)
+            if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
+                return cone, b_leaf, acc, epilogue
+            # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
+            # n-indexed load riding it) — falling through to the positional (m, k) rule below would
+            # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
+            # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
+            # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
+            raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
+        # B is NOT directly named by the lift — it rides a computed cone (and A may too: the
+        # W8A8 double-cone). A storage decode times k-invariant multiplicative factors binds
+        # through the mul-hoist first (decode absorbed by the storage dtype, factors to the
+        # epilogue). Otherwise bind a pure MAP cone structurally, just as for A. The operand EDGE
+        # carries the whole producer tree; later scheduling may compute-fill it into the B slab,
+        # or the scalar reading may evaluate it per cell. This is role-generic computed-operand
+        # fusion: no storage-format fact survives recognition.
+        hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+        if hoist is not None:
+            return hoist
+        if a_leaf is not None and a_leaf.names[0] in lift.args:
+            b_arg = next(a for a in lift.args if a != a_leaf.names[0])
+            cone = map_cone(body, b_arg)
+            if cone and not any(isinstance(st, Load) and m_name in _idx_vars(st.index) for st in cone):
+                return a_leaf, cone, acc, epilogue
+        raise LoweringError("warp tier: the ⊗ lift's B operand is a computed cone that does not bind")
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
     return a_leaf, b_leaf, acc, epilogue
-
-
-def semiring_binding(node, grid) -> tuple[Load, Load, str, Body]:
-    """The root contraction's ``(a_load, b_load, acc, epilogue)`` facts: lower ``node`` to loop-IR,
-    find its ``CONTRACTION`` reduce loop, take the projection ``epilogue`` (the stmts after the loop
-    — the ``Map`` body, or empty for a bare contraction), and delegate to :func:`bind_contraction`.
-    ``node`` is the kernel op, ``grid`` the placement's output axes."""
-    if len(grid) < 2:
-        raise LoweringError("warp tier: contraction output needs an (m, n) grid")
-    from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
-
-    stmts = lower(node)
-    ridx = next((i for i, s in enumerate(stmts) if isinstance(s, Loop) and s.role is AxisRole.CONTRACTION), None)
-    if ridx is None:
-        raise LoweringError("warp tier: no contraction loop to bind")
-    epilogue = Body(tuple(stmts[ridx + 1 :]))
-    return bind_contraction(stmts[ridx], grid[-2].name, grid[-1].name, epilogue)
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:
@@ -167,29 +303,34 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
     return ("op", st.op.name, tuple(_cone_value_key(a, defs) for a in st.args))
 
 
-def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
+def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | None:
     """Nodify the **reduce-bearing (MONOID) producer cone** composition — the fused norm→linear
-    edge: a projecting ``Map`` whose ``source`` is a per-row ``PLANAR`` statistic reduce and whose
+    edge: a projecting zero-axis ``Fold`` whose ``source`` is a per-row ``PLANAR`` statistic reduce and whose
     body is that statistic's scalar epilogue followed by a fresh free (column) ``Loop`` over one or
     more ⊗-folds whose shared A cone reads the statistic. One fold channel is the plain norm→linear
     (``rmsnorm(x)·nw @ w``); N channels sharing ONE A value with a pointwise combine tail is the
     fused gate/up MLP edge (``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold; fusion duplicates the
     cone SSA per channel, deduped by value-tree equality). Returns the same
-    ``Map(body=projection, source=node)`` factorization the ``Reduction`` spelling uses: the
-    ``source`` is the computed-A :class:`Contraction` — its A cone **carries the statistic
-    prologue** (the annotated stat reduce ``Loop`` + its scalar epilogue ahead of the per-cell map
-    stmts, the k-invariant prefix), its ``folds`` the ``(B, acc)`` channels, a **deferred**
-    ``TilePlan()`` — and the ``body`` is the projection (the combine tail + any stat-free prefix
-    defs it reads + the ``Write``). Plus the column axis (the scheduler adds it to the grid), or
-    ``None`` (not this shape; the reduce ``Map`` form stands alone).
+    ``Fold.projection(body=projection, source=node)`` factorization the ``Fold`` spelling uses: the
+    ``source`` is ONE computed-A product contraction whose A edge holds the cone INLINE —
+    a real node tree, ``Fold.projection(body=<the per-cell cone>, operands=(<the statistic Fold>,))``, so the
+    statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
+    with one :class:`Channel` ``(b, acc)`` per ⊗-fold (sharing is the node's arity; the node carries
+    a **deferred** ``TilePlan()``); the ``body`` is the PURE
+    projection (the combine tail + any stat-free prefix defs it reads) and the root ``Write`` a
+    boundary :class:`~emmy.compiler.ir.tile.ir.Store` (1q). Returns ``(node, column axis, stores)``
+    — the scheduler adds the axis to the grid and the stores to the ``TileOp`` —
+    or ``None`` (not this shape; the reduce zero-axis ``Fold`` form stands alone).
 
     STRUCTURE-ONLY: no dtype / geometry / pin legality here — those are per-move scheduling guards
     (``_schedule``), so the same node offers whatever tiers the target legally supports."""
-    if not isinstance(op, Map) or not isinstance(op.source, Reduction):
+    if not (isinstance(op, Fold) and op.axis is None) or len(op.operands) != 1 or not isinstance(op.operands[0], Fold):
         return None
-    red = op.source
-    if red.role is not AxisRole.PLANAR or red.source is not None or red.carrier.twist.family != "id":
+    red = op.operands[0]
+    if red.role is not AxisRole.PLANAR:
         return None
+    if any(isinstance(s, Fold) for s in red.step_stmts()) or any(isinstance(e, Fold) for e in red.operands):
+        return None  # a composed reduce (its partial or an operand edge holds a node) is not the bare statistic shape
     body = list(op.body)
     if not body or not isinstance(body[-1], Loop) or body[-1].is_reduce:
         return None
@@ -204,19 +345,6 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     if not all(isinstance(s, Assign) for s in tail_ops):
         return None  # the combine tail is a pure pointwise chain (Loads ride the stat-free prefix)
     k_ax = kloop.axis
-    grid = list(free)
-    # DEGENERATE M=1: at one output row the trace carries no row loop at all, so the lift peels
-    # zero free axes — but the composition is otherwise identical (stat prologue, column sweep,
-    # ⊗-folds). Synthesize a unit row axis so the node still binds: the column axis joins the
-    # grid exactly as in the M>1 case, the cut realizer gets its ``for m in 0..1`` anchor, and
-    # nothing in the body references the synthetic var (one iteration, index 0). Without this the
-    # fused M=1 edge scheduled as a GRID-1 kernel (one block sweeping every column serially —
-    # 13.7–83 ms/edge measured on the gemma-4 merged shapes) with no cut escape.
-    if not grid:
-        from emmy.compiler.dim import Dim  # noqa: PLC0415
-
-        grid = [Axis(name="_um", extent=Dim(1))]
-    m_ax = grid[-1]
     kbody = list(kloop.body)
     accums = [st for st in kbody if isinstance(st, Accum)]
     if not accums or any(a.op.name != "add" for a in accums):
@@ -259,7 +387,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         return None  # a stat-free cone is the demoted option's shape, not ours
     # The statistic prologue must be row-local: its gmem reads may index (m, its own reduce axis)
     # but never the column / contraction axes.
-    if _idx_vars_deep([*red.partial, *stat_epi]) & {n_ax.name, k_ax.name}:
+    if _idx_vars_deep([*red.spliced_step(), *stat_epi]) & {n_ax.name, k_ax.name}:
         return None
     # The combine tail: its reads must be the fold accumulators, its own defs, or STAT-FREE prefix
     # defs (a k/n-invariant value like SiLU's ``1.0`` scalar — its backward cone within the prefix
@@ -290,15 +418,24 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
                 prefix.append(st)
     if not write.is_scalar or write.values != ((tail_ops[-1].name,) if tail_ops else (folds[0][1],)):
         return None
-    node = Contraction(
-        axes=(m_ax, n_ax),
+    # B-layout agreement is a GROUP-FORMATION gate, not a node assert: channels whose B is stored
+    # the other way round were never legally fusable (one shared A fragment, one slab orientation),
+    # so they simply never group.
+    if len({k_ax.name in bl.index[-1].free_vars() for bl, _ in folds}) != 1:
+        return None
+    # The cone as a NODE TREE: the per-row statistic is its own projected reduce
+    # (``Fold.projection(body=<the stat's scalar sweep>, operands=(Fold,))``) and the cone's source, the
+    # per-cell normalize its body — so the K seam is the node boundary, not a stmt scan.
+    # ONE bilinear node with a channel per ⊗-fold: operand sharing is edge reuse (the shared A
+    # cone read once per component), and the node schedules / lowers as one unit through its own
+    # derived product loop. STORED as the contraction itself (1s) — pure algebra:
+    # the output axes / tile / stage are caller facts, stamped at the point of use.
+    node = Fold.contraction(
         k_axis=k_ax,
-        a_operand=Body((red.loop, *stat_epi, *cone)),
-        folds=tuple(folds),
-        tile=TilePlan(),
-        lead_axes=tuple(grid[:-1]),
+        a=make_cone(list(cone), k_ax.name, stat=red, sweep=tuple(stat_epi)),
+        channels=tuple(Channel(b=bl, acc=acc) for bl, acc in folds),
     )
-    return Map(body=Body((*prefix, *tail_ops, write)), source=node), n_ax
+    return Fold.projection(body=Body((*prefix, *tail_ops)), operands=(node,)), n_ax, (Store(write=write),)
 
 
-__all__ = ["bind_contraction", "bind_prologue_contraction", "map_cone", "semiring_binding"]
+__all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone"]

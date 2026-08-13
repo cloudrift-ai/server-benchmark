@@ -25,13 +25,15 @@ features in processes that featurized without the pipeline loaded.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 
 from emmy import config
+from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
 # ``loop/stamp/020_stamp_structural_features`` — distinct from any tuning Knob
@@ -223,15 +225,21 @@ class Knob:
             else:
                 config.set_knob(self.name, prev)
 
+    def pin_at(self, element: str) -> str | None:
+        """The env pin for this knob's ``<NAME>@<element>`` key ALONE — no bare fallback. The
+        EXPLICIT half of :meth:`narrow_at`: a bare pin cannot say which site of a multi-site family
+        it meant, so a caller that must tell an authoritative site pin from a fanned-out bare one
+        asks this first. The ``@``-suffixed key is not a valid shell var name, so it rides the
+        ``EMMY_KNOBS`` aggregate; :func:`parse_knob_spec` canonicalizes its element to lowercase,
+        matching the lowercase element spelling producers use."""
+        return config.knob_raw(f"{self.name}@{element}")
+
     def narrow_at(self, element: str) -> str | None:
         """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare
         ``<NAME>`` pin — the per-element read mirroring :func:`family_value`'s precedence
-        (``PLACE@fold`` > bare ``PLACE``). Returns the raw pin string (``None`` when neither is
-        set); the caller resolves vocabulary (e.g. the ``PLACE`` family's ``auto`` token). The
-        ``@``-suffixed key is not a valid shell var name, so it rides the ``EMMY_KNOBS``
-        aggregate; :func:`parse_knob_spec` canonicalizes its element to lowercase, matching the
-        lowercase element spelling producers use."""
-        value = config.knob_raw(f"{self.name}@{element}")
+        (``TILE@d`` > bare ``TILE``). Returns the raw pin string (``None`` when neither is
+        set); the caller resolves vocabulary."""
+        value = self.pin_at(element)
         if value is not None:
             return value
         return self.raw()
@@ -246,12 +254,12 @@ class Knob:
 # existing pin / recipe / golden — keeps working unchanged (the suffix disambiguates only a kernel with
 # two eligible nodes). ``TILE`` / ``STAGE`` / ``REDUCE`` all carry the suffix: the schedule reduce
 # partition IS the axis-named reduce decision (there is no separate native ``REDUCE@`` family — the
-# reduce/split-K partition is the one reduce family). ``WSPEC`` / ``PLACE`` stay root-global (always
+# reduce/split-K partition is the one reduce family). ``WORK`` / ``RASTER`` stay root-global (always
 # bare). Readers use :func:`family_value` so a bare and a suffixed key featurize / match identically.
 
-# The per-node schedule codec families that carry an ``@<axis>`` element (``WSPEC`` / ``PLACE`` are
+# The per-node schedule codec families that carry an ``@<axis>`` element (``WORK`` / ``RASTER`` are
 # root-global, always bare).
-_AXIS_FAMILIES = ("TILE", "REDUCE", "STAGE")
+_AXIS_FAMILIES = SLICE_FAMILIES  # the one list, defined in ``ir/tile/path.py``
 
 
 def family_of(key: str) -> str:
@@ -278,26 +286,6 @@ def family_value(knobs: dict, family: str):
         if k.startswith(prefix):
             return val
     return None
-
-
-def resolve_axis(family: str, key: str, eligible: Sequence[str]) -> str | None:
-    """Canonicalize a schedule-knob ``key`` (bare ``TILE`` or suffixed ``TILE@d``) to its
-    ``FAMILY@<axis>`` form given the kernel's ``eligible`` axes for that ``family``:
-
-    - already suffixed (``TILE@d``) → returned unchanged (idempotent).
-    - bare, exactly one eligible axis → ``TILE@<that axis>`` (the suffix is sugar).
-    - bare, no eligible axis → ``None`` (the family doesn't apply — drop / OFF).
-    - bare, ≥2 eligible axes → ``ValueError`` naming the candidates (a hand-written pin must
-      disambiguate, e.g. ``TILE@d`` vs ``TILE@sk``); enumeration never emits a bare key here, so the
-      ambiguous case only arises from a pin."""
-    if "@" in key:
-        return key
-    if not eligible:
-        return None
-    if len(eligible) == 1:
-        return f"{family}@{eligible[0]}"
-    cands = " or ".join(f"{family}@{a}" for a in eligible)
-    raise ValueError(f"{family} is ambiguous: use {cands}")
 
 
 # --- Registry --------------------------------------------------------------
@@ -353,25 +341,61 @@ def pin_key_matches(pinned: str, realized: str) -> bool:
     return pinned == realized or axis_of(pinned) is None or axis_of(realized) is None
 
 
+def canon_family_value(name: str, value) -> str:
+    """The canonical spelling of a ``TILE`` / ``REDUCE`` / ``STAGE`` value — the codec's own normal
+    form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
+    spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
+    alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
+    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/cp`` instead of
+    failing verification against its own value on the deploy path. Any other family — and any
+    unparseable value — passes through untouched (the caller's own equality applies).
+
+    Memoized on ``(family, value)``: the value vocabulary is tiny beside the comparison count (a
+    golden consult runs :func:`values_equal` per candidate row per recorded knob), so the parse
+    runs once per distinct spelling per process."""
+    fam = family_of(name)
+    v = str(value).strip()
+    return _canon_family_cached(fam, v) if v else v
+
+
+@lru_cache(maxsize=8192)
+def _canon_family_cached(fam: str, v: str) -> str:
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers  # noqa: PLC0415
+
+    try:
+        if fam == "TILE":
+            return TilePlan.parse(v, Workers(kind="warp", units=(1, 1))).spell()
+        if fam == "REDUCE":
+            return ReducePlan.parse(v, Workers(kind="thread", units=(2, 1))).spell()
+        if fam == "STAGE":
+            return Stage.parse(v).spell()
+    except ValueError:
+        return v
+    return v
+
+
 def values_equal(name: str, want, got) -> bool:
     """Pinned-vs-realized value equality for knob ``name``: casefolded ``str`` equality
     (the env round-trip stringifies), else both sides decoded through the registered
     knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
     realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
     string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
-    storage convention). ``TILE`` values additionally canonicalize through the codec
-    (``TilePlan.parse(...).spell()``) so an atom-ALIAS pin (``a:mma_m16n8k16_f16/…``)
-    matches the canonically-stamped row (``a:mma_m16n8k16_f16_f32/…``) instead of
-    false-flagging ``unreproducible pin``. An unregistered family compares by string
-    only."""
+    storage convention). ``TILE`` / ``REDUCE`` / ``STAGE`` values canonicalize through
+    their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
+    (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
+    pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
+    ``cp/d2`` matches the realized ``d2/cp``. ``WORK``
+    compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
-    if family_of(name) == "TILE":
-        from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415 — the codec layer sits above this descriptor module
+    if family_of(name) in _AXIS_FAMILIES:
+        return canon_family_value(name, w) == canon_family_value(name, g)
+    if family_of(name) == "WORK":
+        from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
 
         try:
-            return TilePlan.parse(w).spell() == TilePlan.parse(g).spell()
+            return Workers.parse(w) == Workers.parse(g)
         except ValueError:
             return False
     kn = get(family_of(name))
@@ -437,8 +461,7 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
     tolerated, empty entries skipped. A malformed entry (missing ``=`` / empty
     KEY) raises ``ValueError``. Case is canonicalized per key part: the family
     (before any ``@``) uppercases, the element (after it) lowercases — so
-    ``place@FOLD=cut`` pins ``PLACE@fold`` and ``tile@d=…`` keeps its lowercase
-    axis element instead of being mangled to ``TILE@D``."""
+    ``tile@D=…`` pins ``TILE@d`` instead of being mangled to ``TILE@D``."""
     out: dict[str, str] = {}
     for entry in (raw or "").split(","):
         entry = entry.strip()
@@ -464,27 +487,42 @@ apply_knobs_env()
 
 # --- Rendering -------------------------------------------------------------
 
-# Canonical display order for tuning knobs. The ``FAMILY@element`` keys lead — the structural
-# ``PLACE@`` placement, then the axis-named schedule codecs (``TILE@`` / ``REDUCE@`` / ``STAGE@``)
-# — each family's keys sorted by element; the bare exact-name knobs follow in ``KNOB_ORDER``,
-# unknown knobs last (alpha). Shared by the ``run --bench`` kernel table and the ``emmy
-# eval`` tables so columns read stably.
-_FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
-KNOB_ORDER = ("TILE", "REDUCE", "STAGE", "WSPEC")
+# Canonical display order for tuning knobs. The axis-named schedule codecs (``TILE@`` /
+# ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by element; the bare exact-name knobs
+# follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
+# and the ``emmy eval`` tables so columns read stably.
+_FAMILY_ORDER = ("TILE@", "REDUCE@", "STAGE@")
+KNOB_ORDER = ("WORK", "TILE", "REDUCE", "STAGE")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
-
-# Schedule codec families whose ``@<axis>`` display collapses back to bare when the kernel has a
-# single eligible axis (so one-node tables read as ``TILE=…`` / ``REDUCE=…`` / ``STAGE=…``, exactly as
-# before the axis-naming, matching the bare golden YAML). All three per-node schedule codecs collapse —
-# the schedule reduce partition is the one reduce family, so ``REDUCE@<axis>`` bares out like the rest.
-_COLLAPSE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
 # The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
 # omits one leaves that family to the planner's fill at replay time, and the fill drifts as the
 # planner evolves — the recurring unpinned-``REDUCE`` phantom-regression class (a recorded un-split
 # config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
 # view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
-SCHEDULE_FAMILIES = ("TILE", "REDUCE", "STAGE", "WSPEC", "RASTER")
+SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+
+
+#: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare
+#: and ``@``-keyed) plus the precision gates ``_schedule._f16acc_allowed`` / ``_f8_mma_allowed``
+#: read (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
+#: they decide whether the f16-accumulate / native-fp8 atom rows are OFFERED, so they change the
+#: pool exactly like a family pin). The pool cache's pin
+#: fingerprint must cover exactly this set; a knob outside it cannot change which rows enumerate.
+_ENUMERATION_PIN_KNOBS = (*SCHEDULE_FAMILIES, "F16_MMA_F32_ACC", "FP8_MMA", "FAST_MATH")
+
+
+def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
+    """Every live env pin the schedule enumeration can read (:data:`_ENUMERATION_PIN_KNOBS`) as
+    sorted ``(env var, raw value)`` pairs. The schedule pool cache folds this into its key: a pin
+    changes which rows enumerate, so two pin states must never share a pool. The environ scan is
+    this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one exception to
+    ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS``
+    splat."""
+    import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
+
+    prefixes = tuple(config.knob_var(name) for name in _ENUMERATION_PIN_KNOBS)
+    return tuple(sorted((var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)))
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:
@@ -520,13 +558,10 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
     (the value self-describes), so there are no tier-foreign OFF knobs to hide.
 
-    A per-node schedule codec keyed ``@<axis>`` (``TILE@d`` / ``STAGE@d``) **collapses back to bare**
-    (``TILE`` / ``STAGE``) when the kernel has a single eligible axis for that family (one such key),
-    so a one-node table reads exactly as it did before axis-naming; a multi-node kernel (flash) keeps
-    the ``@<axis>`` suffix to disambiguate."""
-    from collections import Counter  # noqa: PLC0415
-
-    fam_counts = Counter(family_of(k) for k in knobs if "@" in k and family_of(k) in _COLLAPSE_FAMILIES)
+    Keys render AS STORED — since phase 3 the stampers spell the canonical codec key (bare for the
+    primary node, ``TILE@dd``-style where the tree needs it), so the view needs no bare-collapse:
+    the stamped row IS the stored/golden spelling. (The old ``@<axis>``→bare display collapse died
+    with the axis-suffix codec; pre-phase-3 evidence is regenerated, not migrated.)"""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
         if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
@@ -536,9 +571,7 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
             continue
         if knob is None and isinstance(v, bool):
             continue
-        fam = family_of(k)
-        disp = fam if ("@" in k and fam in _COLLAPSE_FAMILIES and fam_counts[fam] == 1) else k
-        rendered.append((disp, str(v)))
+        rendered.append((k, str(v)))
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
 
 
@@ -558,39 +591,29 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent
-    from the ROW reading as free — EXCEPT a kernel-set-changing placement. A row recorded
-    before ``PLACE@cone`` existed (any pre-cut tune DB / reservoir) measured the FUSED twin,
-    which is knob-identical to the cut row apart from the placement — letting the absent key
-    wildcard-match a ``cut`` candidate deploys the catastrophic cold cut at the fused row's
-    µs (and the content tie-break then PREFERS it: ``('PLACE@cone','cut') <
-    ('PLACE@cone','fuse')``). The cut may only win where it was actually measured, so a
-    ``cut`` candidate requires the row to record the placement explicitly. ``PLACE@stat=sink``
-    (the row-stat sink, an identical kernel-set change) takes the same clause."""
-    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
-        return False
-    if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
-        return False
-    if str(cand_tun.get("PLACE@fin")) == "fuse" and "PLACE@fin" not in row_tun:
-        return False  # a pre-fin row measured the separate-finalize twin — same kernel-set clause
-    if str(cand_tun.get("PLACE@cstat")) == "fuse" and "PLACE@cstat" not in row_tun:
-        return False  # a pre-cstat row measured the split-stat twin — same kernel-set clause
-    return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
+    from the ROW reading as free (a later pass decides it)."""
+    return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items())
 
 
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`
     family the realized dict never stamped. The pass-boundary OFF fill covers a pass that ran
-    and declined, but a family whose pass never loads for the target (e.g. ``WSPEC`` off
-    Hopper/Blackwell) can be absent from ``op.knobs`` entirely — a recording must still pin it
+    and declined, but a family whose pass never loads for the target (e.g. ``STAGE`` when no
+    transport resolves) can be absent from ``op.knobs`` entirely — a recording must still pin it
     as declined, or the entry drifts when a later planner starts filling it. A family with no
     registered OFF is skipped rather than invented."""
+    # Read the canonical family declarations directly. Besides making this helper
+    # independent of golden-module import side effects, this remains correct when a
+    # test temporarily replaces the registry after ``space`` has already loaded.
+    from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
+
     out = dict(tuning_knob_items(knobs))
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:
             continue
-        kn = get(fam)
+        kn = getattr(_space, fam, None)
         if kn is not None and kn.off is not _UNSET:
             out[fam] = str(kn.off)
     return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))

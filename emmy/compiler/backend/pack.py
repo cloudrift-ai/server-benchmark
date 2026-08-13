@@ -13,7 +13,9 @@ snapshot together. Weights are external too (the HF checkpoint), rebound by
 ``WeightSpec.source_path`` at load.
 
 Validity: a pack loads only when its manifest matches the caller's ``key`` (model identity +
-serving shape — composed by the runner) AND the current environment (backend, device arch,
+serving shape — composed by the runner; "identity" has to include whatever the compiled programs
+read off the CHECKPOINT, not just the architecture config — see the serving runners' keys) AND
+the current environment (backend, device arch,
 nvcc toolkit tag + flags — the same tags the cubin cache keys on) AND every referenced cubin
 still exists. **Any mismatch or error returns ``None`` and the caller falls back to the full
 compile path** — a stale or damaged pack costs a recompile, never a wrong result. Compiler
@@ -46,14 +48,28 @@ _MANIFEST = "manifest.json"
 def _environment() -> dict:
     """The environment half of the validity key — the same tags the cubin cache keys on
     (arch / toolkit / flags), so a pack never references cubins the current toolchain
-    wouldn't have produced. Probes the live GPU."""
+    wouldn't have produced, PLUS the precision-gate state: the ``FAST_MATH``-family pins
+    change which kernel forks the compile enumerates (not the nvcc flags), so a pack
+    warmed in one precision lane must never serve a boot in the other. Found live
+    (2026-07-31 article repro): an ``EMMY_FAST_MATH=1`` boot at the baked serving shape
+    pack-hit the std plans and silently served std kernels — the fm lane's numbers were
+    the std lane's. A pack whose manifest predates the field mismatches and falls back
+    to the full compile, which is the conservative reading (its lane is unrecorded).
+    Probes the live GPU."""
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
+        F16_MMA_F32_ACC,
+        FAST_EXP,
+        FP8_MMA,
+        precision_pin,
+    )
 
     return {
         "backend": "cuda",
         "arch": nvcc.device_arch(False),
         "toolkit": nvcc._toolkit_tag(),
         "nvcc_flags": nvcc.effective_flags(),
+        "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)},
     }
 
 
@@ -63,11 +79,20 @@ def _safe_name(program: str) -> str:
 
 def pack_path(root: Path | str, key: dict) -> Path:
     """The directory for one pack under the ``EMMY_PACK_DIR`` root: a human-readable model
-    label plus a digest of the full validity key, so packs for different models / serving
-    shapes coexist under one root."""
+    label plus a digest of BOTH halves of the validity key — the serving shape (``key``) and
+    the environment (:func:`_environment`) — so every (shape, environment) combination gets
+    its own directory.
+
+    The environment half is load-bearing in the PATH, not just in the manifest: two lanes that
+    differ only in environment (the ``FAST_MATH`` precision gate is the live case) build the
+    same ``key`` and would otherwise share one directory, where the second warm silently
+    overwrites the first. Found by baking a multi-shape image (2026-08-02): the three
+    fast-math shapes clobbered their standard-lane twins, leaving 5 directories for 8 shapes
+    and a pinned-shape boot that mismatched its own pack and fell back to a full compile."""
+    env_digest = hashlib.sha1(json.dumps(_environment(), sort_keys=True).encode()).hexdigest()[:8]
     digest = hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
     label = _safe_name(str(key.get("model", "model")).split("/")[-1])
-    return Path(root) / f"{label}-{digest}"
+    return Path(root) / f"{label}-{digest}-{env_digest}"
 
 
 def save_pack(pack_dir: Path | str, plans: dict[str, ExecutionPlan], *, key: dict, provenance: dict | None = None) -> Path:

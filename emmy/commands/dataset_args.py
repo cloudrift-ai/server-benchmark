@@ -1,5 +1,4 @@
-"""Shared ``--dataset`` CLI vocabulary for the commands that consume measurement
-data (``eval`` for analysis; ``tune --dataset golden`` to tune every golden shape):
+"""Shared ``--dataset`` CLI vocabulary for measurement-analysis commands (``eval``):
 one place registers the source flags (``--dataset`` / ``--db`` / ``--kernel`` /
 ``--min-variants``), one helper publishes ``--online-file``, and one guard fails loud
 on a degenerate source. Handlers then build the actual
@@ -43,7 +42,7 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
     )
     parser.add_argument(
         "--kernel",
-        help="Filter by substring: golden name (the SAME identifier `compile/run/tune --golden` selects a single "
+        help="Filter by substring: golden name (the SAME identifier `compile/run --golden` selects a single "
         "shape with); kernel C identifier for --dataset db; op label (e.g. 'matmul', 'reduce', 'free=512') for "
         "--dataset nodes.",
     )

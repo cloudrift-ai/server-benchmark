@@ -10,8 +10,18 @@ The `recipe` package owns all recipe-related logic: YAML loading, matrix expansi
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
+- `bundled.py` — `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an installed wheel
 
 ## Key Design Decisions
+
+### Bundled Recipes Are Copied Out Before Use
+
+A wheel carries every `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because `recipes/`
+sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in site-packages,
+whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories there. So
+`resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe into the
+current directory and returns that path. An existing directory always takes precedence, so a name that matches both
+a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
 
 ### Matrix Expansion for Benchmark Sweeps
 
@@ -147,11 +157,16 @@ JSON result's `metrics` becomes the per-field mean, with `metrics_stddev` (sampl
 raw per-repeat metrics) added alongside (`benchmark/results.py`). Because the seed and prompts are identical across
 repeats, the spread measures run-to-run noise, not workload variation.
 
+The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
+result validators. `emmy bench` preserves raw observations but does not interpret whether they support an experiment's
+claim; that decision belongs to review of the completed run directory.
+
 ### Extra Args Ban Enforcement
 
 Users must not duplicate named fields in `extra_args`. The `validate_extra_args()` function enforces this by:
 
-1. Building a banned set from the active engine's flag map (`VLLM_FLAG_MAP` or `SGLANG_FLAG_MAP`) plus hardcoded flags (`--trust-remote-code`, `--host`, `--port`, `--model`, `--model-path`, `--served-model-name`).
+1. Building a banned set from the active engine's flag map (`VLLM_FLAG_MAP` or `SGLANG_FLAG_MAP`) plus hardcoded flags
+   (`--trust-remote-code`, `--host`, `--port`, `--model`, `--model-path`, `--served-model-name`, `--revision`).
 2. Tokenizing the `extra_args` string and checking each token (handling both `--flag value` and `--flag=value` forms).
 3. Raising `ValueError` listing all offending flags if any are found.
 
@@ -165,7 +180,10 @@ This validation runs inside `_validate_and_build()` before returning the `Recipe
 - vLLM: `--model {name}`
 - SGLang: `--model-path {name}`
 
-Both `--model` and `--model-path` are in the hardcoded banned set, so they cannot appear in `extra_args` regardless of which engine is active.
+Both `--model` and `--model-path` are in the hardcoded banned set, so they cannot appear in `extra_args` regardless of
+which engine is active. Immutable checkpoints use `model.revision`; `build_engine_args()` emits `--revision` for both
+engines, and deployment passes the same value to `hf download`. `--revision` is therefore also banned from
+`extra_args`, preventing the prefetch and server revisions from drifting apart.
 
 ### Engine-Specific Nesting
 
@@ -202,6 +220,10 @@ model:
   task: embed
 ```
 
+Generative recipes use the semantic chat smoke test by default. A base checkpoint that is not instruction-tuned sets
+`model.smoke_test: completion`; deployment then sends `2 + 2 =` to `/v1/completions` and still requires the correct
+answer. The choice changes only the post-health correctness gate, not the benchmark endpoint or serving task.
+
 ### Command Recipes (Generic Workload)
 
 In addition to inference recipes (`engine.llm` block), a recipe may declare a `command` block to run an arbitrary tool on the provisioned VM. The two are mutually exclusive — `_validate_and_build()` raises if both are set. `Recipe.kind` is `"command"` when `command` is set, else `"inference"`.
@@ -217,6 +239,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
+  strict: true                     # clean source, required artifacts and provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -228,18 +251,40 @@ The `run` template uses `string.Template` `$var` syntax. Substitution variables 
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
 
-### Aggregate Post-Processing
+Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
+entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
+declared artifacts so partial evidence is not lost.
 
-A recipe may optionally declare an `aggregate` block that runs **locally on the orchestrator** after all variants complete. This is useful for combining per-variant results into comparison tables or summary reports.
+### Inline Post-Processing
+
+A recipe may declare an `aggregate` block for a short local command after its variants complete:
 
 ```yaml
 aggregate:
   run: |
-    ./venv/bin/python scripts/aggregate_sgemm.py $run_dir --output $run_dir/report.md
+    rows="$run_dir/small_m_results.tsv"
+    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
+    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
+      sort |
+      while IFS= read -r result; do
+        jq -r '
+          . as $run
+          | ($run.results // [])[]
+          | select(.dimensions.M <= 128)
+          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
+             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
+          | @tsv
+        ' "$result"
+      done >> "$rows"
   timeout: 60
 ```
 
-The `run` template receives `$run_dir` — the local directory containing all pulled-back result files. It runs via `subprocess.run(shell=True)` on the machine executing `emmy bench`, not on a GPU VM. `AggregateConfig` has two fields: `run` (template) and `timeout` (default 300s).
+The template receives `$run_dir`. The example performs transparent structural processing: it selects the small-M
+rows from each SGEMM JSON and assembles one TSV table. Keep such commands self-contained and readable in the recipe;
+do not invoke an external result-analysis script. This hook may select fields, reshape rows, sort, join, or tabulate
+structured data, but it must not interpret the results or generate a human-readable report such as `RESULTS.md`.
+Agents inspect the raw run and write model-specific reports when richer analysis is required.
 
 ### Docker Options
 
@@ -317,7 +362,7 @@ _load_raw_config(recipe_dir) -> raw dict
 Recipe dataclass
     |
     v
-build_engine_args(recipe.engine.llm, model_name) -> ["--flag value", ...]
+build_engine_args(recipe.engine.llm, model_name, model_revision=recipe.model.revision) -> ["--flag value", ...]
     |
     v
 generate_compose() -> docker-compose.yaml string

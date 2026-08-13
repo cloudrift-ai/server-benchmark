@@ -1,4 +1,5 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint format git-sha-guard
+.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
+	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
 	@echo "Server Benchmark Makefile"
@@ -13,18 +14,28 @@ help:
 	@echo "  wheel          - Build the emmy wheel into dist/"
 	@echo "  vllm-emmy-image - Build the vLLM + emmy serving image (docker/vllm-emmy)"
 	@echo "  vllm-emmy-push  - Push the serving image to Docker Hub (cloudriftai/)"
-	@echo "  gemma4-warm / gemma4-serve-image / gemma4-serve-verify / gemma4-serve-push"
-	@echo "                  - Warm (on a 5090), bake, verify, push the prebuilt gemma-4 image"
+	@echo "  serve-goldens / serve-warm / serve-image / serve-verify  MODEL=<hf-id>"
+	@echo "  emmy publish <recipe> --dry-run / --yes  validate / publish the recipe image"
+	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
+	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
+	@echo "  serve-models    - List the models with a pinned release config"
+	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
-setup:
-	@if [ ! -d "venv" ]; then \
+setup: venv/.setup-complete
+
+# Keep the completion marker inside the venv so an interrupted dependency install
+# cannot leave `make setup` permanently succeeding with an unusable environment.
+# pyproject.toml is a prerequisite so dependency edits also refresh the venv.
+venv/.setup-complete: pyproject.toml
+	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
-		echo "Installing Python dependencies..."; \
-		./venv/bin/pip install -e ".[dev]"; \
 	fi
+	@echo "Installing Python dependencies..."
+	./venv/bin/pip install -e ".[dev]"
+	@touch $@
 
 setup-ci:
 	python3.12 -m venv venv --prompt "emmy"
@@ -43,8 +54,20 @@ format: setup
 # blowup on big register-tile kernels). This is the CORRECTNESS lane — -O1 changes
 # runtime perf, not numerics, and the deployable perf tests (tests/perf, -m perf) run
 # at -O3 via `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3.
+# --durations: the slowest tests are printed on every run (CI included), so a new long
+# pole is visible in the log the moment it lands rather than after someone profiles.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
+	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
+
+# Regenerate tests/durations.json — the checked-in per-test timings the conftest
+# LPT-buckets on, so CI's first (cache-less) run is balanced. Runs serially: xdist
+# workers contend for cores and would record inflated, unusable times. Commit the
+# result when the balance has drifted (a new heavy test, a big pass-cost change).
+test-durations: setup
+	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -q -p no:randomly --write-durations
+
+# The name the docs reference; the stock (no tune DB) lane is the default.
+bench-kernels: bench-kernels-clean
 
 bench-kernels-clean: setup
 	@rm -f /tmp/emmy-gpu.lock
@@ -66,6 +89,7 @@ VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell 
 
 wheel: setup
 	./venv/bin/pip install --quiet build
+	./venv/bin/python scripts/prepare_dist.py --recipes
 	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
@@ -82,36 +106,115 @@ vllm-emmy-image: wheel git-sha-guard
 vllm-emmy-push: vllm-emmy-image
 	docker push $(VLLM_EMMY_TAG)
 
-# --- gemma-4 prebuilt-kernel image (docker/vllm-emmy-gemma4): warm on a real 5090,
-# --- bake cubins + model snapshot, verify zero-compile/zero-download cold start ---
-include docker/vllm-emmy-gemma4/config.env
-GEMMA4_TAG ?= cloudriftai/vllm-emmy-gemma4:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
+# --- per-model prebuilt-kernel serving image (docker/vllm-emmy-serve): warm on the
+# --- target GPU, bake cubins + model snapshot, verify zero-compile/zero-download start ---
+#
+# Parameterized by MODEL (an HF id). The slug derived from it (model_slug.sh) names BOTH the
+# published image and the pinned config, so onboarding a model is one new file:
+#
+#   make serve-warm  MODEL=google/gemma-4-12B-it     -> models/gemma-4-12b-it.env
+#                                                    -> cloudriftai/vllm-emmy-gemma-4-12b-it
+SERVE_DIR := docker/vllm-emmy-serve
+MODEL ?= google/gemma-4-12B-it
+MODEL_SLUG := $(shell $(SERVE_DIR)/model_slug.sh '$(MODEL)')
+SERVE_CONFIG := $(SERVE_DIR)/models/$(MODEL_SLUG).env
+SERVE_TAG ?= cloudriftai/vllm-emmy-$(MODEL_SLUG):$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
-gemma4-warm:
-	BASE_IMAGE=$(VLLM_EMMY_TAG) docker/vllm-emmy-gemma4/warm.sh
+# `-include`, not `include`: a missing config must fail inside the serve-* targets with a
+# usable message, not abort every `make test` in a tree whose MODEL has no config yet.
+-include $(SERVE_CONFIG)
+# The config is also `source`d by warm.sh/verify.sh, so values with spaces carry double
+# quotes for bash's sake. Make keeps them verbatim — strip them once here rather than at
+# every use site, where a missed one silently word-splits the GPU name into four args.
+# `subst`, not `patsubst`: patsubst matches per WORD, and a quoted multi-word value is
+# several words to make, so `"%"` never matches and the quotes survive into the argv.
+SERVE_GPU_NAME := $(subst ",,$(SERVE_GPU))
+# Same treatment for the two per-checkpoint values that also carry spaces (serve.sh documents
+# them): the cudagraph capture ladder and any further pinned vLLM flags.
+SERVE_CAPTURE_SIZES_VALUE := $(subst ",,$(SERVE_CAPTURE_SIZES))
+SERVE_EXTRA_ARGS_VALUE := $(subst ",,$(SERVE_EXTRA_ARGS))
 
-gemma4-serve-image: git-sha-guard
-	@test -n "$$(ls -A docker/vllm-emmy-gemma4/warm/hf 2>/dev/null)" -a -n "$$(ls -A docker/vllm-emmy-gemma4/warm/cubin 2>/dev/null)" || \
-		(echo "docker/vllm-emmy-gemma4/warm/ is empty — run 'make gemma4-warm' on the target GPU first"; exit 1)
-	@mkdir -p docker/vllm-emmy-gemma4/warm/pack  # pack is optional (COPY needs the dir); empty → boot falls back to full compile
-	docker run --rm -v $(PWD)/docker/vllm-emmy-gemma4/warm/hf:/hf \
-		-v $(PWD)/docker/vllm-emmy-gemma4/reshard_snapshot.py:/reshard.py \
+# What a `make serve-* MODEL=<id>` would act on. The release workflow prints this first, so
+# the model / card / tag under test are on the record before any multi-hour step starts.
+serve-config: serve-config-guard
+	@echo "MODEL      = $(MODEL)"
+	@echo "slug       = $(MODEL_SLUG)"
+	@echo "config     = $(SERVE_CONFIG)"
+	@echo "image tag  = $(SERVE_TAG)"
+	@echo "base image = $(VLLM_EMMY_TAG)"
+	@echo "target GPU = $(SERVE_GPU_NAME)"
+	@echo "goldens    = $(SERVE_GOLDEN_FILE)"
+	@echo "revision   = $(if $(SERVE_REVISION),$(SERVE_REVISION),unpinned - the repo default branch)"
+	@echo "serve      = --max-model-len $(SERVE_MAX_MODEL_LEN) --max-num-batched-tokens $(SERVE_MAX_NUM_BATCHED_TOKENS) --gpu-memory-utilization $(SERVE_GPU_MEM_UTIL) (decode bucket $(SERVE_DECODE_BUCKET))"
+	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
+	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
+	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
+	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
+	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
+
+serve-models:
+	@echo "Models with a pinned release config ($(SERVE_DIR)/models/):"
+	@ls -1 $(SERVE_DIR)/models/*.env 2>/dev/null | sed 's|.*/||; s|\.env$$||; s|^|  |' || echo "  (none)"
+
+serve-config-guard:
+	@test -f "$(SERVE_CONFIG)" || ( \
+		echo "ERROR: no pinned config for MODEL=$(MODEL) (expected $(SERVE_CONFIG))."; \
+		echo "  A release config is per (model, GPU) and must be headroom-swept on the card —"; \
+		echo "  see $(SERVE_DIR)/ARCHITECTURE.md, then add the file. Existing:"; \
+		ls -1 $(SERVE_DIR)/models/*.env 2>/dev/null | sed 's|.*/||; s|\.env$$||; s|^|    |'; \
+		exit 1)
+	@! grep -q '__FILL_FINAL_' "$(SERVE_CONFIG)" || ( \
+		echo "ERROR: $(SERVE_CONFIG) still contains __FILL_FINAL_ release placeholders."; \
+		echo "  Fill every measured checkpoint, serving, and revision value before warming or baking."; \
+		exit 1)
+	@test -n "$(SERVE_GOLDEN_FILE)" -a -f "$(SERVE_GOLDEN_FILE)" || ( \
+		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden YAML."; \
+		exit 1)
+
+# The goldens are the top tier of the fork-resolution evidence hierarchy. Validate the exact
+# config-derived realization matrix on the target GPU before warming; the pinned config owns
+# model, revision, GPU, canonical file, widths, and precision regimes together.
+serve-goldens: serve-config-guard
+	./venv/bin/emmy eval golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
+
+serve-warm: serve-goldens
+	BASE_IMAGE=$(VLLM_EMMY_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/warm.sh
+
+serve-image: git-sha-guard serve-config-guard
+	@test -n "$$(ls -A $(SERVE_DIR)/warm/hf 2>/dev/null)" -a -n "$$(ls -A $(SERVE_DIR)/warm/cubin 2>/dev/null)" || \
+		(echo "$(SERVE_DIR)/warm/ is empty — run 'make serve-warm MODEL=$(MODEL)' on the target GPU first"; exit 1)
+	@mkdir -p $(SERVE_DIR)/warm/pack  # pack is optional (COPY needs the dir); empty -> boot falls back to full compile
+	docker run --rm --user $$(id -u):$$(id -g) -v $(PWD)/$(SERVE_DIR)/warm/hf:/hf \
+		-v $(PWD)/$(SERVE_DIR)/reshard_snapshot.py:/reshard.py \
 		--entrypoint python3 $(VLLM_EMMY_TAG) /reshard.py /hf
-	docker/vllm-emmy-gemma4/split_hf.sh
-	docker build -f docker/vllm-emmy-gemma4/Dockerfile \
+	$(SERVE_DIR)/split_hf.sh
+	docker build -f $(SERVE_DIR)/Dockerfile \
 		--build-arg BASE_IMAGE=$(VLLM_EMMY_TAG) \
-		--build-arg MODEL=$(GEMMA4_MODEL) \
-		--build-arg MAX_MODEL_LEN=$(GEMMA4_MAX_MODEL_LEN) \
-		--build-arg MAX_NUM_BATCHED_TOKENS=$(GEMMA4_MAX_NUM_BATCHED_TOKENS) \
-		--build-arg GPU_MEM_UTIL=$(GEMMA4_GPU_MEM_UTIL) \
-		--build-arg DECODE_BUCKET=$(GEMMA4_DECODE_BUCKET) \
-		-t $(GEMMA4_TAG) docker/vllm-emmy-gemma4
+		--build-arg PUBLISH_FAMILY=vllm-emmy \
+		--build-arg PUBLISH_VERSION=$(patsubst v%,%,$(VLLM_VERSION)) \
+		--build-arg PUBLISH_REVISION=$(shell git rev-parse HEAD) \
+		--build-arg MODEL=$(SERVE_MODEL) \
+		--build-arg TARGET_GPU='$(SERVE_GPU_NAME)' \
+		--build-arg MAX_MODEL_LEN=$(SERVE_MAX_MODEL_LEN) \
+		--build-arg MAX_NUM_BATCHED_TOKENS=$(SERVE_MAX_NUM_BATCHED_TOKENS) \
+		--build-arg GPU_MEM_UTIL=$(SERVE_GPU_MEM_UTIL) \
+		--build-arg DECODE_BUCKET=$(SERVE_DECODE_BUCKET) \
+		--build-arg REVISION=$(SERVE_REVISION) \
+		--build-arg QUANT=$(SERVE_QUANT) \
+		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
+		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
+		--build-arg EMBED_HOST=$(SERVE_EMBED_HOST) \
+		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
+		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
+		--build-arg M1_TIER=$(SERVE_M1_TIER) \
+		-t $(SERVE_TAG) $(SERVE_DIR)
 
-gemma4-serve-verify:
-	IMAGE=$(GEMMA4_TAG) docker/vllm-emmy-gemma4/verify.sh
+serve-verify: serve-config-guard
+	IMAGE=$(SERVE_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/verify.sh
 
-gemma4-serve-push:
-	docker push $(GEMMA4_TAG)
+serve-push: serve-config-guard
+	@echo "ERROR: direct serving-image pushes are disabled; use 'emmy publish <recipe>'." >&2
+	@exit 2
 
 bench: setup
 	@echo "Running benchmarks..."

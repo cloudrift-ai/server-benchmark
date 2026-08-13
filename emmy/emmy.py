@@ -2,7 +2,9 @@
 """Server benchmark tools — CLI entrypoint."""
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 
+from emmy.commands.agent import register_agent_command
 from emmy.commands.bench import register_bench_command
 from emmy.commands.compare import register_compare_command
 from emmy.commands.compile import register_compile_command
@@ -13,6 +15,7 @@ from emmy.commands.eval import register_eval_command
 from emmy.commands.fit import register_fit_command
 from emmy.commands.generate import register_generate_command
 from emmy.commands.inspect_graph import register_inspect_command
+from emmy.commands.publish import register_publish_command
 from emmy.commands.pull import register_pull_command
 from emmy.commands.run import register_run_command
 from emmy.commands.serve import register_serve_command
@@ -23,8 +26,17 @@ from emmy.commands.vm import register_vm_command
 from emmy.logging_setup import setup_cli_logging
 
 
+def _package_version():
+    """Installed distribution version, or "unknown" for a plain source checkout."""
+    try:
+        return version("emmy-ml")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Server benchmark tools")
+    parser.add_argument("--version", action="version", version=f"emmy {_package_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # deploy subcommand with target sub-subcommands
@@ -40,6 +52,8 @@ def main():
     register_serve_command(subparsers)
     register_teardown_command(subparsers)
     register_vm_command(subparsers)
+    register_agent_command(subparsers)
+    register_publish_command(subparsers)
 
     # compiler workflow commands
     register_pull_command(subparsers)

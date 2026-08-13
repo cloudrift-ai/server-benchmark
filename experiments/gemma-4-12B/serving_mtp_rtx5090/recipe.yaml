@@ -15,23 +15,59 @@
 # GPU memory utilization 0.96; the emmy lanes carry the documented per-workload knobs —
 # decode bucket 32 with mnbt 4128 (chunk 4096 + bucket-sized rider headroom) at c=1, the
 # 2048-token chunk quantum (EMMY_GEN_PREFILL_BUCKET=2048, mnbt 2048+bucket) on the mixed
-# 4k/4k batched cells, bucket 64 / chunk 4096 at c=64. The MTP lanes use the same
-# pattern with the decode bucket widened to the smallest tuned width covering the
-# verification step (concurrency x (depth+1) tokens): 8 at c=1, 16 at c=4, 32 at c=8.
-# The c=64 depth-2 cell needs width 192, which has NO tuned kernels or goldens: its
-# number reports untuned emmy at an uncovered shape (the article flags it the same way).
+# 4k/4k batched cells, bucket 64 / chunk 4096 at c=64. The MTP lanes widen the decode
+# bucket to cover the verification step (concurrency x (depth+1) tokens): 8 at c=1,
+# 32 at c=4 and c=8, 192 at c=64.
+#
+# Why the MTP buckets are NOT simply the smallest tuned width >= the verify width: vLLM
+# rounds every cudagraph capture size up to a multiple of (depth+1) and pads a step to the
+# first captured size at or above its width, so the runner sees a PADDED width. Picking the
+# tightest bucket puts that padded width one rung ABOVE the bucket, and the step then misses
+# the static decode twin entirely and runs the symbolic program (measured cost: ~30% of
+# decode throughput). emmy floors its own ladder to multiples of (depth+1) so the bucket's
+# rung stays reachable, and these buckets leave a rung under themselves. Overshooting the
+# bucket is close to free — doubling the padded rung costs under 1% of TPOT, because decode
+# reads the weights once per step regardless of width — so landing on a WELL-COVERED width
+# beats landing tightly on a thin one. That is why c=4 uses 32 (full fused golden set at
+# m32) rather than 16 (m16 carries only the unfused projections) — worth +41% at depth 2 and
+# +78% at depth 3 against m16, on a same-box A/B.
+#
+# c=64 stays at 192. The same reasoning says it should use 256 (near-full set at m256) and that
+# is measurably faster, but bucket 256 FAILS the output-quality gate: GSM8K collapses to 0.0
+# with empty completions where bucket 32 scores 0.665-0.670 and stock scores 0.640-0.665 on the
+# same harness. Do not widen this lane again without re-running the quality gate.
+#
+# 2026-08-01/02: the two reasons bucket 192 used to be a poor number are BOTH closed. It is no
+# longer an unseeded width — the m192 golden tier was recorded (matmuls, fused cut routings, and
+# the o_proj pair the first sweep missed) — and it is no longer an unwarmed width, since the
+# serving image now bakes one execution-plan pack per serving shape (SERVE_WARM_SHAPES) and 192
+# is one of them, so this lane pack-hits instead of cold-resolving. Together those took the cell
+# from a non-reproducible 10.7-332.7 tok/s lottery to a deterministic 878.5 (2.6x the published
+# 332.7). See plans/gemma4-mtp-batched-serving-findings.md and
+# plans/gemma4-article-repro-16k-findings.md.
 #
 # Acceptance caveat (also in the article): on random-token prompts, long outputs collapse
 # into repetition the drafter predicts near-perfectly, so the 4k-output cells run at
 # ceiling acceptance; natural-text acceptance comes from the GSM8K check
 # (experiments/gemma-4-12B/gsm8k_mtp_rtx5090).
 #
-# The emmy lanes pin the latest published gemma-4 serving image
-# (cloudriftai/vllm-emmy-gemma4, tag = vllm version + emmy sha), which bakes the model
-# snapshot, warmed sm_120 cubins, and the execution-plan pack — cold boots skip compiles
-# and downloads. The pinned tag's emmy revision postdates the MTP shim (PR #426), which
-# the drafter needs to share the target's embedding; images older than the shim fail at
-# engine init with "Target model does not have 'model' attribute".
+# The emmy lanes ride the published gemma-4 serving image
+# (cloudriftai/vllm-emmy-gemma-4-12b-it, built by docker/vllm-emmy-serve/), which bakes the
+# model snapshot, warmed sm_120 cubins, and the execution-plan pack — cold boots skip
+# compiles and downloads. `:latest` tracks the current release; sha-suffixed tags
+# (<vllm-version>-<emmy-sha>) exist beside it when you need a frozen one, and are what to
+# use if a run's numbers must stay reproducible.
+#
+# Whatever `latest` resolves to must postdate the MTP shim (PR #426), which the drafter
+# needs to share the target's embedding; images older than the shim fail at engine init
+# with "Target model does not have 'model' attribute".
+#
+#
+# CONTEXT RAISED TO 16384 (2026-07-31), up from the article's 8448. Both engines move
+# together so the A/B stays fair, but this recipe NO LONGER REPRODUCES THE PUBLISHED
+# TABLE — a run here and the article's numbers differ in protocol, not just in code, and
+# the difference is not a regression. Re-measure the whole grid before comparing anything
+# to the blog post, or check out the 8448 revision to reproduce it.
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/serving_mtp_rtx5090 --local
@@ -41,7 +77,7 @@ model:
 engine:
   llm:
     tensor_parallel_size: 1
-    context_length: 8448
+    context_length: 16384
 
 benchmark:
   seed: 0
@@ -101,7 +137,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=32"
     zip:
@@ -114,7 +150,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
     zip:
@@ -127,7 +163,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=64"
     benchmark.random_input_len: 256
@@ -139,7 +175,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=8"
     zip:
@@ -148,13 +184,13 @@ matrices:
       benchmark.max_concurrency: [1, 1]
       benchmark.num_prompts: [16, 8]
 
-  # ---- emmy + MTP, depth 2: c=4 (verify width 12 -> bucket 16 + the 2048 quantum) ----
+  # ---- emmy + MTP, depth 2: c=4 (verify width 12 -> rung 15 under bucket 32 + 2048 quantum) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
-    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2064 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
-    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=16 EMMY_GEN_PREFILL_BUCKET=2048"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2080 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
+    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=32 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 4096
     benchmark.random_output_len: 4096
     benchmark.max_concurrency: 4
@@ -164,7 +200,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2080 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=32 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 4096
@@ -172,11 +208,11 @@ matrices:
     benchmark.max_concurrency: 8
     benchmark.num_prompts: 64
 
-  # ---- emmy + MTP, depth 2: c=64 (verify width 192 — NO tuned kernels, see header) ----
+  # ---- emmy + MTP, depth 2: c=64 (verify width 192 -> bucket 192, untuned; see header) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=192"
     benchmark.random_input_len: 256
@@ -188,7 +224,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":3}'"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=8"
     zip:
@@ -197,13 +233,13 @@ matrices:
       benchmark.max_concurrency: [1, 1]
       benchmark.num_prompts: [16, 8]
 
-  # ---- emmy + MTP, depth 3: c=4 (verify width 16 -> bucket 16 + the 2048 quantum) ----
+  # ---- emmy + MTP, depth 3: c=4 (verify width 16 -> rung 16 under bucket 32 + 2048 quantum) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
-    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2064 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":3}'"
-    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=16 EMMY_GEN_PREFILL_BUCKET=2048"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2080 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":3}'"
+    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=32 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 4096
     benchmark.random_output_len: 4096
     benchmark.max_concurrency: 4
@@ -213,7 +249,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2080 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":3}'"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=32 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 4096
@@ -225,7 +261,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":5}'"
     engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=8"
     zip:

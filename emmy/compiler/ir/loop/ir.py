@@ -288,7 +288,7 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
     def _sub_axis(ax: Axis) -> Axis:
         if ax.extent.is_static or ax.name not in env:
             return ax
-        return Axis(name=ax.name, extent=env[ax.name], source_axis=ax.source_axis)
+        return Axis(name=ax.name, extent=env[ax.name], window=ax.window)
 
     def _sub_body(body: Body) -> Body:
         new: list[Stmt] = []

@@ -195,6 +195,27 @@ def test_no_merge_with_folded_load_ops():
     assert _count(result, LinearOp) == 2
 
 
+def test_no_merge_with_folded_constant_subgraphs():
+    """A generic ``source_graph`` bind record is not pristine: its evaluation has no
+    concat-of-paths spelling, so the siblings stay unmerged."""
+    from dataclasses import replace
+
+    g = _sibling_graph()
+    for wid in ("w0", "w1"):
+        record = Graph()
+        op = g.nodes[wid].op
+        record.add_node(
+            op=ConstantOp(name=f"{wid}_bits", source_path=op.source_path, source_shape=op.source_shape, source_dtype="f8e4m3"),
+            inputs=[],
+            output=Tensor(f"{wid}_bits", op.source_shape, "f8e4m3"),
+            node_id=f"{wid}_bits",
+        )
+        record.outputs = [f"{wid}_bits"]
+        g.nodes[wid].op = replace(op, source_path=None, source_graph=record)
+    result = _apply(g)
+    assert _count(result, LinearOp) == 2
+
+
 def test_no_merge_across_different_activations():
     g = Graph()
     for i, xid in enumerate(("x", "y")):

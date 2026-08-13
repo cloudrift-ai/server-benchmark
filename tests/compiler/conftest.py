@@ -5,60 +5,17 @@ through each backend (numpy / loop / cuda). A test that takes ``run_graph``
 automatically executes three times under different param IDs — any
 disagreement between backends makes bug attribution mechanical.
 
-Also exposes the ``has_cuda_gpu()`` predicate and the ``requires_cuda``
-skip marker shared by all CUDA-gated tests in this package.
+Reusable functions and skip markers live in ``helpers.py``; conftest contains only fixtures.
 """
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
 
 import numpy as np
 import pytest
 
-
-def has_cuda_gpu() -> bool:
-    """Check if cupy is importable and sees at least one CUDA device."""
-    try:
-        import cupy as cp
-
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
-requires_cuda = pytest.mark.skipif(
-    not has_cuda_gpu(),
-    reason="CUDA not available (need cupy + GPU)",
-)
-
-
-@functools.cache
-def device_compute_capability() -> tuple[int, int] | None:
-    """Live CUDA device compute capability as ``(major, minor)``, or ``None`` when
-    no GPU is visible. cupy reports it as a string like ``"89"`` → ``(8, 9)``."""
-    if not has_cuda_gpu():
-        return None
-    import cupy as cp
-
-    cap = str(cp.cuda.Device().compute_capability)
-    return (int(cap[:-1]), int(cap[-1]))
-
-
-# Skip the mma.sync warp-tier tests below sm_90. The warp tier (swizzled
-# ``ldmatrix`` + ``mma.sync``, TMA transport) auto-enumerates and is validated on
-# sm_90+; on sm_80-89 it is pin-only and currently non-functional, for two
-# independent reasons: the ``sm_NNa`` arch-accelerated suffix the TMA path emits
-# is rejected by nvcc (``Unsupported gpu architecture 'sm_89a'`` — the ``a``
-# variant only exists for sm_90a+), and ``ldmatrix`` itself faults at runtime on
-# at least this Ada (sm_89) host. Tests that FORCE the warp tier via
-# ``EMMY_MMA`` pins therefore can't run below sm_90; they exercise the
-# deployed path on sm_90+ CI.
-requires_sm90 = pytest.mark.skipif(
-    (device_compute_capability() or (0, 0)) < (9, 0),
-    reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
-)
+from tests.compiler.helpers import inject_constants, skip_if_no_cuda
 
 
 @pytest.fixture(params=["f32", "f16"], ids=["f32", "f16"])
@@ -72,53 +29,6 @@ def dtype(request):
     from emmy.compiler import dtype as _dt  # noqa: PLC0415
 
     return _dt.get(request.param)
-
-
-def dtype_tol(dtype) -> dict[str, float]:
-    """Default ``np.testing.assert_allclose`` kwargs for a given dtype.
-
-    fp16 needs ~3 orders of magnitude looser tolerance than fp32 to
-    survive elementwise / reduction chains. Tests that need tighter
-    bounds (or different ones per op) override locally.
-    """
-    return {"rtol": 5e-3, "atol": 5e-3} if dtype.name == "f16" else {"rtol": 1e-4, "atol": 1e-5}
-
-
-def dtype_input_scale(dtype) -> float:
-    """Magnitude scale for random inputs so fp16 reductions don't overflow.
-
-    Standard-normal inputs feeding a sum / matmul over K elements have
-    output magnitude ~ sqrt(K). fp16's representable range tops out at
-    65504 — scaling by 0.05 keeps K up to ~1M safe.
-    """
-    return 0.05 if dtype.name == "f16" else 1.0
-
-
-def _skip_if_no_cuda() -> None:
-    if not has_cuda_gpu():
-        pytest.skip("CUDA not available (need cupy + GPU)")
-
-
-def matmul_graph(m: int, k: int, n: int) -> Graph:  # noqa: F821
-    """Plain `(m,k) @ (k,n) -> (m,n)` matmul graph for lowering / backend tests.
-
-    Returned shape: two ``InputOp`` named ``a`` / ``b``, one ``MatmulOp``
-    named ``o`` — the same trivial GEMM graph that the lowering-accuracy
-    suites and several backend tests would otherwise rebuild inline.
-    Callers needing the input shapes can derive them as
-    ``{"a": (m, k), "b": (k, n)}``.
-    """
-    from emmy.compiler.graph import Graph, Tensor  # noqa: PLC0415
-    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
-
-    g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (m, k)), node_id="a")
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("b", (k, n)), node_id="b")
-    g.add_node(op=MatmulOp(), inputs=["a", "b"], output=Tensor("o", (m, n)), node_id="o")
-    g.inputs = ["a", "b"]
-    g.outputs = ["o"]
-    return g
 
 
 @pytest.fixture(params=["numpy", "loop", "cuda"])
@@ -138,7 +48,7 @@ def run_graph(request) -> Callable:
     kind = request.param
 
     if kind == "cuda":
-        _skip_if_no_cuda()
+        skip_if_no_cuda()
     if kind == "loop":
         # If the test also takes a ``dtype`` fixture and it's fp16, skip
         # the loop backend (cppyy runner is f32-only — see
@@ -159,131 +69,17 @@ def run_graph(request) -> Callable:
 
             be = LoopBackend()
             compiled = be.compile(graph)
-            augmented = _inject_constants(dict(input_data), compiled)
+            augmented = inject_constants(dict(input_data), compiled)
             return be.run(compiled, input_data=augmented)[0].outputs
         # cuda
         from emmy.compiler.backend.cuda.backend import CudaBackend
 
         be = CudaBackend()
         compiled = be.compile(graph)
-        augmented = _inject_constants(dict(input_data), compiled)
+        augmented = inject_constants(dict(input_data), compiled)
         return be.run(compiled, input_data=augmented)[0].outputs
 
     return _run
-
-
-def _inject_constants(input_data: dict[str, np.ndarray], graph) -> dict[str, np.ndarray]:
-    """Auto-supply scalar ConstantOp values that weren't passed in input_data.
-
-    Also re-binds tensor constants whose ``ConstantOp.name`` matches an
-    entry in the input data but whose graph node id differs (e.g. after
-    ``050_fold_into_constant`` replaces ``TransposeOp(c)`` with a
-    new ConstantOp carrying a runtime transpose marker — same source
-    name, fresh node id, transposed shape). Applies the recorded
-    permutation here so the loop / numpy backends see the post-transpose
-    data.
-    """
-    from emmy.compiler.ir.base import ConstantOp
-
-    for nid, node in graph.nodes.items():
-        if not isinstance(node.op, ConstantOp):
-            continue
-        if nid in input_data:
-            continue
-        if node.op.value is not None:
-            input_data[nid] = np.array([node.op.value], dtype=np.float32)
-            continue
-        src = input_data.get(node.op.name)
-        if src is not None:
-            from emmy.compiler.loader.binder import apply_load_ops
-
-            arr = np.asarray(src, dtype=np.float32)
-            if node.op.load_ops and node.op.source_shape is not None:
-                arr = arr.reshape(node.op.source_shape)
-            input_data[nid] = apply_load_ops(arr, node.op.load_ops)
-    return input_data
-
-
-def drain_tune(pipeline, graph, *, on=None, **kwargs):
-    """Synchronously collect :meth:`Pipeline.tune_async` terminals for tests.
-
-    ``Pipeline.tune`` (the sync generator) is gone — the autotuner is async-only —
-    so tests drive ``tune_async`` through one ``asyncio.run``. Returns the list of
-    terminal candidates. ``on(candidate)`` is invoked per terminal as it arrives;
-    return truthy from it to stop early (the async mirror of a ``for ... break``).
-    A real ``CudaBackend``'s device-pinned worker is bound to this loop, so it is
-    awaited-closed before the loop ends (no orphaned subprocess transport)."""
-    import asyncio
-
-    async def _collect():
-        out = []
-        try:
-            async for cand in pipeline.tune_async(graph, **kwargs):
-                out.append(cand)
-                if on is not None and on(cand):
-                    break
-        finally:
-            backend = kwargs.get("backend")
-            if backend is not None and hasattr(backend, "aclose_async_worker"):
-                await backend.aclose_async_worker()
-        return out
-
-    return asyncio.run(_collect())
-
-
-def run_inner_reward(
-    fused_graph,
-    *,
-    ctx,
-    db,
-    backend=None,
-    backends=None,
-    patience,
-    ucb_c=None,
-    explore_eps=0.0,
-    seed=0,
-    progress=None,
-    prior=None,
-    run_id="",
-):
-    """Synchronously run the async per-op inner reward for tests.
-
-    ``two_level.inner_reward`` (the sync ``asyncio.run`` bridge) is gone — the tuner
-    is async-only — so tests drive ``_inner_reward_async`` through one ``asyncio.run``,
-    building the device-pinned ``pool`` from ``backend`` / ``backends`` exactly as the
-    production outer loop does. Mirrors the old signature so call sites only rename."""
-    import asyncio
-
-    from emmy.compiler.pipeline import TuningSearch
-    from emmy.compiler.pipeline.search.two_level import _inner_reward_async
-
-    if ucb_c is None:
-        ucb_c = TuningSearch.DEFAULT_UCB_C
-    pool = list(backends) if backends else [backend]
-    return asyncio.run(
-        _inner_reward_async(
-            fused_graph,
-            ctx=ctx,
-            db=db,
-            pool=pool,
-            patience=patience,
-            ucb_c=ucb_c,
-            explore_eps=explore_eps,
-            seed=seed,
-            progress=progress,
-            prior=prior,
-            run_id=run_id,
-        )
-    )
-
-
-def run_two_level(graph, **kwargs):
-    """Synchronously run the async :func:`two_level.run_two_level_tune` for tests."""
-    import asyncio
-
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
-
-    return asyncio.run(run_two_level_tune(graph, **kwargs))
 
 
 @pytest.fixture(params=["static", "dynamic"])
@@ -301,29 +97,3 @@ def shape_mode(request) -> str:
     static-vs-dynamic parity (off-hint masked sizes live in the masked-symbolic
     section of ``test_matmul_coverage.py``)."""
     return request.param
-
-
-def dyn_M(mode: str, M: int):
-    """``Dim('seq_len')`` for ``mode == 'dynamic'``, else the int ``M``. The
-    one-liner that turns a static graph builder into a static/dynamic one."""
-    if mode == "dynamic":
-        from emmy.compiler.dim import Dim
-
-        return Dim("seq_len")
-    return M
-
-
-def from_pretrained_or_skip(loader, *args, **kwargs):
-    """Run a HuggingFace ``from_pretrained`` download, skipping the test on a Hub
-    connection / rate-limit failure.
-
-    CI runners regularly hit HTTP 429 (Too Many Requests) from huggingface.co —
-    transformers retries then wraps it as ``OSError("We couldn't connect …")``.
-    That's an environment issue, not a code regression, so the network-dependent
-    e2e / trace tests skip rather than hard-fail. ``loader`` is e.g.
-    ``AutoConfig.from_pretrained``; ``args[0]`` is the model id (for the message)."""
-    try:
-        return loader(*args, **kwargs)
-    except OSError as exc:  # transformers wraps 429 / connection errors as OSError here
-        model = args[0] if args else kwargs.get("pretrained_model_name_or_path", "?")
-        pytest.skip(f"HuggingFace Hub unavailable for {model} (likely rate-limited): {exc}")

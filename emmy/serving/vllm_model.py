@@ -45,6 +45,18 @@ def _trunk_dtype_str(torch_dtype) -> str:
     return dtype_str
 
 
+def pinned_model_id(model_config) -> str:
+    """vLLM's model id carrying its ``--revision``, as ``<repo>@<revision>``.
+
+    The runner re-opens the checkpoint itself (detection, snapshot, coded allocation, the
+    ``lm_head`` siblings) — vLLM's own resolution does not carry over. Untagged, every one of
+    those reads took the repo's DEFAULT branch while vLLM's config came from the pinned one, so
+    a repo publishing one rung per branch traced the requested rung's geometry against another
+    rung's weights. A local path or an unpinned load passes through unchanged."""
+    revision = getattr(model_config, "revision", None)
+    return f"{model_config.model}@{revision}" if revision else model_config.model
+
+
 class EmmyEmbedModel(nn.Module, IsAttentionFree):
     is_pooling_model = True
     default_seq_pooling_type = "LAST"
@@ -64,7 +76,7 @@ class EmmyEmbedModel(nn.Module, IsAttentionFree):
         static = config.serving_static()
         batch = vllm_config.scheduler_config.max_num_seqs if (static or config.serving_batched()) else 1
         self.runner = EmmyForwardRunner.create(
-            model_id=mc.model,
+            model_id=pinned_model_id(mc),
             max_seq_len=mc.max_model_len,
             dtype_str=_trunk_dtype_str(mc.dtype),
             batch=batch,

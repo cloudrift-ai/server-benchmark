@@ -20,8 +20,8 @@ from emmy.compiler.backend.cuda.program import GraphCaptureError, benchmark_prog
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from tests.compiler.helpers import requires_cuda
 
-from ..conftest import requires_cuda
 from .test_program import EW_ADD_SOURCE, _make_add_graph
 
 

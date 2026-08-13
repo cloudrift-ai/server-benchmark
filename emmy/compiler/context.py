@@ -15,6 +15,7 @@ the signature alone.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from emmy import config, gpu
@@ -41,6 +42,11 @@ _TENSOR_CORE_GEN = gpu.TENSOR_CORE_GEN
 DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
+# The consumer-die compute capabilities where f32-accumulate HMMA runs at HALF the f16-accumulate
+# rate (GA102 / AD102 / GB202 silicon) — a hardware fact, read through ``Context.f16acc_is_faster``.
+_F16ACC_HALF_RATE_CCS = frozenset({(8, 6), (8, 9), (12, 0)})
+
+
 def _env_compile_flags() -> str:
     """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``). Set by the
     CLI commands (via :func:`emmy.config.set_nvcc_flags`); folded into
@@ -63,6 +69,41 @@ def _live_sm_count() -> int:
     from emmy.compiler.target import live_device_features  # noqa: PLC0415
 
     return int(live_device_features().get("sm_count") or DEFAULT_SM_COUNT)
+
+
+class SessionCache:
+    """Session-scoped LRU memo (key digest → payload), carried on :class:`Context` as AMBIENT
+    state — like the device-physical fields it is EXCLUDED from :meth:`Context.structural_key`:
+    caching must never change identity. One instance per compilation session;
+    ``dataclasses.replace`` on a Context carries the same instance forward, so a tune run's
+    trajectories share it, while a fresh Context starts cold.
+
+    Sits BELOW the search policies (the one consumer today is the schedule pool cache in
+    ``lowering/tile/_schedule``), so greedy and MCTS share hits without knowing the cache
+    exists. Only evidence-independent payloads belong here — a policy's CONCLUSIONS (a deploy
+    pick, a ranking) must never be stored, since evidence moves under a tune. Payloads must be
+    immutable; the owner asserts that at ``put`` time."""
+
+    def __init__(self, cap: int = 8) -> None:
+        self.cap = cap
+        self._store: OrderedDict[str, object] = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> object | None:
+        found = self._store.get(key)
+        if found is None:
+            self.misses += 1
+            return None
+        self._store.move_to_end(key)
+        self.hits += 1
+        return found
+
+    def put(self, key: str, value: object) -> None:
+        self._store[key] = value
+        self._store.move_to_end(key)
+        while len(self._store) > self.cap:
+            self._store.popitem(last=False)
 
 
 @dataclass(frozen=True)
@@ -143,6 +184,10 @@ class Context:
     # tier's subset), so a per-op contradiction is a pruned branch, not an error. NOT
     # in ``structural_key`` (it changes no codegen, only whether a contradiction raises).
     validate_pins: bool = True
+    # The session memo (:class:`SessionCache`) — ambient, mutable-inside, shared across
+    # ``dataclasses.replace`` copies. NOT in ``structural_key`` and ``compare=False``:
+    # caching must never change identity or context equality.
+    session_cache: SessionCache = field(default_factory=SessionCache, compare=False, repr=False)
 
     @classmethod
     def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None) -> Context:
@@ -162,6 +207,51 @@ class Context:
             gpu_name=spec.name if spec else gpu_name,
             compile_flags=_env_compile_flags(),
         )
+
+    @property
+    def f16acc_is_faster(self) -> bool:
+        """Whether f16-accumulate HMMA outruns f32-accumulate on this target. True on the consumer
+        dies (GA102 / AD102 / GB202), where f32-accumulate runs at HALF rate; on the datacenter
+        parts f32-accumulate is full rate, so trading precision for it buys nothing and the fork is
+        pure search noise."""
+        return self.compute_capability in _F16ACC_HALF_RATE_CCS
+
+    @property
+    def has_volta_mma(self) -> bool:
+        """Whether the scheduler selects the Volta ``mma.sync.m8n8k4`` family."""
+        return (7, 0) <= self.compute_capability < (8, 0)
+
+    @property
+    def has_mma_m16n8k16(self) -> bool:
+        """Whether the target has the Ampere ``mma.sync.m16n8k16`` family."""
+        return self.compute_capability >= (8, 0)
+
+    @property
+    def has_ldmatrix(self) -> bool:
+        """Whether the target can issue ``ldmatrix`` (Turing, sm_75, or newer)."""
+        return self.compute_capability >= (7, 5)
+
+    @property
+    def has_cp_async(self) -> bool:
+        """Whether the target can issue the Ampere ``cp.async`` copy instruction."""
+        return self.compute_capability >= (8, 0)
+
+    @property
+    def has_bf16_mma(self) -> bool:
+        """Whether the target has the Ampere BF16 ``mma.sync`` instruction family."""
+        return self.compute_capability >= (8, 0)
+
+    @property
+    def has_fp8_mma(self) -> bool:
+        """Whether the target has the Ada native FP8 ``mma.sync`` instruction family."""
+        return self.compute_capability >= (8, 9)
+
+    @property
+    def has_tma(self) -> bool:
+        """Whether the target can issue TMA (``cp.async.bulk.tensor``) — a Hopper (sm_90) feature.
+        Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage below sm_90 fails to
+        compile: the schedule declines those rows rather than emitting them."""
+        return self.compute_capability >= (9, 0)
 
     def structural_key(self) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.

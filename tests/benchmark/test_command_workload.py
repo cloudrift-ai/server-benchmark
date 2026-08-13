@@ -1,13 +1,29 @@
-"""Unit tests for the command workload module (pure functions)."""
+"""Unit tests for the command workload module."""
+
+from pathlib import Path
 
 import pytest
 
-from emmy.benchmark.command_workload import build_substitution_map, render_command
+from emmy.benchmark.command_workload import _local_result_name, build_substitution_map, render_command, run_command_workload
+from emmy.planner import BenchmarkTask
 from emmy.planner.variant import Variant
+from emmy.recipe.types import CommandConfig, Recipe
 
 
 def _variant(params):
     return Variant(params=params)
+
+
+def test_local_result_name_top_level_file_keeps_flat_name():
+    assert _local_result_name("rtx5090x1", "accum_error.json") == "rtx5090x1_accum_error.json"
+
+
+def test_local_result_name_subdir_files_do_not_collide():
+    std = _local_result_name("rtx4090x1", "std/golden_bench.json")
+    fm = _local_result_name("rtx4090x1", "fm/golden_bench.json")
+    assert std == "rtx4090x1_std_golden_bench.json"
+    assert fm == "rtx4090x1_fm_golden_bench.json"
+    assert std != fm
 
 
 def test_build_substitution_map_flattens_dot_keys():
@@ -60,3 +76,70 @@ def test_render_command_repo_dir_unavailable():
     subs = build_substitution_map(v, [0], repo_dir=None, task_dir="/t")
     with pytest.raises(ValueError, match=r"undefined variable: \$repo_dir"):
         render_command("cd $repo_dir && make", subs)
+
+
+@pytest.mark.asyncio
+async def test_failed_command_still_pulls_preserved_result(monkeypatch, tmp_path):
+    recipe = Recipe(command=CommandConfig(run="false", result_files=["case/artifacts.tar.gz"]))
+    variant = _variant({"deploy.gpu": "NVIDIA GeForce RTX 5090", "deploy.gpu_count": 1})
+    task = BenchmarkTask(recipe_dir="experiment", variant=variant, recipe=recipe, run_dir=tmp_path)
+
+    async def run_cmd(command, **_kwargs):
+        return (7, "", "failed") if command == "false" else (0, "", "")
+
+    async def fake_scp(server, ssh_key, ssh_port, remote, local):
+        del server, ssh_key, ssh_port, remote
+        Path(local).write_bytes(b"archive")
+        return 0, ""
+
+    monkeypatch.setattr("emmy.provisioning.ssh_transport.scp_from_remote", fake_scp)
+    success, info = await run_command_workload(
+        task,
+        run_cmd,
+        repo_dir=None,
+        task_dir="/remote/task",
+        gpu_device_ids=[0],
+        server="host",
+        ssh_key="key",
+        ssh_port=22,
+    )
+
+    assert success is False
+    assert info["exit_code"] == 7
+    assert info["result_paths"] == [str(tmp_path / "rtx5090x1_case_artifacts.tar.gz")]
+    assert (tmp_path / "rtx5090x1_case_artifacts.tar.gz").read_bytes() == b"archive"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "scp"])
+async def test_strict_result_transfer_fails_closed(monkeypatch, tmp_path, failure):
+    recipe = Recipe(command=CommandConfig(run="true", result_files=["artifacts/*.tar.gz"], strict=True))
+    task = BenchmarkTask(
+        recipe_dir="experiment",
+        variant=_variant({"deploy.gpu": "NVIDIA GeForce RTX 5090", "deploy.gpu_count": 1}),
+        recipe=recipe,
+        run_dir=tmp_path,
+    )
+
+    async def run_cmd(command, **_kwargs):
+        if "for f in" in command:
+            return 0, "" if failure == "missing" else "artifacts/results.tar.gz\n", ""
+        return 0, "", ""
+
+    async def fake_scp(*_args):
+        return 1, "transfer failed"
+
+    monkeypatch.setattr("emmy.provisioning.ssh_transport.scp_from_remote", fake_scp)
+    success, info = await run_command_workload(
+        task,
+        run_cmd,
+        repo_dir=None,
+        task_dir="/remote/task",
+        gpu_device_ids=[0],
+        server="host",
+        ssh_key="key",
+        ssh_port=22,
+    )
+
+    assert success is False
+    assert info["result_errors"]

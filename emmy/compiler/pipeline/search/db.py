@@ -3,7 +3,7 @@
 Pure persistence layer — no MCTS state, no propagation walks. Tables:
 
 - ``loop_op`` / ``tile_op`` / ``kernel_op`` / ``cuda_op`` — one row per
-  op encountered along a lowering chain. Keyed by ``op_cache_key``.
+  op encountered along a lowering chain. Keyed by ``Op.cache_key``.
   Each row stores the JSON form (for programmatic inspection) and the
   pretty-printed form (for human inspection).
 - ``lowering`` — best-known child for each parent op, one row per
@@ -199,11 +199,6 @@ class NodeRow:
     # version (writers construct rows with live code); rows read back from a pre-stamp DB carry 1
     # and are excluded from prior evaluation (cross-vocabulary features score as garbage).
     feat_ver: int = FEATURIZER_VERSION
-    # Declarative golden-spelled identity of the benched shape (the golden YAML entry minus
-    # knobs/latencies: ``{"kernel": ..., <shape fields>, "dynamic": ...}``), captured at
-    # collection time by ``run --bench --record-shape``. ``None`` = legacy row (tune-written or
-    # pre-identity bench) — kept in the DB but excluded from goldens-format measurement freezes.
-    shape_spec: dict | None = None
 
 
 def implausible_value_reason(row: NodeRow) -> str | None:
@@ -266,7 +261,7 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     """The *validity* companion to :func:`implausible_value_reason` — the reason the row's
     stamped kernel could never have launched, or ``None``. A ``cp.async``-staged warp tile
     whose slab (``depth · (tile_m + tile_n) · bk_elems · elem_bytes``, the
-    ``_resolve_warp_stage`` sizing) exceeds the card's dynamic-smem opt-in cap cannot
+    warp stage sizing) exceeds the card's dynamic-smem opt-in cap cannot
     materialize — pre-#330 code stamped such stages anyway, the materializer rejected the
     main kernel, and the bench recorded the surviving combine kernel's cached µs as an
     ``ok`` measurement of the whole op. On shapes too small for the latency floor to
@@ -280,13 +275,14 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     stage_spec = next((str(v) for k, v in f.items() if k.startswith("STAGE") and v), "")
     if not tile_spec or not stage_spec.startswith("d"):
         return None
-    from emmy.compiler.ir.schedule import Stage, TilePlan, is_warp_codec  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers  # noqa: PLC0415
 
-    if not is_warp_codec(tile_spec):
-        return None
     try:
-        tp, st = TilePlan.parse(tile_spec), Stage.parse(stage_spec)
+        work = Workers.parse(str(f.get("WORK") or ""))  # the row's unit widths live here, not in TILE
+        tp, st = TilePlan.parse(tile_spec, work), Stage.parse(stage_spec)
     except ValueError:
+        return None
+    if not tp.is_warp:
         return None
     if st.transport != "cp.async":
         return None
@@ -332,10 +328,10 @@ class SearchDB:
     #       topology shifted vs. the legacy downstream forks.
     #   2: explicit-knob OFF sentinels — every variant now stamps every planner
     #       knob (tier-foreign ones get an OFF value: WM/WN/MMA on scalar,
-    #       BM/BN/BR/FK on warp), so ``op_cache_key`` (which folds the knob dict)
+    #       BM/BN/BR/FK on warp), so ``Op.cache_key`` (which folds the knob dict)
     #       shifts for every TileOp/KernelOp. Stale ``lowering`` rows won't match.
     #   3: the RASTER launch-order codec — every contraction row now spells a fifth
-    #       schedule family (``RASTER: ''``/``gm8``), so ``op_cache_key`` shifts for every
+    #       schedule family (``RASTER: ''``/``gm8``), so ``Op.cache_key`` shifts for every
     #       matmul TileOp/KernelOp; cached pre-RASTER chains would silently replay
     #       old-key kernels and starve the new rows of evidence.
     _SCHEMA_VERSION = 3
@@ -425,8 +421,7 @@ class SearchDB:
             status       TEXT NOT NULL DEFAULT 'ok',
             run_id       TEXT NOT NULL DEFAULT '',
             measured_at  TEXT,
-            feat_ver     INTEGER NOT NULL DEFAULT 1,
-            shape_spec   TEXT
+            feat_ver     INTEGER NOT NULL DEFAULT 1
         )
         """,
         "CREATE INDEX IF NOT EXISTS node_parent ON node (parent_key)",
@@ -494,10 +489,6 @@ class SearchDB:
         # shipped are spelled in the v2 vocabulary yet default to 1 — they quarantine
         # conservatively; re-collect with the ``collect-node-data`` flow.
         ("feat_ver", "INTEGER NOT NULL DEFAULT 1"),
-        # Declarative golden-spelled shape identity (canonical JSON; NULL = legacy row).
-        # See :attr:`NodeRow.shape_spec`; only identity-carrying rows enter goldens-format
-        # measurement freezes (``data/freeze.py``).
-        ("shape_spec", "TEXT"),
     )
 
     def _has_perf_error_column(self) -> bool:
@@ -822,7 +813,6 @@ class SearchDB:
             feats_json = json.dumps(r.features, sort_keys=True, default=str)
             is_leaf = None if r.is_leaf is None else int(r.is_leaf)
             measured = r.measured_at or now
-            spec_json = json.dumps(r.shape_spec, sort_keys=True) if r.shape_spec is not None else None
             existing = self._conn.execute(
                 "SELECT value_us, n_updates, visits, status, measured_at, variance, n_samples FROM node WHERE node_key = ?",
                 (r.node_key,),
@@ -831,8 +821,8 @@ class SearchDB:
                 self._conn.execute(
                     "INSERT INTO node "
                     "(node_key, parent_key, context_key, op_sig, gpu, features, value_us, depth, n_updates, updated_at, "
-                    " visits, is_leaf, variance, n_samples, status, run_id, measured_at, feat_ver, shape_spec) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " visits, is_leaf, variance, n_samples, status, run_id, measured_at, feat_ver) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         r.node_key,
                         r.parent_key,
@@ -852,7 +842,6 @@ class SearchDB:
                         r.run_id,
                         measured,
                         r.feat_ver,
-                        spec_json,
                     ),
                 )
                 continue
@@ -885,22 +874,18 @@ class SearchDB:
                 replace = newer and not worse
             else:
                 replace = r.value_us < cur_val  # branch: keep the coverage bound
-            # ``shape_spec`` deliberately deviates from the value-paired-column rule: identity is
-            # config-INTRINSIC (a ``node_key`` has exactly one shape), so it is COALESCE-kept in
-            # both directions — a later identity-less tune re-measurement must not erase
-            # freezability, and a non-replacing identity-carrying bench still proves the shape.
             if replace:
                 self._conn.execute(
                     "UPDATE node SET value_us = ?, features = ?, parent_key = ?, n_updates = ?, updated_at = ?, "
                     "visits = ?, is_leaf = ?, variance = ?, n_samples = ?, status = ?, run_id = ?, measured_at = ?, "
-                    "feat_ver = ?, shape_spec = COALESCE(?, shape_spec) WHERE node_key = ?",
+                    "feat_ver = ? WHERE node_key = ?",
                     (r.value_us, feats_json, r.parent_key, n_upd + 1, now, visits, is_leaf, r.variance, r.n_samples)
-                    + (r.status, r.run_id, measured, r.feat_ver, spec_json, r.node_key),
+                    + (r.status, r.run_id, measured, r.feat_ver, r.node_key),
                 )
             else:
                 self._conn.execute(
-                    "UPDATE node SET n_updates = ?, updated_at = ?, visits = ?, shape_spec = COALESCE(shape_spec, ?) WHERE node_key = ?",
-                    (n_upd + 1, now, visits, spec_json, r.node_key),
+                    "UPDATE node SET n_updates = ?, updated_at = ?, visits = ? WHERE node_key = ?",
+                    (n_upd + 1, now, visits, r.node_key),
                 )
 
     # ------------------------------------------------------------------
@@ -930,11 +915,9 @@ class SearchDB:
         # pre-stamp vocabulary).
         node_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(node)")}
         feat_ver_col = "feat_ver" if "feat_ver" in node_cols else "1"
-        # ``shape_spec`` ships after ``feat_ver`` — own presence check, absent → NULL (legacy).
-        spec_col = "shape_spec" if "shape_spec" in node_cols else "NULL"
         sql = (
             f"SELECT node_key, parent_key, context_key, op_sig, {gpu_col}, features, value_us, depth, "  # noqa: S608
-            f"{enrich_cols}, {feat_ver_col}, {spec_col} FROM node"
+            f"{enrich_cols}, {feat_ver_col} FROM node"
         )
         clauses: list[str] = []
         params: list = []
@@ -948,17 +931,11 @@ class SearchDB:
             sql += " WHERE " + " AND ".join(clauses)
         for row in self._conn.execute(sql, params):
             node_key, parent_key, ck, sig, gpu, feats_json, value_us, depth = row[:8]
-            visits, is_leaf, var, n_samp, status, run_id, measured, feat_ver, spec_json = row[8:]
+            visits, is_leaf, var, n_samp, status, run_id, measured, feat_ver = row[8:]
             try:
                 features = json.loads(feats_json) if feats_json else {}
             except (TypeError, json.JSONDecodeError):
                 continue
-            try:
-                shape_spec = json.loads(spec_json) if spec_json else None
-                if not isinstance(shape_spec, dict):
-                    shape_spec = None
-            except (TypeError, json.JSONDecodeError):
-                shape_spec = None  # unparseable identity degrades to legacy, never drops the row
             yield NodeRow(
                 node_key=node_key,
                 parent_key=parent_key,
@@ -976,7 +953,6 @@ class SearchDB:
                 run_id=run_id,
                 measured_at=measured,
                 feat_ver=int(feat_ver) if feat_ver is not None else 1,
-                shape_spec=shape_spec,
             )
 
     def merge_nodes(self, src_path: Path | str) -> int:

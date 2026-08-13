@@ -78,7 +78,7 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
     kt_id = frag.add_node(
         op=TransposeOp(axes=(-2, -1)),
         inputs=[inp_k],
-        output=Tensor(f"{name}_kt", kt_shape, dtype),
+        output=Tensor(f"{name}_kt", kt_shape, inp_k.output.dtype),
     )
     kt = _maybe_gqa(frag, kt_id, q_batch, k_batch, (head_dim, seq_len), name=f"{name}_kt_gqa")
 

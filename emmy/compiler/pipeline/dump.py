@@ -26,8 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ENV_VAR = config.DUMP_DIR
-
 
 @dataclass
 class CompilerDump:
@@ -52,10 +50,11 @@ class CompilerDump:
         # files once instead of N times for N rule applications.
         self._rule_records: dict[tuple[int, str, str], list[dict]] = {}
         self._rule_texts: dict[tuple[int, str, str], list[str]] = {}
-        # Pristine, pre-decomposition Torch-dialect snapshot — the source for
-        # the per-kernel ``.torch.json`` reproducers. Stashed by
-        # ``dump_input_graph`` before any pass mutates the graph in place.
+        # Pristine, pre-decomposition Torch-dialect snapshot and the frontend
+        # slices recovered for final CUDA kernels.  The latter stay in memory;
+        # Torch IR persistence belongs exclusively to golden YAML.
         self._input_graph: Graph | None = None
+        self._frontend_reproducers: dict[str, Graph] = {}
 
     @classmethod
     def from_env(cls) -> CompilerDump | None:
@@ -117,9 +116,7 @@ class CompilerDump:
         """Graph as captured by the tracer, before any rewriter pass runs.
 
         Stashes a *copy* — the pipeline mutates the passed graph in place, and
-        the per-kernel reproducers (``_dump_torch_repro``) need the pristine
-        frontend ops, keyed by the trace-time node ids that prov uses as
-        origins."""
+        provenance slicing needs pristine frontend ops keyed by trace-time ids."""
         self._input_graph = graph.copy()
         self._dump_graph("00_input", graph)
 
@@ -168,7 +165,7 @@ class CompilerDump:
             sub = single_node_graph(graph, nid)
             safe = self._safe_filename(kname)
             self._write_json(f"{prefix}.kernels/{safe}.json", sub.to_dict())
-            self._dump_torch_repro(prefix, safe, node, graph)
+            self._capture_frontend_reproducer(safe, node)
             # Co-locate the pretty body. Skip duplicate CUDA kernel
             # names (same body across reuse sites).
             if isinstance(node.op, CudaOp):
@@ -179,15 +176,8 @@ class CompilerDump:
             if body is not None:
                 self._write_text(f"{prefix}.kernels/{safe}.txt", body)
 
-    def _dump_torch_repro(self, prefix: str, safe: str, node, graph: Graph) -> None:
-        """Write the original Torch ops a kernel implements as a standalone
-        sub-graph (``<safe>.torch.json``) + a readable summary with per-origin
-        ``i/N`` coverage (``<safe>.torch.txt``).
-
-        Sliced from the pristine ``_input_graph`` by the kernel's prov origins,
-        so it is always whole Torch ops — runnable via
-        ``emmy run --ir <f>.torch.json --bench`` to reproduce accuracy /
-        latency vs torch for exactly those ops."""
+    def _capture_frontend_reproducer(self, safe: str, node) -> None:
+        """Keep the original frontend slice for a CUDA kernel in memory."""
         from emmy.compiler import provenance  # noqa: PLC0415
 
         if self._input_graph is None:
@@ -196,17 +186,50 @@ class CompilerDump:
         origins = {oid for oid in node_prov if oid in self._input_graph.nodes}
         if not origins:
             return
-        sub = self._torch_repro_subgraph(origins)
-        self._write_json(f"{prefix}.kernels/{safe}.torch.json", sub.to_dict())
-        cov = provenance.coverage(node_prov, provenance.totals(graph))
-        header = [f"# matching torch ops for kernel '{safe}'"]
-        for oid in sorted(origins):
-            have, total, full = cov[oid]
-            header.append(f"#   {oid} ({node_prov[oid]['kind']}): {have}/{total} — {'full' if full else 'partial'}")
-        self._write_text(f"{prefix}.kernels/{safe}.torch.txt", "\n".join(header) + "\n\n" + sub.pretty_print())
+        self._frontend_reproducers[safe] = self._frontend_repro_subgraph(origins)
 
-    def _torch_repro_subgraph(self, origins: set[str]) -> Graph:
-        """Slice ``_input_graph`` to ``origins`` + their input closure.
+    def frontend_reproducers(self) -> dict[str, Graph]:
+        """Copies of the frontend slices recovered for emitted CUDA kernels."""
+        return {name: graph.copy() for name, graph in self._frontend_reproducers.items()}
+
+    @classmethod
+    def frontend_reproducer_graph(cls, input_graph: Graph, node, *, absorbed=()) -> Graph | None:
+        """Return the standalone frontend graph implemented by ``node``.
+
+        Callers that need reproducers without a full compiler dump use this seam so
+        provenance slicing has one implementation. ``None`` means the lowered node carries no frontend
+        provenance. ``absorbed`` carries compute producers which the target's
+        fold-aware lowering consumes (for example, flash attention's score
+        producer), so the reproducer covers the complete tuning target.
+        """
+        from emmy.compiler import provenance  # noqa: PLC0415
+
+        origins = {oid for lowered in (node, *absorbed) for oid in provenance.get(lowered) if oid in input_graph.nodes}
+        return cls._frontend_repro_subgraph_from(input_graph, origins) if origins else None
+
+    @classmethod
+    def frontend_reproducer_from_origins(cls, input_graph: Graph, origins: set[str]) -> Graph:
+        """Build the standalone tuning slice selected by stable frontend origins.
+
+        Golden YAML persists the complete frontend program so provenance is
+        reconstructed in its original fusion context.  Tuning still wants a
+        small runnable graph; derive that disposable view at load time rather
+        than persisting a second program or a sidecar.
+        """
+        missing = origins - set(input_graph.nodes)
+        if missing:
+            raise ValueError(f"frontend origins do not exist in the program: {sorted(missing)}")
+        return cls._frontend_repro_subgraph_from(input_graph, origins)
+
+    def _frontend_repro_subgraph(self, origins: set[str]) -> Graph:
+        """Instance form used by the compiler dump after :meth:`dump_input_graph`."""
+        if self._input_graph is None:
+            raise RuntimeError("dump_input_graph must run before slicing a Torch reproducer")
+        return self._frontend_repro_subgraph_from(self._input_graph, origins)
+
+    @classmethod
+    def _frontend_repro_subgraph_from(cls, src: Graph, origins: set[str]) -> Graph:
+        """Slice ``src`` to ``origins`` + their input closure.
 
         A frontend op feeding an origin but not itself an origin becomes a
         synthetic ``InputOp`` boundary (so the slice is standalone); constants
@@ -220,7 +243,6 @@ class CompilerDump:
         from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
         from emmy.compiler.pipeline.search.slice import topo_order  # noqa: PLC0415
 
-        src = self._input_graph
         keep: set[str] = set(origins)
         synthetic: set[str] = set()
         stack = [inp for oid in origins for inp in src.nodes[oid].inputs]
@@ -232,7 +254,7 @@ class CompilerDump:
                 keep.add(cur)
                 stack.extend(src.nodes[cur].inputs)
                 continue
-            const_chain = self._constant_closure(src, cur)
+            const_chain = cls._constant_closure(src, cur)
             if const_chain is not None:
                 keep |= const_chain
             else:
@@ -274,26 +296,6 @@ class CompilerDump:
             if not isinstance(node.op, ConstantOp):
                 stack.extend(node.inputs)
         return closure
-
-    def _collect_subgraph(self, graph: Graph, root_id: str) -> set[str]:
-        """Transitive-input closure for a compute node: itself + every
-        ``ConstantOp`` / ``InputOp`` reachable via ``node.inputs``."""
-        from emmy.compiler.ir.base import ConstantOp, InputOp
-
-        keep: set[str] = set()
-        stack = [root_id]
-        while stack:
-            cur = stack.pop()
-            node = graph.producer(cur)
-            cur = node.id if node is not None else cur
-            if cur in keep:
-                continue
-            keep.add(cur)
-            if node is None:
-                continue
-            if cur == root_id or isinstance(node.op, (ConstantOp, InputOp)):
-                stack.extend(node.inputs)
-        return keep
 
     @staticmethod
     def _safe_filename(name: str) -> str:
@@ -427,7 +429,8 @@ def _inline_scalar_loads(body: str, scalar_inputs: dict[str, float]) -> str:
     and substitute the literal value at every use site in the body."""
     import re
 
-    pat = re.compile(r"^(\s*)(\w+)\s*=\s*load\s+(\S+)\[0\]\s*$")
+    # The prefix is whitespace at loop-IR level and a tree connector in the tile dump.
+    pat = re.compile(r"^(.*?)(\w+)\s*=\s*load\s+(\S+)\[0\]\s*$")
     name_to_lit: dict[str, str] = {}
     out_lines: list[str] = []
     for line in body.splitlines():

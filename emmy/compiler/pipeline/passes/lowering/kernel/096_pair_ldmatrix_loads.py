@@ -97,7 +97,8 @@ def _delta(a: Expr, b: Expr) -> int | None:
 
 
 def _candidate(s: Stmt) -> bool:
-    return isinstance(s, LdmatrixLoad) and s.staged and s.role == "b" and s.pair_frag is None and len(s.src_index) == 2
+    # A staged byte-slab (fp8) drain is a cooperative gather, not an ldmatrix — nothing to pair.
+    return isinstance(s, LdmatrixLoad) and s.staged and not s.byte_slab and s.role == "b" and s.pair_frag is None and len(s.src_index) == 2
 
 
 def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:

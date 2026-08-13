@@ -9,6 +9,7 @@ class VllmConfig:
     """vLLM engine-specific configuration."""
 
     image: str = "vllm/vllm-openai:v0.17.0"
+    entrypoint: str | None = None
     extra_args: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
 
@@ -61,11 +62,13 @@ class LLMConfig:
     def entrypoint(self) -> str | None:
         """Docker entrypoint override for the active engine.
 
-        vLLM images have a built-in entrypoint; SGLang images do not,
-        so we must provide one explicitly.
+        vLLM normally uses the image entrypoint but may override it for a same-image
+        control. SGLang images do not provide one, so its launcher is explicit.
         """
         if self.sglang is not None:
             return "python3 -m sglang.launch_server"
+        if self.vllm is not None:
+            return self.vllm.entrypoint
         return None
 
     @property
@@ -99,9 +102,14 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Immutable Hugging Face revision used by both model prefetch and the serving engine.
+    revision: str | None = None
     # What the model serves: "generate" (completion/chat, the default) or
     # "embed" (/v1/embeddings). Drives the smoke test and the bench workload.
     task: str = "generate"
+    # Generative checkpoints default to the semantic chat smoke test. Base models that
+    # are not instruction-tuned use the completion endpoint instead.
+    smoke_test: str = "chat"
 
 
 @dataclass
@@ -146,6 +154,8 @@ class CommandConfig:
             matched file is pulled back as {variant}_{basename}.
         timeout: Per-task command timeout in seconds.
         env: Extra environment variables to set on the remote command.
+        strict: Require a clean staged source tree, every declared result file,
+            and complete source/GPU/CUDA provenance.
     """
 
     stage: list[str] = field(default_factory=list)
@@ -153,15 +163,12 @@ class CommandConfig:
     result_files: list[str] = field(default_factory=list)
     timeout: int = 1800
     env: dict[str, str] = field(default_factory=dict)
+    strict: bool = False
 
 
 @dataclass
 class AggregateConfig:
-    """Post-processing step that runs locally after all variants complete.
-
-    The ``run`` template receives ``$run_dir`` (the local directory containing
-    all pulled-back result files). Runs on the orchestrator, not on a GPU VM.
-    """
+    """Small, self-contained post-processing step run after a recipe matrix."""
 
     run: str = ""
     timeout: int = 300
@@ -197,7 +204,12 @@ class Recipe:
     def from_dict(cls, d: dict) -> "Recipe":
         """Build a Recipe from a (post-merge, post-migrate) config dict."""
         model_dict = d.get("model", {})
-        model = ModelConfig(huggingface=model_dict.get("huggingface", ""), task=model_dict.get("task", "generate"))
+        model = ModelConfig(
+            huggingface=model_dict.get("huggingface", ""),
+            revision=model_dict.get("revision"),
+            task=model_dict.get("task", "generate"),
+            smoke_test=model_dict.get("smoke_test", "chat"),
+        )
 
         engine_dict = d.get("engine", {})
         llm_dict = engine_dict.get("llm", {})
@@ -221,6 +233,20 @@ class Recipe:
         )
 
         bench_dict = d.get("benchmark", {})
+        workload_fields = {
+            "max_concurrency",
+            "num_prompts",
+            "random_input_len",
+            "random_output_len",
+            "seed",
+            "temperature",
+            "ignore_eos",
+            "repeats",
+        }
+        unsupported_benchmark_fields = set(bench_dict) - workload_fields
+        if unsupported_benchmark_fields:
+            names = ", ".join(sorted(unsupported_benchmark_fields))
+            raise ValueError(f"unsupported benchmark fields: {names}; benchmark only describes workload generation")
         benchmark = BenchmarkConfig(
             max_concurrency=bench_dict.get("max_concurrency", 128),
             num_prompts=bench_dict.get("num_prompts", 256),
@@ -249,6 +275,7 @@ class Recipe:
                 result_files=list(cmd_dict.get("result_files", [])),
                 timeout=cmd_dict.get("timeout", 1800),
                 env=dict(cmd_dict.get("env", {})),
+                strict=cmd_dict.get("strict", False),
             )
 
         aggregate = None

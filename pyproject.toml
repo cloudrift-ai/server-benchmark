@@ -1,15 +1,35 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+# >=77.0 for the PEP 639 `license` / `license-files` spelling used below.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "emmy-ml"
-version = "0.2.0"
-description = "Deploy and benchmark LLM inference on GPU servers using vLLM"
+version = "0.3.0"
+description = "Optimized LLM compiler, benchmarking, and deployment stack."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "CloudRift", email = "hello@cloudrift.ai" }]
+keywords = ["llm", "inference", "benchmark", "vllm", "sglang", "cuda", "gpu", "compiler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Benchmark",
+]
 dependencies = [
-    "huggingface_hub[cli,hf_transfer]",
+    # No extras: huggingface_hub 1.x folded the `hf` CLI into the base package and
+    # dropped both the `cli` and `hf_transfer` extras, so naming them only produced
+    # "does not provide the extra" warnings on every install. hf_transfer is set
+    # inside the deploy container's own environment, not from here.
+    "huggingface_hub>=1.0",
     "httpx",
     "numpy",
     "pyyaml",
@@ -18,7 +38,12 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
-compile = ["torch", "transformers>=5.10", "cppyy==3.5.0", "safetensors"]
+# transformers window (verified 2026-08-12): >=5.13 because the Laguna/GLM-4.5 MoE
+# split tests need models/attributes (e.g. LagunaAttention.gate_per_head) absent in
+# 5.12; <5.15 because 5.15's per-layer heterogeneity makes vllm 0.23's global
+# `hf_text_config.head_dim` read raise AmbiguousGlobalPerLayerAttributeError when
+# building a ModelConfig for gemma-4 (per-layer head_dim). 5.13.0–5.14.1 pass both.
+compile = ["torch", "transformers>=5.13,<5.15", "cppyy==3.5.0", "safetensors"]
 image = ["diffusers>=0.39,<0.40"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.
 # >=0.23: 0.22.1's FlashInfer dispatch cannot run gemma-4's 512-dim global attention
@@ -33,7 +58,12 @@ eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.10", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.13,<5.15", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+
+[project.urls]
+Homepage = "https://github.com/cloudrift-ai/emmy"
+Repository = "https://github.com/cloudrift-ai/emmy"
+Issues = "https://github.com/cloudrift-ai/emmy/issues"
 
 [tool.setuptools.packages.find]
 include = ["emmy*"]
@@ -41,6 +71,10 @@ include = ["emmy*"]
 [tool.setuptools.package-data]
 "emmy.compiler.pipeline.search" = ["goldens/*.yaml"]
 "emmy.compiler.pipeline.search.prior" = ["*.json"]
+# Staged out of the top-level recipes/ by `scripts/prepare_dist.py --recipes`
+# (which `make wheel` and the publish workflow both run) — recipes/ sits outside
+# the emmy package, so setuptools cannot collect it in place.
+"emmy.recipes" = ["*/recipe.yaml"]
 
 [project.scripts]
 emmy = "emmy.emmy:main"

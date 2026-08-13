@@ -74,6 +74,7 @@ def test_by_name_canonicalizes_reported_aliases():
     assert gpu.by_name("NVIDIA H200").name == "NVIDIA H200 141GB"
     assert gpu.by_name("NVIDIA H100 80GB HBM3").name == "NVIDIA H100 80GB"
     assert gpu.by_name("NVIDIA A100-SXM4-80GB").name == "NVIDIA A100 80GB"
+    assert gpu.by_name("Tesla V100-SXM2-16GB").name == "NVIDIA Tesla V100 SXM2 16GB"
     assert gpu.by_name("NVIDIA H200 141GB").name == "NVIDIA H200 141GB"  # canonical resolves to itself
     assert gpu.by_name("NVIDIA Totally Made Up") is None  # unknown → None (live_name keeps the raw string)
 
@@ -106,4 +107,5 @@ def test_hardware_id_distinguishes_same_die_skus(monkeypatch):
 
 def test_back_compat_maps_match_registry():
     assert gpu.pci_device_id_to_name()["2684"] == "NVIDIA GeForce RTX 4090"
+    assert gpu.pci_device_id_to_name()["1db1"] == "NVIDIA Tesla V100 SXM2 16GB"
     assert gpu.short_names()["NVIDIA GeForce RTX 5090"] == "rtx5090"

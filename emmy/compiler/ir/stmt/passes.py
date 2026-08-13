@@ -17,9 +17,9 @@ from functools import singledispatch
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
 from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.algebra import State, StateMerge
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
@@ -27,9 +27,9 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Mma,
     Pack,
-    RowAccum,
     Select,
     SelectBranch,
+    StateMerge,
     Unpack,
     Write,
 )
@@ -75,10 +75,6 @@ def _walk(value, *, on_expr, on_axis):
     if is_dataclass(value) and not isinstance(value, Stmt):
         return type(value)(**{f.name: _walk(getattr(value, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(value)})
     return value
-
-
-def _stage_kwargs(stage, *, on_expr, on_axis):
-    return {f.name: _walk(getattr(stage, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(stage)}
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +153,11 @@ def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 @rewrite.register
 def _(s: StateMerge, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # The renderable cross-partition combine: rename the state / state_b (in the rename map)
-    # PLUS the carrier-internal temps NOT surfaced via ``defines()`` — so a register-tile
+    # PLUS the merge-internal temps NOT surfaced via ``defines()`` — so a register-tile
     # replicator that renames the state per cell leaves the temps shared, colliding across
     # replicas. Uniquify the temps with a suffix derived from the renamed first state name
     # whenever the state actually moves (identity rename / pure σ-split leaves them untouched).
-    names = s.state.names
+    names = s.state
     new_state0 = rename(names[0]) if names else None
     carried = set(names) | set(s.state_b)
     temps = {a.name for a in s.merge} - carried
@@ -172,7 +168,7 @@ def _(s: StateMerge, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         return r if r != name else overlay.get(name, name)
 
     return StateMerge(
-        state=State(names=tuple(rn(n) for n in names)),
+        state=tuple(rn(n) for n in names),
         merge=tuple(rewrite(m, rn, sigma, axis_fn) for m in s.merge),
         state_b=tuple(rn(n) for n in s.state_b),
     )
@@ -198,7 +194,7 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
 @rewrite.register
 def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
-    # the carrier's ``Accum`` / ``Carrier.state`` (registered above) so the seed stays paired.
+    # the fold's ``Accum`` / ``StateMerge.state`` (registered above) so the seed stays paired.
     return Init(name=rename(s.name), identity=s.identity, dtype=s.dtype)
 
 
@@ -223,30 +219,15 @@ def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 
 @rewrite.register
-def _(s: RowAccum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    # EVERY field rides through — a field-by-field reconstruction that drops one is exactly
-    # the ``RegStore.atomic`` silent-degrade bug class.
-    return RowAccum(
-        dst=s.dst,
-        flat=_rename_ssa_vars_in_expr(sigma.apply(s.flat), rename),
-        n=s.n,
-        value=rename(s.value),
-    )
-
-
-@rewrite.register
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    # Preserve the reduce annotation (``role`` / ``carrier``) through σ-offsets / axis-renames —
-    # the carried-state ALGEBRA is untouched by index motion. SSA renames DO move through it
-    # (``Carrier.rename``): the state / channel-term / bound-program names must track the body's
-    # ``Accum`` renames, or the cooperative combine reads a name the renamed body no longer
-    # defines (the M=1 cut-consumer miscompile).
+    # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
+    # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
+    # stored combine in lockstep (``rename_combine``).
     return Loop(
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier.rename(rename) if s.carrier is not None else None,
     )
 
 
@@ -260,7 +241,6 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier.rename(rename) if s.carrier is not None else None,
         end=sigma.apply(s.end) if s.end is not None else None,
     )
 
@@ -308,14 +288,9 @@ def _(s: Select, ctx: SimplifyCtx) -> Stmt:
 
 
 @simplify.register
-def _(s: RowAccum, ctx: SimplifyCtx) -> Stmt:
-    return RowAccum(dst=s.dst, flat=s.flat.simplify(ctx), n=s.n, value=s.value)
-
-
-@simplify.register
 def _(s: Loop, ctx: SimplifyCtx) -> Stmt:
     inner = extend_simplify_ctx(ctx, s.axis)
-    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll, role=s.role, carrier=s.carrier)
+    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll, role=s.role)
 
 
 @simplify.register
@@ -329,7 +304,6 @@ def _(s: StridedLoop, ctx: SimplifyCtx) -> Stmt:
         body=tuple(simplify(c, inner) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier,
         end=s.end.simplify(ctx) if s.end is not None else None,
     )
 
@@ -345,3 +319,50 @@ def _(s: Cond, ctx: SimplifyCtx) -> Stmt:
 
 # Tile-IR Stmt registrations were DEMOLISHED along with the tile IR; pending
 # rebuild.
+
+
+def has_contraction_tail(stmts) -> bool:
+    """True if the post-reduce tail contracts over a NEW free axis — a ``Loop`` whose body holds an
+    inner reduce ``Loop``. This is the fused norm→linear shape, distinguished from a plain softmax
+    tail (a single sweep over the SAME axis). ``Body.accums`` supplies the deep accumulator scan.
+
+    A statement-SHAPE predicate, so it lives beside :func:`projection_distributes` rather than in
+    the scheduler that asks: the reduce tiers read it to price a tail, and the shared-row stage
+    gate to decide there is one to share a row with."""
+    for s in stmts:
+        if isinstance(s, Loop) and any(isinstance(c, Loop) and Body(c.body).accums for c in s.body):
+            return True
+        if any(has_contraction_tail(list(b)) for b in s.nested()):
+            return True
+    return False
+
+
+def projection_distributes(body, states: tuple[str, ...]) -> bool:
+    """True if the kernel's projection epilogue is a **linear-homogeneous** map of the carried
+    state(s) — i.e. it distributes over the atomic-add combine, so applying it to each CTA's
+    partition before the ``atomicAdd`` equals applying it once after the cross-CTA sum
+    (``Σ c·xₛ = c·(Σ xₛ)``). A bare state write (``proj = id``) trivially distributes; a constant
+    *scale* — ``mean``'s ``×1/N`` — does; an additive offset (a fused bias), a nonlinear unary
+    (``relu`` / ``reciprocal`` of the *state*), or a product of two state-derived values do NOT.
+
+    Conservative forward dataflow: ``linear`` is the set of SSA names that are a
+    linear-homogeneous function of the state. A value is grown into it only by ``multiply`` with
+    a state-independent operand (an arg not itself in ``linear``); any other op that consumes a
+    ``linear`` value — or any projection stmt we can't reason about — refuses. The final ``Write``
+    must store only ``linear`` values."""
+    linear = set(states)
+    for s in body:
+        if isinstance(s, Write):
+            return all(v in linear for v in s.values)
+        if isinstance(s, Load):
+            continue  # reads memory (the count / a per-output operand) — state-independent
+        if not isinstance(s, Assign):
+            return False  # an unfamiliar projection stmt — can't prove distributivity
+        hot = [a for a in s.args if a in linear]
+        if not hot:
+            continue  # state-independent — a constant w.r.t. the split
+        if s.op.name == "multiply" and len(hot) == 1:
+            linear.add(s.name)  # state · constant — still linear-homogeneous
+            continue
+        return False  # add / divide / nonlinear of a state value breaks distributivity
+    return False  # no Write reached

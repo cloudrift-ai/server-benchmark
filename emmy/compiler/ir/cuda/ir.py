@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr
+from emmy.compiler.structural import digest
 
 
 @dataclass(frozen=True)
@@ -68,9 +69,25 @@ class CudaOp(Op):
     comment: str = ""
     tma_descriptors: tuple[TmaDescMeta, ...] = field(default_factory=tuple)
     runtime_args: tuple[str, ...] = ()
+    # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input. The kernel
+    # signature replaces ``const T* <arg>`` with ``const T* const* <table>, const int* <sel>,
+    # int <slot>`` and resolves the base pointer in a body preamble; ``arg_order`` keeps the
+    # plain operand name and the launcher expands it in place (``program._launch``). ``slot``
+    # is 0 at compile — the serving runner stamps per-instance slot literals onto plan copies.
+    indirect_args: tuple[tuple[str, str, str, int], ...] = ()
 
     def pretty_body(self) -> str:
         return self.kernel_source
+
+    def cache_key(self) -> str | None:
+        """Override :meth:`Op.cache_key`: digest of the rendered source + launch params (the
+        bits that determine runtime behavior). Name-invariant: the kernel function name is
+        rendered into the source (``void <name>(...)``) but doesn't change runtime behavior,
+        so it normalizes out — renaming a kernel (e.g. via op provenance) neither busts the
+        perf cache nor blocks an isolated-kernel tune from transferring to a whole-model
+        compile."""
+        src = self.kernel_source.replace(self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
+        return digest(type(self).__name__, src, self.arg_order, self.grid, self.block, self.smem_bytes)
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

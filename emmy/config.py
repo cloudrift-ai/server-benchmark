@@ -56,6 +56,8 @@ GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
+GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
+GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 READABLE = "EMMY_READABLE"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
@@ -353,6 +355,39 @@ def gen_prefill_bucket(default: int = -1) -> int:
     return int_env(GEN_PREFILL_BUCKET, default)
 
 
+def gen_prefill_capacity(default: int = -1) -> int:
+    """``EMMY_GEN_PREFILL_CAPACITY`` — the token width the generative runner's symbolic
+    programs size their device buffers at. The default ``-1`` means the dynamic-dim cap
+    (``DYNAMIC_DIM_MAX``), which is what ``max_num_batched_tokens`` defaults to as well.
+
+    Set it when the ACTIVATION ARENA is competing with the KV cache. Capacity is otherwise
+    independent of ``max_num_batched_tokens`` on purpose — the pack key carries it, so tying it
+    to the scheduler knob recompiles the whole program set every time a lane is retuned — but a
+    model that fills the card with weights (GLM-4.5-Air at 2.25 bpw leaves ~1.3 GiB) pays for
+    every token of capacity it never serves. Pin it at the width the deployment actually runs
+    and lower ``--max-num-batched-tokens`` to match. See `serving/vllm_model_gen.py`."""
+    return int_env(GEN_PREFILL_CAPACITY, default)
+
+
+def gen_embed_host(default: int = 0) -> int:
+    """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
+    **mapped host memory** instead of device memory (default 0 = device-resident).
+
+    The gather kernel reads the rows straight over PCIe (the allocation is
+    ``cudaHostAlloc``-mapped, so its host address IS a valid device address), which keeps the
+    lookup a plain device-side gather — no host round trip, so the whole-step decode capture
+    still records it. The table then costs zero VRAM, and on a card the weights already fill
+    that is KV-cache budget: a vocab-sized fp16 table is over a GiB (GLM-4.5-Air: 151552 x 4096
+    = 1.156 GiB, and the checkpoint is untied so nothing else shares it).
+
+    The price is PCIe latency on every embedded token — about 8 KiB per token, so the per-step
+    cost scales with the step's width. Leave it off on any deployment with device headroom; a
+    device-resident gather is roughly two orders of magnitude faster. Ignored when a tied
+    checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
+    nothing to share. See `serving/gen_runner.py`."""
+    return int_env(GEN_EMBED_HOST, default)
+
+
 def gen_m1_tier(default: int = 1) -> int:
     """``EMMY_GEN_M1_TIER`` — build and route the static M=1 (gemv-class) decode twins for
     T=1 steps (default 1 = ON since 2026-07-24). The tier's matvecs run the transposed
@@ -360,16 +395,16 @@ def gen_m1_tier(default: int = 1) -> int:
     qkv 14, down 76, gate_up 142 on the 5090), and the flip criterion held e2e: c=1 TPOT
     17.92/18.98 beats the bucket-32 path's 18.0/19.1 with c=8/c=64 unchanged (m1 routes
     only T==1). Set 0 to fall back to bucket-padded decode at T=1. The remaining ~1.6 ms
-    to stock is the split-chain / kernel-count / seam work of
-    plans/decode-parity-closers.md. See `serving/gen_runner.py`."""
+    to stock is split-chain / kernel-count / seam work. See `serving/gen_runner.py`."""
     return int_env(GEN_M1_TIER, default)
 
 
 def gen_alias_attn(default: int = 1) -> int:
-    """``EMMY_GEN_ALIAS_ATTN`` — write vLLM's paged-attention output DIRECTLY into the M=1 post
-    twin's ``attn_out`` input backing (default 1 = ON since 2026-07-24). Kills the per-layer
-    protective D2D upload copy at T=1 decode: ``upload_prefix_device`` self-copy-skips on
-    pointer equality. The alias holds across steps by construction — the m1 program's input
+    """``EMMY_GEN_ALIAS_ATTN`` — write vLLM's paged-attention output DIRECTLY into the post
+    program's ``attn_out`` input backing (default 1 = ON since 2026-07-24; A4 extended it from
+    the M=1 twin to EVERY tier — decode bucket, exact chunk, symbolic; rider widths fall back).
+    Kills the per-layer protective D2D attention→post upload copy:
+    ``upload_prefix_device`` self-copy-skips on pointer equality. The alias holds across steps by construction — the m1 program's input
     arrays are allocated once, and the outer whole-step decode capture fixes the launch order
     (attention writes, the post program reads, before the next replay overwrites). Flip
     verdict: c=1 TPOT 17.89→17.83 (256) / 18.92→18.88 (4K) with c=64 / 4K c=8 unchanged and

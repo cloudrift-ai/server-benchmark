@@ -1,0 +1,480 @@
+gpu_name: NVIDIA GeForce RTX 5090
+compute_cap:
+- 12
+- 0
+model: allenai/OLMoE-1B-7B-0125-Instruct
+programs:
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [16, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [16, 4096]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [16, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [16, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [16, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [16, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [16, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [16, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [1, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [1, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [256, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [256, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [256, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [256, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_gate_up.m1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 3.3
+      reference_us: 8.2
+      reference_backend: cublas
+- program: 1
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_down.m1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2.5
+      reference_us: 6.1
+      reference_backend: cublas
+- program: 2
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.qk_cat.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f1x2/k4
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 5.4
+      reference_us: 10.2
+      reference_backend: cublas
+- program: 3
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.o_proj.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f1x1/k4
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 3.9
+      reference_us: 8.2
+      reference_backend: cublas
+- program: 4
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_down.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f1x1/k4
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2.9
+      reference_us: 6.1
+      reference_backend: cublas
+- program: 5
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: olmoe_1b7b.rms_norm.k2048.m16
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 2.4
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 6
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: olmoe_1b7b.qk_cat.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: g8k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 5.8
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 7
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: olmoe_1b7b.o_proj.m1.t
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g8k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 4.0
+      reference_us: 10.3
+      reference_backend: cublas
+- program: 8
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: olmoe_1b7b.rms_norm.k2048.m1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1.9
+      reference_us: 4.1
+      reference_backend: torch-eager
+- program: 9
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_gate_up.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 18.8
+      reference_us: 16.8
+      reference_backend: cublas
+- program: 10
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_down.m256
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g2k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 11.2
+      reference_us: 10.3
+      reference_backend: cublas
+- program: 11
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_gate_up.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g4k
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 31.0
+      reference_us: 30.6
+      reference_backend: cublas
+- program: 12
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: olmoe_1b7b.expert_down.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      STAGE: d2/tma
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 17.8
+      reference_us: 17.0
+      reference_backend: cublas

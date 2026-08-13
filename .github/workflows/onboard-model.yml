@@ -1,0 +1,445 @@
+name: Onboard model
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        description: Exact Hugging Face model ID
+        required: true
+        type: string
+      gpu:
+        description: Exact GPU name from emmy/hardware.py
+        required: true
+        type: string
+      gpu_count:
+        description: Exact GPU count
+        required: true
+        default: 1
+        type: number
+      multimodal_mode:
+        description: Qualification mode for a multimodal checkpoint
+        required: true
+        default: auto
+        type: choice
+        options: [auto, multimodal, text-only]
+      publish_image:
+        description: Authorize publishing a verified prebuilt Emmy image when eligible
+        required: true
+        default: true
+        type: boolean
+      pull_request:
+        description: Optional open onboarding PR number to update (otherwise the selected workflow branch is detected)
+        required: false
+        type: string
+concurrency:
+  group: onboard-${{ inputs.pull_request || inputs.model_id }}-${{ inputs.gpu }}-${{ inputs.gpu_count }}
+  cancel-in-progress: false
+
+jobs:
+  onboard:
+    runs-on: [self-hosted, agents]
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      MODEL_ID: ${{ inputs.model_id }}
+      TARGET_GPU: ${{ inputs.gpu }}
+      TARGET_GPU_COUNT: ${{ inputs.gpu_count }}
+      MULTIMODAL_MODE: ${{ inputs.multimodal_mode }}
+      PUBLISH_IMAGE: ${{ inputs.publish_image }}
+      RUN_OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
+      VM_LEASE: /tmp/emmy-onboard-${{ github.run_id }}-${{ github.run_attempt }}.json
+      ONBOARD_SUMMARY: /tmp/emmy-onboard-summary-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_KEY_FILE: /tmp/emmy-onboard-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
+      AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
+      AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
+      SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
+      APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
+      GCP_KEY_FILE: /tmp/emmy-onboard-gcp-key-${{ github.run_id }}-${{ github.run_attempt }}.json
+      GCP_CONFIG_DIR: /tmp/emmy-onboard-gcloud-${{ github.run_id }}-${{ github.run_attempt }}
+      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
+      CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Resolve existing or new pull request branch
+        id: branch
+        uses: actions/github-script@v7
+        env:
+          MODEL_ID: ${{ env.MODEL_ID }}
+          REQUESTED_PR: ${{ inputs.pull_request }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const requested = process.env.REQUESTED_PR || '';
+            let pull = null;
+            if (requested) {
+              const number = Number(requested);
+              if (!Number.isInteger(number) || number < 1) {
+                core.setFailed(`Invalid pull request number: ${requested}`);
+                return;
+              }
+              ({data: pull} = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number,
+              }));
+            } else if (context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
+              const branch = context.ref.replace('refs/heads/', '');
+              const {data: pulls} = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${branch}`,
+              });
+              pull = pulls.find(candidate => candidate.labels.some(label => label.name === 'model-onboarding')) || null;
+            }
+
+            if (pull) {
+              if (pull.state !== 'open') {
+                core.setFailed(`Pull request #${pull.number} is not open`);
+                return;
+              }
+              if (pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+                core.setFailed('Onboarding cannot push artifacts to a fork pull request');
+                return;
+              }
+              if (!pull.labels.some(label => label.name === 'model-onboarding')) {
+                core.setFailed(`Pull request #${pull.number} is missing the model-onboarding label`);
+                return;
+              }
+              const marker = `\`${process.env.MODEL_ID}\``;
+              if (!pull.title.includes(process.env.MODEL_ID) && !(pull.body || '').includes(marker)) {
+                core.setFailed(`Pull request #${pull.number} does not describe ${process.env.MODEL_ID}`);
+                return;
+              }
+              core.setOutput('branch', pull.head.ref);
+              core.setOutput('checkout_ref', pull.head.ref);
+              core.setOutput('pr_number', pull.number);
+              core.setOutput('existing', 'true');
+              return;
+            }
+
+            const slug = process.env.MODEL_ID.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            core.setOutput('branch', `agents/onboard-${slug}-${context.runId}`);
+            core.setOutput('checkout_ref', context.payload.repository.default_branch);
+            core.setOutput('pr_number', '');
+            core.setOutput('existing', 'false');
+
+      - name: Checkout onboarding base
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ steps.branch.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create artifact branch
+        if: steps.branch.outputs.existing != 'true'
+        env:
+          ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
+        run: git switch -c "$ARTIFACT_BRANCH"
+
+      - name: Set onboarding deadline
+        run: echo "ONBOARD_DEADLINE=$(date -u -d '+5 hours 30 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Validate request
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ["MODEL_ID"]):
+              sys.exit("model_id must be an exact Hugging Face owner/repository ID")
+          if int(os.environ["TARGET_GPU_COUNT"]) < 1:
+              sys.exit("gpu_count must be positive")
+          PY
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Emmy
+        run: make setup
+
+      - name: Generate ephemeral SSH key
+        run: ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+
+      - name: Isolate optional GCP credentials
+        run: |
+          case "$GCP_CONFIG_DIR" in
+            /tmp/emmy-onboard-gcloud-*) ;;
+            *) echo "Refusing unsafe GCP config path: $GCP_CONFIG_DIR" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$GCP_CONFIG_DIR"
+          install -d -m 700 "$GCP_CONFIG_DIR"
+          echo "CLOUDSDK_CONFIG=$GCP_CONFIG_DIR" >> "$GITHUB_ENV"
+
+      - name: Configure optional GCP credentials
+        env:
+          GCP_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          GCP_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        if: env.GCP_KEY != ''
+        run: |
+          rm -f -- "$GCP_KEY_FILE"
+          printf '%s' "$GCP_KEY" > "$GCP_KEY_FILE"
+          chmod 600 "$GCP_KEY_FILE"
+          CLOUDSDK_CONFIG="$GCP_CONFIG_DIR" gcloud auth activate-service-account --key-file="$GCP_KEY_FILE"
+          CLOUDSDK_CONFIG="$GCP_CONFIG_DIR" gcloud config set project "$(jq -r .project_id "$GCP_KEY_FILE")"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GCP_KEY_FILE" >> "$GITHUB_ENV"
+          echo "GCP_SERVICE_ACCOUNT=$GCP_ACCOUNT" >> "$GITHUB_ENV"
+
+      - name: Provision exact target VM
+        id: vm
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          ./venv/bin/emmy vm create gpu \
+            --gpu "$TARGET_GPU" \
+            --gpu-count "$TARGET_GPU_COUNT" \
+            --exact-gpu-count \
+            --ssh-key "$SSH_KEY" \
+            --name "onboard-$RUN_OWNER" \
+            --lease "$VM_LEASE" \
+            --owner "$GITHUB_REPOSITORY/$RUN_OWNER" \
+            --json
+          {
+            echo "provider=$(jq -r .vm.provider "$VM_LEASE")"
+            echo "instance_id=$(jq -r .vm.instance_id "$VM_LEASE")"
+            echo "zone=$(jq -r '.vm.zone // ""' "$VM_LEASE")"
+            echo "ssh_host=$(jq -r .vm.ssh_host "$VM_LEASE")"
+            echo "ssh_port=$(jq -r .vm.ssh_port "$VM_LEASE")"
+            echo "ssh_user=$(jq -r .vm.ssh_user "$VM_LEASE")"
+            echo "ssh_target=$(jq -r .vm.ssh_target "$VM_LEASE")"
+            echo "lease=$VM_LEASE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Remove provider credentials before agent execution
+        if: steps.vm.outcome == 'success'
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          key = Path(os.environ["GCP_KEY_FILE"])
+          if key.is_dir() and not key.is_symlink():
+              shutil.rmtree(key, ignore_errors=True)
+          else:
+              key.unlink(missing_ok=True)
+          config = Path(os.environ["GCP_CONFIG_DIR"])
+          if config.is_symlink() or config.is_file():
+              config.unlink(missing_ok=True)
+          else:
+              shutil.rmtree(config, ignore_errors=True)
+          PY
+
+      - name: Run onboard-model agent
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ inputs.publish_image && secrets.DOCKERHUB_TOKEN || '' }}
+          SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
+          SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          EXISTING_PR: ${{ steps.branch.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          existing = os.environ.get("EXISTING_PR")
+          plan = (
+              f"This is the execution of existing model-onboarding PR #{existing}. Read its plan and delete the "
+              "matching plans/onboard-*.md file after all artifacts are complete."
+              if existing
+              else "This is a new onboarding; create all required artifacts from the tracked skill."
+          )
+          prompt = f"""Use the onboard-model skill non-interactively.
+
+          Hugging Face model ID: {os.environ['MODEL_ID']}
+          Exact target: {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}
+          SSH target: {os.environ['SSH_TARGET']}
+          SSH port: {os.environ['SSH_PORT']}
+          SSH private key: {os.environ['SSH_KEY']} (pass --ssh-key {os.environ['SSH_KEY']} to every Emmy remote command)
+          Absolute deadline: {os.environ['ONBOARD_DEADLINE']}
+          Multimodal mode: {os.environ['MULTIMODAL_MODE']}
+          Publication authorized by workflow dispatch: {os.environ['PUBLISH_IMAGE']}
+          Atomic summary output: {os.environ['ONBOARD_SUMMARY']}
+
+          {plan}
+          Do not provision or delete the VM, commit, push, or open/update a pull request. Always write the required
+          atomic summary, including experiment_artifacts with retained experiment recipe.yaml files only. Put the
+          selected benchmark numbers in the final recipe's RESULTS.md; do not retain raw results, experiment reports,
+          dated run snapshots, or onboarding summaries. Also include artifacts listing every intended created,
+          modified, or deleted repository file (including a removed onboarding plan) and no exploratory output. Allowed areas are
+          recipes/, experiments/, docker/vllm-emmy-serve/models/, canonical golden YAML files, and deletion of the
+          matching plans/onboard-*.md file.
+          """
+          Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
+          PY
+
+          printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
+          chmod 600 "$AGENT_KEY_FILE"
+          unset CLOUDRIFT_API_KEY
+          exec env \
+            -u CLOUDRIFT_API_KEY \
+            -u CLOUDSDK_CONFIG \
+            -u GOOGLE_APPLICATION_CREDENTIALS \
+            -u GCP_SERVICE_ACCOUNT \
+            bash .github/scripts/run_onboarding_agent.sh "$AGENT_KEY_FILE" \
+            --skill .claude/skills/onboard-model/SKILL.md \
+            --prompt "$AGENT_PROMPT" \
+            --model "$AGENT_MODEL" \
+            --output "$AGENT_OUTPUT" \
+            --allow-write "$ONBOARD_SUMMARY"
+
+      - name: Delete workflow-owned VM
+        if: always()
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+          GCP_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          GCP_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          cleanup_provider_credentials() {
+            python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          key = Path(os.environ["GCP_KEY_FILE"])
+          if key.is_dir() and not key.is_symlink():
+              shutil.rmtree(key, ignore_errors=True)
+          else:
+              key.unlink(missing_ok=True)
+          config = Path(os.environ["GCP_CONFIG_DIR"])
+          if config.is_symlink() or config.is_file():
+              config.unlink(missing_ok=True)
+          else:
+              shutil.rmtree(config, ignore_errors=True)
+          PY
+          }
+          trap cleanup_provider_credentials EXIT
+          cleanup_provider_credentials
+          lease_provider=""
+          if [ -f "$VM_LEASE" ]; then
+            lease_provider=$(python3 -c 'import json, os; print(json.load(open(os.environ["VM_LEASE"]))["vm"]["provider"])')
+          fi
+          if [ "$lease_provider" = "gcp" ] && [ -n "$GCP_KEY" ]; then
+            install -d -m 700 "$GCP_CONFIG_DIR"
+            printf '%s' "$GCP_KEY" > "$GCP_KEY_FILE"
+            chmod 600 "$GCP_KEY_FILE"
+            export CLOUDSDK_CONFIG="$GCP_CONFIG_DIR"
+            export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY_FILE"
+            export GCP_SERVICE_ACCOUNT="$GCP_ACCOUNT"
+            gcloud auth activate-service-account --key-file="$GCP_KEY_FILE"
+            gcloud config set project "$(jq -r .project_id "$GCP_KEY_FILE")"
+          fi
+          ./venv/bin/emmy vm delete lease "$VM_LEASE" --owner "$GITHUB_REPOSITORY/$RUN_OWNER"
+          ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$GITHUB_REPOSITORY/$RUN_OWNER"
+
+      - name: Validate and stage onboarding artifacts
+        env:
+          SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
+        run: |
+          git diff --exit-code -- .github .claude/skills/onboard-model
+          test -z "$(git ls-files --others --exclude-standard -- .github .claude/skills/onboard-model)"
+          ./venv/bin/python .github/scripts/onboarding_artifacts.py \
+            --summary "$ONBOARD_SUMMARY" \
+            --model-id "$MODEL_ID" \
+            --gpu "$TARGET_GPU" \
+            --gpu-count "$TARGET_GPU_COUNT" \
+            --ssh-target "$SSH_TARGET" \
+            --stage
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "::error::Onboarding produced no repository artifacts"
+            exit 1
+          fi
+
+      - name: Configure renewable GitHub App credentials
+        env:
+          APP_PRIVATE_KEY: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          APP_ID: ${{ secrets.EXPERIMENT_APP_ID }}
+        run: |
+          rm -f -- "$APP_KEY_FILE"
+          printf '%s' "$APP_PRIVATE_KEY" > "$APP_KEY_FILE"
+          chmod 600 "$APP_KEY_FILE"
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          git config credential.helper ""
+          git config --add credential.helper \
+            "!APP_ID=$APP_ID APP_KEY_FILE=$APP_KEY_FILE $GITHUB_WORKSPACE/.github/scripts/git-credential-github-app.sh"
+
+      - name: Commit and push artifacts
+        env:
+          ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          git commit -m "onboard: add $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
+          git push origin "HEAD:$ARTIFACT_BRANCH"
+
+      - name: Refresh GitHub App token
+        id: app-token-refresh
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Create or update onboarding pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
+          EXISTING_PR: ${{ steps.branch.outputs.pr_number }}
+        run: |
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr ready "$EXISTING_PR" || true
+            gh pr comment "$EXISTING_PR" --body \
+              "Onboarding completed for \`$MODEL_ID\` on \`$TARGET_GPU x$TARGET_GPU_COUNT\`. Artifacts were measured, validated, and pushed by run $GITHUB_RUN_ID."
+          else
+            gh label create model-onboarding \
+              --description "Automated model discovery and onboarding" \
+              --color 1D76DB --force
+            gh pr create \
+              --head "$ARTIFACT_BRANCH" \
+              --base "${{ github.event.repository.default_branch }}" \
+              --title "Onboard $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT" \
+              --label model-onboarding \
+              --body "Automated model onboarding with measured recipe, experiment artifacts, and durable results report.\n\nWorkflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+      - name: Cleanup local credentials
+        if: always()
+        run: |
+          rm -f \
+            "$APP_KEY_FILE" \
+            "$AGENT_PROMPT" \
+            "$AGENT_OUTPUT" \
+            "$AGENT_KEY_FILE" \
+            "$GCP_KEY_FILE" \
+            "$ONBOARD_SUMMARY" \
+            "$VM_LEASE" \
+            "$SSH_KEY" \
+            "$SSH_KEY.pub"
+          git config --unset-all credential.helper || true
+          python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          config = Path(os.environ["GCP_CONFIG_DIR"])
+          if config.is_symlink() or config.is_file():
+              config.unlink(missing_ok=True)
+          else:
+              shutil.rmtree(config, ignore_errors=True)
+          PY

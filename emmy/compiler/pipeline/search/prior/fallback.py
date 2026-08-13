@@ -19,12 +19,12 @@ whether a *trained* model exists.
 
 The two priors are on **different scales**: CatBoost regresses ``log(latency µs)``
 so its ``score`` is calibrated µs, whereas the offline prior is fit by
-learning-to-rank (``scripts/golden_knob_heuristics.py``) so its ``score`` —
+learning-to-rank (``emmy fit``) so its ``score`` —
 ``exp(-0.1·quality)`` — is an *ordinal* proxy with arbitrary magnitude (only its
 order is meaningful; its neutral "no opinion" value is exactly ``1.0``). So
 :meth:`score` keeps the online µs as the scale and folds the offline in as a
 dimensionless **multiplier** ``offline**W`` centered at that neutral 1.0 — the
-online half owns the per-shape µs anchor, the offline half contributes only its
+online half sets the per-shape µs scale, the offline half contributes only its
 ranking. ``W`` (``config.offline_tilt``) sizes the nudge: small enough to
 perturb the online order, not replace it. The multiplier is clamped to
 ``e**±8`` before the power: the offline proxy itself is unsaturated (strictly
@@ -75,7 +75,7 @@ class FallbackPrior(Prior):
     def score(self, knobs: dict) -> float:
         # MCTS-selection signal ONLY (deploy/eval go through mean_score/pick).
         # Cold or quarantined: the offline prior IS the ranking. Trusted: keep the
-        # online µs as the scale and tilt it by the offline's dimensionless ranking
+        # online µs as the scale and nudge it by the offline's dimensionless ranking
         # multiplier (``offline**W``, neutral 1.0) so PUCT still explores a region the
         # heuristic prices well but the online model — having never measured it —
         # buries (the fp16 small-BK warp tiles at large squares). ``W=0`` recovers
@@ -88,7 +88,7 @@ class FallbackPrior(Prior):
         online = self.online.score(knobs)
         if w == 0.0 or online <= 0.0:
             return online
-        # The tilt is a bounded NUDGE on the online µs anchor, not a ranking: the
+        # The multiplier is a bounded NUDGE on the online µs prediction, not a re-ranking: the
         # offline proxy is strictly ordered over the full quality range (its exp
         # argument clips only at the float-safety bound), so its raw magnitude can
         # span e**±700 — fed straight into the product it would zero out or blow up
@@ -103,9 +103,9 @@ class FallbackPrior(Prior):
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
         return self.online.mean_scores(knobs_list) if self.trustworthy else self.offline.mean_scores(knobs_list)
 
-    # Features-seam surface (attribution / ablation) — routed through the same
-    # trustworthy gate as mean_score/mean_scores, so the diagnostics decompose the
-    # model that actually owns decisions.
+    # Scoring of already-featurized rows (attribution / ablation) — routed through
+    # the same trustworthy gate as mean_score/mean_scores, so the diagnostics
+    # decompose the model that actually owns decisions.
     def mean_score_features(self, feats: dict) -> float:
         return self.online.mean_score_features(feats) if self.trustworthy else self.offline.mean_score_features(feats)
 

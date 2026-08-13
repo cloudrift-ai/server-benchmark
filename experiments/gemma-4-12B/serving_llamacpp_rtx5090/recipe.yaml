@@ -4,8 +4,12 @@
 # llama-server, and drive the SAME five workload points with the same `vllm bench serve`
 # client and hygiene flags as the vLLM lanes (experiments/gemma-4-12B/serving_rtx5090).
 #
-# Per-point server configs follow the article: single-stream points on one 8448-ctx slot;
-# 4k/4k batched points on 8 slots x 8448; the 256/256 c=64 point needs 64x640 slots, which
+# Per-point server configs: single-stream points on one 16384-ctx slot, matching the vLLM
+# lanes' declared context. The 4k/4k batched points stay at 8 slots x 8448 ON PURPOSE —
+# llama.cpp preallocates the WHOLE KV up front, so 8 x 16384 = 131072 tokens would OOM,
+# and it would buy nothing: the workload is 4096 in + 4096 out = 8192 tokens, which fits
+# a 8448 slot either way. Context here is sized to the workload, not to a protocol knob.
+# The 256/256 c=64 point needs 64x640 slots, which
 # OOMs beside 23 GB of FP16 weights (llama.cpp allocates the full KV up front — no paged
 # allocator, no sliding-window exploitation), so that cell is expected to FAIL and the
 # failure is the article's footnote, not a harness bug.
@@ -31,12 +35,17 @@ command:
     SRC=$task_dir/llama.cpp
     GGUF=$task_dir/gemma-4-12B-it-f16.gguf
 
-    # Build llama.cpp from source (CUDA, native arch)
+    # Build llama.cpp from source (CUDA, native arch). Fail fast on a missing toolchain — a bare
+    # `cmake: command not found` buried in cmake.log cost a run to diagnose (2026-08-01).
+    command -v cmake >/dev/null || { echo "FATAL: cmake not on PATH — apt install cmake (see the repro skill's host prereqs)"; exit 1; }
     if [ ! -x "$$SRC/build/bin/llama-server" ]; then
       git clone --depth 1 https://github.com/ggml-org/llama.cpp $$SRC
       arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+      # Bound build parallelism by RAM: the CUDA fattn template instances run ~3 GB/job, and
+      # -j$(nproc) on a 32-core/60 GB box gets OOM-killed mid-build (2026-08-01, exit "Terminated").
+      jobs=$$(nproc); memg=$$(free -g | awk '/^Mem:/{print $$2}'); [ $$((memg / 3)) -lt $$jobs ] && jobs=$$((memg / 3))
       cmake -S $$SRC -B $$SRC/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$$arch -DLLAMA_CURL=ON > $task_dir/cmake.log 2>&1
-      cmake --build $$SRC/build --target llama-server -j $$(nproc) >> $task_dir/cmake.log 2>&1
+      cmake --build $$SRC/build --target llama-server -j $$jobs >> $task_dir/cmake.log 2>&1
     fi
     $$SRC/build/bin/llama-server --version 2>&1 | head -1 | tee $task_dir/build.txt
 
@@ -63,7 +72,7 @@ command:
       grep -E "Output token throughput|Median TTFT|Median TPOT|Successful" $task_dir/$$1.txt
     }
 
-    serve 1 8448
+    serve 1 16384
     bench small_c1  256  256  1 16
     bench head_c1  4096 4096  1  8
     serve 8 67584

@@ -424,6 +424,12 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
      incumbent seeding, recorded in the header); writes `metrics.json` + `weights.json` (the shipped
      `offline_weights.json` format). Coverage caveat: attention / rms_norm / softmax goldens have no case
      builder — counted `out_of_scope` per card, so the goldens-only fit is also kind-limited.
+   - (3b, 2026-07-30) modular-seams refactor LANDED (`feature/fit-pipeline-seams`): `search/prior/fit/` split
+     into `group.py` (ndarray-backed `Group` dataset representation + `--features` view), `linear.py`
+     (trainer+model, owner of the static/dyn split via `TwoStageFit.score_rows`), `rank.py` (rank metrics),
+     `cv.py` (folds; trainer plugs in as a `fit_model` callable), `run.py` (pure `run_fit` harness) — the
+     seams steps 4–5's freeze data / pairwise loss / CatBoost trainer plug into, zero behavior change
+     (byte-identical gate per phase).
    - (4) prefix synthesis + ranking groups → linear×freeze and (5) catboost×freeze — NOT STARTED. Their
      training data is what the 07-2x collection rework (Update 2026-07-23) is gathering.
    Data assembly unions the freeze with

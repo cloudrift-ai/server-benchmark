@@ -1,7 +1,7 @@
 """CUDA implementation of :class:`RenderTarget`.
 
 Owns every CUDA C-spelling decision the Kernel-IR renderer makes:
-type names (``float`` / ``__half``), conversion intrinsics
+type names (``float`` / ``__half`` / fixed-width integer carriers), conversion intrinsics
 (``__half2float`` / ``__float2half``), per-dtype op intrinsics
 (``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...), and the set of
 ops with native fp16 forms.
@@ -14,15 +14,50 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 
 from __future__ import annotations
 
-from emmy.compiler import dtype as _dtype
+_TYPE_NAME: dict[str, str] = {
+    "f32": "float",
+    "f16": "__half",
+    "f16x2": "__half2",
+    "f8e4m3": "__nv_fp8_e4m3",
+    "f8e5m2": "__nv_fp8_e5m2",
+    "i16": "short",
+    "i32": "int",
+    "i64": "long long",
+    "u16": "unsigned short",
+    "u32": "unsigned int",
+    "u64": "unsigned long long",
+    "bool": "bool",
+}
 
-_TYPE_NAME: dict[str, str] = {"f32": "float", "f16": "__half", "f16x2": "__half2"}
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_NATIVE_OPS = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "floor_divide",
+        "remainder",
+        "mod",
+        "left_shift",
+        "right_shift",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+        "bitwise_count",
+    }
+)
+
+# fp8 storage dtypes (M2/M3 of the FP8 plan). A kernel never computes ON fp8 —
+# the only legal uses of an fp8 SSA value are the decode conversion out of it
+# and the encode conversion into it, both spelled below in ``convert``.
+_F8_DTYPES = ("f8e4m3", "f8e5m2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expr`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
 _INTRINSIC_F32: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
+    "log": "logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
     "cos": "cosf",
@@ -117,6 +152,17 @@ class CudaRenderTarget:
     def convert(self, value: str, src_dt: str, dst_dt: str) -> str:
         if src_dt == dst_dt:
             return value
+        if src_dt in _F8_DTYPES and dst_dt in ("f32", "f16"):
+            # fp8 decode — the ``from_f8*`` cast's device spelling. The functional
+            # cast invokes ``<cuda_fp8.h>``'s explicit conversion operator, which
+            # compiles on every arch the header supports (hardware ``cvt`` on
+            # sm_89+, C++ emulation below) — no sm gate needed.
+            return f"{_TYPE_NAME[dst_dt]}({value})"
+        if dst_dt in _F8_DTYPES and src_dt in ("f32", "f16"):
+            # fp8 encode — the ``to_f8*`` cast's device spelling: the <cuda_fp8.h>
+            # explicit constructor (round-to-nearest-even, saturate-to-finite), the
+            # decode's twin. Same no-sm-gate story as above.
+            return f"{_TYPE_NAME[dst_dt]}({value})"
         if dst_dt == "f16" and src_dt == "f32":
             return f"__float2half({value})"
         if dst_dt == "f32" and src_dt == "f16":
@@ -128,7 +174,16 @@ class CudaRenderTarget:
             return f"__float2half2_rn({value})"
         return value
 
+    def bitcast(self, value: str, src_dt: str, dst_dt: str) -> str:
+        if src_dt == dst_dt:
+            return value
+        if dst_dt not in _TYPE_NAME:
+            raise ValueError(f"CUDA scalar bitcast does not support destination dtype {dst_dt!r}")
+        return f"emmy_bitcast<{_TYPE_NAME[dst_dt]}>({value})"
+
     def intrinsic(self, op_name: str, result_dt: str) -> str:
+        if op_name == "bitwise_count":
+            return "__popcll" if result_dt in ("i64", "u64") else "__popc"
         if result_dt == "f16":
             return _INTRINSIC_F16.get(op_name, op_name)
         if result_dt == "f16x2":
@@ -141,6 +196,8 @@ class CudaRenderTarget:
             return True
         if dtype in ("f16", "f16x2"):
             return op_name in _NATIVE_FP16_OPS
+        if dtype in _INTEGER_DTYPES:
+            return op_name in _INTEGER_NATIVE_OPS
         return False
 
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:
@@ -164,11 +221,3 @@ class CudaRenderTarget:
                 return ("uint4", "__half")
             return None
         return None
-
-
-def _ensure_canonical(dtype: str) -> str:
-    """Coerce a CUDA C type name back to the canonical dtype token, so
-    callers that hold an arbitrary spelling can still ask the target."""
-    if dtype in _TYPE_NAME:
-        return dtype
-    return _dtype.get(dtype).name

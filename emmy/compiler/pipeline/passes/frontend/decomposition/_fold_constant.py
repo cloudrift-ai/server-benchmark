@@ -1,4 +1,4 @@
-"""Shared helper for the ``004a`` / ``004b`` constant-fold rules.
+"""Shared helper for the ``050_fold_into_constant`` / ``060_fold_reshape_into_constant`` rules.
 
 Both rules absorb a single layout op (``TransposeOp`` / ``ReshapeOp``)
 whose only input is a parameter ``ConstantOp`` into the constant's
@@ -26,6 +26,8 @@ the behavior-preservation concern above doesn't apply to it.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
@@ -84,15 +86,9 @@ def fold_into_constant(graph: Graph, root: Node, inp_x: Node, out: Tensor) -> Gr
     if inp_x.op.value is not None:
         raise RuleSkipped("scalar constants are not folded into")
 
-    new_load_ops = inp_x.op.load_ops + (root.op,)
-    new_op = ConstantOp(
-        name=inp_x.op.name,
-        load_ops=new_load_ops,
-        source_path=inp_x.op.source_path,
-        source_parts=inp_x.op.source_parts,
-        source_shape=inp_x.op.source_shape,
-        source_dtype=inp_x.op.source_dtype,
-    )
+    # ``replace`` rather than a field-list reconstruction so every ConstantOp
+    # field — including ones added later — propagates by construction.
+    new_op = replace(inp_x.op, load_ops=inp_x.op.load_ops + (root.op,))
     frag = open_fragment(graph, [])
     new_id = frag.add_node(op=new_op, inputs=[], output=Tensor(out.name, out.shape, out.dtype))
     frag.outputs = [new_id]

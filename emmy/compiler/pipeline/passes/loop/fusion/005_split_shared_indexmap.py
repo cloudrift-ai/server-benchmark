@@ -1,12 +1,9 @@
 """Fuse a multi-consumer pure-indexmap producer into all of its consumers at once.
 
-``010_merge_loop_ops`` only extends a producer→consumer chain through
-**single-consumer** edges (the match-walker stops at a fan-out:
-``pipeline.py`` ``nid = consumers[0] if len(consumers) == 1 else None``). So a
-pure-indexmap ``LoopOp`` that fans out to ≥2 consumers — e.g. the scalar-constant
-broadcasts torch.export folds the attention-mask / RoPE scaffolding into — never
-gets absorbed and survives as its own kernel (a ``[1,1,32,128]`` copy of
-``0.0``/``1.0`` that PyTorch never materializes).
+``010_merge_loop_ops`` fuses a fan-out only when all branches reconverge at one
+owned Loop sink. A pure-indexmap ``LoopOp`` whose consumers remain separate
+(e.g. scalar-constant broadcasts feeding distinct attention-mask / RoPE paths)
+still needs to dissolve without forcing those outputs into one kernel.
 
 Anchored on the **producer**, this rule fuses it into *every* consumer in one
 rewrite: it inlines the producer's body into each consumer (reusing the same
@@ -23,10 +20,10 @@ still dissolves and ``merge_loop_ops`` can retry that copy later (at worst it st
 a separate copy, never a regression).
 
 Gate = pure-indexmap (broadcast / transpose / reshape / slice / cat) with ≥2
-consumers, and not itself a graph output. Single-consumer pure-indexmaps stay
-``merge_loop_ops``'s job. Restricting to pure-indexmap keeps the per-consumer
-duplication cheap (the splicer's blowup logic doesn't even run here) — duplicating
-an *expensive* producer into every consumer would multiply real work.
+consumers, and not itself a graph output. Single-consumer and reconvergent
+fan-out regions stay ``merge_loop_ops``'s job. Restricting this split path to
+pure index maps keeps per-consumer duplication cheap — duplicating an expensive
+producer into separate output kernels would multiply real work.
 
 Terminates: each firing removes one multi-consumer pure-indexmap producer. A fused
 node no longer reads that producer, so the inlining marches one level down any
@@ -39,7 +36,12 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import Load, LoopOp, splice_loop_ops
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_castfree_indexmap, is_pure_indexmap, rename_write_output
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import (
+    closed_loop_consumer_region,
+    is_castfree_indexmap,
+    is_pure_indexmap,
+    rename_write_output,
+)
 
 PATTERN = [Pattern("producer", LoopOp)]
 
@@ -62,8 +64,8 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     # A dtype-CHANGING copy is pure-indexmap-shaped but not plumbing: dissolving it into the
     # consumers erases the traced cast boundary, and each consumer then reads the wide producer
     # buffer through its own narrow declared dtype — fp32 bytes decoded as fp16 denormals (the
-    # fan-out cast on a merged sibling-linear projection). Same gate ``010_merge_loop_ops``
-    # applies to its single-consumer folds; the cast stays materialized at the traced boundary.
+    # fan-out cast on a merged sibling-linear projection). This fan-out-specific boundary remains
+    # materialized even though ordinary single-consumer loop fusion is gate-free.
     if not is_castfree_indexmap(graph, producer):
         raise RuleSkipped("producer is a cast copy — the traced dtype boundary stays materialized")
     if producer.id in graph.outputs:
@@ -71,6 +73,8 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     consumers = sorted(graph.consumers(producer.id))
     if len(consumers) < 2:
         raise RuleSkipped("producer is not shared (< 2 consumers) — single-consumer folds are merge's job")
+    if closed_loop_consumer_region(graph, producer) is not None:
+        raise RuleSkipped("producer fan-out reconverges — merge owns the shared SSA region")
 
     frag = Graph()
     output_map: dict[str, str] = {}  # old consumer id -> fragment output node id

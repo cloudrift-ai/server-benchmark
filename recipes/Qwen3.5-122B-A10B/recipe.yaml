@@ -1,0 +1,36 @@
+# Exact official checkpoint, cast from its published BF16 tensors to FP16 at load time. PP8xTP2
+# keeps six layers per pipeline stage; PP16 exposes incompatible hybrid-cache page geometry in the
+# pinned engine. Build the image with experiments/qwen35-122b/stack_v100 before this recipe runs.
+model:
+  huggingface: "Qwen/Qwen3.5-122B-A10B"
+  revision: dc4d348443bc740c68e2d77492492c11606384d5
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 8
+    gpu_memory_utilization: 0.88
+    context_length: 32768
+    max_concurrent_requests: 1
+    vllm:
+      image: "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --attention-backend FLASH_ATTN_V100
+        --mamba-cache-mode align
+        --max-num-batched-tokens 4096
+        --enforce-eager
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+      extra_env:
+        VLLM_SM70_ENABLE_DENSE_F16_FASTPATH: "0"
+        VLLM_SM70_FLASHQLA_ORIGINAL_PREFILL: "0"
+        VLLM_SM70_UNQUANTIZED_MOE_0DOT3_CONFIG: "1"
+        VLLM_SM70_UNQUANTIZED_MOE_0DOT3_FUNCTIONAL: "0"
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 16

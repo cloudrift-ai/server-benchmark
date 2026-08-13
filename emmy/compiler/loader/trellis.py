@@ -1,0 +1,406 @@
+"""Birth-time spelling of coded linears into format-neutral tensor IR.
+
+This is loader/frontend code: it knows the checkpoint representation, but every node it
+emits is an ordinary range, cast/bitcast, elementwise operation, gather/index map, layout
+operation, or matmul. The packed decode remains a computed operand of the core contraction;
+the logical dense weight is never materialized. No checkpoint-format operation enters
+decomposition, lowering, scheduling, or codegen.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.base import ConstantOp
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SliceOp, TransposeOp
+from emmy.compiler.ir.tensor.ir import (
+    BitcastOp,
+    ElementwiseOp,
+    GatherOp,
+    IndexMapOp,
+    IndexSource,
+    RangeOp,
+)
+from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+
+
+class _Builder:
+    """Small node-construction vocabulary for one static algebra spelling."""
+
+    def __init__(self, graph: Graph, prefix: str) -> None:
+        self.graph = graph
+        self.prefix = prefix
+
+    def node(self, nid: str):
+        return self.graph.nodes[nid]
+
+    def scalar(self, suffix: str, value: float | int, dtype: str) -> str:
+        return self.graph.add_node(
+            op=ConstantOp(name=f"{self.prefix}_{suffix}", value=value),
+            inputs=[],
+            output=Tensor(f"{self.prefix}_{suffix}", (1,), dtype),
+        )
+
+    def cast(self, src: str, dtype: str, suffix: str) -> str:
+        """Emit an explicit scalar conversion boundary.
+
+        Coded reconstruction needs these integer width changes at the point of
+        use, but does not need a standalone tensor-level ``CastOp`` kernel.
+        ``ElementwiseOp(copy)`` carries the destination dtype into Loop IR as a
+        typed SSA assignment, where ordinary fusion can absorb it.
+        """
+        return self.graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[src],
+            output=Tensor(f"{self.prefix}_{suffix}", self.node(src).output.shape, dtype),
+        )
+
+    def bitcast(self, src: str, dtype: str, suffix: str) -> str:
+        return self.graph.add_node(
+            op=BitcastOp(dtype=dtype),
+            inputs=[src],
+            output=Tensor(f"{self.prefix}_{suffix}", self.node(src).output.shape, dtype),
+        )
+
+    def reshape(self, src: str, shape: tuple[int, ...], suffix: str) -> str:
+        return self.graph.add_node(
+            op=ReshapeOp(shape=shape),
+            inputs=[src],
+            output=Tensor(f"{self.prefix}_{suffix}", shape, self.node(src).output.dtype),
+        )
+
+    def ew(self, op: str, inputs: tuple[str, ...], shape: tuple[int, ...], dtype: str, suffix: str) -> str:
+        expanded = [broadcast_to(self.graph, src, shape).id for src in inputs]
+        return self.graph.add_node(
+            op=ElementwiseOp(op=op),
+            inputs=expanded,
+            output=Tensor(f"{self.prefix}_{suffix}", shape, dtype),
+        )
+
+    def binary(self, op: str, lhs: str, rhs: str, shape: tuple[int, ...], dtype: str, suffix: str) -> str:
+        return self.ew(op, (lhs, rhs), shape, dtype, suffix)
+
+    def unary(self, op: str, src: str, dtype: str, suffix: str) -> str:
+        shape = tuple(self.node(src).output.shape)
+        return self.ew(op, (src,), shape, dtype, suffix)
+
+    def range(self, stop: int, suffix: str) -> str:
+        # Reconstruction ranges are static lookup tables, not runtime work.
+        # Keep the Range only inside a source-free constant record, evaluated
+        # once by the binder; no Range enters the executable graph or needs a
+        # lowering path.
+        source = Graph()
+        source_id = source.add_node(
+            op=RangeOp(stop=stop, dtype="i32"),
+            inputs=[],
+            output=Tensor("value", (stop,), "i32"),
+            node_id="value",
+        )
+        source.outputs = [source_id]
+        return self.graph.add_node(
+            op=ConstantOp(
+                name=f"{self.prefix}_{suffix}",
+                source_graph=source,
+                source_shape=(stop,),
+                source_dtype="i32",
+            ),
+            inputs=[],
+            output=Tensor(f"{self.prefix}_{suffix}", (stop,), "i32"),
+        )
+
+    def indexed(self, src: str, shape: tuple[int, ...], coords: tuple, suffix: str) -> str:
+        return self.graph.add_node(
+            op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=coords),)),
+            inputs=[src],
+            output=Tensor(f"{self.prefix}_{suffix}", shape, self.node(src).output.dtype),
+        )
+
+    def strided(self, src: str, shape: tuple[int, ...], stride: int, offset: int, suffix: str) -> str:
+        last = len(shape) - 1
+        coords = tuple(placeholder(i) for i in range(last)) + (placeholder(last) * Literal(stride, "int") + Literal(offset, "int"),)
+        return self.indexed(src, shape, coords, suffix)
+
+
+def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
+    """Packed int16 code words → one circular uint32 window per tile step."""
+    code_shape = tuple(d.as_static() for d in b.node(codes).output.shape)
+    kt, nt, packed = code_shape
+    K = packed // 16
+    word_shape = (kt, nt, 8 * K)
+    u16 = b.bitcast(codes, "u16", "codes_u16")
+    even = b.cast(b.strided(u16, word_shape, 2, 0, "word_even"), "u32", "word_even_u32")
+    odd = b.cast(b.strided(u16, word_shape, 2, 1, "word_odd"), "u32", "word_odd_u32")
+    odd_hi = b.binary("left_shift", odd, b.scalar("shift16", 16, "u32"), word_shape, "u32", "word_odd_hi")
+    words = b.binary("bitwise_or", even, odd_hi, word_shape, "u32", "words")
+
+    shape = (kt, nt, 256)
+    step = placeholder(2)
+    modulus = 256 * K
+    # Adding one full modulus before ``%`` makes the dividend non-negative
+    # for every K/step, so Python evaluation and rendered C agree exactly.
+    start = ((step + 1) * K - 16 + modulus) % modulus
+    word_idx = BinaryExpr("//", start, Literal(32, "int"))
+    next_idx = (word_idx + 1) % (8 * K)
+    leading = (placeholder(0), placeholder(1))
+    lo = b.indexed(words, shape, leading + (word_idx,), "window_lo")
+    hi = b.indexed(words, shape, leading + (next_idx,), "window_hi")
+
+    shift_step = b.range(256, "shift_step")
+    one = b.scalar("shift_one", 1, "i32")
+    start = b.binary("add", shift_step, one, (256,), "i32", "shift_step1")
+    start = b.binary("multiply", start, b.scalar("shift_k", K, "i32"), (256,), "i32", "shift_end")
+    start = b.binary("subtract", start, b.scalar("shift_bias", 16, "i32"), (256,), "i32", "shift_start")
+    start = b.binary("add", start, b.scalar("shift_modulus", modulus, "i32"), (256,), "i32", "shift_start_nonnegative")
+    intra = b.binary("remainder", start, b.scalar("shift_word", 32, "i32"), (256,), "i32", "shift_intra")
+    shift = b.binary("subtract", b.scalar("shift_top", 48, "i32"), intra, (256,), "i32", "window_shift")
+    lo64, hi64 = b.cast(lo, "u64", "window_lo_u64"), b.cast(hi, "u64", "window_hi_u64")
+    joined_hi = b.binary(
+        "left_shift",
+        lo64,
+        b.scalar("shift32_u64", 32, "u64"),
+        shape,
+        "u64",
+        "window_join_hi",
+    )
+    joined = b.binary("bitwise_or", joined_hi, hi64, shape, "u64", "window_join")
+    shifted = b.binary("right_shift", joined, b.cast(shift, "u64", "window_shift_u64"), shape, "u64", "window_shifted")
+    masked = b.binary("bitwise_and", shifted, b.scalar("mask16_u64", 0xFFFF, "u64"), shape, "u64", "windows_u64")
+    return b.cast(masked, "u32", "windows"), kt, nt
+
+
+def _codebook(b: _Builder, windows: str, cb: int, shape: tuple[int, ...]) -> str:
+    """Computed uint32 codebook algebra → fp16 values."""
+    if cb == 2:
+        x = b.binary("multiply", windows, b.scalar("cb_mul", 0x83DCD12D, "u32"), shape, "u32", "cb_x")
+        mask = b.scalar("byte_mask", 0xFF, "u32")
+        byte_sum = b.binary("bitwise_and", x, mask, shape, "u32", "cb_byte0")
+        for bits in (8, 16, 24):
+            shifted = b.binary(
+                "right_shift",
+                x,
+                b.scalar(f"byte_shift{bits}", bits, "u32"),
+                shape,
+                "u32",
+                f"cb_shift{bits}",
+            )
+            byte = b.binary("bitwise_and", shifted, mask, shape, "u32", f"cb_byte{bits // 8}")
+            byte_sum = b.binary("add", byte_sum, byte, shape, "u32", f"cb_sum{bits // 8}")
+        biased = b.binary("add", byte_sum, b.scalar("cb_bias", 0x6400, "u32"), shape, "u32", "cb_packed_half")
+        h = b.bitcast(b.cast(biased, "u16", "cb_packed_half_u16"), "f16", "cb_h")
+        kmul = b.bitcast(b.scalar("cb_kmul_bits", 0x1EEE, "u16"), "f16", "cb_kmul")
+        kadd = b.bitcast(b.scalar("cb_kadd_bits", 0xC931, "u16"), "f16", "cb_kadd")
+        h64 = b.cast(h, "f64", "cb_h64")
+        prod = b.binary("multiply", h64, b.cast(kmul, "f64", "cb_kmul64"), shape, "f64", "cb_prod")
+        value64 = b.binary("add", prod, b.cast(kadd, "f64", "cb_kadd64"), shape, "f64", "cb_value64")
+        return b.cast(value64, "f16", "cb_value")
+
+    multiplier = 89226354 if cb == 0 else 0xCBAC1FED
+    x = b.binary("multiply", windows, b.scalar("cb_mul", multiplier, "u32"), shape, "u32", "cb_product")
+    if cb == 0:
+        x = b.binary("add", x, b.scalar("cb_add", 64248484, "u32"), shape, "u32", "cb_affine")
+    masked = b.binary("bitwise_and", x, b.scalar("cb_mask", 0x8FFF8FFF, "u32"), shape, "u32", "cb_masked")
+    x = b.binary("bitwise_xor", masked, b.scalar("cb_xor", 0x3B603B60, "u32"), shape, "u32", "cb_bits")
+    lo = b.binary("bitwise_and", x, b.scalar("half_mask", 0xFFFF, "u32"), shape, "u32", "cb_lo")
+    lo = b.bitcast(b.cast(lo, "u16", "cb_lo_u16"), "f16", "cb_lo_half")
+    hi = b.binary("right_shift", x, b.scalar("half_shift", 16, "u32"), shape, "u32", "cb_hi")
+    hi = b.bitcast(b.cast(hi, "u16", "cb_hi_u16"), "f16", "cb_hi_half")
+    return b.binary("add", lo, hi, shape, "f16", "cb_value")
+
+
+def _tile_order(b: _Builder, values: str, kt: int, nt: int) -> str:
+    """MMA-fragment step order → row-major tiled matrix, derived from coordinates."""
+    pos = b.range(256, "tile_pos")
+
+    def i(suffix: str, value: int) -> str:
+        return b.scalar(f"i32_{value}_{suffix}", value, "i32")
+
+    row = b.binary("floor_divide", pos, i("row", 16), (256,), "i32", "tile_row")
+    col = b.binary("remainder", pos, i("col", 16), (256,), "i32", "tile_col")
+    row8 = b.binary("remainder", row, i("row8", 8), (256,), "i32", "tile_row8")
+    lane_lo = b.binary("floor_divide", row8, i("lane2", 2), (256,), "i32", "tile_lane_lo")
+    col8 = b.binary("remainder", col, i("col8", 8), (256,), "i32", "tile_col8")
+    lane_hi = b.binary("multiply", col8, i("lane4", 4), (256,), "i32", "tile_lane_hi")
+    lane = b.binary("add", lane_hi, lane_lo, (256,), "i32", "tile_lane")
+    j0 = b.binary("bitwise_and", row, i("j0", 1), (256,), "i32", "tile_j0")
+    row3 = b.binary("right_shift", row, i("row3", 3), (256,), "i32", "tile_row3")
+    j1bit = b.binary("bitwise_and", row3, i("j1bit", 1), (256,), "i32", "tile_j1bit")
+    j1 = b.binary("multiply", j1bit, i("j1", 2), (256,), "i32", "tile_j1")
+    j2bit = b.binary("floor_divide", col, i("j2bit", 8), (256,), "i32", "tile_j2bit")
+    j2 = b.binary("multiply", j2bit, i("j2", 4), (256,), "i32", "tile_j2")
+    j = b.binary("add", b.binary("add", j0, j1, (256,), "i32", "tile_j01"), j2, (256,), "i32", "tile_j")
+    lane8 = b.binary("multiply", lane, i("lane8", 8), (256,), "i32", "tile_lane8")
+    step = b.binary("add", lane8, j, (256,), "i32", "tile_step")
+    ordered = b.graph.add_node(
+        op=GatherOp(axis=-1),
+        inputs=[values, step],
+        output=Tensor(f"{b.prefix}_tiles_row_major", (kt, nt, 256), "f16"),
+    )
+    tiles = b.reshape(ordered, (kt, nt, 16, 16), "tiles")
+    tiled = b.graph.add_node(
+        op=TransposeOp(axes=(0, 2, 1, 3)),
+        inputs=[tiles],
+        output=Tensor(f"{b.prefix}_hat_grid", (kt, 16, nt, 16), "f16"),
+    )
+    return b.reshape(tiled, (kt * 16, nt * 16), "hat")
+
+
+def _hadamard(b: _Builder) -> str:
+    """Construct the scaled 128x128 Sylvester Hadamard matrix generically."""
+    axis = b.range(128, "had_axis")
+    row = b.reshape(axis, (128, 1), "had_row")
+    col = b.reshape(axis, (1, 128), "had_col")
+    shape = (128, 128)
+    bits = b.binary("bitwise_and", row, col, shape, "i32", "had_bits")
+    count = b.unary("bitwise_count", bits, "i32", "had_count")
+    parity = b.binary("bitwise_and", count, b.scalar("had_parity_mask", 1, "i32"), shape, "i32", "had_parity")
+    twice = b.binary(
+        "multiply",
+        b.cast(parity, "f64", "had_parity64"),
+        b.scalar("had_two", 2.0, "f64"),
+        shape,
+        "f64",
+        "had_twice",
+    )
+    signs = b.binary("subtract", b.scalar("had_one", 1.0, "f64"), twice, shape, "f64", "had_signs")
+    scale = b.scalar("had_scale", float(1.0 / np.sqrt(128.0)), "f64")
+    return b.binary("multiply", signs, scale, shape, "f64", "had")
+
+
+def spell_factored_linear(
+    graph: Graph,
+    codes: str,
+    suh: str,
+    svh: str,
+    *,
+    cb: int,
+    weight_shape: tuple[int, int],
+    x: str,
+    bias: str | None,
+    out: Tensor,
+    weight_name: str,
+) -> str:
+    """Spell one coded linear directly as generic factorized contractions.
+
+    The executable graph never owns a materialized decoded weight.  Packed storage is
+    expanded only at the core contraction's scalar B use, while the two Hadamard factors
+    are applied on the activation/result sides.  This is the birth-time EXL3 spelling;
+    every emitted operation is ordinary tensor algebra and no format identity survives.
+    """
+    n, k = weight_shape
+    code_shape = tuple(d.as_static() for d in graph.nodes[codes].output.shape)
+    k_pad, n_pad = code_shape[0] * 16, code_shape[1] * 16
+    if k_pad < k or n_pad < n:
+        raise ValueError(f"coded linear {weight_name}: padded storage {(n_pad, k_pad)} cannot execute directly as logical weight {(n, k)}")
+    x_node = graph.nodes[x]
+    # Only the contraction axes are intrinsically static.  Serving's symbolic
+    # twins tie every leading activation/result axis to the same runtime Dim;
+    # retain those Dim objects throughout the factored contraction instead of
+    # forcing the whole tensor shape through ``as_static``.
+    x_shape = tuple(d.as_static() if d.is_static else d for d in x_node.output.shape)
+    out_shape = tuple(d.as_static() if d.is_static else d for d in out.shape)
+    x_k = x_shape[-1] if x_shape and isinstance(x_shape[-1], int) else None
+    out_n = out_shape[-1] if out_shape and isinstance(out_shape[-1], int) else None
+    if not x_shape or x_k != k or out_n != n or out_shape[:-1] != x_shape[:-1]:
+        raise ValueError(f"coded linear {weight_name}: activation/result shapes {x_shape}/{out_shape} do not match {(n, k)}")
+    if x_node.output.dtype.name not in {"f16", "f32"} or out.dtype.name not in {"f16", "f32"}:
+        raise ValueError(
+            f"coded linear {weight_name}: direct execution requires f16/f32 activation/result, "
+            f"got {x_node.output.dtype.name}/{out.dtype.name}"
+        )
+    if bias is not None:
+        bias_node = graph.nodes[bias]
+        bias_shape = tuple(d.as_static() for d in bias_node.output.shape)
+        if bias_shape != (n,) or bias_node.output.dtype.name not in {"f16", "f32"}:
+            raise ValueError(f"coded linear {weight_name}: bias must be f16/f32[{n}], got {bias_node.output.dtype.name}{bias_shape}")
+
+    b = _Builder(graph, weight_name)
+    windows, kt, nt = _unpack_windows(b, codes)
+    core = _tile_order(b, _codebook(b, windows, cb, (kt, nt, 256)), kt, nt)
+    factor = _hadamard(b)
+
+    def copy(src: str, name: str, shape: tuple, dtype: str) -> str:
+        return graph.add_node(op=ElementwiseOp(op="copy"), inputs=[src], output=Tensor(name, shape, dtype))
+
+    def reshape(src: str, name: str, shape: tuple) -> str:
+        return graph.add_node(
+            op=ReshapeOp(shape=shape),
+            inputs=[src],
+            output=Tensor(name, shape, graph.nodes[src].output.dtype),
+        )
+
+    def matmul(lhs: str, rhs: str, name: str, shape: tuple) -> str:
+        return graph.add_node(op=MatmulOp(), inputs=[lhs, rhs], output=Tensor(name, shape, "f32"))
+
+    factor32 = copy(factor, f"{out.name}_factor32", (128, 128), "f32")
+    exec_x = x
+    exec_x_shape = x_shape[:-1] + (k_pad,)
+    if k_pad != k:
+        last = len(x_shape) - 1
+        coord = placeholder(last)
+        in_bounds = coord.lt(Literal(k, "int"))
+        clamped = TernaryExpr(cond=in_bounds, if_true=coord, if_false=Literal(0, "int"))
+        x_coords = tuple(placeholder(i) for i in range(last)) + (clamped,)
+        zero = b.scalar("x_pad_zero", 0.0, x_node.output.dtype.name)
+        exec_x = graph.add_node(
+            op=IndexMapOp(
+                out_shape=exec_x_shape,
+                sources=(
+                    IndexSource(input_idx=0, coord_map=x_coords, select=in_bounds),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[x, zero],
+            output=Tensor(f"{out.name}_x_padded", exec_x_shape, x_node.output.dtype),
+        )
+    x32 = copy(exec_x, f"{out.name}_x32", exec_x_shape, "f32")
+    suh32 = copy(suh, f"{out.name}_left_scale32", (k_pad,), "f32")
+    scaled_x = b.binary(
+        "multiply",
+        x32,
+        broadcast_to(graph, suh32, exec_x_shape).id,
+        exec_x_shape,
+        "f32",
+        f"{out.name}_left_scaled",
+    )
+    left_block_shape = x_shape[:-1] + (k_pad // 128, 1, 128)
+    left_blocks = reshape(scaled_x, f"{out.name}_left_blocks", left_block_shape)
+    left = matmul(left_blocks, factor32, f"{out.name}_left_factor", left_block_shape)
+    left_flat32 = reshape(left, f"{out.name}_left_flat32", exec_x_shape)
+    left_flat = copy(left_flat32, f"{out.name}_left_flat", exec_x_shape, "f16")
+
+    padded_core_shape = x_shape[:-1] + (n_pad,)
+    core_out = matmul(left_flat, core, f"{out.name}_core", padded_core_shape)
+    right_block_shape = padded_core_shape[:-1] + (n_pad // 128, 1, 128)
+    right_blocks = reshape(core_out, f"{out.name}_right_blocks", right_block_shape)
+    right = matmul(right_blocks, factor32, f"{out.name}_right_factor", right_block_shape)
+    right_flat = reshape(right, f"{out.name}_right_flat", padded_core_shape)
+
+    svh32 = copy(svh, f"{out.name}_right_scale32", (n_pad,), "f32")
+    scaled = b.binary(
+        "multiply",
+        right_flat,
+        broadcast_to(graph, svh32, padded_core_shape).id,
+        padded_core_shape,
+        "f32",
+        f"{out.name}_scaled32",
+    )
+    core_shape = x_shape[:-1] + (n,)
+    if n_pad != n:
+        scaled = graph.add_node(
+            op=SliceOp(shape=core_shape, dim=-1, start=0),
+            inputs=[scaled],
+            output=Tensor(f"{out.name}_logical", core_shape, "f32"),
+        )
+    if bias is not None:
+        bias32 = copy(bias, f"{out.name}_bias32", (n,), "f32")
+        scaled = b.binary(
+            "add",
+            scaled,
+            broadcast_to(graph, bias32, core_shape).id,
+            core_shape,
+            "f32",
+            f"{out.name}_biased32",
+        )
+    return copy(scaled, out.name, core_shape, out.dtype.name)

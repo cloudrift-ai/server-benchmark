@@ -1,6 +1,7 @@
 """``emmy serve`` command construction + flag routing + dry-run (no vllm/GPU)."""
 
 import argparse
+import json
 
 import pytest
 
@@ -171,6 +172,46 @@ def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():
     assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 48]' in cfg
 
 
+def _spec(depth: int) -> list[str]:
+    return ["--speculative-config", json.dumps({"method": "mtp", "model": "m", "num_speculative_tokens": depth})]
+
+
+def _sizes(depth: int, vllm_args: list[str] | None = None) -> list[int]:
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(depth) + (vllm_args or []), generate=True)
+    return json.loads(cmd[cmd.index("--compilation-config") + 1])["cudagraph_capture_sizes"]
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 5])
+def test_serve_cmd_generate_spec_ladder_never_overshoots_the_bucket(depth):
+    """THE invariant. vLLM rounds every capture size UP to a multiple of query_len and dispatches a
+    step to the first size at or above its width, so the runner sees a PADDED width. If the first
+    rung at or above a step's width exceeds the decode bucket, that step misses the static decode
+    twin and silently runs the symbolic program. Every reachable verify width must therefore land on
+    a rung that is still <= the bucket."""
+    query_len = depth + 1
+    sizes = _sizes(depth)
+    bucket = 16  # emmy_config default
+    assert all(s % query_len == 0 for s in sizes), sizes
+    for width in range(query_len, bucket + 1, query_len):
+        rung = min((s for s in sizes if s >= width), default=None)
+        assert rung is not None and rung <= bucket, f"width {width} -> rung {rung} > bucket {bucket}"
+
+
+def test_serve_cmd_generate_spec_ladder_is_dense_enough_to_avoid_padding():
+    """A ladder that merely stays under the bucket can still waste rows: floored powers of two give
+    15 then 30, so a 24-token step pads to 30. Mirroring vLLM's own dense default (stride 8) lands
+    the common verify widths exactly, which is also why the shipped image never hit the fault."""
+    sizes = _sizes(2, ["--max-num-seqs", "256"])
+    for width in (24, 192):
+        assert min(s for s in sizes if s >= width) == width, (width, sizes)
+
+
+def test_serve_cmd_generate_capture_sizes_ignore_absent_spec_config():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+
+
 def test_serve_cmd_generate_enforce_eager_opts_out_of_capture():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--enforce-eager"], generate=True)
     assert "--compilation-config" not in cmd
@@ -190,13 +231,54 @@ def test_serve_cmd_generate_bucket_off_forces_eager(monkeypatch):
     assert "--compilation-config" not in cmd
 
 
+def _force_moe_probe(monkeypatch):
+    monkeypatch.setattr("emmy.commands.serve._is_moe_model", lambda model, vllm_args: True)
+
+
+def test_serve_cmd_generate_moe_captures_at_size_one(monkeypatch):
+    """MoE decode capture is fixed-slot: FULL_DECODE_ONLY with the ladder capped at capture
+    size 1 (single-token steps ride the fixed-slot expert path; wider decode steps stay eager
+    routed dispatch) — not --enforce-eager. The boot guard in EmmyGenModel validates
+    authoritatively against the runner."""
+    _force_moe_probe(monkeypatch)
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert "--enforce-eager" not in cmd
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
+    assert '"cudagraph_capture_sizes": [1]' in cfg
+
+
+def test_serve_cmd_generate_moe_enforce_eager_forwards(monkeypatch):
+    _force_moe_probe(monkeypatch)
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--enforce-eager"], generate=True)
+    assert cmd.count("--enforce-eager") == 1
+    assert "--compilation-config" not in cmd
+
+
+def test_serve_cmd_generate_moe_user_compilation_config_forwards(monkeypatch):
+    # A caller-supplied config forwards untouched; the EmmyGenModel boot guard validates it
+    # against the runner (fixed-slot tier present, sizes capped at 1).
+    _force_moe_probe(monkeypatch)
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--compilation-config", "{}"], generate=True)
+    assert cmd.count("--compilation-config") == 1
+    assert "--enforce-eager" not in cmd
+
+
+def test_serve_cmd_generate_moe_bucket_off_forces_eager(monkeypatch):
+    _force_moe_probe(monkeypatch)
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "0")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert "--enforce-eager" in cmd
+    assert "--compilation-config" not in cmd
+
+
 def test_serve_cmd_generate_rejects_incompatible_dtype():
     with pytest.raises(ValueError, match="fp16"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--dtype", "bfloat16"], generate=True)
 
 
 def test_serve_cmd_generate_rejects_oversized_batched_tokens():
-    with pytest.raises(ValueError, match="dynamic-dim cap"):
+    with pytest.raises(ValueError, match="prefill capacity"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "8192"], generate=True)
 
 
@@ -205,7 +287,7 @@ def test_serve_cmd_generate_batched_tokens_rider_headroom(monkeypatch):
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "32")
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "4128"], generate=True)
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4128"
-    with pytest.raises(ValueError, match="dynamic-dim cap"):
+    with pytest.raises(ValueError, match="prefill capacity"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "4129"], generate=True)
     # Bucket off -> no split coverage: the default falls back to the bare cap.
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "0")
@@ -213,10 +295,59 @@ def test_serve_cmd_generate_batched_tokens_rider_headroom(monkeypatch):
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"
 
 
+def test_serve_cmd_generate_prefill_capacity_moves_the_batched_tokens_default(monkeypatch):
+    """``EMMY_GEN_PREFILL_CAPACITY`` sizes the runner's activation arena, so the scheduler's
+    flattened width has to follow it down — a weight-filled card (GLM-4.5-Air) pays for every
+    token of capacity it never serves."""
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "16")
+    monkeypatch.setenv("EMMY_GEN_PREFILL_CAPACITY", "512")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "528"
+    assert cmd[cmd.index("--max-model-len") + 1] == "4096"  # unchanged: chunked prefill covers long prompts
+    with pytest.raises(ValueError, match="prefill capacity"):
+        build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "529"], generate=True)
+
+
+def test_serve_cmd_generate_nulls_the_quantization_config_for_exl3(tmp_path, monkeypatch):
+    """vLLM has no EXL3 quant method and refuses the boot; the emmy runner owns every coded
+    weight and the head decodes to fp16 at load, so the override says "unquantized"."""
+    cfg = {"model_type": "llama", "architectures": ["LlamaForCausalLM"], "quantization_config": {"quant_method": "exl3", "bits": 2.0}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"], "quantization_config": None}
+    # An unquantized checkpoint keeps the plain override.
+    (tmp_path / "config.json").write_text(json.dumps({k: v for k, v in cfg.items() if k != "quantization_config"}))
+    cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"]}
+
+
 def test_serve_cmd_generate_honors_explicit_batched_tokens():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "2048"], generate=True)
     assert cmd.count("--max-num-batched-tokens") == 1  # the user's, no added default
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "2048"
+
+
+@pytest.mark.parametrize("flag", [["--kv-cache-dtype", "fp8_e4m3"], ["--kv-cache-dtype=fp8_e4m3"]])
+def test_serve_cmd_generate_kv_cache_dtype_passes_through(flag):
+    """``--kv-cache-dtype`` is vLLM's own flag — emmy adds nothing, it just forwards. Pinned
+    because the quantized-KV deployments depend on it reaching BOTH arms unchanged, and on it
+    not disturbing the generative util default (fp8 KV halves the bytes per token, so the same
+    byte budget buys ~2x the KV tokens — no utilization change is needed or made)."""
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=flag, generate=True)
+    assert cmd[-len(flag) :] == flag
+    assert "--gpu-memory-utilization=0.97" in cmd
+    stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=flag, generate=True)
+    assert stock_cmd[-len(flag) :] == flag
+
+
+def test_serve_kv_cache_dtype_survives_the_remainder_reparse(capsys):
+    # The argparse-REMAINDER re-parse extracts emmy's own flags and forwards the rest; a
+    # vLLM flag emmy does not own must come out the other side intact.
+    args = _parse(["serve", MODEL, "--generate", "--dry-run", "--kv-cache-dtype", "fp8_e4m3"])
+    handle_serve(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert "--kv-cache-dtype fp8_e4m3" in out[0]
 
 
 def test_serve_generate_bench_targets_completions(capsys):
@@ -227,3 +358,20 @@ def test_serve_generate_bench_targets_completions(capsys):
     assert "--runner generate" in out[0]
     assert "--backend openai" in out[1] and "/v1/completions" in out[1]
     assert "--random-output-len" in out[1]  # generative bench needs a generation length
+
+
+def test_health_timeout_default():
+    args = _parse(["serve", MODEL, "--bench"])
+    assert args.health_timeout == 1800
+
+
+def test_health_timeout_after_model_is_extracted_not_forwarded(capsys):
+    # A fresh-shape first boot can compile past the 1800 s default; --health-timeout
+    # widens the --bench /health window. Like every emmy flag it must be extracted
+    # from the REMAINDER, not forwarded to vllm serve.
+    args = _parse(["serve", MODEL, "--bench", "--dry-run", "--health-timeout", "5400"])
+    handle_serve(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 2
+    assert "--health-timeout" not in out[0] and "--health-timeout" not in out[1]
+    assert args.health_timeout == 5400

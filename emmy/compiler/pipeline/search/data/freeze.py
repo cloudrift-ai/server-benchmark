@@ -1,28 +1,18 @@
-"""Measurement freeze — a digest-pinned, golden-spelled snapshot of the tune DB's ``node`` table.
+"""Measurement freeze — a digest-pinned snapshot of the tune DB's ``node`` table.
 
 The node DB is a live store (tunes and merges write into it), so a model fit directly from
 it is not reproducible: two runs of the same fitter can see different data. A *freeze* is
 a local snapshot extracted from the DB whose digest pins exactly which measurements a fit
 saw — the fit becomes a pure function of (repo, freeze digest).
 
-Freeze v2 is a DIRECTORY of per-GPU YAML files mirroring the ``goldens/`` layout — a
+Freeze v3 is a DIRECTORY of per-GPU YAML files — a
 ``gpu_name`` / ``compute_cap`` header plus a ``configs`` list — beside a ``manifest.json``
-carrying the provenance header and the content digests. Each row is spelled like a golden
-entry: the declarative ``shape_spec`` captured at collection time (``kernel`` + shape
-fields + ``dynamic`` — ``run --bench --record-shape``, driven by the golden-neighborhood
-sweep), the verbatim TUNABLE knobs, and the measurement extension block (``value_us``,
-``opt`` — the nvcc cicc lane, ``status``, ``variance`` / ``n_samples``, ``run_id`` /
-``measured_at``). Nothing featurized is persisted: the loader re-derives ``H_*`` from the
-gpu registry card-faithfully (``Context.from_target``, ``H_opt`` overridden from ``opt``)
-and the full ``S_*`` histogram by re-tracing the kind's snippet
-(:func:`~..data.sample.traced_s_features`; arithmetic fallback with a warning), so an
-encoding-only featurizer change never quarantines a freeze — re-loading IS the refit's
-re-featurization.
+carrying provenance and content digests. Each row stores its DB ``op_sig``, current
+structural measurement features, verbatim tunable knobs, and measurement metadata.
+Device ``H_*`` features are re-derived card-faithfully at load time.
 
 What freezes (see :func:`freeze_reason`): every **leaf** in the current featurizer
-vocabulary that passes the physical-plausibility predicates AND carries a declarative
-``shape_spec`` — identity-less legacy rows (tune-written, pre-identity benches) stay in
-the DB but never freeze. ``bench_fail`` leaves are kept as durable negatives. Branch rows
+vocabulary that passes the physical-plausibility predicates. ``bench_fail`` leaves are kept as durable negatives. Branch rows
 never freeze and no tree schema is stored (no ``parent_key`` / ``depth`` / ``visits``):
 prefix rows are re-synthesized at fit time under the current fork structure.
 
@@ -34,8 +24,8 @@ and immune to YAML style — and the manifest's top-level ``sha256`` folds the s
 per-file digests. ``created_at`` never enters any digest.
 
 :func:`load_freeze` hard-errors — never a silent fallback — on a missing/foreign/corrupt
-manifest, a ``freeze_ver`` mismatch, a manifest-listed file missing, a per-file digest
-mismatch, or a row that fails to instantiate its golden kind class. There is deliberately
+manifest, a ``freeze_ver`` mismatch, a manifest-listed file missing, or a per-file digest
+mismatch. There is deliberately
 NO load-time ``feat_ver`` gate (the v1 rule): features are re-derived by live code, so the
 stored ``feat_ver`` / ``knob_ver`` / ``encoding_ver`` are provenance, not a contract.
 :func:`load_node_rows` is the interchange seam: it sniffs a path and yields ``NodeRow``s
@@ -70,26 +60,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FREEZE_KIND = "emmy-node-freeze"
-FREEZE_VER = 2
+FREEZE_VER = 3
 MANIFEST_NAME = "manifest.json"
 
 _SQLITE_MAGIC = b"SQLite format 3\x00"
-
-# The measurement extension block of a freeze row — every payload key that is NOT part of
-# the declarative shape_spec (the loader splits a row back into the two halves by this set).
-_EXTENSION_FIELDS = frozenset({"knobs", "value_us", "opt", "status", "variance", "n_samples", "run_id", "measured_at"})
 
 
 def freeze_reason(row: NodeRow) -> str | None:
     """Why ``row`` is excluded from a measurement freeze, or ``None`` to keep it.
 
-    THE freeze sanity filter, and nothing else — keep every identity-carrying leaf
+    THE freeze sanity filter, and nothing else — keep every leaf
     spelled in the current featurizer vocabulary that passes the shared plausibility
     predicates. ``bench_fail`` leaves reach the keep path by construction: both
     predicates return ``None`` for non-``ok`` rows, so failures are kept as negative
-    examples without a special case. The ``shape_spec`` requirement is the whole
-    legacy-exclusion mechanism: only rows recorded with a declarative identity
-    (``run --bench --record-shape``) can spell a golden-format freeze row."""
+    examples without a special case."""
     from emmy.compiler.pipeline.search.db import implausible_value_reason, impossible_kernel_reason  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
 
@@ -97,8 +81,6 @@ def freeze_reason(row: NodeRow) -> str | None:
         return "non-leaf (branch or pre-enrichment row)"
     if row.feat_ver != FEATURIZER_VERSION:
         return f"stale feat_ver {row.feat_ver} != current {FEATURIZER_VERSION}"
-    if row.shape_spec is None:
-        return "no declarative identity (legacy tune row)"
     if "H_cc" not in row.features or "H_opt" not in row.features:
         return "missing H_* regime stamps"
     reason = implausible_value_reason(row)
@@ -111,15 +93,14 @@ def freeze_reason(row: NodeRow) -> str | None:
 
 
 def _row_payload(row: NodeRow) -> dict:
-    """One freeze row as its YAML entry dict — the golden-entry spelling: the declarative
-    ``shape_spec`` flattened in, the verbatim tunable knobs, and the measurement
-    extension block. Nothing featurized: ``H_*`` / ``S_*`` are dropped here and
-    re-derived at load."""
+    """One freeze row: stable DB op identity, structural measurements, tunables,
+    and measurement metadata. Device-context features are re-derived at load."""
     from emmy.compiler.pipeline.search.data.sample import _split_by_prefix  # noqa: PLC0415
 
-    tunable, _ctx, _s = _split_by_prefix(row.features)
+    tunable, _ctx, structural = _split_by_prefix(row.features)
     return {
-        **row.shape_spec,
+        "op_sig": row.op_sig,
+        "structural_features": structural,
         "knobs": tunable,
         "value_us": row.value_us,
         "opt": int(row.features["H_opt"]),
@@ -260,14 +241,11 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
     """Parse + verify the freeze directory at ``path`` → ``(manifest, leaf-only
     NodeRows)`` with features RE-DERIVED by live code (see the module docstring). Hard
     ``RuntimeError`` — never a silent fallback — on any integrity failure. Identity keys
-    of a loaded row: ``op_sig`` is the canonical JSON of its ``shape_spec`` (a stable
-    declarative op id — the ``fold_node_rows(by="op")`` key, shared by a shape's
-    -O1/-O3 twins), ``context_key`` spells ``cap<maj>.<min>-O<opt>``."""
+    of a loaded row retain the stored ``op_sig``; ``context_key`` spells
+    ``cap<maj>.<min>-O<opt>``."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data.sample import traced_s_features  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import _KERNEL_CLASSES  # noqa: PLC0415
     from emmy.compiler.structural import digest as key_digest  # noqa: PLC0415
 
     p = Path(path)
@@ -286,7 +264,6 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
 
     rows: list[NodeRow] = []
     h_cache: dict[tuple[str, tuple[int, int]], dict] = {}
-    s_cache: dict[str, dict] = {}
     for name in sorted(manifest.get("files", {})):
         info = manifest["files"][name]
         fpath = p / name
@@ -308,35 +285,19 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
         h_base = h_cache[(gpu_name, cap)]
 
         for payload in payloads:
-            spec = {k: v for k, v in payload.items() if k not in _EXTENSION_FIELDS}
-            spec_json = json.dumps(spec, sort_keys=True, separators=(",", ":"))
-            if spec_json not in s_cache:
-                cls = _KERNEL_CLASSES.get(spec.get("kernel"))
-                if cls is None:
-                    raise RuntimeError(f"measurement freeze {p}: {name} row has unknown kernel kind {spec.get('kernel')!r} — {regen}")
-                try:
-                    cfg = cls(
-                        name="freeze", gpu_name=gpu_name, compute_cap=cap, knobs={}, **{k: v for k, v in spec.items() if k != "kernel"}
-                    )
-                except (TypeError, ValueError) as e:
-                    raise RuntimeError(
-                        f"measurement freeze {p}: {name} row does not instantiate {spec.get('kernel')!r}: {e} — {regen}"
-                    ) from e
-                traced = traced_s_features(cfg.snippet(), tuple(cfg.dynamic_specs()), cfg.shape_key())
-                if traced is None:
-                    logger.warning(
-                        "[freeze] %s: no traced op keys to the %s shape — falling back to arithmetic S_* extents", name, spec.get("kernel")
-                    )
-                s_cache[spec_json] = dict(traced) if traced is not None else cfg.shape_key().s_features_arith()
+            op_sig = payload.get("op_sig")
+            structural = payload.get("structural_features")
+            if not isinstance(op_sig, str) or not op_sig or not isinstance(structural, dict):
+                raise RuntimeError(f"measurement freeze {p}: {name} row lacks op_sig/structural_features — {regen}")
             knobs = payload["knobs"] or {}
             opt = int(payload["opt"])
-            features = {**h_base, "H_opt": float(opt), **s_cache[spec_json], **knobs}
+            features = {**h_base, "H_opt": float(opt), **structural, **knobs}
             rows.append(
                 NodeRow(
-                    node_key=key_digest("freeze2", gpu_name, spec_json, opt, tuple(sorted((k, str(v)) for k, v in knobs.items()))),
+                    node_key=key_digest("freeze3", gpu_name, op_sig, opt, tuple(sorted((k, str(v)) for k, v in knobs.items()))),
                     parent_key=None,
                     context_key=f"cap{cap[0]}.{cap[1]}-O{opt}",
-                    op_sig=spec_json,
+                    op_sig=op_sig,
                     features=features,
                     value_us=payload["value_us"],
                     depth=0,
@@ -349,7 +310,6 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
                     run_id=payload["run_id"],
                     measured_at=payload["measured_at"],
                     feat_ver=FEATURIZER_VERSION,  # features were just derived by live code
-                    shape_spec=spec,
                 )
             )
     return manifest, rows

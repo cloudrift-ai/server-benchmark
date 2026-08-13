@@ -41,11 +41,18 @@ def calculate_num_instances(recipe: Recipe) -> int:
     return max(1, recipe.deploy.gpu_count // gpus_per_instance)
 
 
-def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_device_ids=None):
+def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_device_ids=None, baked_hf_home=None):
     """Build docker-compose.yaml string from resolved Recipe.
 
     Single instance: 1 vllm service, count: all GPUs, port 8000.
     Multi-instance: N vllm services with device IDs + nginx on 8080.
+
+    ``baked_hf_home``: the image's own HF cache path, when it ships one (see
+    ``_baked_hf_cache``). Setting HF_HOME on such an image would hide the snapshot it
+    baked in, so the override is dropped and the image's own value stands — UNLESS the
+    engine args name a model beyond the baked one (a ``--speculative-config`` drafter):
+    the baked cache holds only the one snapshot and the image pins ``HF_HUB_OFFLINE=1``,
+    so the extra model can resolve only from the host cache, and the override returns.
     """
     llm = recipe.engine.llm
     model_name = recipe.model_name
@@ -54,9 +61,11 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
     entrypoint = llm.entrypoint
     gpus_per_instance = llm.gpus_per_instance
 
-    engine_args = build_engine_args(llm, model_name)
+    engine_args = build_engine_args(llm, model_name, recipe.model.revision)
     command_str = "\n      ".join(engine_args)
     extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
+    needs_extra_model = any("--speculative-config" in a for a in engine_args)
+    hf_home_line = "" if baked_hf_home and not needs_extra_model else f"\n      - HF_HOME={model_dir}"
     docker_options_lines = _render_docker_options(llm.docker_options)
 
     is_amd = recipe.deploy.gpu is not None and recipe.deploy.gpu.startswith("AMD")
@@ -103,8 +112,7 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
     volumes:
       - {model_dir}:{model_dir}
     environment:
-      - HUGGING_FACE_HUB_TOKEN={hf_token}
-      - HF_HOME={model_dir}{extra_env_lines}
+      - HUGGING_FACE_HUB_TOKEN={hf_token}{hf_home_line}{extra_env_lines}
     ports:
       - "{port}:8000"
     shm_size: '16gb'

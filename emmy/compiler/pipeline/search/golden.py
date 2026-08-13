@@ -1,894 +1,742 @@
-"""Golden matmul configs — known-good ``knobs`` per shape, measured vs cuBLAS.
+"""Self-contained golden YAML records and repository index.
 
-A *golden config* records, for one matmul shape on one GPU, the autotuned knob
-set and the latencies of the emmy kernel vs cuBLAS (``torch.matmul``). A
-config is ``golden`` when emmy lands within 95% of cuBLAS (or better),
-i.e. ``ratio = cublas_us / emmy_us >= 0.95``.
-
-The set is a ground truth for the tuning **prior**: it pins down what the
-planner's first guess *should* land on for canonical shapes, and gives a
-deployable-latency baseline to regression-test against.
-
-A ``name`` is **not** unique — one shape may carry several golden configs (e.g. a
-newly found faster knob set kept beside the old). Look configs up with
-:func:`goldens_by_name` (returns a list) and never assume a single match. One sanctioned
-duality is the **fast-math regime**: a sweep run under ``EMMY_FAST_MATH=1`` may record a
-precision-trading winner (an f16-accumulate ``TILE`` atom / ``FAST_EXP: true``) BESIDE the
-same shape's standard entry, never replacing it — a default (gate-off) compile can't reach
-the fast-math config, so replacing would orphan the shape's deployable golden. The regime is
-derived from the recorded knobs (``GoldenConfig.fast_math``), and the rank / reproduction
-views compare each entry against its own regime's enumeration.
-
-This module is import-light (no torch / cupy at module top) so passes and tests
-can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **per-GPU YAML files**
-under ``goldens/`` (e.g. ``goldens/rtx5090_sm120.yaml``): a ``gpu_name`` /
-``compute_cap`` header plus a ``configs`` list, each tagged with a ``kernel``
-discriminator (``matmul`` / ``reduce`` / ``pointwise`` / ``rms_norm`` / ``softmax`` /
-``attention`` / ``norm_linear`` — the fused RMSNorm→linear computed-A megakernel — / ``mlp_geglu`` —
-its multi-channel gate⊗up→GeGLU sibling — / ``rope`` / ``embedding`` — the fork-nothing memory-bound
-regression anchors). A GPU may carry more than
-one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
-file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
-:func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
-the CLI golden workflow — ``emmy tune --golden NAME --bench`` records the
-winning knobs / latencies into the GPU's YAML, ``emmy eval golden`` validates.
-For the **fp32** configs the reference is
-pinned to **true fp32** (``allow_tf32 = False``) so the ratio compares emmy's
-CUDA-core FMA kernel against a real SGEMM, not the ~5-10x faster TF32 tensor-core
-path. The **fp16** squares (``*.fp16``) instead ride the warp-tier tensor-core path
-and compare against cuBLAS HGEMM (torch's default fp16 matmul) — same tensor-core
-hardware on both sides, so the ratio is apples-to-apples vs cuBLAS. On sm_90+ the
-autotuner lands these on the swizzled s16816 ``mma_m16n8k16_f16_f32`` (ldmatrix +
-mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
-fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
-GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
-warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
-(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
-sweep). Ranking lives in ``search/prior/OfflinePrior`` (the ``D_*`` geometry
-features over ``features.knob_features``).
+Golden YAML is a persistence format, not a Python class discriminator.  Every
+record points at a stable Torch IR program in the same document and carries the
+target identity needed by search consumers directly as data.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+import re
+import tempfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from functools import cached_property
+from numbers import Real
 from pathlib import Path
 
 import yaml
 
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX
+from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
+from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
 
-# Qwen3-Embedding-0.6B linear dims (mirrors ``tests/perf/cases.py``).
-QWEN3_06B_HIDDEN = 1024  # hidden_size
-QWEN3_06B_INTER = 3072  # intermediate_size (gate / up / down)
-QWEN3_06B_Q_DIM = 2048  # fused Q-projection output (16 heads * 128)
-QWEN3_06B_KV_DIM = 1024  # fused K/V-projection output (8 heads * 128)
-
-
-def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = False) -> str:
-    """The torch expression a matmul golden config tunes / benches / reproduces.
-
-    Single source of truth: the autotune / repro paths feed this to
-    ``trace_inline_code`` (so the tuned graph *is* this expression), and each
-    config reproduces from the same call. fp32 is ``torch.randn``'s default, so
-    no dtype kwarg is emitted for fp32 — matching the canonical example
-    ``torch.matmul(torch.randn(2048,2048), torch.randn(2048,2048))``.
-
-    ``trans_b`` spells the **serving Linear layout** — B given ``(N, K)``,
-    contracted as ``x @ w.T`` via ``F.linear``. The traced contraction carries
-    ``b_trans``; the warp tier stages it like any canonical matmul (the
-    N-major B slab — cp.async / TMA fill it in the operand's own orientation,
-    the plain no-``.trans`` ldmatrix drains it), so the same ``STAGE``
-    spellings realize on both layouts. The measured µs still differ per layout
-    (different slab geometry and gmem walk), so a golden meant to decide a
-    serving fork must still be TUNED on this layout — a canonical-form entry
-    would deploy its config with a foreign µs."""
-    if dtype == "fp32":
-        if trans_b:
-            return f"torch.nn.functional.linear(torch.randn({M},{K}), torch.randn({N},{K}))"
-        return f"torch.matmul(torch.randn({M},{K}), torch.randn({K},{N}))"
-    tdt = {"fp16": "torch.float16", "bf16": "torch.bfloat16"}[dtype]
-    if trans_b:
-        return f"torch.nn.functional.linear(torch.randn({M},{K},dtype={tdt}), torch.randn({N},{K},dtype={tdt}))"
-    return f"torch.matmul(torch.randn({M},{K},dtype={tdt}), torch.randn({K},{N},dtype={tdt}))"
+_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
-def fast_math_knobs(knobs: dict) -> bool:
-    """Whether a realized knob dict carries a **precision-trading** realization — an
-    f16-accumulate mma atom on any ``TILE``-family value, or ``FAST_EXP: true``. This is the
-    golden entry's regime discriminator, DERIVED from the recorded knobs (never a stored flag,
-    which could drift from them): a fast-math entry is only reachable by an enumeration run
-    under the ``FAST_MATH`` / ``F16_MMA_F32_ACC`` gate, so regime-aware consumers (the
-    ``eval`` rank / reproduction views) pin the gate on before comparing against it. Replay
-    itself needs no gate — the recorded ``TILE`` pin is authoritative."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415 — keep module import-light
+class _FlowSequence(list):
+    """A YAML sequence rendered inline without changing the loaded schema."""
 
-    from .space import FAST_EXP  # noqa: PLC0415
 
-    for k, v in knobs.items():
-        if k.split("@", 1)[0] == "TILE" and is_warp_codec(str(v)):
+class _FlowMapping(dict):
+    """A YAML mapping rendered inline without changing the loaded schema."""
+
+
+class _GoldenDumper(yaml.SafeDumper):
+    pass
+
+
+_GoldenDumper.add_representer(
+    _FlowSequence,
+    lambda dumper, value: dumper.represent_sequence("tag:yaml.org,2002:seq", value, flow_style=True),
+)
+_GoldenDumper.add_representer(
+    _FlowMapping,
+    lambda dumper, value: dumper.represent_mapping("tag:yaml.org,2002:map", value, flow_style=True),
+)
+
+
+def _flow(value):
+    if isinstance(value, list):
+        return _FlowSequence(_flow(item) for item in value)
+    if isinstance(value, Mapping):
+        return _FlowMapping((key, _flow(item)) for key, item in value.items())
+    return value
+
+
+def _short_flow(value: object) -> bool:
+    if isinstance(value, Mapping):
+        if "__program__" in value:
+            return False
+        return len(repr(value)) <= 120 and all(_short_flow(item) for item in value.values())
+    if isinstance(value, list):
+        return len(repr(value)) <= 120 and all(_short_flow(item) for item in value)
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _style_wire_value(value):
+    if isinstance(value, Mapping):
+        if set(value) == {"__program__"}:
+            return {"__program__": _style_program(value["__program__"])}
+        styled = {key: _style_wire_value(item) for key, item in value.items()}
+        return _flow(styled) if _short_flow(value) else styled
+    if isinstance(value, list):
+        return [_style_wire_value(item) for item in value]
+    return value
+
+
+def _style_program(program: Mapping) -> dict:
+    styled_nodes = []
+    for source in program["nodes"]:
+        node = dict(source)
+        if "attrs" in node:
+            node["attrs"] = _style_wire_value(node["attrs"])
+        if "inputs" in node:
+            node["inputs"] = _flow(node["inputs"])
+        node["outputs"] = _flow(node["outputs"])
+        styled_nodes.append(node)
+    styled = {
+        "inputs": _flow(program["inputs"]),
+        "outputs": _flow(program["outputs"]),
+        "nodes": styled_nodes,
+    }
+    if "hints" in program:
+        styled["hints"] = _flow(program["hints"])
+    return styled
+
+
+class GoldenEntryState(StrEnum):
+    INVENTORY = "inventory"
+    PROPOSAL = "proposal"
+    VERIFIED = "verified"
+
+
+class GoldenFileValidation(StrEnum):
+    WORKING = "working"
+    PROMOTION = "promotion"
+    REPOSITORY = "repository"
+
+
+def fast_math_knobs(knobs: Mapping) -> bool:
+    """Whether recorded knobs select a precision-trading realization."""
+    from emmy.compiler.ir.schedule import TilePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import FAST_EXP  # noqa: PLC0415
+
+    for key, value in knobs.items():
+        spelling = str(value).strip()
+        if str(key).split("@", 1)[0] == "TILE" and spelling:
             try:
-                if TilePlan.parse(str(v)).atom.operand_dtype("c").nbytes == 2:
-                    return True
+                plan = TilePlan.parse(spelling, Workers(kind="warp", units=(1, 1)))
             except ValueError:
-                continue  # an unparseable historic spelling can't name an f16acc atom
-        if k == FAST_EXP.name and str(v).strip().casefold() in {"true", "1", "yes", "on"}:
+                plan = None
+            if plan is not None and plan.is_warp and plan.atom.operand_dtype("c").nbytes == 2:
+                return True
+        if key == FAST_EXP.name and spelling.casefold() in {"true", "1", "yes", "on"}:
             return True
     return False
 
 
-def _knobs_env(knobs: dict) -> str:
-    """Render a knobs dict as a ``EMMY_KNOBS`` value: ``TILE=n32x8/f4x26,STAGE=d2/tma``.
-
-    Structural-feature knobs (``STRUCT_PREFIX``) are dropped — a repro command
-    pins tuning decisions, not the kernel's structural identity. ``WARPSPEC`` (the pre-rebuild
-    boolean spelling still on old golden rows; the live codec is ``WSPEC``) rides through like
-    any other knob."""
-    return ",".join(f"{k}={v}" for k, v in knobs.items() if not k.startswith(STRUCT_PREFIX))
+def precision_trading_pins(pins: Mapping) -> bool:
+    """Whether input pins enable any precision-trading enumeration path."""
+    umbrella = bool(pins.get("FAST_MATH", False))
+    return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
-@dataclass(frozen=True, kw_only=True)
-class GoldenConfig:
-    """A kernel config measured within (or near) cuBLAS on a specific GPU.
+def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
+    """Derive a record key through the same offer-aware classifier as deployment.
 
-    Only the two raw latencies are stored; :attr:`ratio` and :attr:`golden`
-    derive from them so the record cannot drift out of sync.
+    Most targets classify completely from their stamped ``S_*`` histogram. Flash and
+    pre-split computed-A forks are the exceptions: deployment recognizes them from an
+    unmistakable schedule offer. A reviewed record stores the selected schedule prefix,
+    so an axis pair or ``d*/sync`` compute-fill carries that same signal without
+    serializing a derived ShapeKey.
     """
+    from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key  # noqa: PLC0415
 
-    name: str  # e.g. "square.2048" / "qwen3_06b.q_proj.s128"
-    gpu_name: str = "NVIDIA GeForce RTX 5090"
-    compute_cap: tuple[int, int] = (12, 0)
-    knobs: dict = field(default_factory=dict)  # dict(cuda_op.knobs), verbatim
-    emmy_us: float = 0.0
-    cublas_us: float = 0.0
-    dynamic: bool = False  # symbolic seq/row axis → masked-tile kernel (``.dynM`` name convention)
-    # HF model id whose serving graph this shape came from (e.g. ``google/gemma-4-12B``) —
-    # provenance, never part of any join key. Optional: a hand-picked benchmark shape has no
-    # model. Model-tagged entries are what ``eval golden --in-model`` audits (it re-traces the
-    # model's serving twins and checks each recorded golden still realizes in them).
-    model: str | None = None
+    base = dict(structural_features)
+    key = _fork_shape_key([{**base, **knobs}], base=base)
+    # ``PLACE@a`` names the computed-A subtree of a contraction. A statistic-bearing cone's
+    # histogram already classifies as fused, but a stat-free activation cone otherwise persists
+    # a plain key that cannot join the live tree's structural computed-A convention.
+    if key.kind == "" and "PLACE@a" in knobs:
+        key = replace(key, kind="fused", is_warp=True)
+    # Legacy dynamic-flash rows predate axis-keyed ``TILE@dd`` / ``TILE@pj`` knobs. Main's
+    # old fusion boundary left enough exp-family histogram on the consumer for ShapeKey's
+    # fallback classifier; gate-free fusion moves that histogram into the probability producer.
+    # The flash recognizer is the stronger fact, so target derivation stamps this marker when it
+    # certifies the consumer+producer unit. Keep those persisted rows on their stable flash key.
+    if structural_features.get("S_flash_certified"):
+        key = ShapeKey(
+            free_prod=key.free_prod,
+            reduce_max=0 if key.is_dyn else key.reduce_max,
+            is_warp=key.is_warp,
+            is_dyn=key.is_dyn,
+            kind="flash",
+        )
+    return key
+
+
+def golden_entry_state(entry: Mapping) -> GoldenEntryState:
+    has_knobs = "knobs" in entry
+    has_measurements = "measurements" in entry
+    if not has_knobs and not has_measurements:
+        return GoldenEntryState.INVENTORY
+    if has_knobs and not has_measurements:
+        return GoldenEntryState.PROPOSAL
+    if has_measurements and not has_knobs:
+        raise ValueError("measurements require knobs")
+    measurements = entry["measurements"]
+    if not isinstance(measurements, Mapping):
+        raise ValueError("measurements must be a mapping")
+    required = {"emmy_us", "reference_us", "reference_backend"}
+    missing = required - set(measurements)
+    if missing:
+        raise ValueError(f"measurements missing {', '.join(sorted(missing))}")
+    return GoldenEntryState.VERIFIED
+
+
+@dataclass(frozen=True)
+class GoldenRecord:
+    name: str
+    gpu_name: str
+    compute_cap: tuple[int, int]
+    model: str | None
+    program_index: int
+    program_wire: dict
+    origins: tuple[str, ...]
+    bindings: tuple[tuple[str, int], ...]
+    pins: tuple[tuple[str, object], ...]
+    knobs: dict
+    measurements: dict | None
+    ranking: dict | None
+    loop_index: int | None = None
+    loop_wire: dict | None = None
+
+    @cached_property
+    def program(self):
+        """Decode the stable Torch IR payload once per embedded program."""
+        key = id(self.program_wire)
+        cached = _PROGRAM_GRAPH_CACHE.get(key)
+        if cached is None or cached[0] is not self.program_wire:
+            graph = graph_from_wire(self.program_wire)
+            _PROGRAM_GRAPH_CACHE[key] = (self.program_wire, graph)
+            return graph
+        return cached[1]
+
+    @cached_property
+    def target_program(self):
+        """Derive the disposable standalone program selected by this record."""
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
+
+        if self.loop_wire is not None:
+            key = id(self.loop_wire)
+            cached = _LOOP_GRAPH_CACHE.get(key)
+            if cached is None or cached[0] is not self.loop_wire:
+                graph = loop_graph_from_wire(self.loop_wire)
+                _LOOP_GRAPH_CACHE[key] = (self.loop_wire, graph)
+            else:
+                graph = cached[1]
+            return specialize_program(graph, dict(self.bindings), loop=True)
+
+        from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
+
+        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
+        return specialize_program(graph, dict(self.bindings))
+
+    @property
+    def target_key(self) -> tuple:
+        """Document-local identity shared by candidate rows for one target."""
+        return ("loop", self.loop_index) if self.loop_index is not None else ("origins", *self.origins)
+
+    @property
+    def binding_map(self) -> dict[str, int]:
+        return dict(self.bindings)
+
+    @property
+    def pin_map(self) -> dict[str, object]:
+        return dict(self.pins)
+
+    @cached_property
+    def shape_key(self) -> ShapeKey:
+        """Deployment join key derived by lowering the stable frontend target."""
+        return _golden_shape_key(self.structural_features, self.knobs)
+
+    @cached_property
+    def structural_features(self) -> dict[str, float]:
+        """Current compiler features, derived lazily through target provenance."""
+        return dict(_derive_structural_features(self))
+
+    @cached_property
+    def origin_ops(self) -> tuple[str, ...]:
+        if not self.origins:
+            return ()
+        by_id = {node["id"]: node["op"] for node in self.program_wire["nodes"]}
+        return tuple(by_id[origin] for origin in self.origins)
+
+    @cached_property
+    def dtype(self) -> str:
+        """Public dtype spelling derived from the selected frontend operation."""
+        if self.loop_wire is not None:
+            graph = self.target_program
+            tensor = graph.buffer(graph.outputs[0])
+            if tensor is None:
+                raise ValueError(f"{self.name}: Loop IR target has no output tensor")
+            output_dtype = tensor.dtype.name
+            return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
+        by_id = {node["id"]: node for node in self.program_wire["nodes"]}
+        order = {node["id"]: index for index, node in enumerate(self.program_wire["nodes"])}
+        terminal = max(self.origins, key=order.__getitem__)
+        output_dtype = by_id[terminal]["outputs"][0][1]
+        return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
+
+    @property
+    def is_matmul(self) -> bool:
+        """Whether this target is a plain frontend contraction."""
+        return self.shape_key.kind == "" and any(op in {"torch.matmul", "torch.linear"} for op in self.origin_ops)
+
+    @property
+    def emmy_us(self) -> float:
+        return float(self.measurements["emmy_us"]) if self.measurements else 0.0
+
+    @property
+    def reference_us(self) -> float:
+        return float(self.measurements["reference_us"]) if self.measurements else 0.0
+
+    @property
+    def reference_backend(self) -> str | None:
+        return str(self.measurements["reference_backend"]) if self.measurements else None
 
     @property
     def ratio(self) -> float:
-        """cuBLAS latency / emmy latency — 1.0 means parity, >1 means faster."""
-        return self.cublas_us / self.emmy_us if self.emmy_us else 0.0
+        return self.reference_us / self.emmy_us if self.emmy_us else 0.0
 
     @property
     def golden(self) -> bool:
-        """Within 95% of cuBLAS or better."""
         return self.ratio >= 0.95
 
     @property
-    def fast_math(self) -> bool:
-        """Whether this entry's recorded knobs carry a precision-trading realization
-        (:func:`fast_math_knobs`) — the golden's REGIME. A shape may carry a standard entry and
-        a fast-math entry side by side under one ``name`` (names are non-unique by design); the
-        regime-aware consumers compare each against its own regime's enumeration."""
-        return fast_math_knobs(self.knobs)
+    def is_routing(self) -> bool:
+        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+
+    @property
+    def dynamic(self) -> bool:
+        return self.shape_key.is_dyn
 
     @property
     def sm_count(self) -> int | None:
-        """The recording card's SM count, from the common GPU registry (by
-        :attr:`gpu_name`) — ``None`` if the GPU isn't registered. This is what makes
-        a same-``compute_cap`` pair distinguishable (RTX 5090 = 170 vs RTX PRO 6000
-        = 188 SMs); :meth:`~...data.sample.Sample.from_golden` threads it into the
-        reconstructed context so the golden featurizes with its own card's regime,
-        not the live device's."""
         from emmy import gpu  # noqa: PLC0415
 
         spec = gpu.by_name(self.gpu_name)
         return spec.sm_count if spec else None
 
-    def _require_dynamic_hint(self, axis_size: int) -> None:
-        """A dynamic golden's symbolic axis is tiled / benched at the GLOBAL ``Dim`` hint, so its
-        traced size must equal ``DEFAULT_SEQ_HINT`` — otherwise it silently measures a different
-        shape than the one recorded. Each kind calls this from ``__post_init__`` with its seq/row axis."""
-        if not self.dynamic:
-            return
-        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415 — int constant, import stays light
 
-        if axis_size != DEFAULT_SEQ_HINT:
-            raise ValueError(
-                f"{self.name}: a dynamic golden's symbolic axis (traced size {axis_size}) must equal "
-                f"DEFAULT_SEQ_HINT ({DEFAULT_SEQ_HINT}); the pipeline benches a symbolic axis at the hint"
-            )
-
-    def dynamic_specs(self) -> list[str]:
-        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer — empty when static.
-        Each kind overrides with the axis(es) of its snippet's inputs that go symbolic."""
-        return []
-
-    def flops(self) -> float | None:
-        """A NEVER-OVERESTIMATED FLOP count for this config's benched problem (the config's
-        traced sizes — a dynamic golden's symbolic axis is sized at the hint it benches at, so
-        no hint multiplier is ever needed). Feeds the arithmetic-intensity floor gate
-        (``run``'s ``_intensity_floor_flag``): the floor flags a bench whose implied FLOP/s
-        exceeds the device peak, so an OVERestimate false-fires on a correct bench — the exact
-        bug this method retires (the old ShapeKey reconstruction multiplied the hint onto
-        reduce-tier dyn keys whose ``free_prod`` already includes the symbolic axis, a 512×
-        overcount flagging every reduce-tier ``.dynM`` replay "impossible"). ``None`` = the
-        kind is ungateable."""
-        return None
+def _require_keys(value: Mapping, allowed: set[str], where: str) -> None:
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
 
 
-@dataclass(frozen=True, kw_only=True)
-class MatmulGoldenConfig(GoldenConfig):
-    """A golden config for a 2-D matmul ``(M, K) @ (K, N)``.
-
-    When ``dynamic: true``, the M axis (``x0``, the lhs rows / seq) is symbolic: the shape
-    compiles as a masked-tile kernel and M doubles as the ``Dim`` hint it is sized / benched at
-    (so M must equal ``DEFAULT_SEQ_HINT``). A dynamic golden is a different deployment artifact
-    than its static twin (boundary guards, masked tiers), so it gets its own ``.dynM`` name and
-    is never merged with the static config. Only the M axis may be symbolic today (symbolic
-    K/N is future work, kept out of the schema until the lowering exists)."""
-
-    M: int
-    N: int
-    K: int
-    dtype: str = "fp32"
-    # The serving Linear layout: B given (N, K), contracted as ``x @ w.T`` (``F.linear``).
-    # The warp tier stages this layout too (the N-major B slab; see ``matmul_snippet``), so
-    # the same STAGE spellings realize on both layouts — but the measured µs differ per
-    # layout, so a golden meant to decide a served model's linear fork must still be tuned
-    # with this on. Same ShapeKey either way: layout twins coexist under one shape and the
-    # shared bucket sorts by µs.
-    # CAVEAT (ordering-protected): with staging realizable on EITHER layout, a stale or
-    # missing twin lets the other layout's entry deploy its config with a foreign µs; the
-    # real fix is a layout signal in the stamped ``S_*`` features + this key, which does not
-    # exist yet. Until then, keep BOTH layout twins recorded and current together.
-    trans_b: bool = False
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-
-    def snippet(self) -> str:
-        """The torch expression this config tunes / benches / reproduces."""
-        return matmul_snippet(self.M, self.N, self.K, self.dtype, self.trans_b)
-
-    def shape_key(self):
-        """This config's :class:`~emmy.compiler.pipeline.search.data.ShapeKey` —
-        the single golden-side join key. Import deferred to keep this module import-light."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        return ShapeKey.from_matmul(self.M, self.N, self.K, self.dtype, dynamic=self.dynamic)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x0:0"] if self.dynamic else []
-
-    def flops(self) -> float:
-        return 2.0 * self.M * self.N * self.K  # exact; M is the benched hint when dynamic
-
-    def repro_command(self, ir: str = "cuda") -> str:
-        """A runnable ``emmy`` command that rebuilds this config's kernel.
-
-        e.g. ``EMMY_KNOBS="TILE=n32x8/f4x26,STAGE=d2/tma" emmy compile -c "torch.matmul(...)" --ir cuda``
-        """
-        dyn = "".join(f" --dynamic {s}" for s in self.dynamic_specs())
-        return f'EMMY_KNOBS="{_knobs_env(self.knobs)}" emmy compile -c "{self.snippet()}"{dyn} --ir {ir}'
+def _positive_number(value, where: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real) or value <= 0:
+        raise ValueError(f"{where} must be a positive number")
 
 
-@dataclass(frozen=True, kw_only=True)
-class ReduceGoldenConfig(GoldenConfig):
-    """A golden config for a row-reduce ``(M, K) → (M,)`` (``torch.sum(dim=-1)``).
-
-    The good config is cooperative: ``BR > 1`` threads reduce each row in parallel
-    (then a WarpShuffle / TreeHalve combine), so the prior must rank cooperative
-    ``BR`` above the serial ``BR=1`` tile — the signal the matmul-only fit lacked.
-    Enumerated by ``priority_mode="reduce"`` (``E_N=1``, free=M, reduce=K)."""
-
-    M: int
-    K: int
-    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        return f"torch.sum(torch.randn({self.M},{self.K}),dim=-1)"
-
-    def flops(self) -> float:
-        return float(self.M * self.K)  # one add per element
-
-    def shape_key(self):
-        """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
-        matching what ``992_stamp_structural_features`` stamps on the reduce kernel.
-        The dynamic twin excludes the symbolic M (the ``(M,) → ()`` free product collapses
-        to 1) and drops the aspect — the stamped-op convention every dynamic key follows;
-        the pre-fix ``free_prod=M`` dynamic key could never join a stamped symbolic reduce
-        (observed on the GeGLU cut's ``__stat`` fragment)."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = 1 if self.dynamic else self.M
-        fm = 0 if self.dynamic else self.M
-        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=fm)
-
-
-@dataclass(frozen=True, kw_only=True)
-class PointwiseGoldenConfig(GoldenConfig):
-    """A golden config for an elementwise map ``(M, N) → (M, N)`` (``torch.relu``).
-
-    Memory-bound: the good config is a wide coalesced tile (large ``BN`` / ``FM``,
-    no reduce). Enumerated by ``priority_mode="pointwise"`` (``E_K=1``, free=M·N)."""
-
-    M: int
-    N: int
-    dtype: str = "fp32"  # fp16/bf16 join the model's half-precision pointwise forks (is_warp=True keys)
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        return f"torch.relu(torch.randn({self.M},{self.N}{tdt}))"
-
-    def flops(self) -> float:
-        return float(self.M * self.N)  # one op per element
-
-    def shape_key(self):
-        """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
-        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent);
-        the dynamic twin excludes the symbolic M (and drops the aspect, the ``kind=""``
-        dynamic-key convention)."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.N if self.dynamic else self.M * self.N
-        fm = 0 if self.dynamic else max(self.M, self.N)
-        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
-
-
-@dataclass(frozen=True, kw_only=True)
-class RmsNormGoldenConfig(GoldenConfig):
-    """A golden config for RMSNorm ``(M, K) → (M, K)`` (``torch.nn.RMSNorm(K)``).
-
-    RMSNorm is a ``Map(body=sweep, source=Reduction)``: a per-row mean-of-squares reduce
-    over ``K`` feeds an rsqrt that rescales every element of the row (the ``k_rms_norm``
-    kernel). It is reduce-tier — the good config reduces each row cooperatively
-    (``REDUCE`` coop>1), so it shares the reduce regime's arithmetic key (free=M, reduce=K)
-    and ``priority_mode="reduce"`` enumeration. The reference is ``torch.nn.RMSNorm`` eager
-    (fp32), so the ratio compares emmy's fused norm against PyTorch's, not cuBLAS."""
-
-    M: int
-    K: int
-    dtype: str = "fp32"  # snippet is fp32; recorded so Sample.from_golden is kind-agnostic
-    # Per-head norms (a model's q/k-norm over head_dim) keep the head axis as a STATIC free
-    # dim beside the symbolic token axis: the op is ``(M, heads, K) → (M, heads, K)`` with
-    # only M symbolic, so the dynamic key's free product is ``heads*K`` — a 2-D snippet can
-    # never join it (its dynamic free is just ``K``). ``heads=1`` is the plain row norm.
-    # Static per-head twins may fold heads into M (same key) or spell it — both join.
-    heads: int = 1
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        dims = f"{self.M},{self.heads},{self.K}" if self.heads > 1 else f"{self.M},{self.K}"
-        return f"torch.nn.RMSNorm({self.K})(torch.randn({dims}))"
-
-    def flops(self) -> float:
-        return 2.0 * self.M * self.heads * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
-
-    def shape_key(self):
-        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M[, heads], K)`` —
-        the sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
-        extent (``free_prod = M*heads*K``, measured off the stamped op; the old ``free_prod = M`` never
-        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M (keeping the
-        static ``heads`` axis — the per-head q/k-norm join)."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.heads * self.K if self.dynamic else self.M * self.heads * self.K
-        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
-
-
-@dataclass(frozen=True, kw_only=True)
-class LinearNormGoldenConfig(GoldenConfig):
-    """A whole-pair golden for the ROW-STAT SINK decision (``PLACE@stat`` —
-    ``025_sink_row_reduce``): ``F.linear(x, w)`` + a trailing ``F.rms_norm`` (+ residual add for
-    the post-attn form), the producer→norm pair whose statistic can migrate into the producer's
-    epilogue. The snippet builds the PAIR so a seeding A/B measures the sink's true e2e effect
-    (producer epilogue + memset + the norm dropping to a wide pointwise sweep).
-
-    The recorded row lives at the NORM's fork (``shape_key`` mirrors
-    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``) and records
-    ``knobs: {PLACE@stat: 'sink'}`` alone (the cut convention: the realizer re-emits the sweep,
-    so the representative row's own schedule is discarded). Two ordering facts make per-site
-    selection work with no re-anchoring: ``_golden_matches_row`` REFUSES a ``PLACE``-bearing
-    golden at a fork whose rows never offered the element (an input-norm fork falls through to
-    the plain ``rms_norm`` coop anchor at the same key), and ``emmy_us`` records the fork's OWN
-    realized kernel (the ~1 µs post-sink sweep, NOT the pair total) so the sink row sorts ahead
-    of that coop anchor and is tried first exactly where the offer exists. ``cublas_us`` records
-    the LOCAL-stat baseline (the coop kernel the sink replaces), so ``ratio`` reads as the
-    per-kernel rescue. The pair-level e2e verdict that justifies seeding lives in the seeding
-    session's findings, not in the row."""
-
-    M: int
-    K: int  # the norm width (= the linear's output N)
-    H: int  # the linear's contraction extent
-    dtype: str = "fp16"
-    trans_b: bool = False  # serving F.linear layout for the producer matmul
-    residual: bool = False  # the post-attn form: norm(linear(x)) + r
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-        if self.knobs and "PLACE@stat" not in self.knobs:
-            raise ValueError(
-                f"linear_norm golden {self.name!r} must record the PLACE@stat placement — a stampless row would "
-                f"shadow the plain rms_norm anchors at the same ShapeKey"
-            )
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        w_decl = f"w = torch.randn({self.K},{self.H}{tdt})\n" if self.trans_b else f"w = torch.randn({self.H},{self.K}{tdt})\n"
-        lin = "F.linear(x, w)" if self.trans_b else "x @ w"
-        r_decl = f"r = torch.randn({self.M},{self.K}{tdt})\n" if self.residual else ""
-        tail = " + r" if self.residual else ""
-        x_decl = f"x = torch.randn({self.M},{self.H}{tdt})\n"
-        return f"nw = torch.randn({self.K}{tdt})\n{w_decl}{r_decl}{x_decl}F.rms_norm({lin}, ({self.K},), nw){tail}"
-
-    def flops(self) -> float:
-        return 2.0 * self.M * self.K * self.H  # the producer contraction dominates; the norm sweep is extra
-
-    def shape_key(self):
-        """Keys the NORM kernel's fork — identical to the plain row norm's key
-        (:class:`RmsNormGoldenConfig` with ``heads=1``): the sweep's output is ``(M, K)`` so
-        ``free_prod = M*K``, reduce ``K``, ``is_warp=False``, ``kind="rms_norm"``."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.K if self.dynamic else self.M * self.K
-        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
-
-
-def _require_cone_anchor(cfg) -> None:
-    """Schema guard for the fused computed-A kinds (``NormLinearGoldenConfig`` /
-    ``MlpGeGluGoldenConfig``): a RECORDED entry (non-empty knobs) must anchor itself to the cone
-    fork — a ``d*/sync`` STAGE (the compute-fill only a computed-A contraction offers) or the
-    explicit ``PLACE@cone: cut`` placement (guarded by ``_golden_matches_row``'s PLACE rule).
-    The deploy join's over-fire safety rests on "a fused golden's config can't realize on a
-    plain gmem-A matmul"; an entry recorded with a gmem-direct STAGE plus plain warp tiles WOULD
-    realize there, deploying a cross-family config with its foreign µs — enforce the data
-    convention at load, like the flash pin-form guard. Key-only instances (empty knobs — key
-    computations and fixtures) are exempt."""
-    if not cfg.knobs:
+def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
+    where = f"configs[{index}].target"
+    if not isinstance(target, Mapping):
+        raise ValueError(f"{where} must be a mapping")
+    _require_keys(target, {"origins", "loop"}, where)
+    if set(target) == {"origins"}:
+        origins = target["origins"]
+        if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
+            raise ValueError(f"{where}.origins must be a non-empty list of node ids")
+        node_ids = {node["id"] for node in program_wire["nodes"]}
+        missing_origins = set(origins) - node_ids
+        if missing_origins:
+            raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
         return
-    knobs = {str(k): str(v) for k, v in cfg.knobs.items()}
-    if knobs.get("PLACE@cone") == "cut":
+    if set(target) == {"loop"}:
+        loop_ref = target["loop"]
+        if isinstance(loop_ref, bool) or not isinstance(loop_ref, int) or not 0 <= loop_ref < len(loops):
+            raise ValueError(f"{where}.loop does not resolve in this document: {loop_ref!r}")
         return
-    if any(k.split("@", 1)[0] == "STAGE" and "sync" in v.split("/") for k, v in knobs.items()):
-        return
-    raise ValueError(
-        f"golden {cfg.name!r}: a fused computed-A entry must record a d*/sync STAGE or PLACE@cone: cut — "
-        f"its config would otherwise realize on a plain gmem-A matmul fork of coincident extents "
-        f"(cross-family deploy); got knobs {cfg.knobs!r}"
+    raise ValueError(f"{where} must contain exactly one of origins or loop")
+
+
+def validate_golden_file(
+    document: object,
+    *,
+    validation: GoldenFileValidation = GoldenFileValidation.WORKING,
+) -> None:
+    if not isinstance(document, Mapping):
+        raise ValueError("golden document must be a mapping")
+    _require_keys(
+        document,
+        {"gpu_name", "compute_cap", "model", "model_quant_digest", "programs", "loops", "configs"},
+        "golden document",
+    )
+    gpu_name = document.get("gpu_name")
+    if gpu_name is not None and (not isinstance(gpu_name, str) or not gpu_name):
+        raise ValueError("gpu_name must be a non-empty string")
+    cap = document.get("compute_cap")
+    if not isinstance(cap, list) or len(cap) != 2 or not all(isinstance(item, int) for item in cap):
+        raise ValueError("compute_cap must be a two-integer list")
+    if validation == GoldenFileValidation.REPOSITORY and not gpu_name:
+        raise ValueError("repository golden requires gpu_name")
+    if document.get("model") is not None and not isinstance(document["model"], str):
+        raise ValueError("model must be a string")
+    quant_digest = document.get("model_quant_digest")
+    if quant_digest is not None and (not isinstance(quant_digest, str) or re.fullmatch(r"[0-9a-f]{16}", quant_digest) is None):
+        raise ValueError("model_quant_digest must be a 16-character lowercase hexadecimal digest")
+    try:
+        programs = validate_program_pool(document.get("programs"))
+    except ValueError as exc:
+        raise ValueError(f"programs: {exc}") from exc
+    try:
+        loops = validate_loop_program_pool(document.get("loops"))
+    except ValueError as exc:
+        raise ValueError(f"loops: {exc}") from exc
+    configs = document.get("configs")
+    if not isinstance(configs, list) or not configs:
+        raise ValueError("configs must be a non-empty list")
+    strict = validation in (GoldenFileValidation.PROMOTION, GoldenFileValidation.REPOSITORY)
+    for index, entry in enumerate(configs):
+        where = f"configs[{index}]"
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"{where} must be a mapping")
+        _require_keys(entry, {"model", "program", "target", "realizations"}, where)
+        if entry.get("model") is not None and not isinstance(entry["model"], str):
+            raise ValueError(f"{where}.model must be a string")
+        program_ref = entry.get("program")
+        if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
+            raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
+        try:
+            graph_from_wire(programs[program_ref])
+        except ValueError as exc:
+            raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+        _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
+        realizations = entry.get("realizations")
+        if not isinstance(realizations, list) or not realizations:
+            raise ValueError(f"{where}.realizations must be a non-empty list")
+        for realization_index, realization in enumerate(realizations):
+            realization_where = f"{where}.realizations[{realization_index}]"
+            if not isinstance(realization, Mapping):
+                raise ValueError(f"{realization_where} must be a mapping")
+            _require_keys(realization, {"name", "bindings", "pins", "knobs", "measurements", "ranking"}, realization_where)
+            if not isinstance(realization.get("name"), str) or not realization["name"]:
+                raise ValueError(f"{realization_where}.name must be a non-empty string")
+            bindings = realization.get("bindings")
+            if not isinstance(bindings, Mapping):
+                raise ValueError(f"{realization_where}.bindings must be a mapping")
+            for name, size in bindings.items():
+                if not isinstance(name, str) or not name or type(size) is not int or size <= 0:
+                    raise ValueError(f"{realization_where}.bindings must map non-empty names to positive integers")
+            pins = realization.get("pins")
+            if not isinstance(pins, Mapping):
+                raise ValueError(f"{realization_where}.pins must be a mapping")
+            from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
+
+            for name, value in pins.items():
+                descriptor = get(family_of(name)) if isinstance(name, str) and name else None
+                if descriptor is None:
+                    raise ValueError(f"{realization_where}.pins names unknown knob {name!r}")
+                valid = {
+                    KnobType.BOOL: type(value) is bool,
+                    KnobType.INT: type(value) is int,
+                    KnobType.STR: isinstance(value, str),
+                    KnobType.BINMASK: type(value) is int or isinstance(value, str),
+                }[descriptor.type]
+                if not valid:
+                    raise ValueError(f"{realization_where}.pins.{name} must be a {descriptor.type.value} value, got {value!r}")
+            if "knobs" in realization and not isinstance(realization["knobs"], Mapping):
+                raise ValueError(f"{realization_where}.knobs must be a mapping")
+            if "knobs" in realization:
+                from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+
+                conflicts = [
+                    name
+                    for name, value in pins.items()
+                    if name in realization["knobs"] and not values_equal(name, value, realization["knobs"][name])
+                ]
+                if conflicts:
+                    raise ValueError(
+                        f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
+                    )
+                families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
+                if "PLACE" in families and families != {"PLACE"}:
+                    raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
+                if strict:
+                    for family in families:
+                        scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
+                        if family in scoped and any("@" in key for key in scoped):
+                            raise ValueError(
+                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys; "
+                                "repository goldens must store one schedule spelling per family"
+                            )
+            if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
+                raise ValueError(f"{realization_where}.ranking must be a mapping")
+            if strict and "ranking" in realization:
+                raise ValueError(f"{realization_where} working ranking metadata cannot be promoted")
+            try:
+                state = golden_entry_state(realization)
+            except ValueError as exc:
+                raise ValueError(f"{realization_where} ({realization.get('name', '?')}): {exc}") from exc
+            if strict and state != GoldenEntryState.VERIFIED:
+                raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
+            if state == GoldenEntryState.VERIFIED:
+                measurements = realization["measurements"]
+                _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
+                _positive_number(measurements["emmy_us"], f"{realization_where}.measurements.emmy_us")
+                _positive_number(measurements["reference_us"], f"{realization_where}.measurements.reference_us")
+                if not isinstance(measurements["reference_backend"], str) or not measurements["reference_backend"]:
+                    raise ValueError(f"{realization_where}.measurements.reference_backend must be a non-empty string")
+
+
+def load_golden_file(
+    path: str | Path,
+    *,
+    validation: GoldenFileValidation = GoldenFileValidation.WORKING,
+) -> dict:
+    source = Path(path)
+    try:
+        document = yaml.load(source.read_text(), Loader=_SAFE_LOADER)
+        validate_golden_file(document, validation=validation)
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        raise ValueError(f"invalid golden file {source}: {exc}") from exc
+    return document
+
+
+def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Mapping) -> GoldenRecord:
+    target = entry["target"]
+    loop_index = target.get("loop")
+    return GoldenRecord(
+        name=realization["name"],
+        gpu_name=document.get("gpu_name") or "",
+        compute_cap=tuple(document["compute_cap"]),
+        model=entry.get("model", document.get("model")),
+        program_index=entry["program"],
+        program_wire=document["programs"][entry["program"]],
+        origins=tuple(target.get("origins", ())),
+        bindings=tuple(sorted(realization["bindings"].items())),
+        pins=tuple(sorted(realization["pins"].items())),
+        loop_index=loop_index,
+        loop_wire=document.get("loops", [])[loop_index] if loop_index is not None else None,
+        knobs=dict(realization.get("knobs") or {}),
+        measurements=dict(realization["measurements"]) if realization.get("measurements") is not None else None,
+        ranking=dict(realization["ranking"]) if realization.get("ranking") is not None else None,
     )
 
 
-@dataclass(frozen=True, kw_only=True)
-class NormLinearGoldenConfig(GoldenConfig):
-    """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
-    ``rms_norm(x, (H,))·nw @ W`` in ONE mma kernel (``(M, H) → (M, N)``).
-
-    This is the single-channel computed-A ``Contraction`` (``010_recognize``'s
-    ``bind_prologue_contraction`` merge): the per-row RMSNorm statistic rides the A cone as a
-    ``sync`` compute-fill prologue and the warp mma rows contract the scaled A against ``W`` — a
-    different kernel family than the bare ``mlp_gate_up`` matmul (which round-trips ``xn`` through
-    gmem) or a bare ``rms_norm`` sweep. It stamps LIKE an RMSNorm sweep (rsqrt, a sweep loop nest)
-    but with a SECOND reduce axis — the contraction — beside the statistic reduce, so its
-    :class:`ShapeKey` carries ``kind="fused"`` (``S_ext_n_reduce_axis >= 2``), keeping it off both
-    the ``rms_norm`` and the ``mlp_gate_up`` matmul goldens. The reference is torch's UNFUSED
-    decomposition (``F.rms_norm`` eager + ``@``), so the ratio compares emmy's one fused mma against
-    PyTorch's norm-then-matmul. Its ONLY realizable configs are the sync compute-fill tiles
-    (``d1/d2/sync``, no ``d2/tma/ring``) — record the tuned twin's ``record_knobs`` verbatim.
-
-    The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares ``kind="fused"`` but is a distinct
-    snippet — see :class:`MlpGeGluGoldenConfig` (both matmuls must share ONE RMSNorm output, which a
-    lambda binding — ``(lambda r: f(r@Wg)*(r@Wu))(rms_norm(x))`` — expresses; a preamble ``xn = ...``
-    would precompute it to a constant and inlining ``rms(x)`` twice traces two un-shared norms)."""
-
-    M: int
-    H: int
-    N: int
-    dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16); fp32 has no fused form
-    # The serving Linear layout: W given ``(N, H)``, contracted via ``F.linear`` — the fused edge a
-    # SERVED model actually deploys (its ``b_trans`` channels stage N-major under the sync
-    # transport's async fills). Same layout-blind ShapeKey as the canonical twin
-    # (:class:`MatmulGoldenConfig.trans_b`'s caveat applies): keep BOTH layout twins recorded.
-    trans_b: bool = False
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-        _require_cone_anchor(self)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        w_decl = f"w = torch.randn({self.N},{self.H}{tdt})\n" if self.trans_b else f"w = torch.randn({self.H},{self.N}{tdt})\n"
-        contract = f"F.linear(F.rms_norm(x,({self.H},),nw), w)" if self.trans_b else f"F.rms_norm(x,({self.H},),nw) @ w"
-        return f"nw = torch.randn({self.H}{tdt})\n{w_decl}x = torch.randn({self.M},{self.H}{tdt})\n{contract}"
-
-    def flops(self) -> float:
-        return 2.0 * self.M * self.N * self.H  # the contraction; the norm/rsqrt prologue is extra (stays an underestimate)
-
-    def shape_key(self):
-        """Keys the stamped computed-A fused op (``kind="fused"``): the output is ``(M, N)`` so
-        ``free_prod = M*N``, the reduce is the contraction extent ``H`` (the statistic reduce shares
-        ``H``); the dynamic twin excludes the symbolic M. ``is_warp`` is always True — a computed-A
-        contraction is a warp mma even though its f32 statistic constants would flip the stamp's
-        dtype signal (:meth:`ShapeKey.from_s_features` forces it for the kind)."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.N if self.dynamic else self.M * self.N
-        return ShapeKey(
-            free_prod=free,
-            reduce_max=self.H,
-            is_warp=True,
-            is_dyn=self.dynamic,
-            kind="fused",
-            # The aspect, so 32x4096 (local norm->q) and 256x512 (global norm->kv) — equal
-            # in free_prod AND reduce — stay distinct keys. Matches the op's stamped
-            # ``S_ext_free_max``; dynamic keys normalize it away in ``__post_init__``.
-            free_max=0 if self.dynamic else max(self.M, self.N),
-        )
+def load_golden_records(document: Mapping) -> list[GoldenRecord]:
+    return [
+        golden_record_from_entry(document, entry, realization) for entry in document["configs"] for realization in entry["realizations"]
+    ]
 
 
-@dataclass(frozen=True, kw_only=True)
-class MlpGeGluGoldenConfig(GoldenConfig):
-    """The fused RMSNorm→gate⊗up→GeGLU **multi-channel computed-A** megakernel:
-    ``gelu(rms_norm(x)·nw @ Wg) * (rms_norm(x)·nw @ Wu)`` in ONE mma kernel (``(M, H) → (M, inter)``).
-
-    The MLP hot kernel gemma-4 actually deploys (``k_linear_mean_reduce``): the gate and up matmuls
-    are ⊗-fold CHANNELS sharing ONE compute-filled A slab (one ldmatrix'd A fragment feeding per-fold
-    B slabs / C fragments), the per-row RMSNorm statistic rides the A cone as a ``sync`` compute-fill
-    prologue, and the GeGLU ⊗-combine rides the store's fragment epilogue. It shares
-    :class:`NormLinearGoldenConfig`'s ``kind="fused"`` (rsqrt + a second reduce axis) but keys on the
-    ``(M, inter)`` OUTPUT (``free_prod = M*inter``, reduce ``H``) — the geglu collapses the two channels
-    to one inter-wide output. The snippet binds the shared ``rms_norm`` via a lambda (a torch expression
-    cannot otherwise share it — a preamble precomputes, inlining duplicates). gemma-4 uses GeGLU
-    (tanh-approx gelu), not SwiGLU. The reference is torch's UNFUSED decomposition, so the ratio compares
-    emmy's one fused mma against PyTorch's norm→2 matmuls→gelu→multiply. Only the sync compute-fill tiles
-    realize (``d1/d2/sync``); record the tuned twin's ``record_knobs`` verbatim."""
-
-    M: int
-    H: int
-    inter: int
-    dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16)
-    # The serving Linear layout (gate/up given ``(inter, H)``, contracted via ``F.linear``) — see
-    # :class:`NormLinearGoldenConfig.trans_b`; keep BOTH layout twins recorded.
-    trans_b: bool = False
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-        _require_cone_anchor(self)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        shape = f"{self.inter},{self.H}" if self.trans_b else f"{self.H},{self.inter}"
-        combine = (
-            "(lambda r: F.gelu(F.linear(r, wg), approximate='tanh') * F.linear(r, wu))"
-            if self.trans_b
-            else "(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))"
-        )
-        return (
-            f"wg = torch.randn({shape}{tdt})\n"
-            f"wu = torch.randn({shape}{tdt})\n"
-            f"nw = torch.randn({self.H}{tdt})\n"
-            f"x = torch.randn({self.M},{self.H}{tdt})\n"
-            f"{combine}(F.rms_norm(x,({self.H},),nw))"
-        )
-
-    def flops(self) -> float:
-        return 4.0 * self.M * self.inter * self.H  # two K-contractions (gate + up) of the shared A; norm/gelu extra
-
-    def shape_key(self):
-        """Keys the stamped multi-channel computed-A fused op (``kind="fused"``): the GeGLU output is
-        ``(M, inter)`` so ``free_prod = M*inter``, the reduce is the shared contraction extent ``H``;
-        the dynamic twin excludes the symbolic M. ``is_warp`` is always True (a computed-A contraction
-        is a warp mma — :meth:`ShapeKey.from_s_features` forces it for the kind)."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.inter if self.dynamic else self.M * self.inter
-        return ShapeKey(
-            free_prod=free,
-            reduce_max=self.H,
-            is_warp=True,
-            is_dyn=self.dynamic,
-            kind="fused",
-            free_max=0 if self.dynamic else max(self.M, self.inter),  # aspect — see NormLinearGoldenConfig
-        )
+_STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
+_PROGRAM_TARGET_CACHE: dict[
+    tuple[int, tuple[int, int], str, tuple[tuple[str, int], ...]],
+    dict[frozenset[str], set[tuple[tuple[str, float], ...]]],
+] = {}
 
 
-@dataclass(frozen=True, kw_only=True)
-class SoftmaxGoldenConfig(GoldenConfig):
-    """Row-softmax ``(M, K) → (M, K)`` over the last axis (``torch.softmax(dim=-1)``).
+def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
+    """Lower one persisted frontend target and recover its unique ``S_*`` row."""
+    payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
+    key = (payload_id, record.target_key, record.compute_cap, record.bindings)
+    cached = _STRUCTURAL_CACHE.get(key)
+    if cached is not None:
+        return cached
 
-    A twisted Reduction (max / exp / sum) + a normalize sweep — the ``k_softmax`` kernel.
-    Reduce-tier: free rows ``(M,)``, reduce extent ``K``, cooperative ``REDUCE`` over ``K``. The
-    reference is torch softmax eager (fp32), so the ratio compares emmy's fused softmax vs PyTorch."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
 
-    M: int
-    K: int
-    dtype: str = "fp32"
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.M)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x:0"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        return f"torch.softmax(torch.randn({self.M},{self.K}),dim=-1)"
-
-    def flops(self) -> float:
-        return 2.0 * self.M * self.K  # max+sum folds per element (exp/div extra — stays an underestimate)
-
-    def shape_key(self):
-        """Keys the stamped softmax sweep op (``kind="softmax"``): like RMSNorm, the normalize
-        sweep makes K a free axis of the ``(M, K)`` output as well as the (max+sum) reduce extent —
-        ``free_prod = M*K`` per the stamped op, symbolic M excluded on the dynamic twin."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.K if self.dynamic else self.M * self.K
-        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="softmax")
-
-
-@dataclass(frozen=True, kw_only=True)
-class AttentionGoldenConfig(GoldenConfig):
-    """Scaled-dot-product (flash) attention over ``(1, n_heads, seq, head_dim)`` inputs, causal
-    (``F.scaled_dot_product_attention(q, k, v, is_causal=True)``).
-
-    The ``k_scaled_dot_product_attention`` kernel is a TWISTED streaming Reduction over the KV
-    axis (online-softmax flash) fused with the QKᵀ / ·V matmuls. When ``dynamic: true`` the seq
-    axis (``x{0,1,2}:2`` of q / k / v) is symbolic — the masked-tile flash, the deployable
-    artifact. The reference is torch SDPA (its own fused path), so the ratio is vs PyTorch."""
-
-    n_heads: int
-    seq: int
-    head_dim: int
-    dtype: str = "fp16"
-    causal: bool = True
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.seq)
-        # Flash TILE pinning is fragile — a golden must record the ONE form that reproduces its
-        # measured config (a wrong form silently re-benches a scalar fallback 100–1000× slow: the
-        # "flatten" pathology). The forms are shape-specific and there is no clean static rule (hd64
-        # reproduces from a bare TILE, hd128 needs per-axis TILE@dd/TILE@pj — the two contractions
-        # take different tiles there), so the recorder verifies each by re-bench. The ONE invariant we
-        # can guard statically: a DYNAMIC (masked-flash) golden's axis-keyed pin never resolves (the
-        # kernel keys its tile differently at pin time), so it MUST record a single bare TILE. A
-        # dynamic FAST-MATH golden records the sibling-atom **PV plan** as that bare TILE (the exact
-        # string its static twin stamps on TILE@<pv_k>) — the pinned branch of
-        # ``_twisted_warp_options`` recovers the geometry from it and keeps scores f32-accumulate.
-        keyed = [k for k in self.knobs if k.startswith("TILE@")]
-        if self.dynamic and keyed:
-            raise ValueError(
-                f"{self.name}: dynamic attention golden has axis-keyed {keyed} — the masked-flash pin "
-                f"doesn't resolve TILE@<axis>; record a single bare TILE that applies to both contractions."
+    if record.loop_wire is not None:
+        ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+        lowered = Pipeline.build(LOOP_PASSES).run(record.target_program, ctx=ctx)
+        output_nodes = {
+            node.id for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)
+        }
+        signatures = {
+            tuple(
+                sorted(
+                    (name, float(value))
+                    for name, value in (getattr(lowered.nodes[node_id].op, "knobs", {}) or {}).items()
+                    if name.startswith(STRUCT_PREFIX)
+                )
             )
+            for node_id in output_nodes
+        }
+        signatures.discard(())
+        if len(signatures) != 1:
+            raise ValueError(f"{record.name}: Loop IR target resolves to {len(signatures)} structural targets")
+        result = next(iter(signatures))
+        _STRUCTURAL_CACHE[key] = result
+        return result
 
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@x0:2", "seq_len@x1:2", "seq_len@x2:2"] if self.dynamic else []
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
 
-    def flops(self) -> float:
-        # Half the dense 4·h·s²·d flash count — never an overestimate under a causal mask.
-        return 2.0 * self.n_heads * self.seq * self.seq * self.head_dim
+    wanted = set(record.origins)
+    program_key = (id(record.program_wire), record.compute_cap, record.gpu_name, record.bindings)
+    target_index = _PROGRAM_TARGET_CACHE.get(program_key)
+    if target_index is None:
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
-    def snippet(self) -> str:
-        tdt = {"fp32": "", "fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16"}[self.dtype]
-        qkv = f"torch.randn(1,{self.n_heads},{self.seq},{self.head_dim}{tdt})"
-        return f"F.scaled_dot_product_attention({qkv}, {qkv}, {qkv}, is_causal={self.causal})"
+        graph = specialize_program(record.program, record.binding_map)
+        provenance.seed(graph)
+        ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+        lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+        absorbed_ids = {
+            producer for node in lowered.nodes.values() if isinstance(node.op, LoopOp) for producer in fused_producer_ids(lowered, node)
+        }
+        target_index = {}
+        for node_id in lowered.topological_order():
+            node = lowered.nodes[node_id]
+            if not isinstance(node.op, LoopOp) or node_id in absorbed_ids:
+                continue
+            fused = fused_producer_ids(lowered, node)
+            absorbed = [lowered.nodes[producer] for producer in fused if producer in lowered.nodes]
+            origins = frozenset(origin for item in (node, *absorbed) for origin in provenance.get(item) if origin in record.program.nodes)
+            feature_map = {
+                name: float(value) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
+            }
+            if fused:
+                feature_map["S_flash_certified"] = 1.0
+            features = tuple(sorted(feature_map.items()))
+            if origins and features:
+                target_index.setdefault(origins, set()).add(features)
+        _PROGRAM_TARGET_CACHE[program_key] = target_index
 
-    def shape_key(self):
-        """Keys the TWISTED flash op the stamp pass emits (``kind="flash"``): free = the output
-        extents (heads x query rows x head_dim), reduce = the streamed KV axis. The dynamic twin
-        mirrors the 992 stamp's symbolic-axis exclusion — q/k/v seq are ALL symbolic, so the free
-        product keeps heads x head_dim and the reduce extent drops out entirely (``reduce_max=0``,
-        measured off the stamped masked-flash op). The QKᵀ contraction the same trace emits keys as
-        a plain contraction (``kind=""``) and never joins an attention golden."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.n_heads * self.head_dim if self.dynamic else self.n_heads * self.seq * self.head_dim
-        return ShapeKey(
-            free_prod=free,
-            reduce_max=0 if self.dynamic else self.seq,
-            is_warp=self.dtype != "fp32",
-            is_dyn=self.dynamic,
-            kind="flash",
+    signatures = target_index.get(frozenset(wanted), set())
+    if not signatures:
+        raise ValueError(f"{record.name}: provenance target {sorted(wanted)} no longer resolves after lowering")
+    if len(signatures) != 1:
+        raise ValueError(
+            f"{record.name}: provenance target {sorted(wanted)} resolves to {len(signatures)} structural targets; "
+            "the stable target selector is ambiguous"
         )
+    result = next(iter(signatures))
+    _STRUCTURAL_CACHE[key] = result
+    return result
 
 
-@dataclass(frozen=True, kw_only=True)
-class RopeGoldenConfig(GoldenConfig):
-    """Rotary position embedding apply — ``q*cos + rotate_half(q)*sin`` over ``(1, n_heads, seq,
-    head_dim)`` (the ``k_cat_slice_unsqueeze_pointwise`` kernel; ``rotate_half`` is ``cat(-q[…d/2:],
-    q[…:d/2])``). A pure **memory-bound pointwise map** (no reduce, no contraction) applied to q and k
-    every layer. It FORKS NOTHING — one coalesced elementwise config, so a golden cannot warm a cold
-    deploy (there is no misdeploy to fix); it is a REGRESSION ANCHOR for ``emmy eval golden`` (the
-    recorded latency vs torch eager catches a codegen slowdown). The reference is torch eager."""
-
-    n_heads: int
-    seq: int
-    head_dim: int
-    dtype: str = "fp16"
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.seq)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@q:2", "seq_len@cos:2", "seq_len@sin:2"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        h = self.head_dim // 2
-        return (
-            f"cos = torch.randn(1,1,{self.seq},{self.head_dim}{tdt})\n"
-            f"sin = torch.randn(1,1,{self.seq},{self.head_dim}{tdt})\n"
-            f"q = torch.randn(1,{self.n_heads},{self.seq},{self.head_dim}{tdt})\n"
-            f"q*cos + torch.cat((-q[...,{h}:], q[...,:{h}]),dim=-1)*sin"
-        )
-
-    def flops(self) -> float:
-        return float(self.n_heads * self.seq * self.head_dim)  # one fused-multiply-add per element
-
-    def shape_key(self):
-        """Keys the stamped pointwise map (``kind=""``, ``reduce_max=0``): free = the output extents
-        (heads x seq x head_dim). The dynamic twin excludes the symbolic seq (``free_prod`` keeps
-        heads x head_dim, ``free_max`` normalizes to 0 like every non-plain / dynamic key)."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.n_heads * self.head_dim if self.dynamic else self.n_heads * self.seq * self.head_dim
-        fm = 0 if self.dynamic else max(self.n_heads, self.seq, self.head_dim)
-        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
+def dump_golden_file(
+    document: Mapping,
+    path: str | Path,
+    *,
+    validation: GoldenFileValidation = GoldenFileValidation.WORKING,
+    overwrite: bool = False,
+) -> Path:
+    validate_golden_file(document, validation=validation)
+    destination = Path(path)
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    styled = dict(document)
+    styled["programs"] = [_style_program(program) for program in document["programs"]]
+    if "loops" in document:
+        styled["loops"] = [_style_program(program) for program in document["loops"]]
+    payload = yaml.dump(styled, Dumper=_GoldenDumper, sort_keys=False, width=140)
+    temporary = None
+    mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=destination.parent, prefix=f".{destination.name}.", delete=False) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+            temporary = Path(output.name)
+        temporary.chmod(mode)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return destination
 
 
-@dataclass(frozen=True, kw_only=True)
-class EmbeddingGoldenConfig(GoldenConfig):
-    """Token embedding gather — ``embed_tokens[ids]`` over a ``(vocab, hidden)`` table (the
-    ``k_embedding`` kernel; ``F.embedding``). A pure **memory-bound gather** (one hidden-wide row copy
-    per token, no compute). Like :class:`RopeGoldenConfig` it FORKS NOTHING — a REGRESSION ANCHOR for
-    ``emmy eval golden``, not a deploy warmer. The reference is torch eager (``F.embedding``)."""
-
-    vocab: int
-    seq: int
-    hidden: int
-    dtype: str = "fp16"
-
-    def __post_init__(self):
-        self._require_dynamic_hint(self.seq)
-
-    def dynamic_specs(self) -> list[str]:
-        return ["seq_len@ids:1"] if self.dynamic else []
-
-    def snippet(self) -> str:
-        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        return f"ids = torch.randint(0,{self.vocab},(1,{self.seq}))\nw = torch.randn({self.vocab},{self.hidden}{tdt})\nF.embedding(ids, w)"
-
-    def flops(self) -> float:
-        return float(self.seq * self.hidden)  # one copy per gathered element (no arithmetic)
-
-    def shape_key(self):
-        """Keys the stamped gather (``kind=""``, ``reduce_max=0``): the output is ``(seq, hidden)`` so
-        ``free_prod = seq*hidden`` (the vocab is the indexed axis, not a free extent); the dynamic twin
-        excludes the symbolic seq."""
-        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-        free = self.hidden if self.dynamic else self.seq * self.hidden
-        fm = 0 if self.dynamic else max(self.seq, self.hidden)
-        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
+def is_repository_golden_path(path: str | Path) -> bool:
+    resolved = Path(path).resolve()
+    repository = _GOLDENS_DIR.resolve()
+    return resolved == repository or repository in resolved.parents
 
 
-_GOLDENS_DIR = Path(__file__).parent / "goldens"
-_KERNEL_CLASSES = {
-    "matmul": MatmulGoldenConfig,
-    "reduce": ReduceGoldenConfig,
-    "pointwise": PointwiseGoldenConfig,
-    "rms_norm": RmsNormGoldenConfig,
-    "linear_norm": LinearNormGoldenConfig,
-    "norm_linear": NormLinearGoldenConfig,
-    "mlp_geglu": MlpGeGluGoldenConfig,
-    "rope": RopeGoldenConfig,
-    "embedding": EmbeddingGoldenConfig,
-    "softmax": SoftmaxGoldenConfig,
-    "attention": AttentionGoldenConfig,
-}
+def _load_goldens() -> list[GoldenRecord]:
+    records: list[GoldenRecord] = []
+    for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
+        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
+        records.extend(load_golden_records(document))
+    return records
 
 
-def _load_goldens() -> list[GoldenConfig]:
-    """Load every per-GPU golden YAML under :data:`_GOLDENS_DIR` into one flat list.
+class _LazyGoldenRecords(Sequence[GoldenRecord]):
+    """Load the repository corpus only when a consumer asks for evidence."""
 
-    One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
-    config so it isn't repeated per entry), an optional ``model:`` provenance header
-    (the HF model id the shapes came from — see :attr:`GoldenConfig.model`; overridable
-    per entry), plus a ``configs`` list, each tagged with
-    a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
-    ``mlp_geglu`` / ``rope`` / ``embedding`` / ``pointwise``) selecting the dataclass. All files are concatenated — a
-    ``name`` may recur across GPUs.
+    def __init__(self, loader: Callable[[], list[GoldenRecord]]) -> None:
+        self._loader = loader
 
-    NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards
-    can share a capability (e.g. ``rtx5090_sm120.yaml`` and
-    ``rtxpro6000_sm120.yaml`` are both ``(12, 0)``). The full ``(gpu_name,
-    compute_cap)`` pair is the GPU identity. The ``eval`` / ``tune --dataset golden``
-    paths currently iterate this flat list without filtering to the live GPU, so a
-    multi-GPU goldens dir intermixes cards in those views and ``ShapeKey`` joins
-    (which key on shape, not GPU) merge same-shape entries across cards — filtering
-    the consumers to the live ``(gpu_name, compute_cap)`` is a known TODO."""
-    out: list[GoldenConfig] = []
-    for path in sorted(_GOLDENS_DIR.glob("*.yaml")):
-        doc = yaml.safe_load(path.read_text())
-        gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
-        file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
-        for c in doc["configs"]:
-            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c))
-    return out
+    @cached_property
+    def _records(self) -> tuple[GoldenRecord, ...]:
+        return tuple(self._loader())
+
+    def __getitem__(self, index: int | slice) -> GoldenRecord | tuple[GoldenRecord, ...]:
+        return self._records[index]
+
+    def __iter__(self) -> Iterator[GoldenRecord]:
+        return iter(self._records)
+
+    def __len__(self) -> int:
+        return len(self._records)
 
 
-GOLDEN_CONFIGS: list[GoldenConfig] = _load_goldens()
+GOLDEN_RECORDS: Sequence[GoldenRecord] = _LazyGoldenRecords(_load_goldens)
 
 
-def goldens_by_name(name: str) -> list[MatmulGoldenConfig]:
-    """Every :class:`MatmulGoldenConfig` recorded under ``name`` — a **list**, not
-    a single config: one shape may carry several golden knob sets (e.g. a newly
-    found faster variant alongside the old one), so callers must not assume a name
-    is unique. Empty when ``name`` is unknown. All entries share the shape (so any
-    one's :meth:`~MatmulGoldenConfig.snippet` is interchangeable); they differ only
-    in ``knobs`` / measured latency — **including across GPUs**: with multiple
-    per-GPU files the same ``name`` recurs once per card, so the returned list can
-    mix GPUs (use ``compute_cap`` **and** ``gpu_name`` to pick a specific card; cap
-    alone is ambiguous for same-capability cards like RTX 5090 / RTX PRO 6000)."""
-    return [g for g in GOLDEN_CONFIGS if isinstance(g, MatmulGoldenConfig) and g.name == name]
+def goldens_by_name(name: str) -> list[GoldenRecord]:
+    """Every record with an exact name; names need not be unique."""
+    return [record for record in GOLDEN_RECORDS if record.name == name]
 
 
-def goldens_for_live_gpu() -> list[GoldenConfig]:
-    """:data:`GOLDEN_CONFIGS` narrowed to the **live** card's ``(gpu_name,
-    compute_cap)`` when a CUDA device is visible, else the full flat list.
-
-    The shape-keyed diagnostics / ``eval`` golden views (coverage, deploy-perf,
-    prior rank) join on :class:`ShapeKey`, which is GPU-blind — so with multiple
-    per-GPU files a name recurs once per card and same-shape entries collide.
-    Two cards can even share ``compute_cap`` (RTX 5090 / RTX PRO 6000 are both
-    ``(12, 0)``), so the live ``gpu_name`` is what disambiguates them. Filtering to
-    the live card keeps those views about the card actually being tuned. Off-GPU
-    (CI, pure-logic tests) there is no live card, so the unfiltered list is
-    returned — callers that need determinism there should inject a single-GPU set.
-    """
+def goldens_for_live_gpu() -> list[GoldenRecord]:
+    """Goldens for the live card, or all records when no card is visible."""
     live = live_recorded_goldens()
-    return list(GOLDEN_CONFIGS) if live is None else (live or list(GOLDEN_CONFIGS))
+    return list(GOLDEN_RECORDS) if live is None else (live or list(GOLDEN_RECORDS))
 
 
-def live_recorded_goldens() -> list[GoldenConfig] | None:
-    """The live card's OWN recorded goldens — ``None`` when no CUDA device is visible
-    (or the probe fails), an **empty list** for a live card with no golden file. Unlike
-    :func:`goldens_for_live_gpu` there is no union fallback, so callers can tell an
-    uncovered card from an off-GPU run: ``tune`` errors on the former rather than tune
-    another card's config under this card's name (the cross-card shadowing bug)."""
+def live_recorded_goldens() -> list[GoldenRecord] | None:
+    """The live card's own records, ``None`` when no CUDA card is visible."""
     key = _live_gpu_key()
     if key is None:
         return None
-    return [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
+    return [record for record in GOLDEN_RECORDS if record.gpu_name == key[0] and record.compute_cap == key[1]]
 
 
 def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
-    """The live card's ``(gpu_name, compute_cap)``, or ``None`` when no CUDA device
-    is visible (or the probe fails) — the join key the per-GPU golden scoping filters on."""
     try:
         import torch  # noqa: PLC0415
 
         if not torch.cuda.is_available():
             return None
-        return torch.cuda.get_device_name(0), tuple(torch.cuda.get_device_capability(0))
-    except Exception:  # noqa: BLE001 — any probe failure ⇒ no live filter
+        name = torch.cuda.get_device_name(0)
+        from emmy.gpu import by_name  # noqa: PLC0415
+
+        gpu = by_name(name)
+        return (gpu.name if gpu is not None else name), tuple(torch.cuda.get_device_capability(0))
+    except Exception:  # noqa: BLE001
         return None
+
+
+__all__ = [
+    "GOLDEN_RECORDS",
+    "GoldenEntryState",
+    "GoldenFileValidation",
+    "GoldenRecord",
+    "dump_golden_file",
+    "fast_math_knobs",
+    "precision_trading_pins",
+    "golden_entry_state",
+    "golden_record_from_entry",
+    "goldens_by_name",
+    "goldens_for_live_gpu",
+    "is_repository_golden_path",
+    "live_recorded_goldens",
+    "load_golden_file",
+    "load_golden_records",
+    "validate_golden_file",
+]

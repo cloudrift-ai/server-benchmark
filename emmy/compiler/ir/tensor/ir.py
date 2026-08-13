@@ -6,6 +6,8 @@ After decomposition rewrites the frontend ops (``LinearOp``, ``MatmulOp``,
 remain in the graph:
 
 - ``ElementwiseOp`` — scalar function per element (add, mul, exp, silu, ...).
+- ``CastOp`` / ``BitcastOp`` — numeric conversion / same-width bit reinterpretation.
+- ``RangeOp`` — a static one-dimensional integer sequence.
 - ``ReduceOp`` — collapse one axis via an associative binary op.
 - ``ScanOp`` — cumulative variant of ``ReduceOp``.
 - ``GatherOp`` / ``ScatterOp`` — data-dependent reads/writes along an axis.
@@ -31,8 +33,75 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from emmy.compiler.dim import Dim, to_dim
+from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.base import Op, _keepdim_axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
+
+# ---------------------------------------------------------------------------
+# Value construction / conversion
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RangeOp(Op):
+    """Construct the static one-dimensional sequence ``[start, stop)`` by ``step``.
+
+    This is the tensor-IR counterpart of ``range`` / ``arange``. The dtype is explicit
+    because the op has no input from which the interpreter could derive it.
+    """
+
+    start: int = 0
+    stop: int = 0
+    step: int = 1
+    dtype: str = "i64"
+
+    def __post_init__(self) -> None:
+        if self.step == 0:
+            raise ValueError("RangeOp step must be non-zero")
+        get_dtype(self.dtype)
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return (len(range(self.start, self.stop, self.step)),)
+
+    def forward(self, *inputs):
+        return np.arange(self.start, self.stop, self.step, dtype=get_dtype(self.dtype).np)
+
+
+@dataclass
+class CastOp(Op):
+    """Numerically convert every input element to ``dtype``."""
+
+    dtype: str = "f32"
+
+    def __post_init__(self) -> None:
+        get_dtype(self.dtype)
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return tuple(input_shapes[0])
+
+    def forward(self, *inputs):
+        return np.asarray(inputs[0]).astype(get_dtype(self.dtype).np)
+
+
+@dataclass
+class BitcastOp(Op):
+    """Reinterpret every input element as a same-width ``dtype`` without changing bits."""
+
+    dtype: str = "u16"
+
+    def __post_init__(self) -> None:
+        get_dtype(self.dtype)
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return tuple(input_shapes[0])
+
+    def forward(self, *inputs):
+        source = np.ascontiguousarray(inputs[0])
+        target = get_dtype(self.dtype).np
+        if source.dtype.itemsize != target.itemsize:
+            raise ValueError(f"BitcastOp requires equal element widths, got {source.dtype} and {target}")
+        return source.view(target)
+
 
 # ---------------------------------------------------------------------------
 # Elementwise / reduce / scan
@@ -252,24 +321,28 @@ class IndexMapOp(Op):
         return tuple(self.out_shape)
 
     def forward(self, *inputs):
-
         shape = tuple(d.as_static() for d in self.out_shape)
-        output = np.empty(shape, dtype=inputs[0].dtype if inputs else np.float32)
-        for out_idx in np.ndindex(shape):
-            env = {f"out_coord_{i}": out_idx[i] for i in range(len(out_idx))}
-            for source in self.sources:
-                if source.select is not None and not source.select.eval(env):
-                    continue
-                in_coords = tuple(int(c.eval(env)) for c in source.coord_map)
-                input_tensor = inputs[source.input_idx]
-                # Clip coords to valid range. After fusion, a Load's IndexMap
-                # may produce out-of-bounds coords when the consuming Select
-                # masks the range to another branch — reading garbage is
-                # safe because the value is never used. CUDA emits direct
-                # reads without bounds-checking for the same reason.
-                clipped = tuple(max(0, min(c, input_tensor.shape[i] - 1)) for i, c in enumerate(in_coords))
-                output[out_idx] = input_tensor[clipped]
-                break
+        if not self.sources:
+            return np.empty(shape, dtype=np.float32)
+
+        # Sparse coordinate grids make every Expr evaluate over whole axes without
+        # materializing one dense grid per dimension. NumPy advanced indexing then
+        # broadcasts the derived input coordinates to the output shape. This is the
+        # same clipping/select semantics as the old np.ndindex reference, expressed
+        # once per source instead of once per output element.
+        grids = np.ogrid[tuple(slice(0, extent) for extent in shape)]
+        env = {f"out_coord_{i}": grid for i, grid in enumerate(grids)}
+        output = np.empty(shape, dtype=inputs[0].dtype)
+        remaining = np.ones(shape, dtype=bool)
+        for source in self.sources:
+            input_tensor = inputs[source.input_idx]
+            coords = tuple(
+                np.clip(np.asarray(expr.eval(env), dtype=np.intp), 0, input_tensor.shape[i] - 1) for i, expr in enumerate(source.coord_map)
+            )
+            values = input_tensor[coords]
+            select = remaining if source.select is None else remaining & np.broadcast_to(source.select.eval(env), shape)
+            np.copyto(output, values, where=select)
+            remaining &= ~select
         return output
 
     def is_identity(self, input_shape: tuple) -> bool:

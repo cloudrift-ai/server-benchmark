@@ -69,12 +69,13 @@ autotuning cache doesn't bust on cosmetic edits.
 | `ir/`                 | Op-type definitions per dialect         | `ir/ARCHITECTURE.md`         |
 | `trace/`              | PyTorch/HuggingFace → Graph IR          | `trace/ARCHITECTURE.md`      |
 | `pipeline/`           | Rewrite engine, passes, dump hooks      | `pipeline/ARCHITECTURE.md`   |
-| `pipeline/passes/lowering/tile/` | LoopOp → TileOp; **purely algebraic moveset, no specializations** (dispatch on carrier algebra) | `pipeline/passes/ARCHITECTURE.md` |
+| `pipeline/passes/lowering/tile/` | LoopOp → TileOp; **purely algebraic moveset, no specializations** (dispatch on fold algebra) | `pipeline/passes/ARCHITECTURE.md` |
 | `backend/`            | Execution (numpy / loop / cuda)         | `backend/ARCHITECTURE.md`    |
 | `loader/`             | Bind constants (safetensors / `nn.Module` → `input_data`) | —              |
 | `pipeline/search/`    | Autotune DB + MCTS tree (see below)     | `pipeline/ARCHITECTURE.md`   |
 | `structural.py`       | `Structural` protocol + `digest()` fold | —                            |
 | `provenance.py`       | Op provenance — map fused kernels back to original frontend ops | — (see below) |
+| `specialize.py`       | Bind named symbolic dimensions in persisted Torch/Loop programs before lowering | — |
 
 ## Per-layer rules
 
@@ -127,6 +128,66 @@ autotuning cache doesn't bust on cosmetic edits.
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on
   CPU — fusion correctness can be checked without a GPU.
 
+## Quantized checkpoints (FP8)
+
+A quantized checkpoint never reaches the trace: the trace runs over the bf16 architecture twin built from config
+(quantization is a property of the checkpoint, not the architecture). Immediately post-trace,
+`loader.quant.spell_quantized_constants` rewrites each fp8-stored weight into in-graph algebra — a bits constant
+(f8 dtype, the weight's source path) + a scale constant + the dequant cone (decode-cast, broadcast-multiply, a
+reshape pair for 2-D block scales) — so from birth a quantized weight is just constants + algebra, with no metadata
+on any shared IR type. Storage-decode cones stay in-graph unconditionally: fp8 bits remain compressed in device
+memory, the dtype decode is absorbed at the fragment load, and a compatible scale is hoisted to the epilogue. The
+generic constant folder deliberately excludes storage-decode cones because materializing them would expand the
+buffer into its compute dtype. Scale pairing is the general `<key>_scale` / `<key>_scale_inv` rule — it subsumes the
+`.weight` → `.weight_scale` convention and covers non-`.weight` leaves (gpt-oss's 3-D expert params,
+`…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
+
+When an official FP8 declaration also specifies dynamic activations, `loader.quant.spell_dynamic_fp8_activations`
+wraps each eligible linear input in the checkpoint's per-row amax, zero-safe scale, encode, decode, and scale algebra.
+Linears sharing one projection input share the spelled value. A normal compile retains the model's original outputs;
+working-golden inventory generation alone promotes the marked bits and scale values to auxiliary outputs so fusion
+preserves the materialized W8A8 boundary. Native FP8 tensor-core enumeration remains explicitly gated by `FP8_MMA`,
+and a conservative compile can still execute the same graph algebra without selecting that hardware path.
+
+**Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
+expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never
+fire; `loader.quant.spell_quantized_inputs(graph, specs)` is the post-trace twin. Each named input keeps its node id
+and `graph.inputs` slot but its dtype becomes the f8 storage dtype — the feed binds the raw bit pattern on the uint8
+fp8 bits carrier, the same rule as the constant side (`emmy/serving/gen_runner.py`'s `_compile_split` binds every plan
+input at its own traced dtype for this reason) — and a new `<name>_scale` input is appended, with the same decode-cast
+/ broadcast-multiply cone re-creating the value the trace promised. The same W8A16 mul-hoist binding absorbs it:
+at gpt-oss expert shapes the gate_up matmul streams fp8 bytes with the scale on the accumulator epilogue at both the
+mma and the M=1 coop-reduce tiers. The down matmul's cone instead stays materialized by loop fusion's flash-consumer
+protection (the down projection sum-contracts the exp-bearing SwiGLU activation, which reads as a future
+softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant path.
+Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
+
+**Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
+packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.
+Checkpoint discovery, sibling pairing, codebook markers, and allocation metadata remain in
+`loader/quant.py` and `loader/safetensors.py`.
+
+At graph birth, `spell_trellis_constants` replaces each coded weight together with its sole
+`LinearOp` consumer. `loader/trellis.py` emits the factorized contraction directly: ordinary
+ranges, casts/bitcasts, integer algebra, gathers/index maps, layouts, and matmuls. The packed decode
+becomes the core contraction's computed B operand; no logical dense weight or fp16 weight-rounding
+buffer exists in the executable graph. `spell_trellis_inputs` applies the same builder to expert
+weight inputs. Marker presence selects the generic codebook algebra. An unsupported or shared
+coded linear fails at birth rather than falling back to materialization; ordinary padded channel
+dimensions are handled inside the generic spelling.
+
+`load_dequantized_state_dict` remains an explicit eager/reference utility and the block decoder is
+still used for an unsupported coded LM head. Neither is an automatic compiled-serving fallback.
+`coded_tensor_storage` remains a loader-only, weight-free inventory for tracing and release
+coverage.
+
+**Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
+search — may know canonical dtypes (`f8e4m3`), generic elementwise ops, and graph algebra. They may NEVER contain a
+checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or name.
+Scheme-specific types and metadata belong only to checkpoint loading and birth-time spelling. Spelling must emit
+generic algebra, and frontend decomposition must leave only generic tensor IR or a regular constant before Loop IR.
+Mechanical architecture tests scan the post-decomposition source tree for format-name leaks.
+
 ## Op provenance
 
 `provenance.py` threads a single `Node.hints["prov"]` map —
@@ -153,5 +214,5 @@ through. Multi-op labels sort dominant-first (descending piece count, lexical ti
 of fusion merge order — the attention kernel is `k_sdpa_linear_reduce`, its QKV-prologue twin `k_linear_sdpa_reduce`.
 Layout/plumbing origins (`_WEAK_KINDS`: transpose / reshape / unsqueeze / cat / slice) label a kernel only when no
 strong op is present — RoPE plumbing fused into attention doesn't pollute the name, while a standalone copy kernel
-still reads `k_cat_…` instead of the node-id fallback. `pipeline/dump._dump_torch_repro` slices the pristine frontend graph by a kernel's origins into a runnable
-`<kname>.torch.json`; `backend/torch_ref` runs that slice through real torch for the `run --ir` vs-torch comparison.
+still reads `k_cat_…` instead of the node-id fallback. Compiler dumps retain provenance-selected frontend slices in
+memory for tune benchmarking; stable persistence of those programs belongs exclusively to golden YAML.

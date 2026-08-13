@@ -13,9 +13,9 @@ import json
 
 from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, implausible_value_reason, impossible_kernel_reason
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-from tests.compiler.pipeline.search.conftest import F16_MATMUL_FEATS as _F16_FEATS
-from tests.compiler.pipeline.search.conftest import impossible_staged_feats
-from tests.compiler.pipeline.search.conftest import node_row as _row
+from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS as _F16_FEATS
+from tests.compiler.pipeline.search.helpers import impossible_staged_feats
+from tests.compiler.pipeline.search.helpers import node_row as _row
 
 
 def _insert_raw(db: SearchDB, row: NodeRow) -> None:
@@ -74,7 +74,7 @@ def test_peak_follows_stamped_dtype() -> None:
 def test_ungateable_rows_pass() -> None:
     assert implausible_value_reason(_row("k", value_us=9.17, gpu="")) is None  # unknown card
     assert implausible_value_reason(_row("k", value_us=9.17, status="bench_fail")) is None  # sentinel, not a measurement
-    assert implausible_value_reason(_row("k", value_us=9.17, features={"TILE@a2": "n16x8/f2x4"})) is None  # no shape
+    assert implausible_value_reason(_row("k", value_us=9.17, features={"TILE@a2": "f2x4", "WORK": "t16x8"})) is None  # no shape
     assert implausible_value_reason(_row("k", value_us=9.17, feat_ver=FEATURIZER_VERSION - 1)) is None  # retired vocabulary
 
 
@@ -97,7 +97,8 @@ def test_overlapping_reduce_kinds_stay_ungated() -> None:
         "S_ext_n_reduce_axis": 2.0,
         "S_loop_depth": 2.0,  # 2 != 2 + 2: the reduce axes overlap the output
         "S_dtype_f32": 3.0,
-        "REDUCE@a1": "b64",
+        "REDUCE@a1": "coop",
+        "WORK": "t64",
     }
     assert implausible_value_reason(_row("k", value_us=13.0, features=softmax)) is None
     # rms_norm.dynM spelling (d=2, nf=1, nr=1, sym=1 -> 2 != 3): a b32 cooperative fold
@@ -110,7 +111,8 @@ def test_overlapping_reduce_kinds_stay_ungated() -> None:
         "S_ext_n_symbolic_axis": 1.0,
         "S_loop_depth": 2.0,
         "S_dtype_f32": 2.0,
-        "REDUCE@a1": "b32",
+        "REDUCE@a1": "coop",
+        "WORK": "t32",
     }
     assert implausible_value_reason(_row("k", value_us=11.8, features=norm_dyn)) is None
 

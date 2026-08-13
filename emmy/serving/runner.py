@@ -78,6 +78,9 @@ class EmmyForwardRunner:
 
     @classmethod
     def create(cls, model_id: str, max_seq_len: int, dtype_str: str = "float16", batch: int = 1, static: bool = False) -> EmmyForwardRunner:
+        """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
+        carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
+        ``--revision`` on). The tagged id also keys the pack, so two revisions never share one."""
         import hashlib
 
         import torch
@@ -88,6 +91,7 @@ class EmmyForwardRunner:
         from emmy.compiler.backend.gpu_lock import gpu_lock
         from emmy.compiler.backend.pack import load_pack, pack_path
         from emmy.compiler.backend.plan import apply_weight_loads
+        from emmy.compiler.loader.safetensors import split_revision, warn_if_unpinned
         from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
         from emmy.compiler.trace.huggingface import build_full_model_wrapper
 
@@ -100,13 +104,15 @@ class EmmyForwardRunner:
         np_dtype = np.dtype(dtype_str)
 
         logger.info("[serving] loading %s trunk (dtype=%s)...", model_id, dtype_str)
+        warn_if_unpinned(model_id)
+        repo, revision = split_revision(model_id)
         # vLLM instantiates models inside a CUDA device context; the HF trunk
         # is only traced + read for constants here (then freed), so force CPU —
         # this also sidesteps transformers' accelerate requirement for
         # non-default device contexts. The wrapper builds buffers and the trace
         # runs the forward on example tensors — all of it must sit on one device.
         with torch.device("cpu"):
-            model = AutoModel.from_pretrained(model_id, dtype=dtype)
+            model = AutoModel.from_pretrained(repo, revision=revision, dtype=dtype)
             model.eval()
             wrapper = build_full_model_wrapper(model, max_seq_len if static else _TRACE_SEQ, dtype, dynamic=True)
 

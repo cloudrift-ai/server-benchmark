@@ -14,7 +14,7 @@ Use it to check that the golden YAMLs are still relevant after any tracer / reco
 enumeration change: DRIFT means a recorded config went stale, GAP means an uncovered shape.
 
 For the self-capturing form — no graph files needed, the serving twins are re-traced
-weight-free from each golden file's ``model:`` tag — use ``emmy eval golden --in-model``
+weight-free from the pinned serving config — use ``emmy eval golden GOLDEN_YAML --serving-config PATH``
 (same verdicts, machine-independent, non-zero exit on DRIFT; also the CI gate's path).
 
 Usage:
@@ -42,7 +42,7 @@ def audit_graph(path: Path) -> list[dict]:
     """Compile one graph JSON against the golden tier alone; return a per-fork verdict list.
 
     Rides the supported ``search/audit.audit_graph`` seam (the library the
-    ``emmy eval golden --in-model`` audit and the CI gate share) with the live device's
+    ``emmy eval golden GOLDEN_YAML --serving-config PATH`` audit and the CI gate share) with the live device's
     context — this script's job is auditing explicit graph JSONs on a real box."""
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline.search.audit import audit_graph as _audit_graph

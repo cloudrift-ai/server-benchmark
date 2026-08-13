@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from tests.compiler.conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 pytestmark = [pytest.mark.perf, requires_cuda]
 

@@ -6,10 +6,10 @@ softmax reduce. This file pins every tier of it:
 - **scalar-tier flash** (``FLASH`` knob, the Loop-IR ``025_recognize_flash`` pass) — non-causal /
   causal / GQA / additive-mask SDPA fuses to ONE streaming online-softmax kernel matching torch,
   static AND dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. This is the ONLY
-  flash tier that lowers today — the two-``Contraction`` ``TWISTED`` reduce tree at block=1, through
+  flash tier that lowers today — the two-bilinear ``Fold`` ``TWISTED`` reduce tree at block=1, through
   the one ``_factor`` contraction path.
 - **tensor-core flash** — RECOVERED through the one emitter: ``_schedule._twisted_warp_option`` stamps
-  the mma ``TilePlan``\ s on the Q@K / P@V ``Contraction``\ s and the tree realizes at fragment
+  the mma ``TilePlan``\ s on the Q@K / P@V bilinear ``Fold``\ s and the tree realizes at fragment
   residence (``_twist``) — no private emitter. The ``test_generated_tensorcore_flash_*`` /
   ``test_warp_chain_*`` cases assert that warp chain.
 - **cooperative-KV flash** (``BR``) — the KV axis split across threads, partial ``(m, l, O)`` states
@@ -29,7 +29,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from ..conftest import from_pretrained_or_skip, requires_cuda, requires_sm90
+from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda, requires_sm90
 
 
 class _Sdpa(torch.nn.Module):
@@ -307,7 +307,8 @@ def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
 
 @requires_cuda
 def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
-    """A ``TILE@<pv_k>=f<D>`` pin (with ``TILE=a:scalar`` covering the score node) selects the CHAIN
+    """A ``TILE@<pv_k>=f<D>`` pin (with ``TILE=a:scalar`` covering the score node and the ``""``
+    inventory the chain rides — one thread per query row) selects the CHAIN
     row on a shape where the mma tier is also on offer — the pinned spelling of the shared-score
     scalar baseline. Regression: the fold dispatch used to route ANY live ``TILE`` pin to the warp
     rows alone, so no pin could reach the chain and the scalar pin degraded to the per-cell tier
@@ -315,8 +316,8 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
     # Individual EMMY_* vars, not the EMMY_KNOBS aggregate: the aggregate splats into per-knob env
     # vars with overwrite=False, so a var another test already set (or left behind) would win over
     # this test's aggregate under xdist; monkeypatch on the individual vars reverts cleanly.
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_WORK", "")
     monkeypatch.setenv("EMMY_TILE@PJ", "f64")
     monkeypatch.setenv("EMMY_REDUCE", "")
     torch.manual_seed(0)
@@ -341,8 +342,8 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
 # =========================================================================== #
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
 # tiled + atomized contractions, fragment online-softmax, C->A register repack) — realized through the
-# ONE pipeline: ``_schedule._twisted_warp_options`` stamps the mma ``TilePlan``\ s on the Q@K / P@V
-# ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
+# ONE pipeline: the twisted warp enumeration stamps the mma ``TilePlan``\ s on the Q@K / P@V
+# bilinear ``Fold``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition
 # forms (the flash-form fork) — the cold ``OfflinePrior`` pick stays warp-when-eligible, which is
@@ -383,10 +384,10 @@ def test_flash_form_fork_offers_geometry_grid():
     warp move grid (every divisibility-legal ``(warps_m, key_atoms)`` point), each geometry crossed
     with its K/V operand-stage candidates (gmem-direct option-0 + the resolver-gated cp.async ring
     depths), plus the chain and the per-cell serial escape — every row spelling the SAME
-    ``TILE@dd`` / ``TILE@pj`` / ``REDUCE@kv`` / ``STAGE@kv`` key set (the evidence pick's
+    ``TILE@dd`` / ``TILE@pj`` / bare ``REDUCE`` / ``STAGE`` key set — the canonical codec
+    spellings, the stream fold being the primary (the evidence pick's
     prefix-consistency); f32 (no mma atom) offers chain + serial."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import twisted_warp_moves  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
@@ -395,22 +396,25 @@ def test_flash_form_fork_offers_geometry_grid():
     for dtype, want_warp in ((torch.float16, len(twisted_warp_moves())), (torch.float32, 0)):
         q, k, v = (torch.randn(1, 4, 128, 64, dtype=dtype) for _ in range(3))
         graph = trace_module(_Sdpa().cpu(), (q, k, v))
-        rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r or "REDUCE@kv" in r]
-        assert all({"TILE@dd", "TILE@pj", "REDUCE@kv", "STAGE@kv"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
-        warp = [r for r in rows if is_warp_codec(r["TILE@dd"])]
-        chain = [r for r in rows if not is_warp_codec(r["TILE@dd"]) and r["TILE@pj"]]
+        rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r]
+        assert all({"TILE@dd", "TILE@pj", "REDUCE", "STAGE", "WORK"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
+        warp = [r for r in rows if str(r.get("WORK", "")).startswith("w")]  # F1: the tier rides the WORK entry
+        chain = [r for r in rows if not str(r.get("WORK", "")).startswith("w") and r["TILE@pj"]]
         serial = [r for r in rows if not r["TILE@dd"] and not r["TILE@pj"]]
         # (1, 4, 128, 64): every (warps_m, key_atoms) point is divisibility-legal (128 % (um·16) == 0,
         # 128 % (nt·8) == 0), so the fp16 pool spans the whole geometry grid; each geometry offers a
         # gmem-direct row plus at least one resolved cp.async stage row (the exact stage count is
-        # budget-dependent — the depth clamp dedups on the resolved spelling).
-        geoms = {r["TILE@dd"] for r in warp}
+        # budget-dependent — the depth clamp dedups on the resolved spelling). A geometry is the
+        # (site TILE@dd, WORK compute half) pair — the warp count lives in the ONE WORK entry
+        # (F1); a resolved TMA row's ``+p`` producer band is a WSPEC-successor fork, not a
+        # geometry.
+        geoms = {(r["TILE@dd"], r["WORK"].partition("+")[0]) for r in warp}
         assert len(geoms) == want_warp, f"{dtype}: expected {want_warp} warp geometries, got {len(geoms)}"
         for g in geoms:
-            stages = {r["STAGE@kv"] for r in warp if r["TILE@dd"] == g}
+            stages = {r["STAGE"] for r in warp if (r["TILE@dd"], r["WORK"].partition("+")[0]) == g}
             assert "" in stages, f"{dtype} {g}: the gmem-direct option-0 row is missing"
             assert any("cp" in s for s in stages), f"{dtype} {g}: no resolved cp.async stage row"
-        assert all(not r["STAGE@kv"] for r in [*chain, *serial]), "chain/serial rows stamp the decided-empty stage"
+        assert all(not r["STAGE"] for r in [*chain, *serial]), "chain/serial rows stamp the decided-empty stage"
         assert len(chain) == 1 and len(serial) >= 1, f"{dtype}: chain/serial siblings missing ({len(chain)}/{len(serial)})"
 
 
@@ -420,7 +424,8 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     """A pinned non-conservative warp-flash geometry — several warps per CTA, a wide streaming key
     block (the per-step C→A slices) — still lowers through the one fragment realizer and matches
     torch. Pins the move grid's realizability, not just the conservative option-0 the cold pick takes."""
-    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/w{um}x1/f1x{nt}/k4")
+    monkeypatch.setenv("EMMY_TILE", f"mma_m16n8k16_f16/f1x{nt}/k4")
+    monkeypatch.setenv("EMMY_WORK", f"w{um}x1")
     torch.manual_seed(um * 10 + nt)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
@@ -451,7 +456,6 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     the realizer — while ``TILE@dd`` (the score node, softmax-bound) NEVER does. A datacenter
     target (sm_90 — full-rate f32-accumulate) and the unset gate offer none."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
@@ -464,7 +468,7 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     rows = pv_rows((12, 0))
     acc = [r for r in rows if "mma_m16n8k16_f16_f16/" in r["TILE@pj"]]
-    base = [r for r in rows if is_warp_codec(r["TILE@dd"]) and "mma_m16n8k16_f16_f16/" not in r["TILE@pj"]]
+    base = [r for r in rows if str(r.get("WORK", "")).startswith("w") and "mma_m16n8k16_f16_f16/" not in r["TILE@pj"]]
     assert len(acc) == len(base) > 0, f"FAST_MATH must double the warp pv rows ({len(acc)} vs {len(base)})"
     assert not any("mma_m16n8k16_f16_f16/" in r["TILE@dd"] for r in rows), "the score node must stay f32-accumulate"
     assert not any("mma_m16n8k16_f16_f16/" in r["TILE@pj"] for r in pv_rows((9, 0))), "no f16acc rows on a full-rate f32-acc target"
@@ -487,27 +491,32 @@ def test_bare_sibling_pin_selects_the_f16acc_pv_plan(monkeypatch, dynamic):
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f1x8/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     seq = torch.export.Dim("seq_len", min=4, max=4096)
     ds = {"q": {2: seq}, "k": {2: seq}, "v": {2: seq}} if dynamic else None
     graph = trace_module(_Sdpa().cpu(), (q, k, v), dynamic_shapes=ds)
     warp = [r for r in enumerate_graph(graph, Context.from_target((12, 0))) if "TILE@pj" in r]
     assert warp, "the bare sibling-PV pin must keep the warp tier (it used to decline to scalar)"
-    assert all(r["TILE@pj"] == "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2" for r in warp), "PV must ride the pinned sibling plan verbatim"
-    assert all(r["TILE@dd"] == "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4" for r in warp), "scores must stay on the base f32-accumulate atom"
+    # F1: rows spell the SITE halves; the pinned plan's warp geometry rides the ONE WORK entry.
+    assert all(r["TILE@pj"] == "mma_m16n8k16_f16_f16/f1x8/k2" for r in warp), "PV must ride the pinned sibling plan verbatim"
+    assert all(r["TILE@dd"] == "mma_m16n8k16_f16_f32/f1x4/k4" for r in warp), "scores must stay on the base f32-accumulate atom"
+    # (a resolved TMA stage row may add a producer band — the ``+p`` suffix is not the pin's claim)
+    assert all(r["WORK"].partition("+")[0] == "w2x1" for r in warp), "the pinned plan's warp geometry rides the WORK entry"
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["", "d2/cp/ring"])
+@pytest.mark.parametrize("stage", ["", "d2/cp"])
 def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):
     """A pinned f16acc-PV flash row (the axis-keyed ``TILE@dd``/``TILE@pj`` golden spelling — the
     sibling atom in ``TILE@pj`` offers the row without the gate, pins are authoritative): the P@V
     mma targets packed f16 fragments (``_h<j>``) and each streaming KV block promote-folds them
     into the f32 output shadows the rescale / projection / store read. Matches torch over the
     gmem-direct AND staged (cp.async ring) streams."""
-    monkeypatch.setenv("EMMY_TILE@DD", "a:mma_m16n8k16_f16/w1x1/f1x2/k4")
-    monkeypatch.setenv("EMMY_TILE@PJ", "a:mma_m16n8k16_f16_f16/w1x1/f1x8")
+    monkeypatch.setenv("EMMY_TILE@DD", "mma_m16n8k16_f16/f1x2/k4")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f16/f1x8")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     if stage:
         monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(11)
@@ -533,11 +542,11 @@ def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):
 @pytest.mark.parametrize(
     ("geom", "stage", "loopify"),
     [
-        ("w1x1/f1x2/k4", "", 4),  # gmem-direct: O_i_f rescale/divide + P@V load+mma + stores re-roll
-        ("w1x1/f1x2/k4", "", 2),  # LOOPIFY=2 also re-rolls the 2-long QK sacc_f scale
-        ("w1x1/f2x2/k4", "", 4),  # per-query-tile suffixed families (O_i_q0_f / O_i_q1_f)
-        ("w1x1/f1x2/k4", "d2/cp/ring", 4),  # staged: block_threads carried through the re-roll rename
-        ("w1x1/f2x2/k4", "d2/cp/ring", 2),  # staged + partial N-atom runs (arrayed to full family size)
+        ("f1x2/k4", "", 4),  # gmem-direct: O_i_f rescale/divide + P@V load+mma + stores re-roll
+        ("f1x2/k4", "", 2),  # LOOPIFY=2 also re-rolls the 2-long QK sacc_f scale
+        ("f2x2/k4", "", 4),  # per-query-tile suffixed families (O_i_q0_f / O_i_q1_f)
+        ("f1x2/k4", "d2/cp", 4),  # staged: block_threads carried through the re-roll rename
+        ("f2x2/k4", "d2/cp", 2),  # staged + partial N-atom runs (arrayed to full family size)
     ],
 )
 def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
@@ -549,7 +558,8 @@ def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
     the gmem-direct and staged (``cp.async`` ring) tiers, plain and ``f2x2`` per-query-tile geometries —
     the staged tier exercises the ``block_threads`` carry-through and the partial-run arraying-to-full-
     family-size guards."""
-    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_TILE", f"mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_LOOPIFY", str(loopify))
     torch.manual_seed(loopify * 7 + len(geom) + len(stage))
@@ -587,6 +597,7 @@ def test_readable_scalar_chain_fold_matches_torch(monkeypatch):
     while a multi-use temp (``m_i__t0``, read by two subtracts) stays named. SASS-identical, so it
     still matches torch. ``--no-readable`` (the default off) keeps the SSA ladder."""
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_WORK", "")
     monkeypatch.setenv("EMMY_READABLE", "1")
     torch.manual_seed(7)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
@@ -621,17 +632,17 @@ def _run_flash(backend, compiled, graph, tensors) -> np.ndarray:
     "stage",
     [
         "d1/cp",
-        "d2/cp/ring",
-        "d3/cp/ring",
+        "d2/cp",
+        "d3/cp",
         pytest.param("d1/tma", marks=requires_sm90),
-        pytest.param("d2/tma/ring", marks=requires_sm90),
+        pytest.param("d2/tma", marks=requires_sm90),
     ],
 )
 def test_staged_warp_flash_matches_torch(monkeypatch, stage):
     """A pinned K/V operand ``STAGE`` on the warp-flash stream: the kernel fills per-block K/V smem
     slabs (cooperative cp.async into padded rows, or rank-N TMA box copies into dense
     hardware-swizzled slabs — the batched operands encode with leading extent-1 box dims) and
-    drains them via the staged ldmatrix variants. ``d1`` single-buffer; ``d2+/ring`` the prefetch
+    drains them via the staged ldmatrix variants. ``d1`` single-buffer; ``d2+`` the prefetch
     ring overlapping the next block's loads with this block's mma work. Matches torch."""
     monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(7)
@@ -657,14 +668,15 @@ def test_staged_warp_flash_matches_torch(monkeypatch, stage):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp/ring"])
+@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp"])
 def test_staged_warp_flash_bit_identical_to_gmem_direct(monkeypatch, stage):
     """Staging is a pure perf transform (the matmul tier's invariant, carried to the stream): the
     K/V slab fills are verbatim row copies and the mma order is unchanged, so the staged kernel's
     output is BIT-identical to its gmem-direct sibling on the same inputs and geometry."""
     torch.manual_seed(11)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     backend, compiled, graph, _ = _compile_tc(q, k, v)
     base = _run_flash(backend, compiled, graph, (q, k, v))
     monkeypatch.setenv("EMMY_STAGE", stage)
@@ -675,7 +687,7 @@ def test_staged_warp_flash_bit_identical_to_gmem_direct(monkeypatch, stage):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d2/cp/ring", pytest.param("d2/tma/ring", marks=requires_sm90)])
+@pytest.mark.parametrize("stage", ["d2/cp", pytest.param("d2/tma", marks=requires_sm90)])
 def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch, stage):
     """The staged stream composes with the fragment causal mask and the GQA ``head // group`` K/V
     indexing — both ride the slab fill's operand index verbatim (the σ passes batch/head terms
@@ -730,7 +742,7 @@ def test_staged_flash_symbolic_cp_stages_and_matches_torch(monkeypatch):
     the drain's tail masks zero their P columns, so the duplicated rows contribute exactly 0. One
     cached kernel carries ``int seq_len``; accurate vs torch at seq ∈ {37, 64, 100} (37/100
     overhang the KV block)."""
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     B, H, D = 1, 2, 32
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -762,7 +774,8 @@ def test_staged_flash_symbolic_cp_bit_identical_to_gmem_direct(monkeypatch, s):
     the tail chunk's clamped (duplicated) key rows land on P columns the drain masks to exactly 0 —
     so the staged output is BIT-identical to gmem-direct at both a block-divisible (64) and an
     overhanging (100) seq. The cp.async counterpart of the TMA twin above."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -772,7 +785,7 @@ def test_staged_flash_symbolic_cp_bit_identical_to_gmem_direct(monkeypatch, s):
 
     backend, compiled, graph, _ = _trace(_Sdpa(), seed, dynamic_shapes=ds)
     base = _run_flash(backend, compiled, graph, (q, k, v))
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
     backend2, compiled2, graph2, kernels2 = _trace(_Sdpa(), seed, dynamic_shapes=ds)
     src2 = compiled2.nodes[kernels2[0]].op.kernel_source
     assert "_k_smem" in src2 and "cp.async" in src2, "cp.async must stage the symbolic stream"
@@ -788,7 +801,7 @@ def test_staged_flash_stage_pin_keeps_warp_not_scalar(monkeypatch):
     bury the (lower-occupancy) staged warp form under a higher-occupancy scalar form. At H=8/seq=512
     the pre-fix prior did exactly that (a staged-flash A/B row read as a ~100× regression). The
     kernel must be the fused warp form (`emmy_c_to_a`) with a live TMA-staged K/V slab, NOT scalar."""
-    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
     B, H, D = 1, 8, 64  # H=8 is the scale where the pre-fix prior buried the staged form under scalar
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -806,7 +819,7 @@ def test_staged_flash_symbolic_tma_stages_and_matches_torch(monkeypatch):
     the tail chunk of a non-block-divisible seq is safe and the drain's tail masks keep it correct
     (the cp.async twin clamp-reads instead of zero-filling). One cached kernel carries
     ``int seq_len``; accurate vs torch at seq ∈ {64, 100} (100 overhangs the KV block)."""
-    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -838,7 +851,8 @@ def test_staged_flash_symbolic_tma_bit_identical_to_gmem_direct(monkeypatch, s):
     box zero-fill of the overhang lands on keys the drain masks to the fold identity — the same
     clamp the gmem-direct symbolic path makes — so the staged output is BIT-identical to gmem-direct
     at both a block-divisible (64) and an overhanging (100) seq."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -848,7 +862,7 @@ def test_staged_flash_symbolic_tma_bit_identical_to_gmem_direct(monkeypatch, s):
 
     backend, compiled, graph, _ = _trace(_Sdpa(), seed, dynamic_shapes=ds)
     base = _run_flash(backend, compiled, graph, (q, k, v))
-    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
     backend2, compiled2, graph2, kernels2 = _trace(_Sdpa(), seed, dynamic_shapes=ds)
     src2 = compiled2.nodes[kernels2[0]].op.kernel_source
     assert "_k_smem" in src2 and "cp_async_bulk_tensor" in src2, "TMA must stage the symbolic stream"
@@ -964,16 +978,15 @@ def test_warp_flash_causal_tile_skip(monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", [pytest.param("d1/tma/alt", marks=requires_sm90), "d1/cp/alt"])
+@pytest.mark.parametrize("stage", [pytest.param("d1/tma/split", marks=requires_sm90), "d1/cp/split"])
 @pytest.mark.parametrize("variant", ["plain", "causal"])
-def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
-    """The ALTERNATING single-slab staging (``STAGE=d1/tma/alt``): one K slab + one V slab on
+def test_warp_flash_split_staging_matches_torch(monkeypatch, variant, stage):
+    """The per-edge transport split (``STAGE=d1/tma/split``): one K slab + one V slab on
     separate mbarriers, refilled in the phase that no longer reads them (K under softmax + P·V,
     V under the next step's Q·K), and Q staged through a padded smem tile (its A fragments
     ldmatrix'd per atom-K chunk). Structure pinned via the emitted source (the per-operand
-    mbarriers + the Q slab), values vs torch — the fills are verbatim copies, so alt stays
+    mbarriers + the Q slab), values vs torch — the fills are verbatim copies, so the split stays
     bit-identical to gmem-direct."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(11)
     module = _Causal() if variant == "causal" else _Sdpa()
@@ -982,10 +995,10 @@ def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
     assert len(kernels) == 1
     src = compiled.nodes[kernels[0]].op.kernel_source
     if "tma" in stage:
-        assert "_kbar" in src and "_vbar" in src, "tma alt must run the per-operand mbarrier pair"
+        assert "_kbar" in src and "_vbar" in src, "tma split must run the per-operand mbarrier pair"
     else:
-        assert "_kbar" not in src and "cp_async" in src, "cp alt rides commit groups, no mbarriers"
-    assert "_q_smem" in src, "alt staging must stage Q through smem"
+        assert "_kbar" not in src and "cp_async" in src, "cp split rides commit groups, no mbarriers"
+    assert "_q_smem" in src, "split staging must stage Q through smem"
 
     def ref():
         with torch.no_grad():
@@ -996,25 +1009,25 @@ def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
     run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
-    assert max_diff < 5e-3, f"alt-staged flash ({variant}) max_diff={max_diff:.2e}"
+    assert max_diff < 5e-3, f"split-staged flash ({variant}) max_diff={max_diff:.2e}"
 
 
 @requires_cuda
 @pytest.mark.parametrize(
     ("variant", "stage"),
-    [("plain", "d1/cp/alt"), pytest.param("plain", "d1/tma/alt", marks=requires_sm90), ("causal", "d1/cp/alt")],
+    [("plain", "d1/cp/split"), pytest.param("plain", "d1/tma/split", marks=requires_sm90), ("causal", "d1/cp/split")],
 )
-def test_warp_flash_alt_staging_symbolic_bit_identical(monkeypatch, variant, stage):
-    """The alternating staging over a SYMBOLIC ``seq_len`` — the resolver accepts it and the
+def test_warp_flash_split_staging_symbolic_bit_identical(monkeypatch, variant, stage):
+    """The per-edge transport split over a SYMBOLIC ``seq_len`` — the resolver accepts it and the
     liveness scheduler's kill-point refills ride the same runtime clamp as the ring prefetch:
     cp.async clamp-reads the tail's key rows (TMA zero-fills its box), the staged-Q fill
     clamp-reads a tail CTA's overhanging query rows (their outputs are store-guarded), and the
-    drain's tail masks zero the overhanging P columns. All fills are verbatim copies, so the alt
+    drain's tail masks zero the overhanging P columns. All fills are verbatim copies, so the split
     kernel is BIT-identical to its gmem-direct symbolic sibling at both a block-divisible (64)
     and an overhanging (100) seq; the causal case composes the ``k_end`` early stop with the
     symbolic clamp."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -1026,18 +1039,18 @@ def test_warp_flash_alt_staging_symbolic_bit_identical(monkeypatch, variant, sta
     backend2, compiled2, graph2, kernels2 = _trace(module, seed, dynamic_shapes=ds)
     src = compiled2.nodes[kernels2[0]].op.kernel_source
     assert "int seq_len" in src, "the symbolic kernel must carry the runtime seq_len arg"
-    assert "_q_smem" in src, "alt staging must stage Q through smem"
+    assert "_q_smem" in src, "split staging must stage Q through smem"
     if "tma" in stage:
-        assert "_kbar" in src and "_vbar" in src, "tma alt must run the per-operand mbarrier pair"
+        assert "_kbar" in src and "_vbar" in src, "tma split must run the per-operand mbarrier pair"
     else:
-        assert "_kbar" not in src and "cp.async" in src, "cp alt rides commit groups, no mbarriers"
+        assert "_kbar" not in src and "cp.async" in src, "cp split rides commit groups, no mbarriers"
 
     for s in (64, 100):
         torch.manual_seed(s)
         q, k, v = (torch.randn(B, H, s, D, dtype=torch.float16) for _ in range(3))
         base = _run_flash(backend, compiled, graph, (q, k, v))
         staged = _run_flash(backend2, compiled2, graph2, (q, k, v))
-        assert np.array_equal(base, staged), f"symbolic alt ({variant}/{stage}, seq={s}) differs from gmem-direct sibling"
+        assert np.array_equal(base, staged), f"symbolic split ({variant}/{stage}, seq={s}) differs from gmem-direct sibling"
 
 
 @requires_cuda
@@ -1049,7 +1062,6 @@ def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
     combine and projects. Two kernels, and the result matches torch — causal composes (each
     slice's triangular tile-skip is slice-local; an above-the-diagonal slice contributes the
     exact carrier identity)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     torch.manual_seed(7)
     module = _Causal() if variant == "causal" else _Sdpa()
@@ -1084,12 +1096,11 @@ def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
 )
 def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce, seq):
     """SYMBOLIC flash split-KV: the slice width is the bn-aligned runtime ``B = ceil(S/(cta·bn))·bn``
-    and each slice stops/masks at its absolute ``bound = min((s+1)·B, S)`` (``Reduction.bound``) —
+    and each slice stops/masks at its absolute ``bound = min((s+1)·B, S)`` (``Fold.bound``) —
     a mid-tensor slice end reads VALID next-slice keys the extent-only tail masks would keep, and
     the tail CTA's overhanging query rows must NOT write their state into the next head's ws rows
     (the split partial's ``m_guard``, the regression this test pins). One cached kernel pair serves
     every runtime size, including an empty last slice (pure carrier identities)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", reduce)
     B, H, D = 1, 4, 64
     module = _Causal() if variant == "causal" else _Sdpa()
@@ -1159,7 +1170,7 @@ def _banded_ref(q, k, v, window, extra_bias=None):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", [None, "d2/cp/ring", "d1/cp/alt"])
+@pytest.mark.parametrize("stage", [None, "d2/cp", "d1/cp/split"])
 @pytest.mark.parametrize(("S", "W"), [(256, 64), (256, 100)])
 def test_warp_flash_banded_matches_torch(monkeypatch, stage, S, W):
     """The sliding-window banded warp flash: a stamped ``SdpaOp.sliding_window`` decomposes to a
@@ -1167,7 +1178,6 @@ def test_warp_flash_banded_matches_torch(monkeypatch, stage, S, W):
     carries BOTH FragmentMasks and both stream bounds (the causal end, the banded start). One
     fused kernel, torch-banded-reference accuracy, on the unstaged and both staged pipelines —
     a non-block-aligned W (100) exercises the boundary tiles' band mask."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     if stage is not None:
         monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(S + W)
@@ -1191,7 +1201,6 @@ def test_warp_flash_banded_tile_skip_structure(monkeypatch):
     """The banded start is DERIVED from the band Select's predicate shape, never from a kernel
     identity: the stamped kernel starts its stream at ``⌊max(0, first_row − W + 1)/bn⌋·bn`` and
     keeps the causal ``kv0_end``; the un-stamped twin has neither band mask nor late start."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(0)
     q, k, v = (torch.randn(1, 4, 256, 64, dtype=torch.float16) for _ in range(3))
     _backend, compiled, _graph, kernels = _stamp_window(_Causal(), (q, k, v), 64)
@@ -1215,7 +1224,6 @@ def test_warp_flash_vacuous_band_still_fuses(monkeypatch, W):
     ``seq 512 < window 1024`` trace deployed a sequential grid-1 softmax·P@V that ran for
     minutes). Expect: ONE fused flash kernel, causal stream end only (no banded start), plain
     causal numerics."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(W)
     S = 256
     q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
@@ -1239,7 +1247,6 @@ def test_warp_flash_banded_symbolic_matches_torch(monkeypatch, seq):
     """SYMBOLIC banded flash: the banded start is grid-derived (CTA row × W), independent of the
     runtime seq_len, so one cached kernel serves every size; the band FragmentMask composes with
     the symbolic tail clamp-masks."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     B, H, D, W = 1, 4, 64, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -1262,7 +1269,6 @@ def test_warp_flash_banded_split_kv_matches_torch(monkeypatch):
     """Banded flash × split-KV (``REDUCE=g2k``): each slice's banded start is slice-local (the
     base subtracted) — a slice wholly below the band runs zero steps and contributes the exact
     carrier identity, mirroring the causal above-the-diagonal case."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     torch.manual_seed(7)
     W = 64
@@ -1285,7 +1291,6 @@ def test_warp_flash_banded_with_additive_bias_matches_torch(monkeypatch):
     loaded (it may mask more than the band — padding), the coord Selects ride beside it and
     drive both stream bounds; the fused kernel carries FragmentBiasAdd AND both FragmentMasks.
     The bias here masks an extra key block the band alone would keep — the result must honor it."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(3)
     S, W = 256, 64
     q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
@@ -1315,7 +1320,6 @@ def test_warp_flash_causal_stamp_with_bias_matches_torch(monkeypatch):
     """The full-attention layer's whole-model shape: an explicit causal bias operand plus the
     ``is_causal`` stamp alone (no window). The stamp's coord Select rides beside the bias and
     derives the causal stream END through the otherwise-opaque operand."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(5)
     S = 256
     q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
@@ -1436,7 +1440,10 @@ def test_warp_chain_gqa_static_matches_torch(monkeypatch, Hq, Hkv, S, D):
 def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
     """Symbolic ``seq_len`` warp-chain flash with **GQA** (``Hq=4 / Hkv=2``, group 2). ``_Gqa`` traces
     as GQA+causal, so this also exercises the causal mask composed with the symbolic boundary mask.
-    ONE cached kernel carrying ``int seq_len``; matches torch GQA+causal SDPA at seq ∈ {8,16,37,64}."""
+    ONE cached kernel carrying ``int seq_len``; matches torch GQA+causal SDPA at seq ∈ {8,16,37,64}.
+    ``REDUCE`` is pinned serial: unpinned, the cold offline pick for this shape is the ``g4k``
+    reduce-partition warp sibling (two kernels) — the fused single-kernel chain is what this case pins."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
     B, Hq, Hkv, D = 1, 4, 2, 32
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = (
@@ -1480,10 +1487,12 @@ def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
 @pytest.mark.parametrize("br", ["32", "64"])
 @pytest.mark.parametrize(("B", "H", "S", "D"), [(1, 2, 64, 16), (1, 4, 128, 32)])
 def test_cooperative_flash_matches_torch(monkeypatch, br, B, H, S, D):
-    """A cooperative-KV flash (BR>1) fuses to one kernel carrying the monoid cross-thread combine
-    (``__shfl_xor_sync`` for BR≤32, a per-component smem tree for BR>32) and matches torch SDPA —
-    the KV parallelization is accuracy-preserving (the LSE monoid is associative + commutative)."""
-    monkeypatch.setenv("EMMY_REDUCE", f"b{br}")
+    """A cooperative-KV flash (``REDUCE=coop`` over a ``t<N>`` inventory) fuses to one kernel carrying
+    the monoid cross-thread combine (``__shfl_xor_sync`` at a band ≤ 32 lanes, a per-component smem
+    tree above) and matches torch SDPA — the KV parallelization is accuracy-preserving (the LSE
+    monoid is associative + commutative)."""
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
+    monkeypatch.setenv("EMMY_WORK", f"t{br}")
     torch.manual_seed(0)
     q, k, v = (torch.randn(B, H, S, D) for _ in range(3))
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
@@ -1805,17 +1814,13 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
 @requires_cuda
 def test_warp_flash_f32_value_operand_converts(monkeypatch):
     """A V operand traced at f32 (gemma-4's V-norm: ``v_f16 * f32 row stat`` promotes, and the
-    traced ``.half()`` cast rides a view) must reach the flash stream as an f16 BUFFER: the
-    cast splits out of the view (``005_split_cast_from_indexmap``), fusion keeps it
-    materialized at flash offer sites (``_is_castfree_indexmap`` — a dtype-changing copy is
-    not plumbing) and fuses the f32 ``mul`` producer INTO it, so the stream sees an
-    atom-dtype operand and the pinned cp.async ring RESOLVES (the pre-split behavior fused
-    the cast into the flash load, and the f32 buffer declined every staged row —
-    gmem-direct forever, the gemma layer-0 lockout)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # resolves: the split-out cast feeds f16 V
-    monkeypatch.setenv("EMMY_WSPEC", "")
+    traced ``.half()`` cast rides a view) must reach the flash stream as an f16 buffer. Gate-free
+    fusion may inline the cast and scale, so flash recognition factors that closed pure-map V
+    cone into a canonical feeder workspace. The stream then sees an atom-dtype operand and the
+    pinned cp.async ring resolves."""
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")  # resolves: the split-out cast feeds f16 V
     torch.manual_seed(5)
     S, D = 128, 64
 
@@ -1857,7 +1862,7 @@ def _band_mask(seq: int, window: int) -> torch.Tensor:
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["", "d2/tma/ring", "d1/cp/alt"])
+@pytest.mark.parametrize("stage", ["", "d2/tma", "d1/cp/split"])
 def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
     """An explicit additive ``attn_mask`` (the HF precomputed causal / sliding-window band)
     realizes at the WARP tier: the score prologue's ``(m, kv)``-indexed bias ``Load`` + ``add``
@@ -1865,9 +1870,8 @@ def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
     absolute coordinates and adds it before the softmax merge — instead of demoting the whole
     kernel to the scalar tier (the gemma-4 seq>window regression: every layer's attention went
     scalar and hung). Banded (sliding-window) mask; composes with the K/V staging forms."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
-    monkeypatch.setenv("EMMY_WSPEC", "")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     if stage:
         monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(3)
@@ -1879,8 +1883,8 @@ def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "mma.sync" in src, "the explicit-mask flash must stay on the warp (mma) tier"
     assert "+= __half2float(mask[" in src, "the mask must realize as per-element fragment bias adds"
-    if stage == "d1/cp/alt":
-        assert "_q_smem" in src, "alt staging must compose with the mask bias"
+    if stage == "d1/cp/split":
+        assert "_q_smem" in src, "split staging must compose with the mask bias"
 
     def ref():
         with torch.no_grad():

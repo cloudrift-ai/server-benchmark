@@ -35,6 +35,13 @@ def test_compose_context_length_and_max_concurrent(sample_config):
     assert "--max-num-seqs 256" in result
 
 
+def test_compose_uses_named_model_revision(sample_config):
+    sample_config["model"]["revision"] = "0123456789abcdef"
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1)
+    assert "--revision 0123456789abcdef" in result
+
+
 def test_compose_omits_unset_named_fields():
     config = {
         "model": {"huggingface": "test-org/test-model"},
@@ -192,6 +199,15 @@ def test_compose_vllm_no_entrypoint(sample_config):
     assert "entrypoint:" not in result
 
 
+def test_compose_vllm_explicit_entrypoint_for_same_image_control(sample_config):
+    sample_config["engine"]["llm"]["vllm"]["entrypoint"] = "python3 -m vllm.entrypoints.openai.api_server"
+    recipe = Recipe.from_dict(sample_config)
+
+    result = generate_compose(recipe, "/mnt/models", "test-token", num_instances=1)
+
+    assert "entrypoint: python3 -m vllm.entrypoints.openai.api_server" in result
+
+
 def test_compose_sglang_parses_as_valid_yaml(sample_config_sglang):
     recipe = Recipe.from_dict(sample_config_sglang)
     result = generate_compose(recipe, "/mnt/models", "test-token", num_instances=1)
@@ -220,6 +236,44 @@ def test_compose_empty_extra_env_produces_no_extra_lines(sample_config):
     parsed = yaml.safe_load(result)
     env = parsed["services"]["vllm_0"]["environment"]
     assert len(env) == 2  # HUGGING_FACE_HUB_TOKEN and HF_HOME only
+
+
+# ── prebuilt-image HF cache ───────────────────────────────────────
+
+
+def test_compose_defers_to_baked_hf_home(sample_config):
+    """A prebuilt per-model image bakes the snapshot under its own HF_HOME and runs
+    offline; overriding HF_HOME would hide it, so the compose override is dropped."""
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1, baked_hf_home="/opt/emmy/hf")
+    parsed = yaml.safe_load(result)
+    env = parsed["services"]["vllm_0"]["environment"]
+    assert not any(e.startswith("HF_HOME=") for e in env)
+    assert "HUGGING_FACE_HUB_TOKEN=token" in env
+
+
+def test_compose_baked_hf_home_yields_to_speculative_drafter(sample_config):
+    """A speculative-config lane names a model the baked cache does not hold, and the
+    image pins offline mode — the drafter can resolve only from the host cache, so the
+    HF_HOME override returns for exactly this case (the emmy+MTP lanes booted with
+    'Invalid repository ID' for the drafter otherwise, 2026-08-06)."""
+    sample_config["engine"]["llm"]["vllm"]["extra_args"] = (
+        '--speculative-config \'{"method":"mtp","model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":2}\''
+    )
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1, baked_hf_home="/opt/emmy/hf")
+    env = yaml.safe_load(result)["services"]["vllm_0"]["environment"]
+    assert "HF_HOME=/mnt/models" in env
+
+
+def test_compose_baked_hf_home_keeps_extra_env(sample_config):
+    """Dropping the HF_HOME override must not disturb the recipe's own env lines."""
+    sample_config["engine"]["llm"]["vllm"]["extra_env"] = {"EMMY_FAST_MATH": "1"}
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose(recipe, "/mnt/models", "token", num_instances=1, baked_hf_home="/opt/emmy/hf")
+    env = yaml.safe_load(result)["services"]["vllm_0"]["environment"]
+    assert "EMMY_FAST_MATH=1" in env
+    assert len(env) == 2  # token + the recipe's own var, no HF_HOME
 
 
 def test_compose_with_extra_env_parses_as_valid_yaml(sample_config):

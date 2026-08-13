@@ -8,23 +8,21 @@ Tile / Cond) live in ``blocks``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
+    _INTEGER_DTYPES,
     RenderCtx,
     Stmt,
     _pad,
     dtype_promote,
     op_to_expr,
     render_index,
+    render_merge_program,
     select_to_ternary,
 )
-
-if TYPE_CHECKING:  # annotation only — algebra imports leaves (Accum.as_carrier does the runtime import)
-    from emmy.compiler.ir.stmt.algebra import Carrier
 
 
 def _resolve_value(name: str, ctx: RenderCtx) -> str:
@@ -128,6 +126,8 @@ class Load(Stmt):
     input: str
     index: tuple[Expr, ...]
     dtype: DataType | None
+
+    pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
 
     def __init__(
         self,
@@ -358,6 +358,8 @@ class Assign(Stmt):
     args: tuple[str, ...]
     dtype: DataType | None = None
 
+    pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
+
     def __post_init__(self) -> None:
         if isinstance(self.op, str):
             object.__setattr__(self, "op", ElementwiseImpl(self.op))
@@ -376,8 +378,16 @@ class Assign(Stmt):
         pad = _pad(ctx.indent)
         op_name = self.op.name
         arg_dtypes = [ctx.ssa_dtypes.get(a, "f32") for a in self.args]
-        # Default rule: result matches the input dtype when all inputs
-        # agree; any fp32 input promotes the whole expression to fp32.
+        if op_name == "bitcast":
+            if len(self.args) != 1 or self.dtype is None:
+                raise ValueError("bitcast Assign requires one argument and an explicit destination dtype")
+            result_dt = self.dtype.name
+            body = ctx.target.bitcast(self.args[0], arg_dtypes[0], result_dt)
+            ctx.ssa_dtypes[self.name] = result_dt
+            return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {body};"]
+        # Default rule: f16 stays narrow only when all inputs agree; generic
+        # integer arithmetic/bit operations likewise retain one common integer
+        # dtype. Other cases promote to f32.
         # Explicit ``self.dtype`` overrides — the demote pass uses this
         # to force a narrower dtype on the result.
         if self.dtype is not None:
@@ -386,7 +396,8 @@ class Assign(Stmt):
             result_dt = dtype_promote(op_name, arg_dtypes)
 
         all_args_at_result = bool(arg_dtypes) and all(d == result_dt for d in arg_dtypes)
-        if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and all_args_at_result:
+        integer_promotion = result_dt in _INTEGER_DTYPES and bool(arg_dtypes) and all(d in _INTEGER_DTYPES for d in arg_dtypes)
+        if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and (all_args_at_result or integer_promotion):
             # Native non-f32 path: all args already at ``result_dt`` so
             # no per-arg conversion is needed. Render with the target's
             # dtype-specific intrinsics. ``Literal.render`` wraps embedded
@@ -397,7 +408,7 @@ class Assign(Stmt):
             # below — computing in fp32 and converting once preserves
             # precision better than converting each arg to fp16 first.
             args = _args_at_dtype(ctx.target, self.args, arg_dtypes, result_dt)
-            expr = op_to_expr(op_name, args)
+            expr = op_to_expr(op_name, args, dtype=result_dt)
             saved_intr = ctx.intrinsics
             saved_lit = ctx.literal_default_dtype
             ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
@@ -413,7 +424,7 @@ class Assign(Stmt):
         # f32 / no-native path: promote args to f32, render in f32, then
         # convert the result back to ``result_dt`` when narrower.
         promoted = _args_at_dtype(ctx.target, self.args, arg_dtypes, "f32")
-        expr = op_to_expr(op_name, promoted)
+        expr = op_to_expr(op_name, promoted, dtype="f32")
         body_str = expr.render(ctx)
         if result_dt != "f32":
             body_str = ctx.target.convert(body_str, "f32", result_dt)
@@ -498,25 +509,8 @@ class Accum(Stmt):
         """The scalar op-fold of two partials: ``name = op(name, name__o)`` — the
         same combine the cooperative / split-K realizations apply, reified as a
         one-``Assign`` program so the decomposition move reads it uniformly with
-        ``Carrier.combine_states``."""
+        the stored combine's state⊕state re-emission."""
         return (Assign(name=self.name, op=self.op, args=(self.name, f"{self.name}__o"), dtype=self.dtype),)
-
-    def as_carrier(self) -> Carrier:
-        """This additive/associative ``Accum`` AS the degenerate 1-component :class:`Carrier` it already is —
-        state ``(name,)``, ``merge`` = ``name = op(name, value)``, identity the op's. The carrier-algebra
-        fact that a contraction / scalar reduce is the trivial (``id``-twist) carrier: it lets the reduce
-        ``Loop`` fold through the **same** cooperative / cross-partition path as a twisted carrier, with no
-        additive special-case. The auto-derived ``combine_states`` (``name = op(name, name__o)``) equals
-        :meth:`combine_partials`, so the ``⊙`` realization is identical."""
-        from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist  # local: algebra imports leaves
-        from emmy.compiler.ir.stmt.carrier import Channel
-
-        # The folded ``value`` is a sibling whose name lives in the degenerate ``merge``
-        # (``name = op(name, value)``), built as the ``id``-family spec.
-        return Carrier(
-            state=State(names=(self.name,)),
-            twist=Twist(family="id", channels=(Channel(fold=self.op, term=self.value, dtype=self.dtype),)),
-        )
 
     # Algebraic traits forward to the scalar combine op — a ``max`` Accum and a
     # ``sum`` Accum differ, and ``self.op`` is the source of truth.
@@ -662,9 +656,8 @@ class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
-    Currently UNPRODUCED — a carrier's seed now rides on its fold and is derived by
-    ``Loop.render`` (an ``Accum`` from ``op.identity``, a ``Carrier`` from
-    ``State.identity``), so no pass emits an explicit ``Init``. Kept as a primitive
+    Currently UNPRODUCED — a fold's seed now rides on its ``Accum`` and is derived by
+    ``Loop.render`` from ``op.identity``, so no pass emits an explicit ``Init``. Kept as a primitive
     (with its render / rewrite / validation handlers) for an explicit cross-scope seed
     the cooperative / split-K reduce tier may want — e.g. a chunked-K accumulator that
     must seed above the outer loop and NOT reset per chunk. ``identity`` is the neutral
@@ -925,6 +918,8 @@ class Select(Stmt):
     catch-alls when no earlier predicate matches.
     """
 
+    pure = True  # a coord-predicated value binding — no effect; legal inside a stored ``Lambda``
+
     name: str
     branches: tuple[SelectBranch, ...]
 
@@ -954,108 +949,11 @@ class Select(Stmt):
 
 
 @dataclass(frozen=True)
-class RowAccum(Stmt):
-    """Accumulate ``value`` into ``dst[flat / n]`` — the row-statistic sink epilogue
-    (``025_sink_row_reduce``).
-
-    A producer kernel that writes each cell of a tensor exactly once contributes that cell's
-    statistic term (e.g. ``v·v`` for a downstream Σx² norm stat) into a per-row f32 aux buffer:
-    ``flat`` is the just-stored cell's flat address in the produced tensor and ``n`` the row
-    width, so ``flat / n`` is the consuming reduce's row. ``dst`` is atomically accumulated
-    (zero-init'd per launch via ``CudaOp.zero_outputs``, exactly like an atomic ``Write``).
-
-    Rendering folds hierarchically. In a **full-block** scope (``RenderCtx.full_block`` — the
-    ``Tile`` decode elided its tail guard, so every thread of the block is here) each warp
-    shfl-butterflies its contributions, the warp partials cross a smem stage + ``__syncthreads``,
-    and thread 0 issues ONE ``atomicAdd`` per same-row run — ~1 atomic per block, which is what
-    keeps the epilogue at noise level (the per-warp fold alone measured +2.5 µs on the M=32
-    finalize: 128 same-row atomics serialize). A guarded / divergent scope falls back to the
-    barrier-free warp fold (full active warp + row-uniform → one atomic per warp), and boundary
-    warps to per-lane ``atomicAdd`` — always correct, just slower."""
-
-    dst: str  # the per-row f32 statistic buffer (flat rows)
-    flat: Expr  # the stored cell's flat address in the produced tensor
-    n: int  # row width: row = flat / n
-    value: str  # SSA name of the contribution term (accumulated in f32)
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.value,)
-
-    def external_writes(self) -> tuple[str, ...]:
-        return (self.dst,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (self.flat,)
-
-    def has_side_effects(self) -> bool:
-        return True
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.dst}[({self.flat.pretty()}) / {self.n}] += {self.value}  (row-accum)"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        pad = _pad(ctx.indent)
-        p1 = _pad(ctx.indent + 1)
-        p2 = _pad(ctx.indent + 2)
-        p3 = _pad(ctx.indent + 3)
-        t = f"_ra_{self.value}"
-        val = _resolve_value(self.value, ctx)
-        full = "0xffffffffu"
-        head = [
-            f"{pad}{{",
-            f"{p1}long {t}_f = (long)({self.flat.render(ctx)});",
-            f"{p1}int {t}_r = (int)({t}_f / {self.n});",
-            f"{p1}float {t}_v = (float)({val});",
-        ]
-        if ctx.full_block:  # full-block arm (barrier legal — see class docstring)
-            return [
-                *head,
-                f"{p1}__shared__ float {t}_sv[32]; __shared__ int {t}_sr[32];",
-                f"{p1}bool {t}_u = __all_sync({full}, {t}_r == __shfl_sync({full}, {t}_r, 0));",
-                f"{p1}float {t}_w = {t}_v;",
-                f"{p1}for (int {t}_o = 16; {t}_o > 0; {t}_o >>= 1) {t}_w += __shfl_down_sync({full}, {t}_w, {t}_o);",
-                # A row-mixed warp can't be represented by one (row, partial) slot — its lanes
-                # contribute directly and the slot is voided (row −1).
-                f"{p1}if (!{t}_u) atomicAdd(&{self.dst}[{t}_r], {t}_v);",
-                f"{p1}if ((threadIdx.x & 31) == 0) {{",
-                f"{p2}{t}_sv[threadIdx.x >> 5] = {t}_u ? {t}_w : 0.0f; {t}_sr[threadIdx.x >> 5] = {t}_u ? {t}_r : -1;",
-                f"{p1}}}",
-                f"{p1}__syncthreads();",
-                f"{p1}if (threadIdx.x == 0) {{",
-                f"{p2}int {t}_nw = (blockDim.x + 31) >> 5;",
-                f"{p2}for (int {t}_i = 0; {t}_i < {t}_nw; {t}_i++) {{",
-                f"{p3}if ({t}_sr[{t}_i] < 0) continue;",
-                f"{p3}float {t}_s = {t}_sv[{t}_i]; int {t}_rr = {t}_sr[{t}_i];",
-                f"{p3}for (int {t}_j = {t}_i + 1; {t}_j < {t}_nw && {t}_sr[{t}_j] == {t}_rr; {t}_j++) {{",
-                f"{p3}    {t}_s += {t}_sv[{t}_j]; {t}_sr[{t}_j] = -1;",
-                f"{p3}}}",
-                f"{p3}atomicAdd(&{self.dst}[{t}_rr], {t}_s);",
-                f"{p2}}}",
-                f"{p1}}}",
-                f"{p1}__syncthreads();",
-                f"{pad}}}",
-            ]
-        return [
-            *head,
-            # Warp fold only when ALL 32 lanes are here AND agree on the row — __activemask()
-            # is uniform across the active lanes, so the short-circuit keeps the sync
-            # intrinsics full-warp-only (partial masks would be UB under FULL-mask shfl).
-            f"{p1}if (__activemask() == {full} && __all_sync({full}, {t}_r == __shfl_sync({full}, {t}_r, 0))) {{",
-            f"{p2}for (int {t}_o = 16; {t}_o > 0; {t}_o >>= 1) {t}_v += __shfl_down_sync({full}, {t}_v, {t}_o);",
-            f"{p2}if ((threadIdx.x & 31) == 0) atomicAdd(&{self.dst}[{t}_r], {t}_v);",
-            f"{p1}}} else {{",
-            f"{p2}atomicAdd(&{self.dst}[{t}_r], {t}_v);",
-            f"{p1}}}",
-            f"{pad}}}",
-        ]
-
-
-@dataclass(frozen=True)
 class ZeroPrologue(Stmt):
     """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
     (``lowering/cuda/005_delegate_zero_init``).
 
-    An atomic accumulator (atomic ``Write`` / ``RegStore`` output, a ``RowAccum`` aux buffer)
+    An atomic accumulator (atomic ``Write`` / ``RegStore`` output)
     must be zero before its kernel launches; the runtime's per-launch ``zero_outputs`` memset
     costs a CUDA-graph MEMSET node per site. This stmt rides a kernel that launches strictly
     BEFORE the accumulator's kernel in the same stream (a dataflow predecessor — topological
@@ -1090,3 +988,66 @@ class ZeroPrologue(Stmt):
             f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
             f"{pad}}}",
         ]
+
+
+@dataclass(frozen=True)
+class StateMerge(Stmt):
+    """The cross-partition state⊕state combine, as a **renderable** loop-IR stmt (its right
+    operand is a second fully-reduced state named :attr:`state_b` — the merge program baked in
+    at construction, so no algebra source is needed downstream). Built by the lowering layer
+    (``Reduction.state_merge``) for the REG tree / cooperative-tree / cross-CTA finalize; it
+    renders the ψ-rescale state reassignment via ``render_merge_program``. Unlike ``Accum`` it is
+    not a fold carrier — it sits in a combine region, not a streaming fold loop, so it never
+    makes its enclosing loop ``is_reduce``."""
+
+    state: tuple[str, ...]
+    merge: tuple[Stmt, ...]
+    state_b: tuple[str, ...]
+
+    def deps(self) -> tuple[str, ...]:
+        """Every external name the render references: ``state_b`` plus any other outer name a
+        merge-program stmt reads (:func:`_merge_reads` — carried state and program-internal temps
+        excluded, matching the ``Accum`` convention that read-modify-written names live in
+        ``defines()``). ``deps`` must be the COMPLETE read set — read counters / liveness / the
+        splicer's rename resolve references through it, and the render walks the merge program
+        directly (``merge`` is not a nested ``Body``), so a read absent here is invisible to them."""
+        seen = set(self.state_b)
+        extra = tuple(n for n in _merge_reads(self.merge, self.state) if n not in seen)
+        return self.state_b + extra
+
+    def defines(self) -> tuple[str, ...]:
+        return self.state
+
+    def pretty(self, indent: str = "") -> list[str]:
+        lines = [f"{indent}({', '.join(self.state)}) <- combine_states({', '.join(self.state_b)})"]
+        for a in self.merge:
+            lines += a.pretty(indent + "    ")
+        return lines
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return render_merge_program(self.merge, self.state, ctx)
+
+
+def _stmt_reads(a: Stmt) -> tuple[str, ...]:
+    """The arg reads of one merge-program stmt. An ``Assign`` reads its ``args``; an
+    ``Accum`` reads its folded ``value`` and (when redirected) its rescaled ``base`` — its
+    carried ``name`` is the loop-carried state, not a same-program read."""
+    if isinstance(a, Accum):
+        return (a.base, a.value) if a.base is not None and a.base != a.name else (a.value,)
+    return a.args
+
+
+def _merge_reads(merge: tuple[Stmt, ...], state_names: tuple[str, ...]) -> tuple[str, ...]:
+    """The external read names of a merge program — args read but neither carried state
+    nor a temp defined within the program — in first-use order. These are the partials the
+    merge folds into the state. The program is a mix of ``Assign`` temps/rescales and ``Accum``
+    folds (a twisted fold's streaming merge); both expose their reads via :func:`_stmt_reads`
+    and their def via ``name``."""
+    state, defined, seen, reads = set(state_names), set(), set(), []
+    for a in merge:
+        for arg in _stmt_reads(a):
+            if arg not in state and arg not in defined and arg not in seen:
+                seen.add(arg)
+                reads.append(arg)
+        defined.add(a.name)
+    return tuple(reads)

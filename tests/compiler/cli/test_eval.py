@@ -69,6 +69,152 @@ def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> N
     con.close()
 
 
+def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
+    rc, stdout, stderr = run_cli("eval", "golden")
+    assert rc == 2
+    assert "GOLDEN_YAML" in stdout + stderr
+
+    golden = tmp_path / "given.yaml"
+    configured = tmp_path / "configured.yaml"
+    config = tmp_path / "release.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={configured}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
+    )
+    rc, stdout, stderr = run_cli("eval", "golden", str(golden), "--serving-config", str(config))
+    assert rc == 2
+    assert "serving config names" in stdout + stderr
+
+
+def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
+    from emmy.serving.release import load_serving_config
+
+    golden = tmp_path / "golden.yaml"
+    config = tmp_path / "release.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={golden}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=72\nSERVE_DECODE_BUCKET=8\nSERVE_PREFILL_CAPACITY=64\n"
+        'SERVE_WARM_SHAPES="32:64:96:fm"\n'
+    )
+
+    serving = load_serving_config(config)
+
+    got = {(dict(row.bindings).get("num_tokens"), row.pins) for row in serving.realizations}
+    assert got == {
+        *((width, (("FAST_MATH", False),)) for width in (None, 1, 8, 64)),
+        *((width, (("FAST_MATH", True),)) for width in (None, 1, 32, 64)),
+    }
+
+
+def _write_release_golden(path: Path, realizations: list[dict]) -> None:
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    terminal = graph.producer(graph.outputs[0])
+    dump_golden_file(
+        {
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": [8, 9],
+            "model": "org/model",
+            "programs": [graph_to_wire(graph)],
+            "configs": [{"program": 0, "target": {"origins": [terminal.id]}, "realizations": realizations}],
+        },
+        path,
+        validation=GoldenFileValidation.REPOSITORY,
+    )
+
+
+def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.compiler.pipeline.search.audit as audit
+    import emmy.serving.twins as twins
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.yaml"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "relu.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_STATIC_ONLY=1\nSERVE_MAX_NUM_BATCHED_TOKENS=1\nSERVE_DECODE_BUCKET=1\n"
+        "SERVE_PREFILL_CAPACITY=1\nSERVE_PREFILL_BUCKET=0\nSERVE_M1_TIER=1\nSERVE_CAPTURE_SIZES=[1]\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    captured = {}
+
+    def fake_capture(source, **kwargs):
+        captured["capture"] = (source, kwargs)
+        return {"pre1": object()}
+
+    def fake_audit(graphs, gpu_name, compute_cap, *, goldens):
+        captured["audit"] = (graphs, gpu_name, compute_cap, goldens)
+        return {"pre1": [{"verdict": "MATCH"}]}
+
+    monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(audit, "audit_card", fake_audit)
+    monkeypatch.setattr(audit, "summarize", lambda _results: {"MATCH": 1, "DRIFT": 0, "GAP": 0, audit.COMPILE_FAIL: 0})
+    monkeypatch.setattr(audit, "gap_keys", lambda _results: set())
+
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+
+    assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
+    _, gpu_name, compute_cap, records = captured["audit"]
+    assert (gpu_name, compute_cap) == ("NVIDIA GeForce RTX 4090", (8, 9))
+    assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
+
+
+def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import pytest
+
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.yaml"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "relu.m8",
+                "bindings": {"num_tokens": 8},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
+        "SERVE_PREFILL_CAPACITY=32\nSERVE_PREFILL_BUCKET=0\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+
+    with pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+    assert exc.value.code == 1
+
+
 def test_knobs_missing_db(run_cli, tmp_path):
     """A non-existent DB path is not an error: the registry schema still prints and
     the regret analysis is skipped cleanly (exit 0, no traceback)."""
@@ -369,71 +515,6 @@ def test_prior_nodes_smoke(run_cli, tmp_path):
     assert "traceback" not in (stdout + stderr).lower()
 
 
-def test_prior_nodes_accepts_freeze_path(run_cli, tmp_path):
-    """``eval online --dataset nodes --db`` takes a measurement freeze (a per-GPU YAML
-    directory) interchangeably with the live DB (``load_node_rows`` sniffs which it
-    got). Only the two identity-carrying leaves survive the freeze filter (the branch
-    row never freezes), and the loaded rows carry no tree schema — the report degrades
-    gracefully to the leaf metrics instead of inventing forks."""
-    from emmy.compiler.pipeline.search.data.freeze import write_freeze
-    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
-
-    db_path = tmp_path / "n.db"
-    db = SearchDB(db_path)
-    spec = {"kernel": "matmul", "M": 64, "N": 64, "K": 64, "dtype": "fp32", "trans_b": False, "dynamic": False}
-    s = {
-        "H_cc": 120.0,
-        "H_opt": 3.0,
-        "S_ext_free_prod": 1024.0,
-        "S_reduce_add": 1.0,
-        "S_pw_multiply": 1.0,
-        "S_n_distinct_input": 2.0,
-    }
-    gpu = "NVIDIA GeForce RTX 5090"
-    db.record_nodes(
-        [
-            NodeRow("P", None, "ctx", "mm", s, 1.0, 1, gpu=gpu, is_leaf=False),
-            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2, gpu=gpu, is_leaf=True, shape_spec=spec),
-            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2, gpu=gpu, is_leaf=True, shape_spec=spec),
-        ]
-    )
-    db.close()
-    freeze_dir = tmp_path / "freeze"
-    write_freeze(db_path, freeze_dir)
-    rc, stdout, stderr = run_cli(
-        "eval", "online", "--dataset", "nodes", "--db", str(freeze_dir), "--online-file", str(tmp_path / "missing.json")
-    )
-    assert rc == 0, f"stderr: {stderr}"
-    assert "=== offline prior" in stdout
-    assert "=== online prior" in stdout
-    assert "node store: 2 nodes" in stdout  # the branch row did not freeze
-    assert "leaf reachability" in stdout
-    assert "traceback" not in (stdout + stderr).lower()
-
-
-def test_prior_nodes_kernel_filter(run_cli, tmp_path):
-    """``eval online --dataset nodes --kernel`` scopes the node store by op label."""
-    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
-
-    db_path = tmp_path / "n.db"
-    db = SearchDB(db_path)
-    s = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
-    db.record_nodes(
-        [
-            NodeRow("P", None, "ctx", "mm", s, 1.0, 1),
-            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2),
-        ]
-    )
-    db.close()
-    prior = str(tmp_path / "missing.json")
-    rc, stdout, stderr = run_cli("eval", "online", "--dataset", "nodes", "--db", str(db_path), "--kernel", "matmul", "--online-file", prior)
-    assert rc == 0, f"stderr: {stderr}"
-    assert "matching --kernel 'matmul'" in stdout
-    rc2, stdout2, _ = run_cli("eval", "online", "--dataset", "nodes", "--db", str(db_path), "--kernel", "reduce", "--online-file", prior)
-    assert rc2 == 0
-    assert "no nodes match --kernel 'reduce'" in stdout2
-
-
 def test_nodes_dataset_rejected_by_db_only_subcommand(run_cli, tmp_path):
     """Widening the ``--dataset`` vocabulary with ``nodes`` must not leak into the
     db-only subcommands — ``eval variants`` still exits 2 on it."""
@@ -547,8 +628,8 @@ def test_bare_families_canonicalizes_axis_suffixed_knobs():
     rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
     from emmy.commands.eval import _bare_families
 
-    got = _bare_families({"TILE@a2": "n16x8/f2x4", "STAGE@a2": "d3/tma/ring", "REDUCE@a2": "g2a", "WSPEC": ""})
-    assert got == {"TILE": "n16x8/f2x4", "STAGE": "d3/tma/ring", "REDUCE": "g2a", "WSPEC": ""}
+    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/tma", "REDUCE@a2": "g2a"})
+    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/tma", "REDUCE": "g2a"}
     # bare keys pass through; first key wins a family collision (single-node picks in practice)
     assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
 
@@ -559,28 +640,25 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
     ``gpu_name`` dropped, the SM count fell back to the host device (or the GPU-less
     default), so the occupancy features priced tiles for a card that doesn't exist —
     the eval said rank 0 on gemma goldens the real 4090 misdeployed 12-29x. The fitter
-    (``golden_knob_heuristics``) already passed it; this pins the eval side to match."""
-    import emmy.commands.eval as eval_cmd
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+    (now ``emmy fit``'s case builder) already passed it; this pins the eval side to match."""
+    from types import SimpleNamespace
 
-    golden = MatmulGoldenConfig(
+    import emmy.commands.eval as eval_cmd
+
+    golden = SimpleNamespace(
         name="gemma4_12b.q_proj",
-        M=512,
-        N=4096,
-        K=3840,
-        dtype="fp16",
-        knobs={"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2"},
+        knobs={"TILE": "mma_m16n8k16_f16_f32/f4x4/k2", "WORK": "w2x2"},
         gpu_name="NVIDIA GeForce RTX 4090",
         compute_cap=(8, 9),
     )
     seen: list = []
 
-    def fake_evaluate_golden(M, N, K, dtype, gold, ctx, *, dynamic=False):
+    def fake_evaluate_record(record, ctx):
         seen.append(ctx)
-        return dict(gold), 0, 1, 0
+        return dict(record.knobs), 0, 1, 0
 
     monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
-    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_golden", fake_evaluate_golden)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_record", fake_evaluate_record)
     eval_cmd._emit_offline_eval(None)
 
     assert len(seen) == 1
@@ -595,9 +673,9 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
     (fine while an offered sibling floors the shape); a shape whose entries are ALL
     pin-only FALLS THROUGH the deploy's golden floor and the audit returns True (the
     command exits 1) — the 4090 ``attention.hd512.s4096`` split-KV class, caught at
-    record time instead of in production benches. ``PLACE@cone: cut`` is the
-    guaranteed-unrealizable pin here: a plain matmul fork never offers the placement and
-    ``_golden_matches_row`` refuses PLACE as free."""
+    record time instead of in production benches. A warp mma TILE on an fp32 shape is the
+    guaranteed-unrealizable pin here: the f32 enumeration never offers the warp tier, so
+    no offered row carries the entry's TILE/WORK values."""
     import logging
 
     import pytest
@@ -605,21 +683,42 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
     pytest.importorskip("torch")
     import emmy.commands.eval as eval_cmd
     import emmy.compiler.pipeline.search.golden as golden_mod
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.pipeline.search.golden import GoldenRecord
+    from emmy.compiler.torch_wire import graph_to_wire
 
     def cfg(name, m, knobs, us):
-        return MatmulGoldenConfig(
-            name=name, M=m, N=32, K=32, dtype="fp32", knobs=knobs, emmy_us=us, gpu_name="NVIDIA GeForce RTX 4090", compute_cap=(8, 9)
+        graph = Graph()
+        graph.add_node(InputOp(), [], Tensor("x", (m, 32)), node_id="x")
+        graph.add_node(InputOp(), [], Tensor("w", (32, 32)), node_id="w")
+        graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (m, 32)), node_id="matmul")
+        graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
+        return GoldenRecord(
+            name=name,
+            gpu_name="NVIDIA GeForce RTX 4090",
+            compute_cap=(8, 9),
+            model=None,
+            program_index=0,
+            program_wire=graph_to_wire(graph),
+            origins=("matmul",),
+            bindings=(),
+            pins=(("FAST_MATH", False),),
+            knobs=knobs,
+            measurements={"emmy_us": us, "reference_us": us, "reference_backend": "torch"},
+            ranking=None,
         )
 
+    warp_pin = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2"}
     floored = [
-        cfg("audit.floored", 32, {"PLACE@cone": "cut"}, 10.0),  # pin-only; the sibling below floors the shape
+        cfg("audit.floored", 32, dict(warp_pin), 10.0),  # pin-only; the sibling below floors the shape
         cfg("audit.floored", 32, {}, 20.0),  # prefix-consistent with any offered row — the deploy floor
     ]
-    orphan = [cfg("audit.orphan", 48, {"PLACE@cone": "cut"}, 10.0)]  # ALL pin-only → falls through
-    # The compile-time golden index reads GOLDEN_CONFIGS scoped to the audited card — patch it
+    orphan = [cfg("audit.orphan", 48, dict(warp_pin), 10.0)]  # ALL pin-only → falls through
+    # The compile-time golden index reads GOLDEN_RECORDS scoped to the audited card — patch it
     # so the verdicts are hermetic (no dependence on the repo's real 4090 recordings).
-    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", floored + orphan)
+    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", floored + orphan)
 
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit(floored + orphan)
@@ -631,11 +730,11 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
     assert any("FALL-THROUGH" in m and "audit.orphan" in m for m in msgs)
     assert not any("FALL-THROUGH" in m and "audit.floored" in m for m in msgs)
 
-    # A set whose every entry realizes un-pinned is clean: no flags, audit returns False.
+    # A set whose every entry realizes without additional winner pins is clean.
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit([floored[1]])
     assert fell is False
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("realize un-pinned" in m for m in msgs)
+    assert any("realize in their input regimes" in m for m in msgs)
     assert not any("PIN-ONLY" in m or "FALL-THROUGH" in m for m in msgs)

@@ -30,15 +30,6 @@ def _classify_create_failure(stderr: str) -> Exception:
     return TerminalProvisionError(f"gcloud create failed: {stderr.strip()}")
 
 
-def _duration_to_seconds(duration: str) -> int:
-    """Convert a GCP duration string (e.g. '2h', '30m', '1800s') to seconds."""
-    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    suffix = duration[-1]
-    if suffix in units:
-        return int(duration[:-1]) * units[suffix]
-    return int(duration)
-
-
 # ── Command builders ───────────────────────────────────────────────
 
 
@@ -214,6 +205,7 @@ async def create_instance(
     wait_ssh_timeout=300,
     ssh_gateway=None,
     dry_run=False,
+    allocation_observer=None,
 ):
     """Create a GCP GPU instance and optionally wait for SSH.
 
@@ -225,6 +217,8 @@ async def create_instance(
 
     Args:
         provisioning_model: FLEX_START, SPOT, or STANDARD.
+        allocation_observer: optional observer notified as soon as a deletion
+            handle exists.
 
     Returns:
         VMConnectionInfo on success, None on failure.
@@ -254,6 +248,8 @@ async def create_instance(
     # explicitly delete it. Mirror CloudRift's orphan-termination pattern so
     # callers (orchestrator or direct) can rely on a uniform cleanup invariant.
     try:
+        if allocation_observer is not None:
+            await allocation_observer.allocated(("gcp", instance, zone))
         logger.info(f"Waiting for instance to reach RUNNING status (timeout: {timeout}s)...")
         if not await wait_for_status(instance, zone, "RUNNING", timeout, dry_run=dry_run):
             raise CapacityExhausted(f"GCP instance '{instance}' did not reach RUNNING within {timeout}s in zone {zone}")
@@ -287,6 +283,17 @@ async def create_instance(
         except Exception as cleanup_exc:
             logger.error(f"Failed to delete orphan GCP instance '{instance}': {cleanup_exc}")
         raise
+
+
+async def instance_is_active(instance, zone):
+    """Return whether GCP still reports the instance handle."""
+    rc, stdout, stderr = await run_shell_cmd(_gcloud_status_cmd(instance, zone))
+    if rc == 0:
+        return True
+    lowered = f"{stdout}\n{stderr}".lower()
+    if "not found" in lowered or "was not found" in lowered:
+        return False
+    raise RuntimeError(f"Could not audit GCP VM {instance} in {zone}: {stderr.strip()}")
 
 
 async def delete_instance(instance, zone, dry_run=False):

@@ -17,8 +17,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-
-from ..conftest import requires_cuda, requires_sm90
+from tests.compiler.helpers import requires_cuda, requires_sm90
 
 _S, _H, _I = 32, 1024, 3072  # seq, hidden, intermediate — the Qwen3-Embedding-0.6B MLP slice
 

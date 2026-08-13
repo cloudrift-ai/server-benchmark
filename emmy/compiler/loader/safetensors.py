@@ -15,6 +15,7 @@ seen on Llama / Qwen / TinyLlama.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from pathlib import Path
@@ -22,23 +23,81 @@ from pathlib import Path
 import numpy as np
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.loader.binder import apply_load_ops
+from emmy.compiler.loader.binder import apply_load_ops, evaluate_source_graph
+from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES, decode_f8
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_model_dir(model_id_or_path: str) -> Path:
+def split_revision(model_id_or_path: str) -> tuple[str, str | None]:
+    """``"repo@revision"`` → ``("repo", "revision")``; anything else (including a local path,
+    which is checked first so a directory whose name contains ``@`` still resolves) →
+    ``(model_id_or_path, None)``.
+
+    The ``<repo>@<revision>`` spelling is how a pinned checkpoint travels as ONE string through
+    the resolvers, the serving runners, the pack key and a golden's ``model:`` provenance. It
+    matters for a repo that publishes several rungs of the same weights on branches (an EXL3
+    conversion): the rungs differ in the per-tensor bit allocation the kernels carry, so the
+    default branch is a different model.
+    """
+    if Path(model_id_or_path).is_dir() or "@" not in model_id_or_path:
+        return model_id_or_path, None
+    repo, _, rev = model_id_or_path.rpartition("@")
+    return repo, rev
+
+
+@functools.cache
+def warn_if_unpinned(model_id_or_path: str) -> None:
+    """Warn when the id names a repo that publishes more than one branch and pins no revision.
+
+    Same guard ``docker/vllm-emmy-serve/warm.sh`` applies before a warm (it refuses outright):
+    a multi-branch repo silently resolves to its default branch, so an unpinned load of an EXL3
+    conversion takes whichever rung the author made default. Best-effort — an unreachable or
+    offline hub, or a repo with one branch, says nothing. Cached per repo: one boot resolves the
+    same checkpoint from several bands, and neither the warning nor the refs call should repeat.
+
+    A local path or an already-pinned id says nothing, so callers may hand this whatever model id
+    they were given — the serving runners call it once at boot, covering the plain
+    ``from_pretrained`` lane that never reaches :func:`_resolve_model_dir`.
+    """
+    repo, revision = split_revision(model_id_or_path)
+    if revision is not None or Path(repo).is_dir():
+        return
+    try:
+        from huggingface_hub import list_repo_refs  # noqa: PLC0415
+
+        branches = [b.name for b in list_repo_refs(repo).branches]
+    except Exception as e:  # noqa: BLE001 — the refs API is advisory; never fail a load over it
+        logger.debug("branch check skipped for %s: %s", repo, e)
+        return
+    if len(branches) > 1:
+        logger.warning(
+            "%s publishes %d branches (%s) and no revision was pinned — resolving the DEFAULT branch. "
+            "Pin the one you mean as '%s@<branch-or-commit>' (serving: --revision).",
+            repo,
+            len(branches),
+            ", ".join(sorted(branches)),
+            repo,
+        )
+
+
+def _resolve_model_dir(model_id_or_path: str, revision: str | None = None) -> Path:
     """Return a local directory containing the model's safetensors files.
 
-    If the argument is an existing directory, use it as-is. Otherwise
-    treat it as an HF repo id and snapshot-download it (cached).
+    If the argument is an existing directory, use it as-is. Otherwise treat it as an HF repo id
+    and snapshot-download it (cached). The id may carry its revision as ``<repo>@<revision>``
+    (:func:`split_revision`); an explicit ``revision`` argument wins over the tagged one.
     """
     p = Path(model_id_or_path)
     if p.is_dir():
         return p
+    repo, tagged = split_revision(model_id_or_path)
+    revision = revision or tagged
+    if revision is None:
+        warn_if_unpinned(repo)
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(model_id_or_path))
+    return Path(snapshot_download(repo, revision=revision))
 
 
 def _build_index(model_dir: Path) -> dict[str, Path]:
@@ -81,8 +140,106 @@ def _candidate_keys(source_path: str) -> list[str]:
         s = s[len("model.") :]
         cands.append(s)
     cands.append("model." + source_path)
+    # Laguna's original checkpoint code spells its always-on MLP singular while the built-in
+    # Transformers architecture spells the same module plural. Keep the model-native name in
+    # traced IR and offer the on-disk alias only at this checkpoint boundary.
+    aliased = []
+    for candidate in cands:
+        aliased.append(candidate)
+        if ".shared_experts." in candidate:
+            aliased.append(candidate.replace(".shared_experts.", ".shared_expert."))
+        elif ".shared_expert." in candidate:
+            aliased.append(candidate.replace(".shared_expert.", ".shared_experts."))
     seen: set[str] = set()
-    return [c for c in cands if not (c in seen or seen.add(c))]
+    return [c for c in aliased if not (c in seen or seen.add(c))]
+
+
+def _read_shard(
+    shard_path: str, keys: list[str], sources: dict[str, np.ndarray], bits_keys: frozenset[str] = frozenset()
+) -> dict[str, str]:
+    """Read ``keys`` from one shard into ``sources``, decoding fp8 tensors to f32 values.
+
+    safetensors' numpy framework has no fp8 carrier (numpy lacks a float8 dtype;
+    ``get_tensor`` raises), so fp8 keys re-open the shard through the torch
+    framework and a zero-copy ``uint8`` view exposes the bit pattern for the LUT
+    decode. Chosen over parsing the shard's raw byte ranges ourselves (which
+    would duplicate format knowledge here); torch is available in every flow
+    that reaches a quantized checkpoint — the trace itself requires it. BF16
+    tensors (the unquantized modules of a quantized checkpoint — embeddings,
+    norms) take the same torch route, read as f32 values (the loader's value
+    dtype for bf16). Everything else keeps the numpy path bit-identical.
+
+    ``bits_keys`` names fp8-stored keys whose CONSUMING constant (an in-graph
+    node or a ``source_graph`` record leaf) carries an f8 graph dtype — those
+    bind the RAW uint8 bit pattern, no LUT decode, no scale; the graph's own
+    decode cone owns the value semantics. Every other fp8 key decodes to f32
+    values as before.
+
+    Returns the fp8 keys read, ``{key: canonical fp8 token}`` — how callers
+    tell a decoded-fp8 array from a natively-float one after the read.
+    """
+    from safetensors import safe_open
+
+    fp8: dict[str, str] = {}  # key → canonical fp8 token
+    bf16: list[str] = []
+    with safe_open(shard_path, framework="numpy") as f:
+        for k in set(keys):
+            stored = f.get_slice(k).get_dtype()
+            fmt = F8_SAFETENSORS_DTYPES.get(stored)
+            if fmt is not None:
+                fp8[k] = fmt
+            elif stored == "BF16":
+                bf16.append(k)
+            else:
+                sources[k] = f.get_tensor(k)
+    if fp8 or bf16:
+        import torch  # noqa: PLC0415
+
+        with safe_open(shard_path, framework="pt") as ft:
+            for k, fmt in fp8.items():
+                bits = ft.get_tensor(k).view(torch.uint8).numpy()
+                sources[k] = bits if k in bits_keys else decode_f8(bits, fmt)
+            for k in bf16:
+                sources[k] = ft.get_tensor(k).float().numpy()
+    return fp8
+
+
+def load_sources_by_path(model_id_or_path: str, paths) -> dict[str, np.ndarray]:
+    """Read the checkpoint tensors ``paths`` names, keyed by the REQUESTED path.
+
+    The path-keyed sibling of :func:`load_constants_from_safetensors`, for callers that hold a
+    plan rather than a graph — the serving trunk binds an ``ExecutionPlan``'s ``WeightSpec``
+    source paths (``serving/gen_runner.py``), and a plan carries no node dtypes to key the
+    raw-bits rule on. Every key reads at its STORED value dtype (fp8 decodes to f32, BF16 reads
+    as f32 — the loader convention; int carriers such as EXL3's ``.trellis`` codes keep their
+    stored words). A path with no matching key is simply absent from the result, so the caller
+    can fall back to a live module for it."""
+    model_dir = _resolve_model_dir(model_id_or_path)
+    index = _build_index(model_dir)
+    by_shard: dict[str, list[str]] = {}
+    resolved: dict[str, str] = {}
+    for path in paths:
+        key = next((c for c in _candidate_keys(path) if c in index), None)
+        if key is None:
+            continue
+        resolved[path] = key
+        by_shard.setdefault(str(index[key]), []).append(key)
+    sources: dict[str, np.ndarray] = {}
+    for shard_path, keys in by_shard.items():
+        _read_shard(shard_path, keys, sources)
+    return {path: sources[key] for path, key in resolved.items() if key in sources}
+
+
+def _record_leaves(record: Graph):
+    """Yield ``(source_path, dtype_name)`` for every leaf source a ``source_graph`` bind
+    record needs, recursing into nested records."""
+    for lid, lop in record.loadable_constants():
+        if lop.source_graph is not None:
+            yield from _record_leaves(lop.source_graph)
+            continue
+        dtype_name = record.nodes[lid].output.dtype.name
+        for path in [p for p, _shape in lop.source_parts] if lop.source_parts else [lop.source_path]:
+            yield path, dtype_name
 
 
 def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict[str, np.ndarray]:
@@ -90,41 +247,80 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
 
     Returns a dict keyed by node id, ready to feed into ``Backend.run``
     as ``input_data``. Scalar constants (``value is not None``) and
-    constants without a ``source_path`` are skipped — the backend
-    materializes them on its own.
-    """
-    from safetensors import safe_open
+    constants without a source are skipped — the backend materializes
+    them on its own.
 
+    A constant whose graph dtype is an f8 dtype binds RAW BITS (uint8 carrier,
+    no LUT decode, no scale): the graph's own decode cone owns the value
+    semantics (the birth-time spelling — ``loader.quant``). Decode-to-values
+    applies only when the graph wants a non-f8 dtype from fp8 storage.
+
+    A ``source_graph`` constant (a static computation folded at bind time) binds
+    each of the record's leaf sources under the same rules and evaluates
+    the record through the NumPy backend; this constant's own trailing
+    ``load_ops`` chain (e.g. a later-folded transpose) then runs on the result.
+    """
     model_dir = _resolve_model_dir(model_id_or_path)
     index = _build_index(model_dir)
 
+    f8_dtypes = set(F8_SAFETENSORS_DTYPES.values())
     needed: dict[str, list[str]] = {}  # shard path → list of keys
     resolved: dict[str, tuple[str, ...]] = {}  # node_id → safetensors key(s); >1 = source_parts concat
+    record_keys: dict[str, dict[str, str]] = {}  # node_id → {leaf source_path: safetensors key}
+    bits_nodes: set[str] = set()  # node_id → bind raw fp8 bits (see docstring)
+    bits_keys: set[str] = set()  # the safetensors keys those nodes / record leaves resolve to
+
+    def _resolve_key(nid: str, path: str) -> str | None:
+        for cand in _candidate_keys(path):
+            if cand in index:
+                needed.setdefault(str(index[cand]), []).append(cand)
+                return cand
+        logger.warning("safetensors loader: no key matched for %s (source_path=%r)", nid, path)
+        return None
+
     for nid, op in graph.loadable_constants():
-        paths = [p for p, _shape in op.source_parts] if op.source_parts else [op.source_path]
-        keys: list[str] = []
-        for path in paths:
-            for cand in _candidate_keys(path):
-                if cand in index:
-                    keys.append(cand)
-                    needed.setdefault(str(index[cand]), []).append(cand)
+        if op.source_graph is not None:
+            leaves: dict[str, str] = {}
+            leaf_bits: set[str] = set()
+            for path, dt in _record_leaves(op.source_graph):
+                key = leaves.get(path) or _resolve_key(nid, path)
+                if key is None:
                     break
-            else:
-                logger.warning("safetensors loader: no key matched for %s (source_path=%r)", nid, path)
+                leaves[path] = key
+                if dt in f8_dtypes:
+                    leaf_bits.add(key)
+            else:  # all-or-nothing, as for concats
+                record_keys[nid] = leaves
+                bits_keys |= leaf_bits
+            continue
+        paths = [p for p, _shape in op.source_parts] if op.source_parts else [op.source_path]
+        keys = [k for path in paths if (k := _resolve_key(nid, path)) is not None]
         if len(keys) == len(paths):  # all-or-nothing: a partial concat would bind garbage
             resolved[nid] = tuple(keys)
+            if graph.nodes[nid].output.dtype.name in f8_dtypes:
+                bits_nodes.add(nid)
+                bits_keys.update(keys)
 
     sources: dict[str, np.ndarray] = {}
     for shard_path, keys in needed.items():
-        with safe_open(shard_path, framework="numpy") as f:
-            for k in set(keys):
-                sources[k] = f.get_tensor(k)
+        _read_shard(shard_path, keys, sources, bits_keys=frozenset(bits_keys))
 
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
+        if op.source_graph is not None:
+            leaves = record_keys.get(nid)
+            if leaves is None:
+                continue
+            val = evaluate_source_graph(op.source_graph, {path: sources[key] for path, key in leaves.items()})
+            if val is not None:
+                out[nid] = apply_load_ops(val, op.load_ops)
+            continue
         keys = resolved.get(nid)
         if keys is None:
             continue
         src = np.concatenate([sources[k] for k in keys], axis=0) if op.source_parts else sources[keys[0]]
-        out[nid] = apply_load_ops(src, op.load_ops)
+        # A bits-bound constant's chain runs under its f8 dtype token — the raw
+        # uint8 numpy dtype is not a registered DataType.
+        dtype = graph.nodes[nid].output.dtype.name if nid in bits_nodes else None
+        out[nid] = apply_load_ops(src, op.load_ops, dtype=dtype)
     return out

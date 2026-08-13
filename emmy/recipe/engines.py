@@ -31,6 +31,7 @@ _HARDCODED_FLAGS = {
     "--model",
     "--model-path",
     "--served-model-name",
+    "--revision",
 }
 
 
@@ -40,7 +41,7 @@ def banned_extra_arg_flags(engine: str = "vllm") -> set[str]:
     return set(flag_map.values()) | _HARDCODED_FLAGS
 
 
-def build_engine_args(llm: LLMConfig, model_name: str) -> list[str]:
+def build_engine_args(llm: LLMConfig, model_name: str, model_revision: str | None = None) -> list[str]:
     """Build the full CLI argument list for the active engine.
 
     Each element in the returned list is a complete flag-value pair (e.g.
@@ -67,6 +68,9 @@ def build_engine_args(llm: LLMConfig, model_name: str) -> list[str]:
 
     if llm.max_concurrent_requests is not None:
         args.append(f"{flag_map['max_concurrent_requests']} {llm.max_concurrent_requests}")
+
+    if model_revision is not None:
+        args.append(f"--revision {model_revision}")
 
     if llm.extra_args.strip():
         args.append(llm.extra_args)

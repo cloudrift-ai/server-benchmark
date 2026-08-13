@@ -1,0 +1,42 @@
+# Task-local qualification of the corrected 2.00 bpw Laguna S 2.1 EXL3 checkpoint.
+# The image is built from this checkout on the supplied RTX 5090 host. Replace it with a
+# published immutable reference before promoting a durable serving recipe.
+model:
+  huggingface: "riftstack/Laguna-S-2.1-exl3"
+  revision: 45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    context_length: 512
+    max_concurrent_requests: 1
+    gpu_memory_utilization: 0.95
+    vllm:
+      image: "emmy-onboard-vllm-emmy:0.23.0-gatefix"
+      extra_args: >-
+        --runner generate
+        --dtype float16
+        --generation-config vllm
+        --hf-overrides '{"architectures":["EmmyGenModel"],"quantization_config":null}'
+        --max-num-batched-tokens 1
+        --enforce-eager
+        --no-enable-prefix-caching
+      extra_env:
+        EMMY_GEN_DECODE_BUCKET: "1"
+        EMMY_GEN_PREFILL_CAPACITY: "1"
+        EMMY_GEN_PREFILL_BUCKET: "0"
+        EMMY_GEN_M1_TIER: "1"
+        PYTORCH_ALLOC_CONF: "expandable_segments:True"
+
+benchmark:
+  random_input_len: 1
+  random_output_len: 8
+  max_concurrency: 1
+  num_prompts: 4
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1

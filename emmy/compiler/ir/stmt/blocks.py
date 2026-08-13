@@ -9,12 +9,11 @@ tile flavors of the (now demolished) tile IR.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Expr, Var
-from emmy.compiler.ir.stmt.algebra import Carrier
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Mma
@@ -60,17 +59,15 @@ class Loop(Stmt):
 
     ``role`` is the axis's scheduling :class:`~emmy.compiler.ir.axis.AxisRole`
     (``FREE`` / ``PLANAR`` / ``CONTRACTION`` / ``TWISTED``), stamped by tile-lowering
-    detection; ``carrier`` is the :class:`~emmy.compiler.ir.stmt.algebra.Carrier`
-    algebra payload (state + twist) a reduce loop folds through (``None`` on a ``FREE`` loop
-    or a not-yet-annotated reduce). Both default to the unannotated ``FREE`` / ``None`` so
-    every existing construction site keeps working.
+    detection (the unannotated default is ``FREE``). The loop carries NO algebra — the fold's ⊕
+    lives on the :class:`~emmy.compiler.ir.tile.ir.Fold` node's stored ``combine``, and the
+    dissolved fold ``Accum``\\ s in the body are the loop-level spelling.
     """
 
     axis: Axis
     body: Body
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
-    carrier: Carrier | None = None
     seed: bool = True  # emit the per-Accum ``<acc> = identity;`` seed before the loop; False when a
     # nested drain whose accumulators are pre-seeded once outside an enclosing loop (the staged
     # scalar contraction — re-seeding per outer-slab iteration would zero the running sum).
@@ -89,7 +86,7 @@ class Loop(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, carrier=self.carrier, seed=self.seed)
+        return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, seed=self.seed)
 
     def binds_axes(self) -> frozenset[str]:
         return frozenset({self.axis.name})
@@ -114,8 +111,8 @@ class Loop(Stmt):
         # immediate body — the seed rides on the fold, derived here from ``op.identity`` at
         # the fold's ``dtype`` (so fp32-over-fp16 declares ``float acc = 0.0f;``, a fp16
         # ``max`` declares ``__half acc = __float2half(0.0f);``), no explicit ``Init``. This
-        # is the SINGLE seed-placement path: a reduce ``Loop`` carries its ``Carrier`` but its
-        # body already holds the loose fold ``Accum``\\ s (dissolved at recognition), so there
+        # is the SINGLE seed-placement path: a reduce ``Loop``'s body already holds the loose
+        # fold ``Accum``\\ s (dissolved at recognition), so there
         # is never a carrier stmt to special-case here. A nested fold re-declares per enclosing
         # iteration (scope-local shadowing), so a same-named outer carrier is harmless. This
         # is the *serial* schedule's placement; a cooperative / cross-CTA realization reads
@@ -214,54 +211,6 @@ def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderC
     return [pad + line for line in reversed(decoded)]
 
 
-def _render_swizzled_grid_decode(axes: tuple[Axis, ...], idx_expr: str, group_m: int, ctx: RenderCtx) -> list[str]:
-    """Emit a Triton-canonical CTA-swizzle decode of ``idx_expr`` for a
-    matmul-shape grid (``axes`` ending in ``(M_b, N_b)``, optionally
-    preceded by ``K_s``).
-
-    Consecutive CTA IDs walk down M in groups of ``group_m`` before
-    stepping N, so each row-group of CTAs shares A's row tile in L2.
-    The runtime ``gsize_m = min(group_m, num_m - first_m)`` clamp makes
-    a non-divisor ``num_m`` collapse to standard decode on the tail
-    group, and any matmul with ``num_m <= group_m`` (tiny / tall-skinny)
-    is a runtime no-op.
-
-    Falls back to the row-major decode when there are fewer than two
-    axes — the swizzle pass should have skipped, but the renderer stays
-    self-contained.
-    """
-    if len(axes) < 2:
-        return _render_grid_axis_decode(axes, idx_expr, ctx)
-    pad = _pad(ctx.indent)
-    m_axis, n_axis = axes[-2], axes[-1]
-    outer_axes = axes[:-2]  # K_s when SPLITK>1, otherwise empty
-    num_m = _extent_c(m_axis, ctx)
-    num_n = _extent_c(n_axis, ctx)
-    lines: list[str] = ["// CTA swizzle: walk GROUP_M tiles down M before stepping N (L2 A-row reuse)."]
-    if outer_axes:
-        # Peel the outer block axes (K_s etc.) off the linear CTA ID first
-        # so the swizzle only re-decodes the M_b/N_b tail.
-        outer_stride = " * ".join((num_m, num_n))  # M_b * N_b
-        # Emit outer decodes against (idx_expr / outer_stride) using the
-        # standard row-major helper, then re-decode the (m_b, n_b) tail
-        # below with the swizzle.
-        outer_quotient = f"({idx_expr} / ({outer_stride}))"
-        for ax_line in _render_grid_axis_decode(outer_axes, outer_quotient, ctx):
-            lines.append(ax_line.lstrip())
-        lines.append(f"int bid = {idx_expr} % ({outer_stride});")
-    else:
-        lines.append(f"int bid = {idx_expr};")
-    lines.append(f"int num_m = {num_m};")
-    lines.append(f"int num_n = {num_n};")
-    lines.append(f"int gsz = {group_m} * num_n;")
-    lines.append("int gid = bid / gsz;")
-    lines.append(f"int first_m = gid * {group_m};")
-    lines.append(f"int gsize_m = ({group_m} < num_m - first_m) ? {group_m} : (num_m - first_m);")
-    lines.append(f"int {m_axis.name} = first_m + ((bid % gsz) % gsize_m);")
-    lines.append(f"int {n_axis.name} = (bid % gsz) / gsize_m;")
-    return [pad + ln for ln in lines]
-
-
 def _render_thread_axis_decode(axes: tuple[Axis, ...], ctx: RenderCtx) -> list[str]:
     """Emit ``int <axis> = (tid / stride) % extent;`` per axis."""
     pad = _pad(ctx.indent)
@@ -307,7 +256,6 @@ class StridedLoop(Stmt):
     body: Body
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
-    carrier: Carrier | None = None
     end: Expr | None = None
 
     def __post_init__(self) -> None:
@@ -329,7 +277,6 @@ class StridedLoop(Stmt):
             body=body,
             unroll=self.unroll,
             role=self.role,
-            carrier=self.carrier,
             end=self.end,
         )
 
@@ -445,10 +392,6 @@ class Cond(Stmt):
         pad = _pad(ctx.indent)
         cond = self.cond.render(ctx)
         inner = ctx.child()
-        if inner.full_block:
-            # A conditional scope is divergent — a block-fold ``RowAccum`` (which barriers)
-            # inside it would hang the masked-off threads.
-            inner = replace(inner, full_block=False)
         body = render_body(self.body, inner)
         out = [f"{pad}if ({cond}) {{", *body, f"{pad}}}"]
         if self.else_body:

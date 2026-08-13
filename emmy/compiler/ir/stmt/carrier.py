@@ -14,9 +14,9 @@ numerically-stable combine programs, we *generate* them:
 3. **Certify** stability structurally: every ``exp`` arg is ``x − max(…, x, …)``.
 
 ``combine_states`` (state⊕state, the cross-partition fold) and ``merge`` (the streaming
-single-element fold) are both derived from one channel spec — ``merge`` is ``combine_states``
-with the second operand replaced by the per-element injection, its final per-channel writes
-retagged to seed-riding ``base``-``Accum``\\ s.
+single-element fold) are both derived from one injection spec — ``merge`` is ``combine_states``
+with the second operand replaced by the per-element injected terms, its final per-component
+writes retagged to seed-riding ``base``-``Accum``\\ s.
 
 Scope: the **exp/LSE family** (covers attention + online softmax — they differ only in channel
 count). The generation (1) is family-agnostic; only the stabilizer (2) is per-family.
@@ -27,7 +27,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.leaves import Accum, Assign
 
@@ -35,29 +34,6 @@ from emmy.compiler.ir.stmt.leaves import Accum, Assign
 class UnstableCarrierError(ValueError):
     """A generated combine failed the stability certificate — an ``exp`` whose argument is not
     provably ``≤ 0``. Raised instead of silently emitting overflow-prone code."""
-
-
-# --------------------------------------------------------------------------------------------
-# Channel spec — the carrier's per-component algebra (the part that VARIES across carriers).
-# --------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Channel:
-    """One carried component. ``fold`` is the base-monoid ⊕ across the reduce axis (``maximum``
-    for the pivot, ``add`` for an accumulator). ``term`` is the per-element injected value (the
-    score name for the pivot, ``1.0`` for the denominator, the value name for an expectation).
-    ``lift`` is the ⊗ combining the softmax weight with ``term`` (``None`` = pivot/denominator;
-    ``multiply`` = expectation) — at the scalar tier ⊗ is the implicit scalar multiply already
-    in the generation; ``lift`` is carried so a future fragment realizer can lower ⊗ to a
-    contraction (mma). See the tile-lowering ARCHITECTURE notes on tier independence. ``dtype``
-    is the accumulator dtype — used by the degenerate (``id``) family (an exp carrier folds in
-    f32); ``None`` defers to the lowering default."""
-
-    fold: ElementwiseImpl
-    term: str | float
-    lift: ElementwiseImpl | None = None
-    dtype: object = None
 
 
 # --------------------------------------------------------------------------------------------
@@ -165,7 +141,7 @@ def _reads(t: _T, name: str) -> bool:
 def _gen_outputs(state: tuple[str, ...], b0: _T, b_rest: list[_T]) -> list[_T]:
     """Per-component naive→simplified output term. ``state`` = operand A (carried) names; ``b0`` =
     operand B pivot term; ``b_rest`` = operand B per-accumulator terms (state names for
-    combine_states, injected values for merge). Channel 0 is the max pivot."""
+    combine_states, injected values for merge). Component 0 is the max pivot."""
     m_a = _leaf(state[0])
     M = _T("maximum", (m_a, b0))
     outs = [M]  # pivot
@@ -286,60 +262,13 @@ def exp_combine_states(state: tuple[str, ...], state_b: tuple[str, ...], *, key:
     return prog  # type: ignore[return-value]
 
 
-def exp_merge(state: tuple[str, ...], channels: tuple[Channel, ...], *, key: str | None = None) -> tuple[Stmt, ...]:
-    """The streaming single-element fold for an exp-family carrier. The injection singleton is
-    the channels' ``term``s (pivot ← score, denom ← 1, expectation ← value)."""
-    score = channels[0].term
+def exp_merge(state: tuple[str, ...], terms: tuple, *, key: str | None = None) -> tuple[Stmt, ...]:
+    """The streaming single-element fold for an exp-family algebra. The injection singleton is
+    ``terms`` — one per component (pivot ← the score name, denominator ← ``1.0``, expectation ←
+    the value name)."""
+    score = terms[0]
     assert isinstance(score, str), "pivot term (the score) must be an SSA name"
-    outs = _gen_outputs(state, _leaf(score), [_term(c.term) for c in channels[1:]])
+    outs = _gen_outputs(state, _leaf(score), [_term(t) for t in terms[1:]])
     prog = _emit(outs, state, key or state[0], merge=True)
     _certify(prog)
     return prog
-
-
-# --------------------------------------------------------------------------------------------
-# The degenerate ``id`` family — a plain reduce (ψ = identity, no stabilization). Each component
-# folds independently by its own op; there is no rescale, so the combine is the bare self-fold.
-# --------------------------------------------------------------------------------------------
-
-
-def id_accums(state: tuple[str, ...], channels: tuple[Channel, ...]) -> list[Accum]:
-    """The bare fold ``Accum``\\ s a degenerate carrier dissolves to — ``name = op(name, term)``,
-    seed ``op.identity`` (derived by ``Loop.render``)."""
-    return [Accum(name=s, value=str(c.term), op=c.fold, dtype=c.dtype) for s, c in zip(state, channels, strict=True)]
-
-
-def id_merge(state: tuple[str, ...], channels: tuple[Channel, ...]) -> tuple[Assign, ...]:
-    """The identity-twist streaming fold ``name = op(name, term)`` (one ``Assign`` per
-    component) — the self-fold form ``as_accums`` recognizes and ``dissolve`` lowers."""
-    return tuple(Assign(name=s, op=c.fold, args=(s, str(c.term)), dtype=c.dtype) for s, c in zip(state, channels, strict=True))
-
-
-def id_combine_states(state: tuple[str, ...], state_b: tuple[str, ...], channels: tuple[Channel, ...]) -> tuple[Assign, ...]:
-    """The cross-partition fold of two degenerate partials — componentwise ``name =
-    op(name, name__o)``."""
-    return tuple(Assign(name=s, op=c.fold, args=(s, sb), dtype=c.dtype) for s, sb, c in zip(state, state_b, channels, strict=True))
-
-
-# Channel constructors mirroring the expectation-semiring vocabulary.
-_ADD = ElementwiseImpl("add")
-_MUL = ElementwiseImpl("multiply")
-_MAX = ElementwiseImpl("maximum")
-
-
-def pivot(score: str) -> Channel:
-    return Channel(fold=_MAX, term=score)
-
-
-def denom() -> Channel:
-    return Channel(fold=_ADD, term=1.0)
-
-
-def expect(value: str) -> Channel:
-    return Channel(fold=_ADD, term=value, lift=_MUL)
-
-
-def exp_channels(score: str, accumulators: list[Channel]) -> tuple[Channel, ...]:
-    """The full exp-family channel tuple over a carrier (pivot first). ``accumulators`` are the
-    non-pivot channels (``denom()`` / ``expect(v)``)."""
-    return (pivot(score), *accumulators)

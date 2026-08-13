@@ -60,3 +60,27 @@ def test_cache_not_keyed_on_object_identity(monkeypatch):
     # Same shape, different body — must NOT be served the cached negate kernel.
     tanh = _run_loop(_build("tanh"), x)
     np.testing.assert_allclose(tanh, np.tanh(x), rtol=2e-5, atol=1e-5)
+
+
+def test_float_precision_boundaries_use_host_cpp_spelling():
+    """The Loop runner's float ABI must not inherit CUDA half spellings."""
+    from emmy.compiler.backend.loop import LoopBackend
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.loop.runner import render_loopop_cpp
+
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (8,), "f32"), node_id="x")
+    graph.add_node(op=ElementwiseOp("copy"), inputs=["x"], output=Tensor("narrow", (8,), "f16"), node_id="narrow")
+    graph.add_node(op=ElementwiseOp("copy"), inputs=["narrow"], output=Tensor("wide", (8,), "f32"), node_id="wide")
+    graph.inputs, graph.outputs = ["x"], ["wide"]
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    loop = next(node.op for node in compiled.nodes.values() if isinstance(node.op, LoopOp))
+    source = render_loopop_cpp(loop, "precision_copy", {"x": (8,)}, (8,))
+    assert "__half" not in source
+    assert "__float2half" not in source
+
+    x = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
+    actual = backend.run(compiled, input_data={"x": x})[0].outputs["wide"]
+    np.testing.assert_array_equal(actual, x)

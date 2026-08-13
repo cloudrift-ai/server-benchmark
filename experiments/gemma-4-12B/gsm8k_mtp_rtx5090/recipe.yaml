@@ -1,12 +1,36 @@
-# GSM8K check for the gemma-4-12B-it MTP lanes (RTX 5090) — the blog article's
-# speculative-decoding losslessness rows: stock vLLM and vLLM+emmy, each serving with the
-# MTP drafter (google/gemma-4-12B-it-assistant, 3 speculated tokens), evaluated with the
-# same client (scripts/run_lmeval_gate.py: 200 questions, few-shot, seed 0, strict
-# exact-match) as the plain lanes' quality table.
+# GSM8K check for the gemma-4-12B-it MTP lanes (RTX 5090): stock vLLM and vLLM+emmy, each
+# serving with the MTP drafter (google/gemma-4-12B-it-assistant), evaluated with the same
+# client (scripts/run_lmeval_gate.py: 200 questions, few-shot, seed 0, strict exact-match,
+# 8 concurrent requests) as the plain lanes' quality table.
 #
-# Expected: both lanes land in the plain lanes' band (~0.665-0.690). Speculative decoding
-# only emits tokens the target verifies against its own greedy choice, so a lower score
-# means broken numerics or a serving bug, not "tuning".
+# Four lanes in two groups. The depth-3 pair at emmy's default decode bucket is the article's
+# published losslessness row. The depth-2 pair covers what the THROUGHPUT recipe actually
+# serves — bucket 32, the width serving_mtp_rtx5090 routes its c=4 and c=8 MTP verify steps
+# onto — because a decode bucket selects which static twin every step runs, so quality
+# established at one width says nothing about another. Depth 2 is also the only depth whose
+# capture ladder the flooring rule reshapes (serving/ARCHITECTURE.md).
+#
+# Expected: every emmy lane matches a STOCK LANE RUN AT ITS OWN CLIENT CONCURRENCY. Speculative
+# decoding only emits tokens the target verifies against its own greedy choice, so a genuine
+# shortfall means broken numerics or a serving bug, not "tuning".
+#
+# There is NO fixed pass band, and reading one off another concurrency is a false-alarm generator:
+# stock itself scores 0.690 at 8 concurrent but 0.655 at 64, outside the ~0.665-0.690 range the
+# concurrency-8 runs suggest. Measured at bucket 32: 0.670 at a 24-token verify step, 0.660 at 16,
+# 0.665 at 12 — against stock 0.665 (8 concurrent) and 0.640 (4 concurrent). At bucket 192: emmy
+# 0.675 (8 concurrent) and 0.665 (64) against stock 0.690 and 0.655 — emmy is 0.015 under stock at
+# one concurrency and 0.010 OVER it at the other. At 200 examples the standard error is ~0.033, so
+# differences of this size are noise; a real numerics break reads ~0.27 (the BOS trap below) or 0.0.
+#
+# `exact_match,flexible-extract` sits at 0.345-0.370 on BOTH engines, stock included, because the
+# model keeps generating past its `#### N` answer and the permissive filter grabs a later number.
+# Read `strict-match`; a low flexible score alone is an extraction artifact, not an engine fault.
+#
+# Read the stock lane at the same depth FIRST. It shares the harness, tokenizer and client
+# with the emmy lanes but none of emmy's kernels, so stock ≈ 0 means the probe is invalid,
+# while stock in-band next to an emmy lane at 0 localises the fault to emmy. A driver upgrade
+# landing mid-run voids a lane the same way (nvidia-smi disagreeing with the loaded kernel
+# module) — check that before reading any score as a numerics verdict.
 #
 # The serve logs double as the drafter's acceptance measurement on NATURAL text (GSM8K
 # prose) — the throughput benchmarks' random-token prompts inflate acceptance on long
@@ -24,6 +48,13 @@
 # boot-dominated (the emmy boot compiles kernels and captures decode graphs — ~30 min on a
 # cold cache); the evaluation itself is ~2 minutes per lane.
 #
+#
+# CONTEXT RAISED TO 16384 (2026-07-31), up from the article's 8448. Both engines move
+# together so the A/B stays fair, but this recipe NO LONGER REPRODUCES THE PUBLISHED
+# TABLE — a run here and the article's numbers differ in protocol, not just in code, and
+# the difference is not a regression. Re-measure the whole grid before comparing anything
+# to the blog post, or check out the 8448 revision to reproduce it.
+#
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090 --local
 command:
@@ -33,8 +64,9 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
-    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env, so the staged tree
-    # needs docker/ or `make setup` dies before creating the venv.
+    # The Makefile shells out to docker/vllm-emmy-serve/model_slug.sh at parse time, so
+    # a tree without docker/ makes every make call print 'Command not found'. It no
+    # longer dies there (the model config is `-include`d), but keep docker/ staged.
     - docker
   run: |
     set -e
@@ -47,7 +79,6 @@ command:
     ./venv/bin/python -c "import vllm; assert vllm.__version__ == '0.23.0', vllm.__version__"
     MODEL=google/gemma-4-12B-it
     DRAFT=google/gemma-4-12B-it-assistant
-    SPEC='{"method":"mtp","model":"'$$DRAFT'","num_speculative_tokens":3}'
     TOK=$task_dir/tok-bos
 
     # Patched tokenizer dir: copy the checkpoint's tokenizer, write <bos> into the
@@ -73,8 +104,13 @@ command:
     PYEOF
     fi
 
-    gate() { # label serve-args...
-      label=$$1; shift
+    # label, spec depth, decode-bucket env (empty for emmy's default), then serve flags.
+    # The bucket slot is what makes this gate cover what is actually served: the throughput
+    # recipe (serving_mtp_rtx5090) overrides EMMY_GEN_DECODE_BUCKET per lane, so a gate run
+    # only at the default width validates a configuration no benchmark ever runs.
+    gate() {
+      label=$$1; depth=$$2; benv=$$3; shift 3
+      spec='{"method":"mtp","model":"'$$DRAFT'","num_speculative_tokens":'$$depth'}'
       pkill -f "[v]llm serve" 2>/dev/null || true
       # Wait for the previous lane's VRAM to actually drain — a fixed sleep raced the
       # teardown and OOM'd the next boot.
@@ -82,11 +118,14 @@ command:
         [ "$$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && break
         sleep 5
       done
-      ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 8448 \
-        --no-enable-prefix-caching --tokenizer $$TOK --speculative-config "$$SPEC" "$$@" \
+      env $$benv ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 16384 \
+        --no-enable-prefix-caching --tokenizer $$TOK --speculative-config "$$spec" "$$@" \
         > $task_dir/serve_$$label.log 2>&1 &
       pid=$$!
-      for i in $$(seq 1 360); do
+      # 90 minutes: a bucket outside the image's warmed set misses the execution-plan pack,
+      # and the boot then re-runs the compiler frontend for every program (~50 min observed
+      # at bucket 256 on a 15-core host).
+      for i in $$(seq 1 540); do
         curl -sf localhost:8000/health >/dev/null && break
         kill -0 $$pid 2>/dev/null || { echo "SERVE_$${label}_DIED"; tail -5 $task_dir/serve_$$label.log; return 1; }
         sleep 10
@@ -98,14 +137,28 @@ command:
       kill $$pid 2>/dev/null
     }
 
-    gate stock-mtp-d3 --stock || true
-    gate emmy-mtp-d3 || true
+    # Reference lanes — the pair the article's quality table reports.
+    gate stock-mtp-d3 3 "" --stock || true
+    gate emmy-mtp-d3 3 "" || true
+    # The configuration the throughput recipe serves: depth 2 (the only depth whose capture
+    # ladder the flooring rule changes) at bucket 32, the width its c=4 and c=8 MTP lanes route
+    # onto. The stock lane at the same depth is the control: it shares this harness, tokenizer
+    # and client but none of emmy's kernels, so a low score there means the probe is invalid
+    # rather than the engine.
+    #
+    # Bucket 192 (the c=64 lane) is NOT gated here: at this client concurrency the verify step
+    # is far narrower than that bucket, so the lane would measure a padding ratio no deployment
+    # of it runs. Bucket 256 is not gated either because the throughput recipe no longer uses
+    # it — it was tried and produces empty completions, which is the open bug this gate's
+    # protocol was used to find (plans/gemma4-mtp-batched-serving-findings.md).
+    gate stock-mtp-d2 2 "" --stock || true
+    gate emmy-mtp-d2-b32 2 EMMY_GEN_DECODE_BUCKET=32 || true
     pkill -f "[v]llm serve" 2>/dev/null || true
     echo GSM8K_MTP_DONE
   result_files:
     - "*.json"
     - "*.log"
-  timeout: 10800
+  timeout: 25200
 
 matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"

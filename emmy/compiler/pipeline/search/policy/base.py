@@ -66,3 +66,11 @@ class Search(ABC):
         its ``graph`` carries the realized op ``knobs`` (the full config,
         including knobs stamped at deterministic lowering steps that never
         appear as forks). Default no-op; :class:`TuningSearch` overrides it."""
+
+    def note_bench(self, *, measured: bool) -> None:  # noqa: B027
+        """Tell the policy whether the terminal required a live benchmark.
+
+        Cache hits still produce observations, but they do not consume a hard
+        measured-candidate budget. Policies without such a budget ignore this
+        hook.
+        """

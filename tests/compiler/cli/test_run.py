@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def _randn(shape: str, dtype, scale: float | None = None) -> str:
@@ -26,6 +26,18 @@ def _randn(shape: str, dtype, scale: float | None = None) -> str:
         s = 0.1 if scale is None else scale
         return f"(torch.randn({shape}, dtype=torch.float16) * {s})"
     return f"torch.randn({shape})"
+
+
+def _working_golden_for_live_gpu(name: str) -> Path:
+    from emmy import gpu
+    from emmy.compiler.pipeline.search import golden
+
+    live_name = gpu.live_name()
+    for path in sorted((Path(golden.__file__).parent / "goldens").glob("*.yaml")):
+        records = golden.load_golden_records(golden.load_golden_file(path))
+        if any(record.name == name and record.gpu_name == live_name for record in records):
+            return path
+    pytest.skip(f"no {name} working golden for {live_name}")
 
 
 def test_run_no_code_errors(run_cli):
@@ -50,22 +62,41 @@ def test_run_input_and_code_mutually_exclusive(run_cli):
 
 
 def test_pinned_knobs_sets_and_restores_env(monkeypatch):
-    """``_pinned_knobs`` pins ``EMMY_<KNOB>`` for the block, then restores the
+    """``pinned_knobs`` pins ``EMMY_<KNOB>`` for the block, then restores the
     prior environment — removing keys that were unset, restoring preexisting ones
     (the golden-bench A/B relies on this to compile a pinned variant cleanly)."""
     import os
 
-    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     monkeypatch.delenv("EMMY_TILE", raising=False)
     monkeypatch.setenv("EMMY_STAGE", "preexisting")
-    with _pinned_knobs({"TILE": "n32x8/f2x4", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
-        assert os.environ["EMMY_TILE"] == "n32x8/f2x4"
+    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
+        assert os.environ["EMMY_TILE"] == "f2x4"
         assert os.environ["EMMY_STAGE"] == "d2/cp"
         assert os.environ["EMMY_WARP_SPECIALIZE"] == "False"
     assert "EMMY_TILE" not in os.environ  # was unset → removed
     assert os.environ["EMMY_STAGE"] == "preexisting"  # restored
     assert "EMMY_WARP_SPECIALIZE" not in os.environ
+
+
+def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch):
+    """Axis-scoped programmatic pins preserve the raw aggregate that placement routing reads."""
+    import os
+
+    from emmy.compiler.pipeline.knob import parse_knob_spec
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
+    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
+    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_PLACE@A"] == "cut"
+        assert os.environ["EMMY_TILE@DD"] == "f2x2"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
+    assert os.environ["EMMY_PLACE@A"] == "fuse"
+    assert "EMMY_TILE@DD" not in os.environ
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
 
 
 def _symbolic_input_graph():
@@ -105,8 +136,7 @@ def test_hint_sized_inputs_tiles_symbolic_axes():
 
 def test_hint_sized_inputs_static_graph_is_noop():
     from emmy.commands.run import _hint_sized_inputs
-
-    from ..conftest import matmul_graph
+    from tests.compiler.helpers import matmul_graph
 
     a, b = torch.randn(4, 8), torch.randn(8, 4)
     args, kwargs, sym_env = _hint_sized_inputs(matmul_graph(4, 8, 4), (a, b), {})
@@ -180,13 +210,27 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
     assert "Eager PyTorch" in fns
 
 
+def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
+    import torch._dynamo
+
+    from emmy.commands.run import _build_torch_fns
+
+    monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
+
+    fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
+
+    assert "torch.compile" not in fns
+
+
 @requires_cuda
 def test_run_golden_bench_shows_benched_golden_row(run_cli):
-    """``run --golden NAME --bench`` compiles + benches the recorded golden (knobs
-    pinned) and prints it as a ``golden NAME``-labeled row in the kernel table, plus the
+    """A selected working-golden target compiles and benches its recorded knobs,
+    then prints it as a ``golden NAME``-labeled row in the kernel table, plus the
     ``greedy (isolated)`` twin — the greedy graph re-benched through the pinned-row path,
     the baseline the golden rows compare against."""
-    rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench")
+    path = _working_golden_for_live_gpu("matmul.square.512")
+    rc, stdout, stderr = run_cli("run", "--golden", str(path), "--target", "matmul.square.512", "--bench")
     assert rc == 0, f"stderr: {stderr}"
     assert "golden matmul.square.512" in stdout, stdout
     assert "greedy (isolated)" in stdout, stdout
@@ -211,11 +255,11 @@ def test_run_ab_rejects_malformed_spec(run_cli):
     assert "missing '='" in (stdout + stderr)
 
 
-def test_run_record_shape_rejects_bad_spec(run_cli):
-    """``--record-shape`` fails fast (before any compile/bench spend) on an invalid spec."""
+def test_run_record_shape_option_is_retired(run_cli):
+    """The obsolete shape-identity surface is no longer accepted by the parser."""
     rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--record-shape", '{"kernel": "warp_drive"}')
     assert rc == 2
-    assert "unknown kernel kind" in (stdout + stderr)
+    assert "unrecognized arguments: --record-shape" in (stdout + stderr)
 
 
 def test_ab_samples_parse_label_and_shape():
@@ -224,14 +268,14 @@ def test_ab_samples_parse_label_and_shape():
     cue to nest by kernel ``S_*`` signature instead of a golden matmul shape)."""
     from emmy.commands.run import _ab_samples
 
-    (s,) = _ab_samples(["tile=n16x8, STAGE=d2/cp"])
-    assert s.knobs == {"TILE": "n16x8", "STAGE": "d2/cp"}  # names uppercased, whitespace tolerated
-    assert s.name == "ab tile=n16x8, STAGE=d2/cp"
+    (s,) = _ab_samples(["tile=f2x4, STAGE=d2/cp"])
+    assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/cp"}  # names uppercased, whitespace tolerated
+    assert s.name == "ab tile=f2x4, STAGE=d2/cp"
     assert s.shape is None
     assert s.dynamic is None
     # A --dynamic run stamps its specs on the pseudo-sample so the A/B re-trace
     # builds the same symbolic graph as the greedy run.
-    (d,) = _ab_samples(["TILE=n16x8"], dynamic=["seq_len@x0:0"])
+    (d,) = _ab_samples(["TILE=f2x4"], dynamic=["seq_len@x0:0"])
     assert d.dynamic == ("seq_len@x0:0",)
 
 
@@ -258,8 +302,8 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
         return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: g, bench_pinned_async=fake_bench_pinned_async)
-    dyn = SimpleNamespace(name="g.dynM", knobs={"TILE": "n16x8/f2x2"}, shape=None, dynamic=("seq_len@x0:0",))
-    static = SimpleNamespace(name="g", knobs={"TILE": "n16x8/f2x2"}, shape=None, dynamic=None)
+    dyn = SimpleNamespace(name="g.dynM", knobs={"TILE": "f2x2"}, shape=None, dynamic=("seq_len@x0:0",))
+    static = SimpleNamespace(name="g", knobs={"TILE": "f2x2"}, shape=None, dynamic=None)
     benches = asyncio.run(
         _bench_golden_variants(backend, "torch.matmul(torch.randn(8,8), torch.randn(8,8))", [dyn, static], warmup=1, iters=1)
     )
@@ -272,7 +316,7 @@ def test_intensity_floor_flags_impossible_row(monkeypatch):
     """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
     recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
     plausible latency passes, and an unregistered device degrades to no gate. The gate reads
-    ``Sample.flops`` (``GoldenConfig.flops()`` — never overestimated, hint-free) rather than
+    ``Sample.flops`` (an exact measured-work count, never a ``ShapeKey`` estimate) rather than
     reconstructing from the ShapeKey: the join key excludes symbolic axes on the matmul side
     but includes them on the reduce-tier side, so the old hint-multiplier reconstruction
     flagged every reduce-tier ``.dynM`` replay 512× over (the golden-audit false positive)."""
@@ -311,20 +355,38 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
 
 
+def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    eager = {"o": np.array([1.0, 100.0], dtype=np.float32)}
+    passed = _strict_correctness_proof({"o": np.array([1.0015, 100.05], dtype=np.float32)}, eager)
+    assert passed["status"] == "pass"
+    assert passed["reference"] == "eager"
+    assert passed["rtol"] == passed["atol"] == 1e-3
+    assert passed["max_abs_error"] > 0
+    assert passed["mean_abs_error"] > 0
+
+    failed = _strict_correctness_proof({"o": np.array([1.01, 100.0], dtype=np.float32)}, eager)
+    assert failed["status"] == "fail"
+    assert "exceeds" in failed["error"]
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
     with the pinned and realized values; a pin realized on ANY kernel of a multi-kernel
     lowering passes; a bare pin matches its axis-stamped ``@``-keyed realizations
-    (``TILE@d``, multi-axis ``TILE@dd``/``TILE@pj``, the never-collapsed ``PLACE@fold``);
+    (``TILE@d``, multi-axis ``TILE@dd``/``TILE@pj``);
     value compare is registry-canonical (``knob.values_equal``); a registered family
     with no stamp anywhere is ungateable (a reloaded ``--ir`` graph drops serialized
     knobs, so absence ≠ dropped), while an unregistered family flags as a pin typo.
-    A synthetic registry (mirroring space.py's TILE/STAGE/PLACE/FAST_EXP declarations)
+    A synthetic registry (mirroring space.py's TILE/STAGE/FAST_EXP declarations)
     keeps the test independent of module-load order."""
-    from emmy.commands.run import _unreproducible_pin_flag
     from emmy.compiler.pipeline import knob as knob_mod
     from emmy.compiler.pipeline.knob import Knob, KnobType
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     monkeypatch.setattr(
         knob_mod,
@@ -332,45 +394,42 @@ def test_unreproducible_pin_flag(monkeypatch):
         {
             "TILE": Knob("TILE", KnobType.STR, off=""),
             "STAGE": Knob("STAGE", KnobType.STR, off=""),
-            "PLACE": Knob("PLACE", KnobType.STR),
             "FAST_EXP": Knob("FAST_EXP", KnobType.BOOL, off=False),
         },
     )
 
     # Honored pin — realized exactly.
-    assert _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
     # Silently swapped pin — the greedy-vs-greedy case the gate exists for.
-    flag = _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
+    flag = unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
     assert "unreproducible pin" in flag and "TILE=w2x1/f1x8" in flag and "w4x2/f2x4" in flag
     # A REGISTERED family with no stamp on any kernel is ungateable, not a miss: on a
     # partially re-lowered --ir reload the stamp may have been serialized away (a full
     # compile OFF-fills declared knobs, so a dropped pin still shows as (off)/conflict).
-    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
     # An UNREGISTERED family with no stamp is a typo in the pin — flagged.
-    assert "(unset)" in _unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
+    assert "(unset)" in unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
     # Multi-kernel lowering (split main + finalize): honored on the second kernel.
-    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
+    assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
     # Bare pin vs single-axis @-keyed realization.
-    assert _unreproducible_pin_flag({"TILE": "n16x8/f2x2"}, [{"TILE@d": "n16x8/f2x2"}]) is None
+    assert unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@d": "f2x2"}]) is None
     # Bare pin vs a MULTI-axis realization (flash stamps two TILE@ keys — no collapse).
-    assert _unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
-    # Bare PLACE (the golden YAML spelling) vs the fold/cone-stamped realization.
-    assert _unreproducible_pin_flag({"PLACE": "fuse"}, [{"PLACE@fold": "fuse", "PLACE@cone": "fuse"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
     # An @-keyed pin whose axis the re-lowering renamed: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
-    flag = _unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
+    flag = unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
     assert "TILE@d2=w2x1/f1x8" in flag and "(unset)" not in flag
     # Registry-canonical value compare (bool knob pinned via the string grammar).
-    assert _unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
+    assert unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
     # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
     # sibling never pollutes the diagnostic...
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
-    assert "realized (off)" in _unreproducible_pin_flag({"STAGE": "d2/tma/ring"}, [{"STAGE": ""}])
+    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
-    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
+    assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
 
 
 def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
@@ -539,9 +598,9 @@ def test_lane_discriminates_fast_math_from_std():
     an f16-accumulate mma atom or ``FAST_EXP`` is ``"fm"``, everything else ``"std"``."""
     from emmy.commands.run import _lane
 
-    assert _lane({"TILE": "a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4"}) == "fm"
+    assert _lane({"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"}) == "fm"
     assert _lane({"FAST_EXP": "1"}) == "fm"
-    assert _lane({"TILE": "n32x8/f2x8"}) == "std"
+    assert _lane({"TILE": "f2x8", "WORK": "t32x8"}) == "std"
     assert _lane({}) == "std"
 
 
@@ -552,8 +611,8 @@ def test_graph_lane_is_any_kernel_not_a_dict_union(monkeypatch):
     (the phantom-regression trap the lane exists to prevent)."""
     import emmy.commands.run as run_mod
 
-    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4"}
-    std = {"TILE": "n32x8/f2x8"}
+    fm = {"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"}
+    std = {"TILE": "f2x8", "WORK": "t32x8"}
     for order in ([fm, std], [std, fm]):
         monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda graph, order=order: order)
         assert run_mod._graph_lane(object()) == "fm", f"order {order} must still report fm"
@@ -578,10 +637,22 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
         return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs))
 
     # Greedy deployed a std kernel; the stub stands in for every kernel-node walk.
-    monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda g: [_node({"TILE": "n32x8/f2x8"})])
+    monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda g: [_node({"TILE": "f2x8", "WORK": "t32x8"})])
 
-    fm = Sample(knobs={"TILE": "a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4"}, latency_us=100.0, name="mlp_gate_up", shape=object())
-    std = Sample(knobs={"TILE": "n32x8/f2x8"}, latency_us=140.0, name="mlp_gate_up", shape=object())
+    fm = Sample(
+        knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
+        pins={"FAST_MATH": True},
+        latency_us=100.0,
+        name="mlp_gate_up",
+        shape=object(),
+    )
+    std = Sample(
+        knobs={"TILE": "f2x8", "WORK": "t32x8"},
+        pins={"FAST_MATH": False},
+        latency_us=140.0,
+        name="mlp_gate_up",
+        shape=object(),
+    )
     golden_benches = [run_mod._GoldenBench(s, object(), None, (), "ok") for s in (fm, std)]
 
     out = tmp_path / "ab.json"
@@ -592,6 +663,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     assert rec["greedy"]["lane"] == "std"
     lanes = {p["name"] + p["lane"]: p["lane"] for p in rec["pinned"]}  # both rows share the name
     assert sorted(lanes.values()) == ["fm", "std"]
+    assert {p["pinned_knobs"]["FAST_MATH"] for p in rec["pinned"]} == {"True", "False"}
     # The filter a sweep applies: only same-lane rows are comparable to the greedy.
     same_lane = [p for p in rec["pinned"] if p["lane"] == rec["greedy"]["lane"]]
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"
@@ -599,13 +671,27 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
 
 @requires_cuda
 def test_run_golden_bench_json_record(run_cli, tmp_path):
-    """``run --bench --golden NAME --json PATH`` writes the machine-readable A/B record:
+    """A working-golden benchmark writes the machine-readable A/B record:
     backends, the greedy kernel rows, and one pinned entry per recorded golden config with
     its integrity ``flags`` field and recorded reference latencies."""
     import json
 
     out = tmp_path / "ab.json"
-    rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench", "--warmup", "2", "--iters", "5", "--json", str(out))
+    path = _working_golden_for_live_gpu("matmul.square.512")
+    rc, stdout, stderr = run_cli(
+        "run",
+        "--golden",
+        str(path),
+        "--target",
+        "matmul.square.512",
+        "--bench",
+        "--warmup",
+        "2",
+        "--iters",
+        "5",
+        "--json",
+        str(out),
+    )
     assert rc == 0, f"stderr: {stderr}"
     rec = json.loads(out.read_text())
     assert rec["golden"] == "matmul.square.512"
@@ -672,10 +758,10 @@ def test_run_ab_bench_shows_pinned_row(run_cli):
     scalar-tile spelling for this shape) — an unmatched pin now fails its row loudly
     and exits non-zero instead of benching the planner's pick under the pin's name."""
     rc, stdout, stderr = run_cli(
-        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "TILE=n16x16/f2x2"
+        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "TILE=f2x2,WORK=t16x16"
     )
     assert rc == 0, f"stderr: {stderr}"
-    assert "ab TILE=n16x16/f2x2" in stdout, stdout
+    assert "ab TILE=f2x2,WORK=t16x16" in stdout, stdout
 
 
 @requires_cuda
@@ -717,9 +803,9 @@ def test_run_code_matmul_accuracy(run_cli, dtype):
 
 @requires_cuda
 def test_run_code_target_override(run_cli):
-    """``--target sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
+    """``--gpu-arch sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
     on the live device and must match eager, so ``rc == 0`` is the accuracy assertion."""
-    rc, _, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(256, 256), torch.randn(256, 256))", "--target", "sm_80")
+    rc, _, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(256, 256), torch.randn(256, 256))", "--gpu-arch", "sm_80")
     assert rc == 0, f"stderr: {stderr}"
 
 
@@ -1259,7 +1345,7 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
         g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
         return g
 
-    greedy_graph = graph_with({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "REDUCE": "g2k"})
+    greedy_graph = graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "g2k"})
     unmatched = _GoldenBench(
         SimpleNamespace(name="g.unmatched", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None, latency_us=None, ref_us=None),
         graph_with({"TILE": "w4x2/f2x4"}),
@@ -1276,9 +1362,10 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert rec["greedy"]["total_us"] is None
     krow = rec["greedy"]["kernels"][0]
     assert krow["us"] is None
-    # record_knobs: realized values + explicit OFF for families the compile never stamped.
+    # record_knobs: realized values + explicit OFF for families the compile never stamped
+    # (WORK replaced WSPEC in SCHEDULE_FAMILIES — F1: the producer band rides WORK's +p suffix).
     assert krow["record_knobs"]["REDUCE"] == "g2k"
-    for fam in ("STAGE", "WSPEC", "RASTER"):
+    for fam in ("STAGE", "WORK", "RASTER"):
         assert krow["record_knobs"][fam] == ""
     row = rec["pinned"][0]
     assert row["status"] == "pin_unmatched" and row["total_us"] is None
@@ -1369,10 +1456,55 @@ def test_write_ab_json_greedy_isolated_block(tmp_path):
     results = {"Eager PyTorch": 100.0, "torch.compile": 50.0, "Emmy": 25.0}
     _write_ab_json(args, results, greedy, bench, [], greedy_iso=iso)
     rec = json.loads((tmp_path / "ab.json").read_text())
-    assert rec["backends"]["Eager PyTorch"] == {"latency_us": 100.0, "speedup_vs_eager": 1.0}
+    assert rec["backends"]["Eager PyTorch"] == {
+        "latency_us": 100.0,
+        "captured": False,
+        "timing_semantics": "uncaptured_forward",
+        "speedup_vs_eager": 1.0,
+    }
     assert rec["backends"]["torch.compile"]["speedup_vs_eager"] == 2.0
     assert rec["backends"]["Emmy"]["speedup_vs_eager"] == 4.0
     assert rec["greedy"]["total_us"] == 500.0
     iso_rec = rec["greedy"]["isolated"]
     assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0
     assert iso_rec["kernels"][0]["us"] == 400.0 and iso_rec["flags"] == []
+
+
+def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _GoldenBench, _write_ab_json
+
+    greedy, bench, _iso = _iso_bench_fixtures()
+    multi_bench = SimpleNamespace(
+        min_ms=0.8,
+        time_ms=0.9,
+        per_launch=[
+            SimpleNamespace(idx=0, samples=[0.3], time_ms=0.3),
+            SimpleNamespace(idx=1, samples=[0.5], time_ms=0.5),
+        ],
+        num_launches=2,
+        captured=True,
+        e2e_min_ms=0.6,
+    )
+    sample = SimpleNamespace(name="ab TILE=f2x4", knobs={"TILE": "f2x4"}, shape=None, dynamic=None)
+    row = _GoldenBench(sample, greedy, multi_bench, [])
+    args = SimpleNamespace(
+        json=str(tmp_path / "ab.json"),
+        code="torch.matmul(a, b)",
+        input=None,
+        ir=None,
+        golden=None,
+        dynamic=None,
+        warmup=1,
+        iters=1,
+    )
+
+    _write_ab_json(args, {"Emmy": 600.0}, greedy, bench, [row])
+
+    pinned = json.loads((tmp_path / "ab.json").read_text())["pinned"][0]
+    assert pinned["total_us"] == 600.0
+    assert pinned["timing_semantics"] == "whole_program_e2e"
+    assert pinned["captured"] is True
+    assert pinned["num_launches"] == 2

@@ -22,6 +22,7 @@ verbatim without extraction (the escape hatch for a hypothetical name clash).
 """
 
 import argparse
+import json
 import logging
 import os
 import shlex
@@ -79,6 +80,13 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     parser.add_argument(
         "--bench-seed", type=int, default=d(0), help="Bench prompt-sampling seed (with --bench; `--seed` itself forwards to vllm serve)."
     )
+    parser.add_argument(
+        "--health-timeout",
+        type=int,
+        default=d(_HEALTH_TIMEOUT_S),
+        help="Seconds to wait for /health before killing the server (with --bench; raise it when a "
+        "fresh-shape first boot compiles longer than the default 1800).",
+    )
     parser.add_argument("--dry-run", action="store_true", default=d(False), help="Print the vllm command(s) without running.")
 
 
@@ -130,7 +138,52 @@ def _flag_value(vllm_args: list[str], flag: str, default: str) -> str:
     return default
 
 
-def _gen_graph_args(vllm_args: list[str]) -> list[str]:
+def _spec_query_len(vllm_args: list[str]) -> int:
+    """Tokens per request per decode step: ``num_speculative_tokens + 1``, or 1 without
+    speculative decoding. Under MTP/EAGLE every request contributes the draft tokens PLUS
+    the verified one to the same step, so a steady-state decode step is
+    ``concurrency * query_len`` wide — not ``concurrency``."""
+    raw = _flag_value(vllm_args, "--speculative-config", "")
+    if not raw:
+        return 1
+    try:
+        cfg = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return 1  # vLLM validates it; a shape we can't read just means no adjustment
+    return int(cfg.get("num_speculative_tokens", 0) or 0) + 1
+
+
+def _local_config(model: str, vllm_args: list[str]):
+    """The checkpoint's HF config, read LOCALLY (``local_files_only``) so command construction
+    stays hermetic — offline test doubles and uncached models resolve to ``None`` in
+    milliseconds. ``--trust-remote-code`` / ``--revision`` forward so custom-code checkpoints
+    still probe. Every caller treats a ``None`` as "no special case"."""
+    try:
+        from transformers import AutoConfig  # noqa: PLC0415
+
+        kwargs = {"local_files_only": True}
+        if _has_flag(vllm_args, "--trust-remote-code"):
+            kwargs["trust_remote_code"] = True
+        revision = _flag_value(vllm_args, "--revision", "")
+        if revision:
+            kwargs["revision"] = revision
+        return AutoConfig.from_pretrained(model, **kwargs)
+    except Exception:  # noqa: BLE001 — any probe failure: let the serve proceed un-special-cased
+        return None
+
+
+def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
+    """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
+    probe (:func:`_local_config`). The probe is UX only: the authoritative guard is in
+    ``EmmyGenModel.__init__``, which validates an MoE capture boot against the runner (fixed-slot
+    tier present, capture sizes capped at 1) — a probe miss here degrades to that clear boot
+    error, never to a capture crash."""
+    cfg = _local_config(model, vllm_args)
+    cfg = getattr(cfg, "text_config", cfg)
+    return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
+
+
+def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
@@ -141,9 +194,28 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     encoding out of the capture window). Opt out with vLLM's own ``--enforce-eager``
     (forwards as-is); a caller-supplied ``--compilation-config`` also wins over ours. With
     the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so
-    eager is forced."""
+    eager is forced. Under speculative decoding the ladder is floored to multiples of
+    ``num_speculative_tokens + 1`` so the bucket rung survives vLLM's own spec re-rounding —
+    see the comment on the flooring below."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
+    if model is not None and _is_moe_model(model, vllm_args):
+        # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
+        # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
+        # keep the routed dispatch, which host-syncs and stays eager. The ladder is therefore
+        # capped at capture size 1. Whether the fixed-slot tier actually built is unknowable
+        # pre-boot — the AUTHORITATIVE guard is in ``EmmyGenModel.__init__``, which inspects
+        # the runner and rejects an MoE capture boot loudly when the tier is missing (serve
+        # with --enforce-eager then). A caller-supplied config forwards untouched and faces
+        # the same boot guard.
+        if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
+            return []  # the caller decided; the boot guard validates capture against the runner
+        bucket = emmy_config.gen_decode_bucket()
+        if bucket <= 0:
+            logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
+            return ["--enforce-eager"]
+        cfg = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
+        return ["--compilation-config", cfg]
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
         return []  # the caller decided; forward theirs untouched
     bucket = emmy_config.gen_decode_bucket()
@@ -157,6 +229,28 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     max_seqs = int(max_seqs_raw) if max_seqs_raw.isdigit() else 256
     top = max(bucket, max_seqs)
     sizes = sorted({s for s in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) if s < top} | {bucket, top})
+    # Under speculative decoding vLLM re-rounds every capture size UP to a multiple of
+    # ``query_len`` (config/compilation.py adjust_cudagraph_sizes_for_spec_decode, guarding
+    # its issue #28207) and dispatches a step to the first size >= its width. A power-of-two
+    # ladder has no multiple of 3, so at depth 2 every rung MOVES: {16, 32, 192} became
+    # {18, 33, 192} — the 16 and 32 rungs landed one step ABOVE their own decode bucket, and
+    # every steady-state verify step missed the static twin it was sized for and fell to the
+    # symbolic masked-tile path (which run_device_sym also declines to graph-capture). Floor
+    # the rungs to multiples of query_len instead: flooring can only move a rung DOWN, so the
+    # bucket's own rung stays reachable at <= bucket and vLLM's round-up is then a no-op.
+    # Flooring alone is not enough, because a SPARSE ladder still overshoots: floored to multiples
+    # of 3 the power-of-two rungs are 15 then 30, so a 24-token step lands on 30 — under the bucket,
+    # but 6 rows of padding. vLLM's own default ladder is dense (stride 8), which is why the shipped
+    # image never hit this at all. Mirror that shape under speculation: dense candidates, each
+    # floored to a multiple of query_len. A 24-token step then lands exactly on 24, and a 192-token
+    # one exactly on 192, instead of on the next power of two.
+    query_len = _spec_query_len(vllm_args)
+    if query_len > 1:
+        dense = {1, 2, 4} | set(range(8, top + 1, 8)) | {bucket, top}
+        sizes = sorted({s - s % query_len for s in dense} - {0})
+        if not sizes:
+            logger.warning("no capture size survives flooring to num_speculative_tokens+1=%d; serving eager", query_len)
+            return ["--enforce-eager"]
     # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
     # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
     # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32
@@ -173,8 +267,16 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
 
     cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
     if not stock and generate:
-        cmd += _gen_graph_args(vllm_args)
-        cmd += ["--hf-overrides", '{"architectures": ["EmmyGenModel"]}']
+        cmd += _gen_graph_args(vllm_args, model=model)
+        # A checkpoint whose compressed weights emmy's loader owns end to end must be presented
+        # to vLLM as unquantized — vLLM carries no method for the scheme and would refuse the
+        # boot, while nothing in the engine needs one. The loader band decides which schemes
+        # those are (naming a checkpoint format here would cross the band).
+        from emmy.compiler.loader.quant import engine_config_overrides  # noqa: PLC0415
+
+        overrides: dict = {"architectures": ["EmmyGenModel"]}
+        overrides.update(engine_config_overrides(_local_config(model, vllm_args)))
+        cmd += ["--hf-overrides", json.dumps(overrides)]
         # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
         # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.
         if _has_flag(vllm_args, "--dtype"):
@@ -183,19 +285,20 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
                 raise ValueError(f"generative serving requires fp16; --dtype {dt!r} is incompatible (use --dtype float16)")
         else:
             cmd += ["--dtype", "float16"]
-        # The flattened width (sum of newly-scheduled tokens per step) must stay within
-        # DYNAMIC_DIM_MAX (= _DEFAULT_MAX_MODEL_LEN) PLUS the decode bucket: the chunk-twin
-        # + decode-twin row split covers the bucket-sized headroom, so a full chunk step
-        # keeps carrying its decode riders (and the previous prompt's tail) instead of
-        # freezing every decoding request per chunk. vLLM's default max_num_batched_tokens
-        # (e.g. 8192 on a big GPU) would trip the model's startup bound, so default it to
-        # the covered maximum here.
+        # The flattened width (sum of newly-scheduled tokens per step) must stay within the
+        # runner's prefill CAPACITY (the dynamic-dim cap = _DEFAULT_MAX_MODEL_LEN, or a lower
+        # EMMY_GEN_PREFILL_CAPACITY) PLUS the decode bucket: the chunk-twin + decode-twin row
+        # split covers the bucket-sized headroom, so a full chunk step keeps carrying its decode
+        # riders (and the previous prompt's tail) instead of freezing every decoding request per
+        # chunk. vLLM's default max_num_batched_tokens (e.g. 8192 on a big GPU) would trip the
+        # model's startup bound, so default it to the covered maximum here.
         bucket = emmy_config.gen_decode_bucket()
-        top = int(_DEFAULT_MAX_MODEL_LEN) + max(bucket, 0)
+        capacity = emmy_config.gen_prefill_capacity()
+        top = (capacity if 0 < capacity else int(_DEFAULT_MAX_MODEL_LEN)) + max(bucket, 0)
         if _has_flag(vllm_args, "--max-num-batched-tokens"):
             mnbt = _flag_value(vllm_args, "--max-num-batched-tokens", "")
             if mnbt.isdigit() and int(mnbt) > top:
-                raise ValueError(f"--max-num-batched-tokens {mnbt} exceeds the dynamic-dim cap + decode bucket ({top}); use it or lower")
+                raise ValueError(f"--max-num-batched-tokens {mnbt} exceeds the prefill capacity + decode bucket ({top}); use it or lower")
         else:
             cmd += ["--max-num-batched-tokens", str(top)]
     elif not stock:
@@ -323,16 +426,18 @@ def handle_serve(args):
         os.execve(vllm, serve_cmd, env)
 
     bench_cmd[0] = vllm
-    _serve_and_bench(serve_cmd, bench_cmd, port, env=env)
+    _serve_and_bench(serve_cmd, bench_cmd, port, env=env, health_timeout_s=args.health_timeout)
 
 
-def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str, *, env: dict | None = None) -> None:
+def _serve_and_bench(
+    serve_cmd: list[str], bench_cmd: list[str], port: str, *, env: dict | None = None, health_timeout_s: int = _HEALTH_TIMEOUT_S
+) -> None:
     log_file = tempfile.NamedTemporaryFile(mode="wb", prefix="emmy-serve-", suffix=".log", delete=False)
     logger.info("Starting server (logs: %s)...", log_file.name)
     logger.info("  %s", shlex.join(serve_cmd))
     server = subprocess.Popen(serve_cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env)
     try:
-        _wait_for_health(server, port, log_file.name)
+        _wait_for_health(server, port, log_file.name, timeout_s=health_timeout_s)
         logger.info("Server healthy — running benchmark...")
         logger.info("  %s", shlex.join(bench_cmd))
         rc = subprocess.run(bench_cmd, env=env).returncode
@@ -349,12 +454,12 @@ def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str, *, e
         sys.exit(rc)
 
 
-def _wait_for_health(server: subprocess.Popen, port: str, log_path: str) -> None:
+def _wait_for_health(server: subprocess.Popen, port: str, log_path: str, *, timeout_s: int = _HEALTH_TIMEOUT_S) -> None:
     """Poll /health until the server answers; fail fast if it exits first
     (first boot may compile the whole model — be patient)."""
     import httpx
 
-    deadline = time.monotonic() + _HEALTH_TIMEOUT_S
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if server.poll() is not None:
             tail = "".join(open(log_path, errors="replace").readlines()[-15:])
@@ -366,6 +471,6 @@ def _wait_for_health(server: subprocess.Popen, port: str, log_path: str) -> None
         except httpx.HTTPError:
             pass
         time.sleep(3)
-    logger.error("Server did not become healthy within %ds; logs: %s", _HEALTH_TIMEOUT_S, log_path)
+    logger.error("Server did not become healthy within %ds; logs: %s", timeout_s, log_path)
     server.terminate()
     sys.exit(1)

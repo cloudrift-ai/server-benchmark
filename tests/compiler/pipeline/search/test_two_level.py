@@ -26,18 +26,35 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.keys import op_cache_key
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.two_level import (
     LOWERING_PASSES,
+    InnerReward,
+    OpResult,
 )
-from tests.compiler.conftest import drain_tune, run_inner_reward, run_two_level
+from tests.compiler.helpers import drain_tune, run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on
 # stagnation (the fake backend gives a stable but arbitrary per-variant
 # signal). Enough to exercise "Σ_k n_k, not the product" without paying for a
 # full tree drain — exhaustion (∞ effort) is covered directly in test_db.py.
 _PATIENCE = 8
+
+
+def test_searched_winner_requires_one_post_fusion_and_one_cuda_kernel() -> None:
+    one = OpResult(
+        name="k",
+        op_key="key",
+        best_us=4.0,
+        searched_knobs={"TILE": "f2x2"},
+        searched_us=5.0,
+        searched_cuda_ops=1,
+    )
+    assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE": "f2x2"}, 5.0)
+
+    multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
+    assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
+    assert InnerReward(total_us=8.0, ok=True, per_op=[one, one]).searched_winner() is None
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +89,7 @@ class _CountingBackend:
             # crc32, not hash(): str hashes are salted per process (PYTHONHASHSEED),
             # which made the MCTS path — and the bench counts the separability test
             # bounds — vary run to run.
-            us = 1.0 + (zlib.crc32(op_cache_key(n.op).encode()) % 100)
+            us = 1.0 + (zlib.crc32(n.op.cache_key().encode()) % 100)
             per.append(LaunchTime(idx=i, kernel_name=getattr(n.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,)))
         return BenchmarkResult(time_ms=sum(p.time_ms for p in per), num_launches=len(per), per_launch=per)
 
@@ -161,7 +178,7 @@ def test_inner_reward_is_separable_not_a_product() -> None:
     # Per-op sharing through the DB perf cache is allowed — an already-measured
     # variant replays without a bench. The exact share count is sensitive to
     # MCTS exploration order: the
-    # ``_CountingBackend`` fakes latency from ``crc32(op_cache_key)``, so any
+    # ``_CountingBackend`` fakes latency from ``crc32(Op.cache_key)``, so any
     # structural-digest perturbation (e.g. a Source-field rename) shifts the
     # path and the count by a few benches. The hard guarantee is the
     # cross-product upper bound; tighter ``n1+n2`` / ``max(n1,n2)`` bounds
@@ -321,7 +338,7 @@ def test_inner_reward_deeper_patience_benches_new_variants() -> None:
 
 def test_inner_reward_shares_identical_kernel() -> None:
     """Two identical kernels in one terminal collapse to a single ``per_op``
-    entry under one ``op_cache_key`` with ``multiplicity=2``. The inner
+    entry under one ``Op.cache_key`` with ``multiplicity=2``. The inner
     search runs once; the outer total still costs 2× the shared best so the
     outer MCTS reward stays bit-for-bit identical to the per-node-iterated
     formulation."""
@@ -329,7 +346,7 @@ def test_inner_reward_shares_identical_kernel() -> None:
     loops = _loop_ids(fused)
     assert len(loops) == 2
     # Same body ⇒ same structural key.
-    keys = {op_cache_key(fused.nodes[nid].op) for nid in loops}
+    keys = {fused.nodes[nid].op.cache_key() for nid in loops}
     assert len(keys) == 1, "the two matmuls must share one structural key"
 
     single = _tune_one_slice(fused, loops[0], _PATIENCE)
@@ -348,7 +365,7 @@ def test_inner_reward_parallel_matches_serial(monkeypatch) -> None:
     a pool of N device-pinned backends yields the SAME per-op bests and summed
     reward as the one-slot serial path. Each op's search is seeded by ``op_idx``
     (execution-order-independent) and the fake backend's latency keys off
-    ``op_cache_key`` (slot-independent), so completion order can't change the
+    ``Op.cache_key`` (slot-independent), so completion order can't change the
     result. ``prior=None`` keeps this off the online-prior (catboost) path.
 
     The tile is pinned to per-cell (``EMMY_TILE=""``) so the matmul enumerates a
@@ -413,12 +430,12 @@ def test_o3_band_is_per_regime_under_a_precision_gate(monkeypatch):
         return search.last_o3_worthy
 
     s = TuningSearch()
-    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8", "STAGE": "d1/tma"}
-    std_best = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4", "STAGE": "d4/tma/ring"}
-    std_near = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2", "STAGE": "d2/tma/ring"}
-    std_far = {"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "STAGE": ""}
+    fm = {"TILE": "mma_m16n8k16_f16_f16/f2x4/k8", "WORK": "w2x4", "STAGE": "d1/tma"}
+    std_best = {"TILE": "mma_m16n8k16_f16_f32/f2x4", "WORK": "w2x4", "STAGE": "d4/tma"}
+    std_near = {"TILE": "mma_m16n8k16_f16_f32/f2x4/k2", "WORK": "w2x4", "STAGE": "d2/tma"}
+    std_far = {"TILE": "mma_m16n8k16_f16_f32/f1x1", "WORK": "w1x1", "STAGE": ""}
     assert bench(s, fm, 238.0), "the global-best fast-math row rebenches"
     assert bench(s, std_best, 259.0), "the best STANDARD row must rebench in its own band (8% off the fm best)"
     assert bench(s, std_near, 262.0), "a standard row within tol of the standard best qualifies"
     assert not bench(s, std_far, 400.0), "a standard row far outside its own band still does not"
-    assert not bench(s, {**fm, "STAGE": "d2/tma/ring"}, 300.0), "a fast-math row competes against the global best only"
+    assert not bench(s, {**fm, "STAGE": "d2/tma"}, 300.0), "a fast-math row competes against the global best only"

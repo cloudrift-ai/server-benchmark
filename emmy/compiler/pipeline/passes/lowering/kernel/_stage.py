@@ -1,7 +1,7 @@
 """Operand-staging assembly for the kernel emitters (``_factor.factorize``).
 
 The single home for every operand-staging *transport*: the warp tier's cooperative gmem→smem
-2-D slab fills (``cp.async`` / TMA, off a :class:`~emmy.compiler.ir.schedule.Stage`) and
+2-D slab fills (synchronous copy / ``cp.async`` / TMA, off a :class:`~emmy.compiler.ir.schedule.Stage`) and
 the reduce tier's ``sync`` 1-D shared-row fill (:func:`sync_row_fill`, the fused norm→linear
 prologue) both live here, indexed off the same linear-tid / thread-count seam. Assembles the
 surviving kernel-IR transport leaf nodes (``Smem`` / ``CpAsyncCopy`` / ``CpAsyncCommit`` /
@@ -17,10 +17,10 @@ skeleton, :func:`pipelined_kloop` — per operand-group a ``(transport, depth)``
 wait / barrier placement DERIVED from which tagged body segments read each group's slabs (the
 whole-body single-group entry is :func:`staged_kloop`; the warp-flash alternating form is the same
 walk over its three tagged segments) — driven by a :class:`Transport` strategy
-(:class:`CpAsyncTransport` / :class:`TmaTransport`) — the two producers put behind one
-``fill``/``commit``/``wait`` seam. The
+(:class:`SyncCopyTransport` / :class:`CpAsyncTransport` / :class:`TmaTransport`) — the three
+producers put behind one ``fill``/``commit``/``wait`` seam. The
 slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
-(cp.async / TMA) filled it. A slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom`
+(synchronous copy / cp.async / TMA) filled it. A modern slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom`
 per operand): TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies
 the identical XOR in software on its destination index, and each staged ``LdmatrixLoad`` reads back
 through the matching address XOR — which is what keeps the ldmatrix drain free of smem bank
@@ -90,12 +90,14 @@ def _cp_async_width(slab_cols: int, elem_bytes: int) -> int:
     legal cp.async width (4 / 8 / 16) and that divides the inner (contiguous) slab
     extent (a chunk never straddles a slab row). The slab's inner dim maps stride-1
     to the gmem inner dim (canonical A[m,k] / B[k,n]), so a V-run is contiguous in
-    both."""
+    both. ``elem_bytes == 1`` (an fp8 byte slab) yields 16-element 16 B chunks —
+    the byte-staging legality requires 16-divisible inner spans, so the widest
+    width always fits."""
     for nbytes in (16, 8, 4):
         v = nbytes // elem_bytes
         if v >= 1 and slab_cols % v == 0:
             return v
-    return 1  # elem_bytes > 16 — never (fp16/bf16/fp32 only)
+    return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
 
 
 def cp_async_fill(
@@ -187,21 +189,21 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
 
 
 def sync_stat_fill(
-    *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, dtype: str = "float"
+    *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, stat=None, dtype: str = "float"
 ) -> list[Stmt]:
     """The ``sync``-transport per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
     row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
     stat reduce ``Loop`` (coalesced — consecutive lanes read consecutive elements) and close the
-    fold with the carrier's shuffle butterfly (:func:`emit_combine` at warp width — the state
+    fold with the stat fold's shuffle butterfly (``stat`` — its :class:`Reduction`; :func:`emit_combine` at warp width — the state
     broadcasts to every lane), each lane then runs the scalar epilogue redundantly and lane 0
     writes each bridged ``stats`` value into its length-``rows`` smem row (``slab_of(name)``); one
     CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce
     ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe."""
     decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=dtype) for nm in stats]
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
-    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce and s.carrier is not None), None)
-    if rl_i is None or cta.n_threads % 32 or cta.n_threads < 32:
+    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.role.is_reduce), None)
+    if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
         body = (*row_body, *writes)
         loop = StridedLoop(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)
         return [*decls, loop, Sync()]
@@ -211,7 +213,7 @@ def sync_stat_fill(
     lane = BinaryExpr("%", cta.linear_tid, _lit(32))
     warp = BinaryExpr("/", cta.linear_tid, _lit(32))
     fold = StridedLoop(axis=rl.axis, start=lane, step=_lit(32), body=rl.body, unroll=False)
-    combine = emit_combine(rl.carrier, t="_lane", n_threads=32)
+    combine = emit_combine(stat, t="_lane", n_threads=32)
     guarded = Cond(cond=BinaryExpr("==", lane, _lit(0)), body=writes)
     body = (*row_body[:rl_i], fold, *combine, *row_body[rl_i + 1 :], guarded)
     loop = StridedLoop(axis=row_axis, start=warp, step=_lit(cta.n_threads // 32), body=Body(body), unroll=False)
@@ -275,7 +277,7 @@ def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str, *, swi
 
 # --------------------------------------------------------------------------- #
 # The Transport strategy — the one interface the staged K-loop drives, and the
-# two producers behind it (cp.async / TMA). A :class:`Transport` owns the operand
+# three producers behind it (synchronous copy / cp.async / TMA). A :class:`Transport` owns the operand
 # slab layout + the fill/commit/wait handshake; :func:`staged_kloop` owns the
 # depth-parametrized control flow. The two are structurally different primitives
 # (cp.async is fill → commit → wait-group; TMA is an arrive/expect-tx + box copy
@@ -296,7 +298,7 @@ def _slot_row(slot: Expr, rows_per_slot: int) -> Expr | None:
 
 @dataclass(frozen=True)
 class Operand:
-    """One staged operand — A or B — the per-operand slab geometry both transports index off. The two
+    """One staged operand — A or B — the per-operand slab geometry all copy transports index off. The two
     ride as an ``(a, b)`` pair so :meth:`CpAsyncTransport.fill` / ``slab_decls`` loop over them instead
     of spelling A then B. ``shape`` is ``(rows, cols)`` of one ring slot (A ``(tile_m, bk)`` / B
     ``(bk, tile_n)``); each slab is ``ring·rows`` rows (slot ``s`` at row ``s·rows``), plain row-major /
@@ -388,6 +390,61 @@ class SyncOperand:
 
 
 @dataclass(frozen=True)
+class SyncCopyTransport:
+    """The blocking gmem→smem copy producer.
+
+    Every CTA thread vector-loads a contiguous operand run from global memory and vector-stores it
+    into the selected shared-memory ring slot. ``wait`` is the CTA barrier that publishes the
+    completed slot; there is no commit primitive. The ordinary :func:`pipelined_kloop` therefore
+    owns depth, slot rotation, refill barriers, and the independent smem→register pipeline exactly
+    as it does for asynchronous transports. A depth above one is correct but cannot overlap the
+    blocking copy with the current drain on the same threads; it remains a searchable schedule
+    rather than a promised latency-hiding mechanism.
+    """
+
+    operands: tuple[Operand, Operand]
+    slab_dtype: str
+    elem_bytes: int
+    cta: CtaTile
+
+    def slab_decls(self, ring: int) -> list[Stmt]:
+        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype) for op in self.operands]
+
+    def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
+        return []
+
+    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002
+        out: list[Stmt] = []
+        for op in self.operands:
+            rows, cols = op.shape
+            elem_bytes = op.elem_bytes or self.elem_bytes
+            v = _cp_async_width(cols, elem_bytes)
+            fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
+            base = _mul(Var(fe.name), _lit(v))
+            row = BinaryExpr("/", base, _lit(cols))
+            col = BinaryExpr("%", base, _lit(cols))
+            smem_row = row
+            row_offset = op.slot_row(slot)
+            if row_offset is not None:
+                smem_row = _add(row_offset, row)
+            names = tuple(f"_{op.tag}_copy{i}" for i in range(v))
+            body = Body(
+                (
+                    Load(names=names, input=op.buf, index=tuple(op.index(k0)(row, col))),
+                    Write(output=op.slab, index=(smem_row, col), values=names, swizzle=op.swizzle),
+                )
+            )
+            out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=body, unroll=False))
+        return out
+
+    def commit(self) -> list[Stmt]:
+        return []
+
+    def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
+        return [Sync()]
+
+
+@dataclass(frozen=True)
 class SyncTransport:
     """The ``sync`` producer — per-thread compute/copy fills closed by ONE CTA barrier. This is the
     mma tier's ``sync`` transport: the fused-edge compute-fill (a producer cone materializing the A
@@ -461,6 +518,20 @@ class SyncTransport:
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
         sz, _ = op.value(zero, probe_row, zero)
         ctx = SimplifyCtx.empty()
+
+        def aligned(expr: Expr) -> bool:
+            form = affine_form(expr, expr.free_vars())
+            if form is None:
+                return False
+            anchor, coeffs = form
+            anchor = anchor.simplify(ctx)
+            return (
+                isinstance(anchor, Literal)
+                and isinstance(anchor.value, int)
+                and anchor.value % v == 0
+                and all(coeff % v == 0 for coeff in coeffs.values())
+            )
+
         plans: list[str] = []
         cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
@@ -468,7 +539,6 @@ class SyncTransport:
                 plans.append("hoist")
                 continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
-            anchor = sz[p].index[-1].simplify(ctx) if isinstance(sz[p], Load) else None
             if (
                 isinstance(a, Load)
                 and a.is_scalar
@@ -477,8 +547,8 @@ class SyncTransport:
                 and len(a.index) == len(b.index)
                 and all(x.pretty() == y.pretty() for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
                 and step == 1
-                and isinstance(anchor, Literal)
-                and anchor.value % v == 0
+                and isinstance(sz[p], Load)
+                and aligned(sz[p].index[-1])
             ):
                 plans.append("vector")
             else:
@@ -525,7 +595,9 @@ class SyncTransport:
                 cell_col = _add(col, _lit(j)) if j else col
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
-                vals.append(f"{val}__c{j}")
+                vals.append(val)
+            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in stmt.defines()}
+            vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
             # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
             # unsuffixed, and per-cell references pass through to them; VECTOR positions (a scalar
@@ -577,7 +649,19 @@ class CpAsyncTransport:
     cta: CtaTile
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1] + op.pad_cols, op.dtype or self.slab_dtype) for op in self.operands]
+        # A 1-byte (fp8) slab pins an explicit 16 B alignment: its natural (1 B) alignment
+        # satisfies neither the 16 B cp.async chunks nor the drain's vector (u32 / fp8x2)
+        # reads; 16 B keeps both, and the padded row stride is 16-divisible by legality.
+        return [
+            slab_smem(
+                op.slab,
+                ring * op.shape[0],
+                op.shape[1] + op.pad_cols,
+                op.dtype or self.slab_dtype,
+                align=16 if (op.elem_bytes or self.elem_bytes) == 1 else 0,
+            )
+            for op in self.operands
+        ]
 
     def prologue(self, ring: int) -> list[Stmt]:
         return []
@@ -708,7 +792,7 @@ _CONSUMER_REGS = 240
 _SM_REGFILE = 65536
 
 
-def _wspec_kloop(
+def _producer_band_kloop(
     *,
     transport: TmaTransport,
     drain: Callable[[Expr], list[Stmt]],
@@ -1032,7 +1116,7 @@ def staged_kloop(
     slot generation (``chunk // ring``); cp.async ignores it (it gates on the commit group instead).
 
     ``workers`` (a resolved :class:`~emmy.compiler.ir.schedule.WarpSpec`) splits the same phases
-    across producer / compute warp bands instead (:func:`_wspec_kloop`) — TMA transport only (the
+    across producer / compute warp bands instead (:func:`_producer_band_kloop`) — TMA transport only (the
     scheduler's legality gate), ``block_threads`` naming the compute band.
 
     ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
@@ -1051,20 +1135,20 @@ def staged_kloop(
     # bit-identical to gmem-direct. Static callers pass plain ``int``s.
     if workers is not None:
         symbolic = isinstance(k_extent, Dim)
-        assert not symbolic, "warp-spec + symbolic-kv staging is not built (WSPEC drives static-kv TMA only)"
+        assert not symbolic, "producer-band + symbolic-kv staging is not built (the band drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         # A banded stream start is not built for the producer/compute band split — stream the full
         # extent (the band FragmentMask keeps every skipped-candidate step at the fold identity, so
-        # dropping the OPTIMIZATION is exact; only the tile-skip is lost under WSPEC).
-        return _wspec_kloop(
+        # dropping the OPTIMIZATION is exact; only the tile-skip is lost under the band).
+        return _producer_band_kloop(
             transport=transport,
             drain=drain,
             ring=min(depth, n_chunks) if n_chunks >= 2 else 1,
             bk_elems=bk_elems,
             n_chunks=n_chunks,
             k_extent=k_extent,
-            aux_threads=32 * workers.aux_warps,
+            aux_threads=32 * workers.producer_warps,
             block_threads=block_threads,
             k_end=k_end,
         )

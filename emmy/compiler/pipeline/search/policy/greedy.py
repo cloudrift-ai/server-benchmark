@@ -58,10 +58,12 @@ def _tile_pipeline():
 
 # The rule whose fork prices a kernel: the prior's predicted µs for the chosen
 # complete schedule row at the contraction fork (the one hierarchical tile → stage → reduce
-# fork ``_schedule`` offers from inside ``010_recognize``) is the per-kernel cost the
+# fork the tile schedule offers) is the per-kernel cost the
 # structural pricing sums (defined here, not in ``two_level``, because that module imports
-# this package at module scope — the reverse would cycle).
-PARTITION_RULE = "010_recognize"
+# this package at module scope — the reverse would cycle). The fork moved out of recognition
+# when the two halves split: ``010_recognize`` emits the unmapped ``TileOp`` and
+# ``020_schedule`` offers the row fork, so the scored trace decision records under the latter.
+PARTITION_RULE = "020_schedule"
 
 
 def tile_identity(knobs: dict) -> frozenset:
@@ -113,8 +115,9 @@ def _load_prior_safe():
     ``OfflinePrior`` cold-start fallback), memoized per process on the online
     file's ``(path, mtime)`` — a serve boot compiles ~96 programs and each would
     otherwise ``json.loads`` the 56 MB checkpoint again (the dominant boot-time
-    resolution cost). Best-effort: any load failure → ``None`` → the golden floor
-    plus emission order — a bad/missing prior must never break compile."""
+    resolution cost). Best-effort: any load failure → ``None`` → recorded goldens
+    still decide the forks they match, the rest falls to emission order — a
+    bad/missing prior must never break compile."""
     try:
         from emmy import config  # noqa: PLC0415
 
@@ -139,11 +142,72 @@ def _first_leaf(option: object) -> object:
 def _leaf_knobs(leaf: object) -> dict:
     """A flattened leaf's complete knob row: a leaf ``Fork`` carries it as
     ``knobs``; a concrete ``Op`` carries its own; a ``Graph`` splice has no
-    single row (scored structurally, never by knobs) — empty, matching the
-    ``LazyCandidate.from_option`` lift the drive path used."""
+    single row (scored structurally, never by knobs) — empty, matching how
+    ``LazyCandidate.from_option`` treats it during the tuning search."""
     if isinstance(leaf, Fork):
         return dict(leaf.knobs)
     return dict(getattr(leaf, "knobs", None) or {}) if not isinstance(leaf, Graph) else {}
+
+
+def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
+    """The decision memo's key for one schedule fork, or ``None`` where the memo does not apply.
+
+    GREEDY-ONLY and scoped to one factory call (one compile attempt), because a decision is a
+    CONCLUSION over evidence — MCTS must explore, and evidence may move between attempts. Within
+    one attempt the pick is deterministic, so N same-shape kernels — 28 identical per-layer
+    matmuls — decide once and the rest replay by tree descent instead of a flatten-and-score.
+
+    ``TileOp``-rooted forks only, keyed on the scheduler's own ``pool_key``: it carries the
+    dtype / hint / pin discriminators op identity deliberately excludes, so the memo can never
+    serve a twin with different atom eligibility (the pool cache's f16-serves-f32 hazard, same
+    class). The rule identity separates two forks offered on one op, and the node's blocklist
+    CONTENT keys the validate-retry path — a retry with a blocked tile is a different decision."""
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+
+    if not isinstance(fp.root_op, TileOp):
+        return None
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import pool_key  # noqa: PLC0415
+
+    rule = fp.match.rule
+    node_blocked = blocked.get(fp.node_id) if blocked else None
+    return (
+        getattr(getattr(rule, "pass_", None), "name", None),
+        getattr(rule, "name", None),
+        pool_key(fp.root_op),
+        frozenset(node_blocked) if node_blocked else frozenset(),
+    )
+
+
+def _pool_group(fp: ForkPoint) -> list | None:
+    """The schedule fork's enumerated rows, read off the lazy tree's ROOT branch — the pool
+    already materialized them, so the golden tier can consult candidates without building one
+    leaf. ``None`` for any other option shape (several top options, a leaf fork, a concrete op —
+    the flash arm's eagerly-built ``TileOp`` options among them): the caller keeps the flatten
+    path."""
+    if len(fp.options) != 1:
+        return None
+    root = fp.options[0]
+    if not isinstance(root, Fork) or root.is_leaf:
+        return None
+    group = getattr(root, "group", None)
+    return list(group) if group else None
+
+
+def _find_decided_leaf(options: list, want: dict) -> object | None:
+    """The leaf carrying exactly the memoized row ``want`` — replayed by DESCENDING the lazy fork
+    tree: a branch expands only when every knob it pins matches the row, so the walk instantiates
+    O(path × siblings) Forks, never the flat leaf set (the descent ``build_fork_tree`` was built
+    for, which the scoring pass cannot use because it must rank complete rows). ``None`` when no
+    leaf matches — emission drift between two offers of one key — and the caller re-decides."""
+    for o in options:
+        if isinstance(o, Fork) and not o.is_leaf:
+            if all(want.get(name) == value for name, value in o.knobs.items()):
+                found = _find_decided_leaf(o.expand(), want)
+                if found is not None:
+                    return found
+        elif _leaf_knobs(o) == want:
+            return o
+    return None
 
 
 def _leaf_op(leaf: object):
@@ -171,16 +235,15 @@ def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, f
     slice-resolve's trace entry at the partition fork. ``db`` rides into the
     nested decide, so the partition-fork pick follows the same deploy evidence
     hierarchy as a top-level knob pick (reservoir -O3 rows, then the tune DB's
-    -O1 ranking lane, model prediction only where nothing was measured) — the
+    -O1 ranking rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
-    per ``op_cache_key`` so 28 identical per-layer kernels price once.
+    per ``Op.cache_key`` so 28 identical per-layer kernels price once.
     Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
     the op-variant path)."""
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
 
-    key = op_cache_key(graph.nodes[nid].op)
+    key = graph.nodes[nid].op.cache_key()
     if key in memo:
         return memo[key]
     us: float | None = None
@@ -198,9 +261,7 @@ def _price_graph(graph: Graph, ctx: Context, prior, memo: dict[str, float | None
     """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
     e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve)."""
-    from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
-
-    prices = [_price_kernel(graph, nid, ctx, prior, memo, db) for nid, n in graph.nodes.items() if op_cache_key(n.op) is not None]
+    prices = [_price_kernel(graph, nid, ctx, prior, memo, db) for nid, n in graph.nodes.items() if n.op.cache_key() is not None]
     if not prices or any(p is None for p in prices):
         return None
     return sum(prices)
@@ -260,9 +321,9 @@ def _pick_structural(
     return best_split if best_split_us < min(fused_prices) else None
 
 
-# The tune ranking lane's default nvcc flags (``emmy/commands/tune.py``'s
-# ``apply_nvcc_flags(default=...)``) — the deploy-side DB consult queries the
-# perf rows recorded under this lane's ``context_key`` twin beside the deploy's own.
+# The default nvcc flags of the tune ranking pass (``emmy/commands/tune.py``'s
+# ``apply_nvcc_flags(default=...)``) — the deploy-side DB consult also queries the
+# perf rows recorded under a ``context_key`` with these flags, beside the deploy's own.
 _TUNE_RANKING_FLAGS = "-Xcicc -O1"
 
 
@@ -315,14 +376,15 @@ def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float,
     """The tune DB's measured ``ok`` cuda perf rows, indexed by their ``S_*``
     structural signature (stringified values — perf knobs round-trip JSON) —
     the deploy-side analogue of ``Prior._o3_evidence``. Queries three context
-    keys (``context_key`` folds the nvcc flags): the deploy's own, the
-    ``-Xcicc -O1`` tune ranking twin, and the ``-Xcicc -O3`` twin where the
-    tune's deployable re-benches land. Each entry carries a ``deployable``
-    flag: an -O1-lane median is a *ranking* signal with known -O3 inversions,
-    so the pick must prefer deployable-lane rows wherever they exist (a
-    ranking-lane override of a well-trained model regressed qkv/mlp_down ~15%
-    in the ninth-4090-sweep verification). Best-effort: any failure returns an
-    empty index (deploys fall back to the prior)."""
+    keys (``context_key`` folds the nvcc flags): the deploy's own, and the same
+    key with the ``-Xcicc -O1`` tune ranking flags and with ``-Xcicc -O3``,
+    where the tune's deployable re-benches land. Each entry carries a
+    ``deployable`` flag: an -O1 median is a *ranking* signal with known -O3
+    inversions, so the pick must prefer rows measured at deployable flags
+    wherever they exist (letting -O1 rows override a well-trained model
+    regressed qkv/mlp_down ~15% in the ninth-4090-sweep verification).
+    Best-effort: any failure returns an empty index (deploys fall back to the
+    prior)."""
     from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
 
     index: dict[frozenset, list[tuple[dict, float, bool]]] = {}
@@ -356,8 +418,8 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
     the same prefix-consistency contract as ``Prior.evidence_pick`` (every
     tunable knob the candidate specifies must match the measured row; undecided
     knobs are free). Signature matching is drift-tolerant (:func:`_sig_groups`).
-    Two-tier by lane: deployable-lane rows (the deploy's own + ``-O3`` twin
-    contexts) decide outright; ``-O1`` ranking-lane rows decide only when no
+    Two-tier: rows measured at deployable flags (the deploy's own + ``-O3``
+    context keys) decide outright; ``-O1`` ranking rows decide only when no
     candidate has deployable evidence — an -O1 median is a ranking signal with
     known -O3 inversions, and letting it override a well-trained model regressed
     qkv/mlp_down ~15% in the ninth-4090-sweep verification. Keeps a config the
@@ -391,7 +453,7 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
     groups_memo: dict[frozenset, list[list[tuple[dict, float, bool]]]] = {}
 
     best: tuple[int, float] | None = None  # deployable lane
-    best_rank: tuple[int, float] | None = None  # -O1 ranking-lane fallback
+    best_rank: tuple[int, float] | None = None  # fallback: rows from the -O1 ranking pass
     for i, cand in enumerate(rows):
         sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
         cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
@@ -399,9 +461,8 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
             groups_memo[sig] = _sig_groups(index, sig)
         for measured in groups_memo[sig]:
             for row_tun, us, deployable in measured:
-                # Value-of-position join, except the cut placement: a pre-cut row (no
-                # ``PLACE@cone`` key) measured the fused twin and must not vouch for the
-                # knob-identical cut candidate (``evidence_row_vouches``).
+                # A row counts as evidence when it matches every knob the candidate
+                # has decided; undecided knobs are free (``evidence_row_vouches``).
                 if not evidence_row_vouches(cand_tun, row_tun):
                     continue
                 if deployable:
@@ -438,7 +499,7 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]
 def _golden_evidence_index(ctx: Context) -> dict:
     """The deploy card's recorded goldens — every kind: matmul, attention (flash), rms_norm, softmax,
     reduce, pointwise, norm_linear / mlp_geglu (the fused RMSNorm→linear / gate⊗up computed-A), and the
-    fork-nothing rope / embedding regression anchors (which never bind here — no fork) — grouped by
+    rope / embedding entries kept only as regression references (they fork nothing, so they never match here) — grouped by
     :class:`~emmy.compiler.pipeline.search.data.shape.ShapeKey` (whose ``kind``
     discriminator keeps the sweep kinds apart from extent-coincident contractions)
     and sorted fastest-first — the verified-evidence tier a greedy compile consults
@@ -450,7 +511,7 @@ def _golden_evidence_index(ctx: Context) -> dict:
     caches written by local tunes). Goldens are consulted, never inserted into
     the reservoir or the online prior's training data. Best-effort: any load
     failure returns an empty index (deploys fall back to the normal hierarchy)."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
     if not gpu_name:
@@ -458,10 +519,12 @@ def _golden_evidence_index(ctx: Context) -> dict:
     index: dict = {}
     try:
         cap = tuple(ctx.compute_capability)
-        for g in GOLDEN_CONFIGS:
+        for g in GOLDEN_RECORDS:
             if g.gpu_name != gpu_name or tuple(g.compute_cap) != cap:
                 continue
-            index.setdefault(g.shape_key(), []).append(g)
+            if g.is_routing:
+                continue  # a ROUTING entry (PLACE-only) decides cuts pre-schedule — never a fork row
+            index.setdefault(g.shape_key, []).append(g)
         for entries in index.values():
             entries.sort(key=lambda g: g.emmy_us or float("inf"))  # unmeasured entries rank last
     except Exception:  # noqa: BLE001 — a golden consult failure must never break compile
@@ -472,12 +535,12 @@ def _golden_evidence_index(ctx: Context) -> dict:
 def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
     """Prefix-consistency of a golden's recorded tuning knobs against one offered
     candidate row. Keys compare through
-    :func:`~emmy.compiler.pipeline.knob.pin_key_matches` (a bare golden spelling
-    matches the axis-stamped realization) and values through
-    :func:`~emmy.compiler.pipeline.knob.values_equal` (registry-canonical, so an
-    atom-alias TILE spelling matches the canonically-stamped row). A family the
-    candidate hasn't decided at this fork is free — a later pass decides it (the
-    ``evidence_pick`` value-of-position convention).
+    :func:`~emmy.compiler.pipeline.knob.pin_key_matches` (a golden key recorded
+    without an axis suffix matches the axis-stamped realization) and values through
+    :func:`~emmy.compiler.pipeline.knob.values_equal` (registry-canonical, so a
+    TILE value written with an alias atom name matches the canonically-stamped
+    row). A family the candidate hasn't decided at this fork is free — a later
+    pass decides it (the ``evidence_pick`` convention: undecided knobs are free).
 
     An AXIS-KEYED golden key must be satisfied by every candidate key it names — the
     flash all-or-nothing pin contract: a static attention golden records ``TILE@dd``
@@ -494,19 +557,6 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
         fam = family_of(gk)
         hits = [(rk, rv) for rk, rv in row.items() if not rk.startswith(("S_", "H_")) and family_of(rk) == fam and pin_key_matches(gk, rk)]
         if not hits:
-            # A STRUCTURAL placement is the one family where "undecided" cannot mean free. Every
-            # other family is a schedule knob a later pass fills in, so an absent key legitimately
-            # reads as "any realization will do". ``PLACE`` instead names which KERNELS exist, and a
-            # fork that never offered the decision can never realize it — the golden's structure
-            # simply is not on the table there. Treating it as free is a silent WRONG deploy: the
-            # gemma-4 norm→qkv cones fork PRE-split (no ``PLACE@cone`` on any of their 13k rows) yet
-            # ``_fork_shape_key`` rebuilds their key to ``kind="fused"``, so they share a ShapeKey
-            # with genuine post-split cones — a ``PLACE@cone: cut`` golden matched them as free and
-            # deployed the bare map form at 1244 µs while reporting the cut's 54.4 µs (5.3x
-            # regression on the prefill half). Refusing the match turns that into a loud drift
-            # warning and a fall-through to the normal hierarchy.
-            if fam == "PLACE":
-                return False
             continue  # family not decided at this fork — free
         matched = [values_equal(rk, gv, rv) for rk, rv in hits]
         if "@" in gk:  # axis-keyed: names exactly one realization — all-or-nothing
@@ -514,19 +564,13 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
                 return False
         elif not any(matched):  # bare: one plan, satisfied by any same-family realization
             return False
-    # The symmetric PLACE clause: a golden that does NOT name a kernel-set-changing placement
-    # measured the un-restructured form, so it must not vouch for a row carrying the CHANGING
-    # value — the ``fuse``-mirror finalize row is knob-identical to its base and would win the
-    # content tie-break on a keyless golden, deploying a kernel set the golden never measured
-    # (the ``evidence_row_vouches`` principle applied to the golden tier).
-    for k, changing in (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse")):
-        if k not in golden_knobs and str(row.get(k)) == changing:
-            return False
     return True
 
 
-def _fork_shape_key(rows: list[dict]):
-    """The deploy-time :class:`ShapeKey` of a fork's candidate rows. The base case is
+def _fork_shape_key(rows: list[dict], base: dict | None = None):
+    """The deploy-time :class:`ShapeKey` of a fork's candidate rows. ``base`` carries the shared
+    ``S_*`` stamps when ``rows`` are the pool's RAW rows (the golden probe — the stamps live on
+    the offer op, not in a pool row); merged rows carry them on ``rows[0]``. The base case is
     ``from_s_features`` over the shared ``S_*`` stamps — but two restructured-op forks stamp a
     histogram the classifier can't kind, so each is rebuilt from an OFFER / dtype signature the
     stamped final op would carry.
@@ -535,7 +579,7 @@ def _fork_shape_key(rows: list[dict]):
     ``S_loop_depth``, no op histogram — measured off a live greedy resolve), so the classifier can
     never mark it ``kind="flash"`` there. It is instead unmistakable from its OFFER: only the twisted
     lowering forks the two contractions as ``TILE@dd`` + ``TILE@pj``. When the rows carry that pair,
-    the key is rebuilt flash-kinded, with the masked twin's reduce extent normalized to the stamped
+    the key is rebuilt flash-kinded, with the masked (dynamic) form's reduce extent normalized to the stamped
     final-op convention (the fork-time masked op still shows head_dim as a visible reduce; the golden
     keys — and the diagnostics/A-B joins over final stamped ops — have every reduce axis
     symbolic-excluded, ``reduce_max=0``).
@@ -545,7 +589,7 @@ def _fork_shape_key(rows: list[dict]):
     (``S_ext_n_reduce_axis == 1``) and the rsqrt lives in the nested A-cone sub-body, so the
     histogram can't fire ``kind="fused"`` (which needs ``>= 2`` and a top-level ``S_pw_rsqrt``).
     Like flash, it is unmistakable from its OFFER: only a computed-A contraction enumerates the
-    mandatory ``sync`` compute-fill (``d*/sync`` STAGE rows — ``space.stage_moves`` spells only
+    mandatory ``sync`` compute-fill (``d*/sync`` STAGE rows — ``space.stage_moves`` offers only
     gmem-direct / ``cp`` / ``tma``, and the ``sync`` transport is born in the computed-A resolvers
     alone), so a fork whose rows carry a sync-STAGE candidate IS the cone form. (The earlier
     mixed-dtype sniff — f16/bf16 operands + an f32 statistic constant over an add-reduce — fired on
@@ -558,9 +602,10 @@ def _fork_shape_key(rows: list[dict]):
     dynamic — unlike the flash reduce)."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-    key = ShapeKey.from_s_features(rows[0])
+    stamps = base if base is not None else rows[0]
+    key = ShapeKey.from_s_features(stamps)
     # ANY row carrying the pair marks the fork (like the cone's sync-STAGE scan below):
-    # the pair may be spelled only on the warp leaves, and row 0 — whichever leaf the
+    # the pair may appear only on the warp leaves, and row 0 — whichever leaf the
     # planner emitted first — need not be one of them.
     if any({"dd", "pj"} <= {k.split("@", 1)[-1] for k in row if k.startswith("TILE@")} for row in rows):
         key = ShapeKey(
@@ -576,7 +621,7 @@ def _fork_shape_key(rows: list[dict]):
         # STATISTIC kernel produces ONE value per row — without this the cut's own ``__stat``
         # producer was rebuilt to ``kind="fused"``, which both locked it out of the plain
         # reduce goldens and left it able to shadow a real cone of equal extents.
-        and rows[0].get("S_ext_n_free_axis", 0) >= 2
+        and stamps.get("S_ext_n_free_axis", 0) >= 2
         # The OFFER signal (exact, like flash's TILE@dd+TILE@pj): a ``d*/sync`` STAGE row
         # exists only on a computed-A contraction fork. Segment-match so ``cp.async``'s
         # substring can never false-positive.
@@ -595,8 +640,8 @@ def _fork_shape_key(rows: list[dict]):
 
 # Optional per-consultation verdict sink for the golden-tier audit (``search/audit.py``).
 # ``None`` (the default) is zero-cost; ``golden_audit`` installs a list that
-# ``_golden_pick`` appends one record per consulted fork to — the supported seam the
-# drift audit reads, replacing the old monkey-patch spy in ``scripts/diagnostics``.
+# ``_golden_pick`` appends one record per consulted fork to — the supported hook the
+# drift audit reads, replacing the old monkey-patch interception in ``scripts/diagnostics``.
 _AUDIT_SINK: list[dict] | None = None
 
 
@@ -607,7 +652,7 @@ def golden_audit(records: list[dict]):
     ``MATCH`` (a recorded golden realized on an offered candidate), ``DRIFT`` (goldens
     keyed to the fork's shape but none realizes — a graph/enumeration change invalidated
     them), ``GAP`` (no golden recorded for the shape). ``unrealized`` (MATCH/DRIFT only;
-    ``None`` on GAP) lists the shape's recorded :class:`GoldenConfig` entries that NO
+    ``None`` on GAP) lists the shape's recorded golden entries that NO
     offered candidate realizes — the per-entry "pin-only" signal the ``eval golden``
     offer audit reads (an entry can be individually unrealizable while a sibling still
     MATCHes and floors the deploy)."""
@@ -631,7 +676,7 @@ def _audit_record(
         )
 
 
-def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, float] | None:
+def _golden_pick(index: dict, rows: list[dict], node_id: str, base: dict | None = None) -> tuple[int, float] | None:
     """Verified-golden pick over candidate knob rows: the first candidate
     prefix-consistent with the fastest recorded golden of the op's shape
     (:class:`ShapeKey` off the shared ``S_*`` base). Sits ABOVE the reservoir /
@@ -648,16 +693,16 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
     from emmy.compiler.pipeline.knob import canonical_row_key, tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
 
-    if not rows or float(rows[0].get("H_opt", _O3_OPT)) != _O3_OPT:
+    if not rows or float((base if base is not None else rows[0]).get("H_opt", _O3_OPT)) != _O3_OPT:
         return None  # deploying a non--O3 regime — golden µs is deployable-regime truth
-    key = _fork_shape_key(rows)
+    key = _fork_shape_key(rows, base=base)
     goldens = index.get(key)
     if not goldens:
         _audit_record(node_id, key, "GAP", None, None, len(rows))
         return None
     # Per-entry realizability, computed only under an active audit sink: the ``eval golden``
-    # offer audit reads which recorded entries the un-pinned enumeration never offers
-    # (pin-only rows); the deploy hot path below still stops at the first realizing golden.
+    # offer audit reads which recorded entries the input-regime enumeration never offers
+    # without additional winner pins; the deploy hot path below still stops at the first realizing golden.
     unrealized = None
     if _AUDIT_SINK is not None:
         unrealized = [g for g in goldens if not any(_golden_matches_row(dict(tuning_knob_items(g.knobs)), row) for row in rows)]
@@ -676,7 +721,7 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
         "them — the golden(s) no longer realize under the current enumeration; falling through to the normal "
         "evidence hierarchy. Investigate enumeration drift for: %s",
         node_id,
-        goldens[0].shape_key(),
+        goldens[0].shape_key,
         len(goldens),
         "y" if len(goldens) == 1 else "ies",
         ", ".join(g.name for g in goldens),
@@ -698,7 +743,7 @@ def greedy_decide(
     cold-start heuristic otherwise (both behind ``load_prior``'s
     ``FallbackPrior``). With no prior at all (a failed load, or the explicit
     ``prior=None`` emission-order resolve) the card's recorded goldens still
-    floor the pick — the golden tier is prior-independent evidence — and only
+    decide the forks they match — golden evidence needs no prior — and only
     a fork without a realizable golden falls to emission order (option-0,
     first leaf). Stamps the pick's predicted µs on
     ``fp.score``, so the resolve trace carries the per-fork price (the
@@ -721,10 +766,14 @@ def greedy_decide(
     ``Pipeline.run``'s retry after a structural pick failed to lower, and by
     the nested pricing probes themselves (no recursive splitting inside a
     price probe). The price memo is per-factory-call (one compile attempt),
-    keyed by ``op_cache_key``."""
+    keyed by ``Op.cache_key``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    memo: dict[str, float | None] = {}  # op_cache_key → predicted µs (None = unpriceable)
+    memo: dict[str, float | None] = {}  # Op.cache_key → predicted µs (None = unpriceable)
+    #: The DECISION memo (:func:`_decision_key` → the winning row + its price) — same lifetime as
+    #: the price memo, one compile attempt. A repeat offer replays by :func:`_find_decided_leaf`
+    #: descent; only genuinely new (key, blocklist) states pay the flatten-and-score.
+    decisions: dict[tuple, tuple[dict, float | None]] = {}
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     # Lazily-built per-compile DB evidence index (needs a fork point's ctx for the
@@ -744,18 +793,56 @@ def greedy_decide(
         if not loaded:
             loaded = True
             the_prior = _load_prior_safe()
+        dkey = _decision_key(fp, blocked)
+        if dkey is not None and dkey in decisions:
+            want, price = decisions[dkey]
+            found = _find_decided_leaf(fp.options, want)
+            if found is not None:
+                fp.score = price
+                return found
+        # The golden PROBE — the covered path never flattens: a schedule fork's enumerated rows
+        # already sit on the lazy tree's root branch (the pool), so the golden tier consults them
+        # directly and a MATCH descends to its ONE leaf. The verdict (MATCH / DRIFT / GAP) is
+        # recorded here exactly once; the fall-through paths below skip their own golden consult.
+        golden_consulted = False
+        if dkey is not None:
+            if golden_state[0] is None:
+                golden_state[0] = _golden_evidence_index(fp.ctx)
+            group = _pool_group(fp) if golden_state[0] else None
+            if group is not None:
+                node_blocked = blocked.get(fp.node_id) if blocked else None
+                if node_blocked is not None:
+                    group = [r for r in group if not _tile_blocked(r, node_blocked)]
+                base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
+                got = _golden_pick(golden_state[0], group, fp.node_id, base=base) if group else None
+                golden_consulted = bool(group)
+                if got is not None:
+                    best_i, price = got
+                    found = _find_decided_leaf(fp.options, dict(group[best_i]))
+                    if found is not None:
+                        if the_prior is None:
+                            logger.warning(
+                                "deploy: node %r resolved WITHOUT a prior (load failure or emission-order fallback), "
+                                "but the golden floor holds — deploying the recorded golden realization (%.1f us) "
+                                "over option-0.",
+                                fp.node_id,
+                                price,
+                            )
+                        fp.score = price
+                        decisions[dkey] = (dict(group[best_i]), price)
+                        return found
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
             # (``prior=None``). The card's recorded goldens are tier (1) of the
-            # evidence hierarchy and depend on no prior, so they still FLOOR the
-            # pick: a fork whose golden realizes on an offered candidate deploys the
+            # evidence hierarchy and depend on no prior, so they still apply:
+            # a fork whose golden realizes on an offered candidate deploys the
             # golden, and only the rest falls to emission order. (A blocklisted
             # tile — one that failed ``validate(ctx)`` earlier — stays excluded, so
-            # the floor can never re-pick a tile the retry loop already rejected.)
+            # this path can never re-pick a tile the retry loop already rejected.)
             if golden_state[0] is None:
                 golden_state[0] = _golden_evidence_index(fp.ctx)
-            if golden_state[0]:
+            if golden_state[0] and not golden_consulted:
                 leaves = [o for o in flatten_leaves(fp.options) if not _is_structural_option(o)]
                 live = [(o, _leaf_knobs(o)) for o in leaves]
                 node_blocked = blocked.get(fp.node_id) if blocked else None
@@ -773,6 +860,8 @@ def greedy_decide(
                         price,
                     )
                     fp.score = price
+                    if dkey is not None:
+                        decisions[dkey] = (dict(live[best_i][1]), price)
                     return live[best_i][0]
             return _first_leaf(fp.options[0])  # no realizable golden → emission order
         # Flatten: greedy benches nothing, so it must pick the globally best
@@ -826,24 +915,7 @@ def greedy_decide(
         # candidate has evidence at all.
         if golden_state[0] is None:
             golden_state[0] = _golden_evidence_index(fp.ctx)
-        got = _golden_pick(golden_state[0], rows, fp.node_id) if golden_state[0] else None
-        # A row that changes the KERNEL SET (``PLACE@cone=cut`` — realized by
-        # ``020_cut_edge`` into producer + N consumers) is offered to the EVIDENCE tiers above
-        # but withheld from the model fallback below: the per-op prior scores one kernel's knob
-        # row, so its number for a row that becomes several kernels is meaningless, and the cut
-        # row is knob-identical to its fused twin — it ties on score and can win the content
-        # tie-break on nothing. Cold that is actively dangerous: a cut whose consumers have no
-        # golden deploys them on a scalar tile (36 ms on the gemma-4 M=256 q cone). So the cut
-        # can only ever win where it was actually MEASURED to, which is the same principle the
-        # structural-pricing gate encodes, applied at row level. ``PLACE@stat=sink``
-        # (``025_sink_row_reduce`` — the producer gains an epilogue, the norm re-emits as a
-        # sweep) changes the kernel set the same way and is withheld identically.
-        restructured = (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse"))
-        model_rows = [i for i, r in enumerate(rows) if all(r.get(k) != v for k, v in restructured)] or list(range(len(rows)))
-
-        def _model_pick(rank) -> tuple[int, float]:
-            j, p = rank([rows[i] for i in model_rows])
-            return model_rows[j], p
+        got = _golden_pick(golden_state[0], rows, fp.node_id) if golden_state[0] and not golden_consulted else None
 
         picker = getattr(the_prior, "pick", None)
         if picker is not None:
@@ -854,19 +926,18 @@ def greedy_decide(
                 got = _db_measured_pick(db_index(), rows)
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
-            best_i, price = got if got is not None else _model_pick(picker)
+            best_i, price = got if got is not None else picker(rows)
         elif got is not None:  # golden decides even for bare-mean_scores priors
             best_i, price = got
         else:  # bare-mean_scores prior object (tests / custom callers)
             from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
-            def _mean_rank(sub: list[dict]) -> tuple[int, float]:
-                s = the_prior.mean_scores(sub)
-                j = min(range(len(sub)), key=lambda i: (s[i], canonical_row_key(sub[i])))
-                return j, s[j]
-
-            best_i, price = _model_pick(_mean_rank)
+            s = the_prior.mean_scores(rows)
+            best_i = min(range(len(rows)), key=lambda i: (s[i], canonical_row_key(rows[i])))
+            price = s[best_i]
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
+        if dkey is not None:
+            decisions[dkey] = (dict(live[best_i][1]), price)
         return live[best_i][0]
 
     return decide

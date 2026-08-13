@@ -23,9 +23,22 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from emmy.compiler.graph import Graph, Node
     from emmy.compiler.ir.expr import Expr
     from emmy.compiler.tensor import Tensor
+
+
+class _ClassProperty:
+    """A read-only property answered by the CLASS (``@classmethod @property`` chaining is gone
+    since Python 3.13) — reachable from both ``LoopOp.dialect`` and ``op.dialect``."""
+
+    def __init__(self, fget) -> None:
+        self.fget = fget
+
+    def __get__(self, obj, owner):
+        return self.fget(owner)
 
 
 @dataclass
@@ -76,12 +89,6 @@ class Op:
         """Derive the output shape from input shapes. Override in subclasses."""
         raise NotImplementedError(f"{type(self).__name__}.infer_output_shape not implemented")
 
-    def infer_output_shapes(self, input_shapes: list[tuple]) -> tuple[tuple, ...]:
-        """Plural counterpart of :meth:`infer_output_shape` — one shape per
-        output slot. The default wraps the single-output hook so existing ops
-        need no change; a multi-output op overrides this one instead."""
-        return (self.infer_output_shape(input_shapes),)
-
     def forward(self, *inputs):
         """Compute the operation using numpy arrays. Override in subclasses."""
         raise NotImplementedError(f"{type(self).__name__}.forward not implemented")
@@ -99,6 +106,39 @@ class Op:
         post-register-tile thread count fits the hardware launch budget.
         """
         return True
+
+    def cache_key(self) -> str | None:
+        """Tuning / cubin-cache identity for a kernel-bearing op, or ``None`` when this op
+        kind is not cacheable (boundary sentinels, pre-lowering ops). Each kernel-bearing
+        dialect overrides it as a digest of its content identity (``structural_key``) folded
+        with :meth:`_knob_key` — knobs are part of the key because same-body /
+        different-knobs variants must not collide with their parent in the search tree
+        (``SearchTree.expand`` self-parents the node otherwise). The same kernel reached via
+        different rewrite paths produces the same key — ``source`` is never part of it."""
+        return None
+
+    def _knob_key(self) -> tuple:
+        """The knob half of :meth:`cache_key` — the dict as a sorted item tuple."""
+        return tuple(sorted(self.knobs.items())) if self.knobs else ()
+
+    @_ClassProperty
+    def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner
+        """The lowering-stage tag for a kernel-bearing op (``"loop"`` / ``"tile"`` /
+        ``"kernel"`` / ``"cuda"``); ``None`` for everything that is not one kernel of work
+        (boundary sentinels, pre-fusion ops). DERIVED, never declared: kernel-bearing is
+        exactly "overrides :meth:`cache_key`", and the tag is the class name minus its ``Op``
+        suffix, lowercased. A future subclass of a dialect op that wants its PARENT's tag must
+        override this — the name rule tags it by its own name."""
+        if cls.cache_key is Op.cache_key:
+            return None
+        return cls.__name__.removesuffix("Op").lower()
+
+    def source_chain(self) -> Iterator[Op]:
+        """Yield this op and every predecessor along the rewrite chain (:attr:`source`)."""
+        cur: Op | None = self
+        while cur is not None:
+            yield cur
+            cur = cur.source
 
 
 @dataclass
@@ -133,8 +173,8 @@ class ConstantOp(Op):
     ``(path, pre-chain shape)`` pairs the loader reads individually and concatenates along
     **axis 0** before running ``load_ops`` (``merge_sibling_linears``' N-concat of sibling
     projection weights — axis 0 is the ``(N, K)`` out-features axis). Exactly one of
-    ``source_path`` / ``source_parts`` is set on a loadable constant; ``source_shape`` /
-    ``source_dtype`` describe the post-concat source.
+    ``source_path`` / ``source_parts`` / ``source_graph`` is set on a loadable constant;
+    ``source_shape`` / ``source_dtype`` describe the post-concat (or post-evaluation) source.
 
     **Value binding** — a scalar constant binds its value EXACTLY ONE of three ways, never
     ambiguously (enforced in :meth:`__post_init__`):
@@ -153,19 +193,34 @@ class ConstantOp(Op):
     """
 
     name: str
-    value: float | None = None  # a STATIC scalar (None ⇒ not a static constant)
+    value: float | int | None = None  # a STATIC scalar (None ⇒ not a static constant)
     context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
     source_shape: tuple[int, ...] | None = None
     source_dtype: str | None = None
+    # N-source bind record: a constant-only frontend mini-graph whose leaf
+    # ``ConstantOp``s name checkpoint source paths. The loader binds each leaf
+    # source (its own dtype rules apply — an f8-dtype leaf binds raw bits),
+    # evaluates the graph through the reference NumPy backend, and only THEN
+    # runs this constant's ``load_ops`` chain — so later layout folds
+    # (``050``/``060``) compose onto a folded constant exactly as onto a plain
+    # one. Produced by the generic constant folder when it collapses a static
+    # computation cone; ``None`` for every ordinary source constant.
+    # ``source_shape`` / ``source_dtype`` describe the EVALUATED (pre-chain)
+    # result. ``fold_into_constant`` rebuilds constants via
+    # ``dataclasses.replace``, so the field propagates through the layout-fold
+    # band by construction.
+    source_graph: Graph | None = None
 
     def __post_init__(self) -> None:
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
         if self.source_path is not None and self.source_parts:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_path OR source_parts, not both")
+        if self.source_graph is not None and (self.source_path is not None or self.source_parts):
+            raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_graph record OR checkpoint source paths, not both")
         if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
             self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
 

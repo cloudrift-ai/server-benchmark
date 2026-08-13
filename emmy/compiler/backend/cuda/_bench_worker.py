@@ -21,6 +21,7 @@ Protocol (length-prefixed pickle on stdin/stdout):
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None}``
   or ``{"ok": False, "error": str, "traceback": str}`` on exception.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
+- A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -95,6 +96,14 @@ async def _run_job(req: dict) -> dict:
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
     the compile at a given opt level (the cubin cache key folds it in)."""
+    if req.get("worker_warmup"):
+        import cupy as cp
+
+        cp.cuda.Device().use()
+        cp.cuda.runtime.free(0)
+        cp.cuda.runtime.deviceSynchronize()
+        return {"warmed": True}
+
     from emmy import config
 
     with config.nvcc_flags_override(req.get("nvcc_flags")):
@@ -127,11 +136,12 @@ async def _run_job(req: dict) -> dict:
         # In-process within this child — the parent's SIGKILL is the wall-timeout backstop.
         backend = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0)
         kind, payload = spec
-        accuracy_error = run_io = None
+        accuracy_error = run_io = correctness = None
         if kind == "frontend_graph":
             from emmy.commands.run import bench_lowered_vs_torch
 
-            results, bench, avail, captured, accuracy_error = await bench_lowered_vs_torch(
+            want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
+            response = await bench_lowered_vs_torch(
                 payload,
                 req["graph"],
                 backend,
@@ -140,7 +150,12 @@ async def _run_job(req: dict) -> dict:
                 warmup=req["warmup"],
                 iters=req["iters"],
                 bench_backends=req["bench_backends"],
+                strict_accuracy=req.get("strict_accuracy", False),
+                return_reference=want_reference,
             )
+            results, bench, avail, captured, accuracy_error = response[:5]
+            if want_reference:
+                correctness, run_io = response[5:]
         elif kind == "trace_args":
             import types
 
@@ -149,7 +164,7 @@ async def _run_job(req: dict) -> dict:
 
             _, _, bundle = load_or_trace(types.SimpleNamespace(**payload))
             if bundle is None:
-                raise RuntimeError("trace_args produced no runnable module (--ir JSON path has none)")
+                raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
             if req.get("accuracy"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
@@ -160,7 +175,7 @@ async def _run_job(req: dict) -> dict:
                 # reference (bounded: pinned rows only exist for --code inputs).
                 from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output
 
-                input_data = _bind_inputs(req["graph"], module, args_t, kwargs)
+                input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 eager_out = _eager_output(module, args_t, kwargs)
                 accuracy_error = _check_accuracy(run_result.outputs, eager_out)
@@ -195,6 +210,7 @@ async def _run_job(req: dict) -> dict:
             "captured": captured,
             "accuracy_error": accuracy_error,
             "run_io": run_io,
+            "correctness": correctness,
         }
 
 
@@ -221,7 +237,7 @@ def main() -> None:
     # A bench worker never dumps compiler artifacts — but a child-built ``CudaBackend()``
     # defaults its dump to ``CompilerDump.from_env()``, whose ``__post_init__`` rmtrees the
     # directory. With ``EMMY_DUMP_DIR`` inherited from the parent that would wipe the
-    # parent's dump (the ``.torch.json`` reproducers a ``tune --bench`` is about to read).
+    # parent's dump while ``tune --bench`` consumes its in-memory frontend slices.
     from emmy import config
 
     os.environ.pop(config.DUMP_DIR, None)

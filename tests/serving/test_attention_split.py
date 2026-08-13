@@ -42,7 +42,7 @@ def _split_path_output(pre, post, attn, hidden2d, cos, sin, mask, apply_rotary):
     return post(attn_out, hidden2d)
 
 
-@pytest.mark.parametrize("arch", ["qwen3", "llama", "gemma3"])
+@pytest.mark.parametrize("arch", ["qwen3", "llama", "gemma3", "laguna"])
 def test_split_matches_eager_block(arch):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
@@ -75,7 +75,7 @@ def test_split_matches_eager_block(arch):
         )
         model = transformers.LlamaForCausalLM(config)
         from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-    else:  # gemma3: 4-norm layer + per-head q/k norm (no v_norm). sliding_window_pattern=1 forces
+    elif arch == "gemma3":  # 4-norm layer + per-head q/k norm (no v_norm). sliding_window_pattern=1 forces
         # layer 0 to full_attention (global) so the plain-causal reference SDPA matches.
         config = transformers.Gemma3TextConfig(
             vocab_size=64,
@@ -91,6 +91,29 @@ def test_split_matches_eager_block(arch):
         )
         model = transformers.Gemma3ForCausalLM(config)
         from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
+    else:  # Laguna: per-head q/k norm plus a softplus per-head attention output gate.
+        pytest.importorskip("transformers.models.laguna")
+        config = transformers.LagunaConfig(
+            vocab_size=64,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            max_position_embeddings=64,
+            sliding_window=16,
+            num_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=32,
+            shared_expert_intermediate_size=32,
+            layer_types=["full_attention"],
+            mlp_layer_types=["dense"],
+            num_attention_heads_per_layer=[4],
+            gating="per-head",
+        )
+        model = transformers.LagunaForCausalLM(config)
+        from transformers.models.laguna.modeling_laguna import apply_rotary_pos_emb
 
     torch.manual_seed(0)
     model = model.eval()
@@ -101,8 +124,8 @@ def test_split_matches_eager_block(arch):
     t = 6
     hidden3d = torch.randn(1, t, config.hidden_size)
     position_ids = torch.arange(t).unsqueeze(0)
-    # Gemma's rotary is keyed per layer-type (local vs global); layer 0 here is global.
-    rotary_kwargs = {"layer_type": "full_attention"} if arch == "gemma3" else {}
+    # Gemma and Laguna rotary embeddings are keyed per layer-type; layer 0 here is global.
+    rotary_kwargs = {"layer_type": "full_attention"} if arch in ("gemma3", "laguna") else {}
     cos, sin = trunk.rotary_emb(hidden3d, position_ids, **rotary_kwargs)  # [1, T, D]
     mask = build_causal_mask(t, torch.float32)  # [1, 1, T, T] additive
 
@@ -203,3 +226,49 @@ def test_pre_emits_2d_seam_shapes():
     assert tuple(q.shape) == (t, 4 * 16)  # [T, Hq*D]
     assert tuple(k.shape) == (t, 2 * 16)  # [T, Hkv*D]
     assert tuple(v.shape) == (t, 2 * 16)
+
+
+def test_laguna_post_applies_softplus_attention_gate_before_o_proj():
+    """Laguna gates every attention head from the normalized layer input.  The split ABI only
+    carries the residual into ``post``, so ``post`` must reconstruct that normalized input and
+    apply the softplus gate before the output projection."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.laguna.modeling_laguna import LagunaDecoderLayer
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+
+    cfg = transformers.LagunaConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_attention_heads_per_layer=[4],
+        num_key_value_heads=2,
+        head_dim=16,
+        layer_types=["full_attention"],
+        mlp_layer_types=["dense"],
+        max_position_embeddings=64,
+        gating=True,
+    )
+    torch.manual_seed(0)
+    block = LagunaDecoderLayer(cfg, layer_idx=0).eval()
+    for parameter in block.parameters():
+        torch.nn.init.normal_(parameter, std=0.2)
+    # Transformers 5.12 did not expose this declaration. The checkpoint still
+    # spells the layout unambiguously as one gate projection output per head.
+    del block.self_attn.gate_per_head
+    _, post = build_attention_split_wrapper(block)
+
+    residual = torch.randn(5, cfg.hidden_size)
+    attn_out = torch.randn(5, cfg.num_attention_heads * cfg.head_dim)
+    with torch.no_grad():
+        got = post(attn_out, residual)
+        normalized = block.input_layernorm(residual)
+        gate = torch.nn.functional.softplus(block.self_attn.g_proj(normalized).float()).to(attn_out.dtype)
+        gated = (attn_out.view(5, cfg.num_attention_heads, cfg.head_dim) * gate.unsqueeze(-1)).view(5, -1)
+        h = residual + block.self_attn.o_proj(gated)
+        ref = h + block.mlp(block.post_attention_layernorm(h))
+
+    torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-5)

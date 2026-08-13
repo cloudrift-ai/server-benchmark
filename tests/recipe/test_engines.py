@@ -86,6 +86,12 @@ def test_build_args_vllm_max_concurrent():
     assert "--max-num-seqs 256" in args
 
 
+def test_build_args_emits_named_model_revision():
+    llm = LLMConfig(vllm=VllmConfig())
+    args = build_engine_args(llm, "org/model", "0123456789abcdef")
+    assert "--revision 0123456789abcdef" in args
+
+
 def test_build_args_vllm_omits_none_max_concurrent():
     llm = LLMConfig(vllm=VllmConfig())
     args = build_engine_args(llm, "org/model")

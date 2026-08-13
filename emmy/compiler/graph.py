@@ -187,6 +187,11 @@ def _serialize_field(v):
     # ``json.dumps(default=str)`` (which ``_deserialize_field`` couldn't reverse).
     if isinstance(v, IndexSource):
         return repr(v)
+    # ``ConstantOp.source_graph`` — a nested mini-graph field round-trips
+    # through the graph's own dict form, tagged so ``_deserialize_field`` can
+    # tell it from an ordinary dict-valued op field.
+    if isinstance(v, Graph):
+        return {"__graph__": v.to_dict()}
     if isinstance(v, (list, tuple)) and v and all(isinstance(x, IndexSource) for x in v):
         return [repr(x) for x in v]
     if isinstance(v, ElementwiseImpl):
@@ -221,7 +226,7 @@ def _deserialize_field(k, v):
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
-        # (``"Map(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
+        # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
     # (``Placement(...)`` / ``TilePlan(...)`` / ``ReducePlan(...)`` / ``Stage(...)`` /
@@ -234,6 +239,8 @@ def _deserialize_field(k, v):
         return tuple(_eval_stmt(e) for e in v)
     if k == "sources" and isinstance(v, list) and v and all(isinstance(e, str) and e.startswith("IndexSource(") for e in v):
         return tuple(_eval_stmt(e) for e in v)
+    if isinstance(v, dict) and "__graph__" in v:
+        return Graph.from_dict(v["__graph__"])
     if isinstance(v, dict) and "__op__" in v:
         op_cls = _lookup_op_class(v["__op__"])
         if op_cls is None:
@@ -247,6 +254,10 @@ def _deserialize_field(k, v):
         # e.g. ``CudaOp.tma_descriptors``'s ``TmaDescMeta(...)`` reprs (stringified by the
         # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
         return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
+    if isinstance(v, dict):
+        # Dict-valued op fields (``TileOp.schedule`` — codec key → resolved slice) round-trip
+        # their VALUES as constructor reprs under the same known-class guard.
+        return {dk: (_maybe_eval_ctor(dv) if isinstance(dv, str) else dv) for dk, dv in v.items()}
     return v
 
 
@@ -274,16 +285,28 @@ def _eval_stmt(s: str):
 _STMT_EVAL_SCOPE: dict | None = None
 
 
+def _loop_ir_lambda(params=(), body=(), results=()):
+    """Rehydrate a dumped ``Lambda`` repr — strict formation for a pure body, the raw-loop-IR
+    arm for the kernels that legitimately dump impure fn bodies (the un-recognized escape cells,
+    ``030_split_reduce``'s finalize kernels — see ``tile.ir._loop_ir_fn``)."""
+    from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import _loop_ir_fn  # noqa: PLC0415
+
+    return _loop_ir_fn(params, Body.coerce(body), results)
+
+
 def _stmt_eval_scope() -> dict:
     """Lazy-built eval scope for Stmt-repr strings."""
     global _STMT_EVAL_SCOPE
     if _STMT_EVAL_SCOPE is not None:
         return _STMT_EVAL_SCOPE
+    import math as _math
+
     import numpy as _np
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis, AxisRole, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -298,7 +321,6 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.stmt import (
         Accum,
         Assign,
-        Carrier,
         Cond,
         Init,
         Load,
@@ -306,14 +328,11 @@ def _stmt_eval_scope() -> dict:
         Pack,
         Select,
         SelectBranch,
-        State,
         StateMerge,
         StridedLoop,
-        Twist,
         Unpack,
         Write,
     )
-    from emmy.compiler.ir.stmt.carrier import Channel
     from emmy.compiler.ir.tensor.ir import IndexSource
 
     _STMT_EVAL_SCOPE = {
@@ -339,11 +358,10 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
-        "Carrier": Carrier,
-        "State": State,
-        "Twist": Twist,
+        # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
+        # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
+        "Window": Window,
         "StateMerge": StateMerge,
-        "Channel": Channel,
         "Smem": Smem,
         "Sync": Sync,
         "TreeHalve": TreeHalve,
@@ -354,9 +372,17 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
+        # ``repr(float('-inf'))`` is ``-inf`` — the online-softmax ``Fold.init`` running max, and
+        # any other non-finite literal, needs the bare names in scope to round-trip.
+        "inf": _math.inf,
+        "nan": _math.nan,
+        # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
+        # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
+        # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
+        "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Map`` / ``Reduction`` / ``Contraction``) and the
+    # The tile-IR structural nodes (``Fold`` node) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
@@ -365,12 +391,13 @@ def _stmt_eval_scope() -> dict:
     # back. Auto-populate every public class from these modules (``setdefault`` so the
     # explicit stmt/expr entries above win on any name clash) — a new node/knob field
     # needs no edit here.
+    import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_axis_mod, _sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -556,6 +583,26 @@ class Graph:
             self._users[old_id] = set()
         self.inputs = [new_id if i == old_id else i for i in self.inputs]
         self.outputs = [new_id if o == old_id else o for o in self.outputs]
+
+    def replace_input(self, consumer_id: str, old_buf: str, new_buf: str) -> None:
+        """Replace one consumer edge while keeping the buffer indexes consistent.
+
+        Unlike :meth:`replace_node`, this rewires only ``consumer_id``. It is the
+        graph-mutation primitive for birth-time frontend spelling that inserts an
+        explicit value transform in front of selected consumers without redirecting
+        the transform's own input edge.
+        """
+        if consumer_id not in self.nodes:
+            raise KeyError(f"Consumer node {consumer_id!r} not found")
+        if new_buf not in self._producers and new_buf not in self.nodes:
+            raise KeyError(f"Replacement buffer {new_buf!r} not found")
+        consumer = self.nodes[consumer_id]
+        if old_buf not in consumer.inputs:
+            raise ValueError(f"Consumer {consumer_id!r} does not read buffer {old_buf!r}")
+        consumer.inputs = [new_buf if item == old_buf else item for item in consumer.inputs]
+        consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+        self._users.get(old_buf, set()).discard(consumer_id)
+        self._users.setdefault(new_buf, set()).add(consumer_id)
 
     def splice(
         self,
@@ -811,11 +858,12 @@ class Graph:
     def loadable_constants(self) -> Iterator[tuple[str, ConstantOp]]:
         """Yield ``(node_id, op)`` for the constants an executor must *load* — non-static
         (``value is None``) constants that name an external ``source_path`` (or a
-        ``source_parts`` concat of several). Scalar, ``context_value``, and synthetic
-        (source-less) constants are skipped: the backend materializes those itself. The
-        single entry point shared by the safetensors and live-module loaders."""
+        ``source_parts`` concat of several, or a ``source_graph`` bind record whose leaves
+        name the external sources). Scalar, ``context_value``, and synthetic (source-less)
+        constants are skipped: the backend materializes those itself. The single entry
+        point shared by the safetensors and live-module loaders."""
         for nid, op in self.constant_ops():
-            if op.value is None and (op.source_path is not None or op.source_parts):
+            if op.value is None and (op.source_path is not None or op.source_parts or op.source_graph is not None):
                 yield nid, op
 
     def node_role(self, node_id: str) -> str:
@@ -968,9 +1016,22 @@ class Graph:
             if isinstance(body, Body):
                 op_payload: tuple = ("body", body.structural_key())
             else:
-                attrs = tuple(
-                    (f.name, repr(_unwrap_dims(getattr(op, f.name)))) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS
-                )
+                from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+
+                def _field_key(o: object, name: str) -> str:
+                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
+                    # the bottom-up term key); a nested ``Graph`` field
+                    # (``ConstantOp.source_graph``) digests by its own structural key
+                    # (its default repr carries the object address); every other field
+                    # keeps its repr.
+                    if name == "op" and isinstance(o, TileOp):
+                        return o.structural_key()
+                    val = getattr(o, name)
+                    if isinstance(val, Graph):
+                        return val.structural_key()
+                    return repr(_unwrap_dims(val))
+
+                attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)
                 op_payload = ("attrs", attrs)
             out = node.output
             out_payload = (_unwrap_dims(tuple(out.shape)), out.dtype)

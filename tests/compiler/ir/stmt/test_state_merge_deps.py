@@ -9,15 +9,14 @@ carried state names and program-internal temps stay excluded (the ``Accum`` conv
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt.algebra import State, StateMerge
-from emmy.compiler.ir.stmt.leaves import Accum, Assign
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, StateMerge
 
 
 def _merge_with_outer_read() -> StateMerge:
     # A two-component (m, l) combine whose rescale reads an OUTER name ``scale`` — the shape of
     # the under-report: ``scale`` is neither carried state, nor state_b, nor an internal temp.
     return StateMerge(
-        state=State(names=("m", "l")),
+        state=("m", "l"),
         merge=(
             Assign(name="t", op="subtract", args=("m", "m__o")),
             Assign(name="t2", op="multiply", args=("t", "scale")),

@@ -44,17 +44,78 @@ from vllm.model_executor.layers.attention.attention import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import YaRNScalingRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
-from emmy.serving.vllm_model import _trunk_dtype_str
+from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 
 logger = logging.getLogger(__name__)
 
 
-def _build_rotary(config, head_dim, max_position):
+class _BoundedYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
+    """YaRN with its frequency correction anchored at the training length but a served-size cache.
+
+    vLLM's stock YaRN implementation correctly uses ``original_max_position_embeddings`` to
+    compute the correction ramp, but also unconditionally allocates
+    ``original_max_position_embeddings * factor`` cache rows.  Laguna advertises 1M context
+    (8192 * 128), which is hundreds of MiB of dead RoPE cache when the engine serves 4K.  Keep
+    the original length on the module for the correction math and bound only the generated
+    position rows.
+    """
+
+    def __init__(self, *args, cache_max_position: int, **kwargs):
+        self.cache_max_position = int(cache_max_position)
+        if self.cache_max_position <= 0:
+            raise ValueError(f"RoPE cache length must be positive, got {self.cache_max_position}")
+        super().__init__(*args, **kwargs)
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        inv_freq = self._compute_inv_freq(self.scaling_factor)
+        positions = torch.arange(self.cache_max_position, dtype=torch.float32)
+        freqs = torch.einsum("i,j -> ij", positions, inv_freq)
+        cos = freqs.cos() * self.mscale
+        sin = freqs.sin() * self.mscale
+        return torch.cat((cos, sin), dim=-1)
+
+
+def _get_rope(head_dim, max_position, rope_parameters, dtype):
+    """Build one dtype-correct RoPE whose cache is bounded by the served context length."""
+    rope_parameters = rope_parameters or {}
+    if rope_parameters.get("rope_type", "default") != "yarn" or "mrope_section" in rope_parameters:
+        return get_rope(
+            head_dim,
+            max_position=max_position,
+            rope_parameters=rope_parameters,
+            is_neox_style=True,
+            dtype=dtype,
+        )
+
+    partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
+    if partial_rotary_factor <= 0.0 or partial_rotary_factor > 1.0:
+        raise ValueError(f"partial_rotary_factor={partial_rotary_factor} must be between 0.0 and 1.0")
+    rotary_dim = rope_parameters.get("rope_dim") or int(head_dim * partial_rotary_factor)
+    extra_kwargs = {
+        key: value
+        for key, value in rope_parameters.items()
+        if key in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow", "apply_yarn_scaling", "truncate")
+    }
+    return _BoundedYaRNScalingRotaryEmbedding(
+        head_dim,
+        rotary_dim,
+        rope_parameters["original_max_position_embeddings"],
+        rope_parameters.get("rope_theta", 10000),
+        True,
+        rope_parameters["factor"],
+        dtype,
+        cache_max_position=max_position,
+        **extra_kwargs,
+    )
+
+
+def _build_rotary(config, head_dim, max_position, dtype):
     """Construct the model's RoPE the way stock vLLM does — applying each architecture's
     default-theta mutation first (Qwen3 → 1e6, else a missing rope_theta silently falls
     back to 10000 → wrong logits)."""
@@ -65,15 +126,10 @@ def _build_rotary(config, head_dim, max_position):
             set_default_rope_theta(config, default_theta=1000000)
     except Exception:  # noqa: BLE001 — older vLLM without the helper; config carries theta already
         pass
-    return get_rope(
-        head_dim,
-        max_position=max_position,
-        rope_parameters=getattr(config, "rope_parameters", None),
-        is_neox_style=True,
-    )
+    return _get_rope(head_dim, max_position, getattr(config, "rope_parameters", None), dtype)
 
 
-def _build_rotaries(config, runner, n_layers, max_position):
+def _build_rotaries(config, runner, n_layers, max_position, dtype):
     """One RoPE module per decoder layer, built at the LAYER's head_dim. Homogeneous models
     (Qwen3 / Llama) share a single rotary across all layers; Gemma-3/4 keys RoPE on the layer's
     attention type (local θ for ``sliding_attention``, global θ + partial/proportional for
@@ -88,9 +144,65 @@ def _build_rotaries(config, runner, n_layers, max_position):
             lt = layer_types[i]
             if lt not in by_type:
                 hd = runner.layer_meta(i)[0]
-                by_type[lt] = get_rope(hd, max_position=max_position, is_neox_style=True, rope_parameters=rope_params[lt])
+                by_type[lt] = _get_rope(hd, max_position, rope_params[lt], dtype)
         return [by_type[layer_types[i]] for i in range(n_layers)]
-    return [_build_rotary(config, runner.layer_meta(0)[0], max_position)] * n_layers
+    return [_build_rotary(config, runner.layer_meta(0)[0], max_position, dtype)] * n_layers
+
+
+def _rope_cache_limit(model_config, config) -> int:
+    """Use vLLM's validated served length, not the checkpoint's advertised maximum."""
+    return int(getattr(model_config, "max_model_len", None) or getattr(config, "max_position_embeddings", 8192))
+
+
+#: The ``lm_head`` sibling leaves an EXL3 checkpoint stores in place of a plain ``.weight``.
+_CODED_HEAD_LEAVES = ("trellis", "suh", "svh", "mcg", "mul1")
+
+
+def _coded_lm_head_source(model_id: str) -> dict | None:
+    """The EXL3 head's sibling tensors as numpy, or ``None`` when this checkpoint has a plain
+    ``lm_head.weight`` for the ordinary weight stream to load.
+
+    An EXL3 checkpoint quantizes the output head like any other linear (GLM-4.5-Air:
+    ``head_bits`` 6, 0.434 GiB coded), so ``lm_head.weight`` does not exist and vLLM's weight
+    iterator has nothing the model can match. Reading the three leaves straight from the
+    checkpoint also skips a second full pass over the shards — on a 2-bit MoE that stream is
+    ~29 GiB of expert codes, none of which this model owns."""
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    qdir = quantized_checkpoint_dir(model_id)
+    if qdir is None:
+        return None
+    from emmy.compiler.loader.safetensors import load_sources_by_path
+
+    src = load_sources_by_path(str(qdir), [f"lm_head.{leaf}" for leaf in _CODED_HEAD_LEAVES])
+    return src if "lm_head.trellis" in src else None
+
+
+def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
+    """Decode the EXL3 head into vLLM's ``lm_head.weight`` (``[vocab, hidden]``), block by block.
+
+    The loader's orientation is ``(in, out)``, so each block transposes on the way in. Blocked
+    because the Hadamard fold runs in float64: decoded whole, a vocab-sized head costs ~5 GiB of
+    host memory at the moment the expert store is already resident. Padding rows (EXL3 rounds the
+    out extent to 128, vLLM's ``ParallelLMHead`` to 64) stay zero — the logits processor slices
+    the logical vocab off the front either way."""
+    from emmy.compiler.loader.exl3 import decode_exl3_blocks
+
+    if getattr(head, "tp_size", 1) != 1:
+        raise NotImplementedError("EmmyGenModel: a coded lm_head writes whole rows, so it is single-GPU only")
+    param = head.weight
+    trellis, suh, svh = src["lm_head.trellis"], src["lm_head.suh"], src["lm_head.svh"]
+    hidden = trellis.shape[0] * 16
+    if param.shape[1] != hidden:
+        raise ValueError(f"coded lm_head has in_features {hidden}, but vLLM's head parameter is {tuple(param.shape)}")
+    param.data.zero_()
+    blocks = decode_exl3_blocks(trellis, suh, svh, mcg=src.get("lm_head.mcg"), mul1=src.get("lm_head.mul1"))
+    for lo, hi, block in blocks:
+        hi = min(hi, param.shape[0])
+        if lo >= hi:
+            break
+        param.data[lo:hi].copy_(torch.from_numpy(np.ascontiguousarray(block[:, : hi - lo].T)))
+    logger.info("[EmmyGenModel] decoded the EXL3 lm_head (%d x %d) from the checkpoint", param.shape[0], param.shape[1])
 
 
 class _SharedRawEmbedding(nn.Module):
@@ -163,6 +275,9 @@ class EmmyGenModel(nn.Module):
         config = getattr(mc.hf_config, "text_config", mc.hf_config)
         self.config = config
         self.dtype = mc.dtype
+        # Revision-tagged: ``load_weights`` re-opens the checkpoint for an EXL3-coded head, and the
+        # runner resolves it again for the trace — both must land on the rung vLLM was pinned to.
+        self._model_id = pinned_model_id(mc)
 
         # Per-layer sliding/global attention (Gemma-3/4) IS supported: each vLLM Attention below
         # gets its layer's window and each layer its own-theta RoPE. A single uniform sliding
@@ -185,27 +300,33 @@ class EmmyGenModel(nn.Module):
         # + bucket] (``EmmyGenRunner.rider_width``), so a full chunk step keeps carrying
         # its decode riders instead of freezing every decoding request for the chunk.
         rider = max(decode_bucket, 0)
-        if max_batched and max_batched > DYNAMIC_DIM_MAX + rider:
-            raise ValueError(
-                f"max_num_batched_tokens={max_batched} exceeds DYNAMIC_DIM_MAX + decode_bucket "
-                f"({DYNAMIC_DIM_MAX} + {rider}); serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX + rider} or lower"
-            )
-
         # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step they
-        # serve (the dynamic-dim cap; wider steps are the split's) — the device-resident
-        # PREFILL path (``run_device_sym``) needs fixed capacity buffers; without it prefill
-        # falls back to the per-layer host numpy hops. Capacity is pinned at the CAP, not at
-        # mnbt: the pack key carries `max_tokens`/`prefill_bucket`, so tying them to the
-        # scheduler knob would recompile the whole program set (and cold-build twins at
-        # unseeded golden widths) every time mnbt is tuned per lane. The prefill-chunk twin
-        # defaults to that same width (chunked prefill fills steps to mnbt whenever the
-        # queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit value overrides.
-        capacity = DYNAMIC_DIM_MAX if max_batched else None
+        # serve (wider steps are the split's) — the device-resident PREFILL path
+        # (``run_device_sym``) needs fixed capacity buffers; without it prefill falls back to the
+        # per-layer host numpy hops. Capacity is pinned at a CONFIGURED width, not at mnbt: the
+        # pack key carries `max_tokens`/`prefill_bucket`, so tying them to the scheduler knob
+        # would recompile the whole program set (and cold-build twins at unseeded golden widths)
+        # every time mnbt is tuned per lane. It defaults to the dynamic-dim cap;
+        # ``EMMY_GEN_PREFILL_CAPACITY`` lowers it for a model whose activation arena competes
+        # with the KV cache. The prefill-chunk twin defaults to that same width (chunked prefill
+        # fills steps to mnbt whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an
+        # explicit value overrides.
+        capacity = emmy_config.gen_prefill_capacity()
+        if capacity < 0:
+            capacity = DYNAMIC_DIM_MAX
+        if not 0 < capacity <= DYNAMIC_DIM_MAX:
+            raise ValueError(f"EMMY_GEN_PREFILL_CAPACITY={capacity} must be in 1..{DYNAMIC_DIM_MAX} (or -1 for the cap)")
+        if max_batched and max_batched > capacity + rider:
+            raise ValueError(
+                f"max_num_batched_tokens={max_batched} exceeds the prefill capacity + decode_bucket "
+                f"({capacity} + {rider}); serve with --max-num-batched-tokens {capacity + rider} or lower"
+            )
+        capacity = capacity if max_batched else None
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
         self.runner = EmmyGenRunner.create(
-            model_id=mc.model,
+            model_id=self._model_id,
             dtype_str=_trunk_dtype_str(mc.dtype),
             decode_bucket=decode_bucket,
             max_tokens=capacity,
@@ -222,6 +343,34 @@ class EmmyGenModel(nn.Module):
             )
         n_layers = self.runner.num_layers
 
+        # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
+        # only): single-token decode is capture-legal through the runner's FIXED-SLOT tier
+        # (``_moe_combine_slots`` — fixed launch set, no host sync), so an MoE boot may keep
+        # whole-step decode capture at capture size 1. Every wider decode step still rides the
+        # routed dispatch, which host-syncs and cannot be recorded — so capture sizes above 1,
+        # or a boot where the fixed-slot tier failed to build (M=1 expert compile failure, or a
+        # schedule that stages weights through TMA descriptors), are rejected LOUDLY here.
+        # Failing with the real reason beats the cryptic CUDA 'operation not permitted during
+        # stream capture' crash vLLM's capture pass would hit later.
+        if self.runner._moe is not None and not mc.enforce_eager:
+            cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+            if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
+                if not self.runner.has_moe_fixed_slot:
+                    raise ValueError(
+                        "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
+                        "boot (the M=1 expert program failed to build, or its schedule stages weights through "
+                        "TMA descriptors — see the gen_runner warnings above); serve with --enforce-eager"
+                    )
+                sizes = getattr(vllm_config.compilation_config, "cudagraph_capture_sizes", None) or []
+                over = sorted(s for s in sizes if s > 1)
+                if over:
+                    raise ValueError(
+                        f"MoE decode capture is limited to capture size 1 (the fixed-slot tier covers "
+                        f"single-token steps only; wider decode steps run the routed dispatch eager) — "
+                        f"capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
+                        f"emmy serve --generate default for MoE) or --enforce-eager"
+                    )
+
         sliding_window = getattr(config, "sliding_window", None)
 
         def _layer_window(i):
@@ -231,9 +380,23 @@ class EmmyGenModel(nn.Module):
                 return sliding_window
             return None
 
+        # Attention sinks (gpt-oss): a per-layer ``sinks`` weight, shape [num_heads], that the
+        # attention softmax treats as one extra always-present logit column. The config carries
+        # no flag — sinks exist purely as checkpoint weights — so key on the architecture.
+        # Passing ``sinks=`` into ``Attention`` makes vLLM's backend selection sinks-aware
+        # (on sm_120 it lands on TRITON_ATTN; FA2 and FlashInfer both reject sinks there); the
+        # params are the second vLLM-owned weight beside ``lm_head`` (``load_weights`` claims
+        # ``*.self_attn.sinks``).
+        self.sinks = None
+        if getattr(config, "model_type", None) == "gpt_oss":
+            self.sinks = nn.ParameterList(
+                [nn.Parameter(torch.empty(self.runner.layer_meta(i)[1], dtype=mc.dtype), requires_grad=False) for i in range(n_layers)]
+            )
+
         # One real vLLM Attention per layer — unique prefix (vLLM keys static_forward_context /
-        # cache-spec discovery by it and rejects duplicates). No weights. per_layer_sliding_window
-        # makes vLLM's paged attention window that layer (and size its KV-cache spec accordingly).
+        # cache-spec discovery by it and rejects duplicates). No weights (except sinks, above).
+        # per_layer_sliding_window makes vLLM's paged attention window that layer (and size its
+        # KV-cache spec accordingly).
         # Dims come from the runner PER LAYER: Gemma-4's global layers use a larger head_dim than
         # its sliding ones, so a single (num_heads, head_dim) would misshape the global layers.
         attn = []
@@ -249,13 +412,14 @@ class EmmyGenModel(nn.Module):
                     quant_config=vllm_config.quant_config,
                     per_layer_sliding_window=_layer_window(i),
                     prefix=f"{prefix}.layers.{i}.self_attn.attn",
+                    **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
                 )
             )
         self.attn = nn.ModuleList(attn)
         # RoPE is NOT in Attention. One module per layer (applied between pre and attn): homogeneous
         # models share a single rotary; Gemma-3/4 keys theta AND head_dim on layer type (local/global).
-        max_pos = getattr(config, "max_position_embeddings", 8192)
-        self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos))
+        max_pos = _rope_cache_limit(mc, config)
+        self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
 
         # vLLM owns ONLY lm_head; the runner owns embed + the trunk.
         self.lm_head = ParallelLMHead(
@@ -330,14 +494,13 @@ class EmmyGenModel(nn.Module):
     def _forward_device(self, ids, positions):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
-        t = ids.shape[0]
         hidden = self.runner.embed_device(ids)  # [T, H] CUDA
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
             q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
-            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn and t == 1 else None
+            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn else None  # A4: any tier; the backing router decides
             if attn_out is None:
                 attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
@@ -347,14 +510,24 @@ class EmmyGenModel(nn.Module):
         """vLLM paged attention writing INTO the M=1 post twin's ``attn_out`` input backing —
         ``Attention.forward`` minus its own output allocation, so ``run_device``'s prefix upload
         self-copy-skips (the seam copy drops out of the captured decode graph). Returns ``None``
-        to fall back to the ordinary module call (m1 twin absent for this layer, or an attention
-        feature this tail doesn't replicate — kv scales / query quant)."""
+        to fall back to the ordinary module call (no tier covers these rows, or the layer still
+        owes its one-shot kv-scale calculation)."""
         attn = self.attn[layer]
-        if attn.calculate_kv_scales or getattr(attn, "query_quant", None) is not None:
+        if attn.calculate_kv_scales:
+            # ONE-SHOT: the fallback module call below runs ``maybe_calc_kv_scales``, which
+            # clears the flag for this layer, so the alias resumes from the next step on.
+            # (Off by default anyway — ``--calculate-kv-scales`` is deprecated in vLLM 0.23;
+            # unless the checkpoint carries q/k/v scales they stay 1.0.)
             return None
         out = self.runner.post_attn_backing(layer, rows=q.shape[0])
         if out is None or out.dtype != q.dtype:
             return None
+        if getattr(attn, "query_quant", None) is not None and attn.impl.supports_quant_query_input:
+            # ``--kv-cache-dtype fp8*``: vLLM statically quantizes the QUERY to the cache dtype
+            # before the backend call. Replicated here (dtype-checking ``out`` against the
+            # PRE-quant q first — the attention output keeps the original query dtype, exactly
+            # as ``Attention.forward``'s ``output_dtype`` does).
+            q, _ = attn.query_quant(q, attn._q_scale)
         query = q.view(-1, attn.num_heads, attn.head_size)
         key = k.view(-1, attn.num_kv_heads, attn.head_size)
         value = v.view(-1, attn.num_kv_heads, attn.head_size_v)
@@ -386,33 +559,80 @@ class EmmyGenModel(nn.Module):
         """vLLM owns ONLY ``lm_head`` (the runner already loaded embed + trunk). Load
         ``lm_head.weight`` from the checkpoint; when ``tie_word_embeddings`` the checkpoint
         may carry only the embedding, so accept an ``*embed_tokens.weight`` alias for the head
-        (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``)."""
+        (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``).
+
+        An EXL3 checkpoint carries no ``lm_head.weight`` at all — the head is trellis-coded — so
+        it decodes straight from the checkpoint instead (:func:`_coded_lm_head_source`) and the
+        weight stream is consumed only for what remains. An unsourced head is a hard error: vLLM's
+        own strict check waives any parameter whose quant method defines
+        ``process_weights_after_loading``, which the head's does, so nothing downstream would
+        notice a head left at its construction garbage and the server would serve noise while
+        looking healthy."""
         param = self.lm_head.weight
         loader = getattr(param, "weight_loader", default_weight_loader)
         tied = getattr(self.config, "tie_word_embeddings", False)
         loaded: set[str] = set()
-        for name, w in weights:
-            if name == "lm_head.weight":
-                loader(param, w)
-                loaded.add("lm_head.weight")
-            elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
-                loader(param, w)
-                loaded.add("lm_head.weight")
+        coded = _coded_lm_head_source(self._model_id)
+        if coded is not None:
+            _decode_lm_head_into(self.lm_head, coded)
+            loaded.add("lm_head.weight")
+        if coded is None or self.sinks is not None:
+            for name, w in weights:
+                if name == "lm_head.weight" and coded is None:
+                    loader(param, w)
+                    loaded.add("lm_head.weight")
+                elif tied and coded is None and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
+                    loader(param, w)
+                    loaded.add("lm_head.weight")
+                elif self.sinks is not None and name.endswith(".self_attn.sinks"):
+                    # gpt-oss attention sinks — the per-layer [num_heads] weight beside lm_head
+                    # (see __init__). Single GPU: the full copy (stock's tp narrow at tp=1).
+                    layer = int(name.split(".layers.")[1].split(".")[0])
+                    self.sinks[layer].data.copy_(w)
+                    loaded.add(name)
+        if "lm_head.weight" not in loaded:
+            raise ValueError(
+                "EmmyGenModel: no source for lm_head.weight in this checkpoint (no 'lm_head.weight', "
+                f"no tied '*embed_tokens.weight'{'' if tied else ' — the config is untied'}, and no EXL3 "
+                "'lm_head.trellis'). The head would stay uninitialized and every logit would be garbage."
+            )
         # Tied checkpoints: the loaded head IS the raw embed table — hand it to the runner and drop
         # the runner's own ~2 GiB folded device copy (uploaded eagerly at construction for the
-        # profiling-order contract). empty_cache + the cupy pool trim actually RELEASE the freed
-        # blocks to the driver, so vLLM's KV-cache profiling (which runs after load) sees them —
-        # this is where the reclaimed memory becomes KV blocks. The runner re-applies the gemma
-        # embed_scale at gather; the shared table stays raw (the head must read it unscaled).
-        if tied and "lm_head.weight" in loaded and param.data.is_cuda:
+        # profiling-order contract). The runner re-applies the gemma embed_scale at gather; the
+        # shared table stays raw (the head must read it unscaled).
+        if tied and param.data.is_cuda:
             self.runner.adopt_embed_table(param.data, scale=getattr(self.runner, "_embed_scale", 1.0))
-            import cupy as cp
-
-            torch.cuda.empty_cache()
-            cp.get_default_memory_pool().free_all_blocks()
+        # RECLAIM, unconditionally: empty_cache + the cupy pool trim RELEASE freed blocks back to
+        # the driver, and vLLM's KV-cache sizing (which runs right after load) budgets
+        # ``util x total - currently-used`` off the driver's own accounting — it cannot see that a
+        # cached block is free. Everything this boot churned through counts: the adopted table's
+        # replaced copy above, the runner's staging buffers, and the head decode's own upload
+        # blocks. This is where reclaimed memory becomes KV blocks.
+        self.reclaim_device_memory()
         # The spec-decode shim shares this table with the drafter; verify the tie once, here,
         # where the adopt hand-off just happened (the compiled forward carries no guards).
         shim = getattr(self, "model", None)
         if shim is not None:
             shim.embed_tokens.validate_tied()
         return loaded
+
+    @staticmethod
+    def reclaim_device_memory() -> None:
+        """Return both allocators' free blocks to the driver (torch's caching allocator and
+        cupy's memory pool). Idempotent and cheap; call it before anything sizes itself off the
+        driver's free-memory reading.
+
+        Logged in the driver's own units, because that is the accounting vLLM's KV sizing reads
+        and the reclaim is otherwise invisible — which is how the untied path went without one."""
+        import cupy as cp
+
+        before = torch.cuda.mem_get_info()[0]
+        torch.cuda.empty_cache()
+        cp.get_default_memory_pool().free_all_blocks()
+        free, total = torch.cuda.mem_get_info()
+        logger.info(
+            "[EmmyGenModel] reclaimed %.3f GiB of allocator free blocks; %.3f of %.3f GiB now free for the KV cache",
+            (free - before) / 2**30,
+            free / 2**30,
+            total / 2**30,
+        )

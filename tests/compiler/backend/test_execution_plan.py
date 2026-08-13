@@ -13,6 +13,8 @@ import numpy as np
 import pytest
 
 from emmy.compiler.backend.plan import (
+    PLAN_FORMAT_GENERATED,
+    PLAN_FORMAT_INDIRECT,
     PLAN_FORMAT_VERSION,
     WeightSpec,
     _encode_load_ops,
@@ -99,9 +101,48 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = PLAN_FORMAT_VERSION + 1
+    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED) + 1  # past every format the runtime speaks
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
+
+
+def _indirect_graph() -> Graph:
+    """One launch whose weight input is an indirect operand (table + selector + slot)."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1, 64)), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("w", (128, 64)), node_id="w")
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_ind() {}",
+            kernel_name="k_ind",
+            arg_order=("x", "w", "y"),
+            grid=((1,), (1,), (1,)),
+            block=((128,), (1,), (1,)),
+            indirect_args=(("w", "w__table", "w__sel", 0),),
+        ),
+        inputs=["x", "w"],
+        output=Tensor("y", (1, 128)),
+        node_id="y",
+    )
+    g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def test_plan_indirect_operand_projection_and_round_trip():
+    """An indirect operand projects off the CudaOp, serializes the plan as
+    ``PLAN_FORMAT_INDIRECT`` (a runtime ignoring the field would pass the wrong arg pack —
+    old readers must reject and fall back to the full compile), and survives the JSON round
+    trip; a plan without the field keeps format ``PLAN_FORMAT_VERSION`` byte-compatibly."""
+    plan = plan_from_graph(_indirect_graph())
+    (launch,) = plan.launches
+    assert launch.indirect_args == (("w", "w__table", "w__sel", 0),)
+    d = plan_to_dict(plan)
+    assert d["format"] == PLAN_FORMAT_INDIRECT
+    restored = plan_from_dict(json.loads(json.dumps(d)))
+    assert restored == plan
+    # A plan with no indirect operands stays on the original format — existing packs and
+    # readers are untouched.
+    assert plan_to_dict(plan_from_graph(_sample_graph()))["format"] == PLAN_FORMAT_VERSION
 
 
 def test_grid_expr_survives_round_trip():
@@ -181,6 +222,102 @@ def test_weight_spec_source_parts_projection_and_round_trip():
     expected = np.concatenate([wq, wk], axis=0)
     np.testing.assert_array_equal(assemble_source(restored.weights["w_cat"], sources), expected)
     np.testing.assert_array_equal(assemble_source(g.nodes["w_cat"].op, sources), expected)
+
+
+def _one_weight_plan(op, nid="w"):
+    """A minimal plan over one loadable constant ``op``, so a weight spec can be inspected."""
+    g = Graph()
+    g.add_node(op=op, inputs=[], output=Tensor(nid, (4, 4)), node_id=nid)
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_t() {}",
+            kernel_name="k_t",
+            arg_order=(nid, "y"),
+            grid=((1,), (1,), (1,)),
+            block=((32,), (1,), (1,)),
+            smem_bytes=0,
+        ),
+        inputs=[nid],
+        output=Tensor("y", (4, 4)),
+        node_id="y",
+    )
+    g.outputs = ["y"]
+    return plan_from_graph(g)
+
+
+def _slice_index_map(out_shape, spans):
+    """A single-source ``IndexMapOp`` reading ``spans`` (per-axis ``(start, step)``)."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+
+    coords = tuple(
+        BinaryExpr("+", BinaryExpr("*", Var(f"out_coord_{i}"), Literal(step, "int")), Literal(start, "int"))
+        for i, (start, step) in enumerate(spans)
+    )
+    return IndexMapOp(out_shape=out_shape, sources=(IndexSource(input_idx=0, coord_map=coords),))
+
+
+@pytest.mark.parametrize(("shape", "spans"), [((3,), ((0, 1),)), ((2, 3), ((1, 1), (0, 2))), ((4,), ((2, 1),))])
+def test_slice_index_map_encodes_and_matches_the_binder(shape, spans):
+    """A folded ``SliceOp`` reaches the plan as an ``IndexMapOp``; the pack vocabulary encodes
+    the affine per-axis form as a plain numpy slice."""
+    op = _slice_index_map(shape, spans)
+    encoded = _encode_load_ops((op,))
+    assert encoded is not None and encoded[0][0] == "slice"
+    src = np.arange(8 * 9, dtype=np.float32).reshape(8, 9)
+    src = src if len(shape) == 2 else src[0]
+    np.testing.assert_array_equal(apply_weight_loads(src, encoded), apply_load_ops(src, (op,)))
+
+
+def test_non_affine_index_map_stays_outside_the_vocabulary():
+    """A transposing index map is NOT a slice — it must encode as ``None`` rather than as a
+    silently wrong per-axis read."""
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+
+    swap = IndexMapOp(out_shape=(3, 2), sources=(IndexSource(input_idx=0, coord_map=(Var("out_coord_1"), Var("out_coord_0"))),))
+    assert _encode_load_ops((swap,)) is None
+
+
+def test_unreproducible_bind_record_marks_the_weight_unbindable(caplog):
+    """A record the plan cannot reproduce (leaves it would have to read from the checkpoint)
+    must mark the weight ``load_ops=None`` — the pack save then refuses, rather than writing a
+    pack whose boot silently drops the weight."""
+    import logging
+
+    record = Graph()
+    record.add_node(
+        op=ConstantOp(name="leaf", source_path="model.external", source_shape=(4, 4), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("leaf", (4, 4)),
+        node_id="leaf",
+    )
+    record.outputs = ["leaf"]
+    with caplog.at_level(logging.WARNING, logger="emmy.compiler.backend.plan"):
+        plan = _one_weight_plan(ConstantOp(name="h", source_graph=record, source_shape=(4, 4)))
+    assert plan.weights["w"].load_ops is None
+    assert plan.weights["w"].generated is None
+    assert "bind record" in caplog.text
+
+
+def test_source_free_bind_record_is_generated_serialized_and_rebound():
+    from emmy.compiler.ir.tensor.ir import CastOp, RangeOp
+    from emmy.compiler.loader.binder import assemble_source
+
+    record = Graph()
+    axis = record.add_node(op=RangeOp(stop=16, dtype="i32"), inputs=[], output=Tensor("axis", (16,), "i32"))
+    values = record.add_node(op=CastOp(dtype="f32"), inputs=[axis], output=Tensor("values", (16,), "f32"))
+    record.add_node(op=ReshapeOp(shape=(4, 4)), inputs=[values], output=Tensor("generated", (4, 4)), node_id="generated")
+    record.outputs = ["generated"]
+
+    plan = _one_weight_plan(ConstantOp(name="generated", source_graph=record, source_shape=(4, 4), source_dtype="f32"))
+    spec = plan.weights["w"]
+    assert spec.generated is not None and spec.load_ops == ()
+    wire = json.loads(json.dumps(plan_to_dict(plan)))
+    assert wire["format"] == PLAN_FORMAT_GENERATED
+    restored = plan_from_dict(wire)
+    assert restored == plan
+    np.testing.assert_array_equal(assemble_source(restored.weights["w"], {}), np.arange(16, dtype=np.float32).reshape(4, 4))
 
 
 def test_plan_mimo_node_mints_per_buffer_specs_and_writes():

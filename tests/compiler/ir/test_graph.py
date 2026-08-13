@@ -94,6 +94,22 @@ def test_replace_node():
     assert "red2" in [o for o in g.outputs]
 
 
+def test_replace_input_rewires_only_one_consumer():
+    g = _make_matmul_graph()
+    replacement = g.add_node(
+        op=ElementwiseOp(op="negative"),
+        inputs=["A"],
+        output=Tensor("negative_a", ("M", "K", "N")),
+        node_id="negative_a",
+    )
+
+    g.replace_input("ew", "A", replacement)
+
+    assert g.nodes["ew"].inputs == ["negative_a", "B"]
+    assert g.users("A") == {"negative_a"}
+    assert g.users("negative_a") == {"ew"}
+
+
 def test_remove_node():
     g = _make_matmul_graph()
     g.outputs = []
@@ -150,6 +166,51 @@ def test_cuda_op_tma_descriptors_roundtrip():
     descs = loaded.nodes["out"].op.tma_descriptors
     assert descs and all(isinstance(d, TmaDescMeta) for d in descs), f"expected TmaDescMeta tuple, got {descs!r}"
     assert descs[0].src_buf == "k" and descs[0].box_extents == (1, 1, 64, 64) and descs[0].swizzle == "B128"
+
+
+def test_kernel_op_windowed_axis_roundtrip():
+    """A dumped kernel-stage graph must rehydrate a ``Tile`` whose axes carry a ``Window``.
+
+    ``repr(Axis)`` spells the ``window`` field in full, so every register-tiled or cross-CTA-split
+    kernel dumps ``Window(parent=Axis(...), base=..., bound=...)`` inside ``KernelOp.body``.
+    ``Window`` lives in ``ir/axis.py``, which the eval scope's auto-populate loop did not cover, so
+    ``Graph.from_dict`` on ``07_lowering_kernel.json`` raised ``NameError: name 'Window' is not
+    defined`` — and with it every ``emmy run --ir <kernel.json>``."""
+    import json
+
+    from emmy.compiler.ir.axis import Axis, Window
+    from emmy.compiler.ir.kernel.ir import KernelOp, Smem, Tile
+
+    parent = Axis(name="a0", extent=512)
+    body = Tile(
+        axes=(Axis(name="a0_b", extent=8, window=Window(parent=parent)),),
+        body=(Smem(name="_a_smem", extents=(128, 32), dtype="__half"),),
+        block_threads=256,
+    )
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (512, 4096), "f16"), node_id="x")
+    g.add_node(op=KernelOp(body=(body,), name="k_x"), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
+    g.inputs, g.outputs = [x], ["out"]
+
+    loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))  # the EMMY_DUMP_DIR disk round-trip
+    op = loaded.nodes["out"].op
+    assert isinstance(op, KernelOp), f"expected KernelOp, got {op!r}"
+    (tile,) = op.body
+    assert isinstance(tile.axes[0].window, Window), f"expected a rehydrated Window, got {tile.axes[0].window!r}"
+    assert tile.axes[0].source_axis.name == "a0"
+    assert op.smem_bytes() == 128 * 32 * 2
+
+
+def test_stmt_eval_scope_reads_non_finite_literals():
+    """``repr(float('-inf'))`` is the bare token ``-inf``, which does not eval without a name.
+
+    The online-softmax ``Fold.init`` running max dumps ``init=(-inf, 0.0, 0.0)``, so every flash
+    tile-stage dump raised ``NameError: name 'inf' is not defined`` on reload."""
+    from emmy.compiler.graph import _stmt_eval_scope
+
+    scope = _stmt_eval_scope()
+    assert eval("(-inf, 0.0, 0.0)", dict(scope)) == (float("-inf"), 0.0, 0.0)
+    assert eval("nan", dict(scope)) != eval("nan", dict(scope))  # NaN is not equal to itself
 
 
 def test_to_dict_serializes_composite_shape_dim():

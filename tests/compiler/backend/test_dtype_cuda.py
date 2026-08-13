@@ -17,8 +17,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp, SoftmaxOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-
-from ..conftest import requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 
 def test_cuda_name_int_dtypes():
@@ -47,6 +46,18 @@ def test_nbytes_of_int_dtypes():
     assert nbytes_of(dt.I64) == 8
     assert nbytes_of("i32") == 4
     assert nbytes_of("i64") == 8
+
+
+def test_fp8_cuda_traits():
+    # Registry completeness for the fp8 storage dtypes (M1 — no kernel computes
+    # on fp8 yet): C names, the <cuda_fp8.h> include, 1-byte accounting.
+    from emmy.compiler.backend.cuda.dtype import cuda_includes
+
+    assert cuda_name(dt.F8E4M3) == "__nv_fp8_e4m3"
+    assert cuda_name(dt.F8E5M2) == "__nv_fp8_e5m2"
+    assert cuda_includes([dt.F8E4M3, dt.F8E5M2]) == ["<cuda_fp8.h>"]
+    for spelling in (dt.F8E4M3, "f8e4m3", "float8_e4m3fn", "__nv_fp8_e4m3", "__nv_fp8_e5m2"):
+        assert nbytes_of(spelling) == 1
 
 
 def _fp16_chain_graph() -> Graph:

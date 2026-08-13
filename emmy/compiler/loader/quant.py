@@ -20,6 +20,10 @@ architecture-twin construction). Two checkpoint families share the design — FP
   weight is just constants + algebra, and the cone stays in-graph so the
   compressed device storage reaches the ordinary lowering and scheduling rules
   (``032_fold_constant_subgraphs`` declines every storage-decode cone).
+- :func:`spell_dynamic_fp8_activations`: when the same checkpoint explicitly
+  declares dynamic activation scaling, wrap each eligible linear input in the
+  per-row amax / encode / decode algebra. The graph then carries the checkpoint's
+  W8A8 computation directly; later passes still see only dtypes and tensor algebra.
 - :func:`spell_quantized_inputs`: the input-sourced twin of the constant
   speller for graphs whose weights are forward-argument ``InputOp``s (the MoE
   serving seam's expert programs). Each named input becomes an fp8 bits input
@@ -510,6 +514,188 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
     if spelled:
         logger.info("spelled %d quantized weight constant(s) from %s", spelled, model_dir)
     return spelled
+
+
+def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None]:
+    """Return ``(enabled, declared_fmt)`` for a supported dynamic FP8 activation scheme."""
+    if not qc:
+        return False, None
+    if qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "dynamic":
+        fmt = {"e4m3": "f8e4m3", "e5m2": "f8e5m2", "f8e4m3": "f8e4m3", "f8e5m2": "f8e5m2"}.get(qc.get("fmt"))
+        return fmt is not None, fmt
+    if qc.get("quant_method") == "compressed-tensors":
+        groups = list((qc.get("config_groups") or {}).values())
+        # Fail closed on mixed declarations: without resolving every group's target
+        # selector, one dynamic group must not turn a weight-only group into W8A8.
+        if groups and all(
+            isinstance(group, dict)
+            and isinstance(group.get("weights"), dict)
+            and group["weights"].get("type") == "float"
+            and int(group["weights"].get("num_bits") or 0) == 8
+            and isinstance(group.get("input_activations"), dict)
+            and group["input_activations"].get("type") == "float"
+            and int(group["input_activations"].get("num_bits") or 0) == 8
+            and group["input_activations"].get("dynamic") is True
+            and group["input_activations"].get("strategy") == "token"
+            for group in groups
+        ):
+            return True, None  # the paired weight's concrete f8 storage dtype selects the encode format
+    return False, None
+
+
+def _cone_storage_formats(graph: Graph, start: str) -> set[str]:
+    """Return FP8 storage dtypes reachable upstream from one graph buffer."""
+    pending = [start]
+    seen: set[str] = set()
+    formats: set[str] = set()
+    while pending:
+        buf = pending.pop()
+        node = graph.producer(buf)
+        if node is None or node.id in seen:
+            continue
+        seen.add(node.id)
+        if isinstance(node.op, ConstantOp):
+            dtype = node.output.dtype.name
+            if dtype in F8_SAFETENSORS_DTYPES.values():
+                formats.add(dtype)
+        pending.extend(node.inputs)
+    return formats
+
+
+def _cone_has_fp8_encode(graph: Graph, start: str) -> bool:
+    """Whether an activation buffer is already downstream of an FP8 encode."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+
+    pending = [start]
+    seen: set[str] = set()
+    while pending:
+        buf = pending.pop()
+        node = graph.producer(buf)
+        if node is None or node.id in seen:
+            continue
+        seen.add(node.id)
+        if isinstance(node.op, ElementwiseOp) and node.op.op.name.startswith("to_f8"):
+            return True
+        pending.extend(node.inputs)
+    return False
+
+
+def _fresh_buffer_name(graph: Graph, base: str) -> str:
+    """Return a deterministic unused primary-buffer name."""
+    name = base
+    suffix = 2
+    while name in graph.nodes or graph.buffer(name) is not None:
+        name = f"{base}_{suffix}"
+        suffix += 1
+    return name
+
+
+def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str) -> str:
+    """Spell one shared per-row dynamic FP8 activation value and return its decoded buffer."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    source = graph.buffer(activation)
+    if source is None or not source.shape or source.dtype.name not in {"f16", "bf16", "f32"}:
+        raise ValueError(f"dynamic FP8 activation {activation!r} must be a rank-1+ floating tensor")
+    shape = tuple(source.shape)
+    scale_shape = (*shape[:-1], 1)
+    stem = _fresh_buffer_name(graph, f"{activation}_dynamic_fp8")
+
+    absolute = graph.add_node(
+        op=ElementwiseOp(op="abs"),
+        inputs=[activation],
+        output=Tensor(f"{stem}_abs", shape, "f32"),
+    )
+    amax = graph.add_node(
+        op=ReduceOp(op="maximum", axis=-1),
+        inputs=[absolute],
+        output=Tensor(f"{stem}_amax", scale_shape, "f32"),
+    )
+    floor = const_bc(graph, name=f"{stem}_floor", value=1.0e-12, target_shape=scale_shape, dtype="f32")
+    stable_amax = graph.add_node(
+        op=ElementwiseOp(op="maximum"),
+        inputs=[amax, floor],
+        output=Tensor(f"{stem}_stable_amax", scale_shape, "f32"),
+    )
+    finite_max = 448.0 if fmt == "f8e4m3" else 57344.0
+    denominator = const_bc(graph, name=f"{stem}_finite_max", value=finite_max, target_shape=scale_shape, dtype="f32")
+    scale = graph.add_node(
+        op=ElementwiseOp(op="divide"),
+        inputs=[stable_amax, denominator],
+        output=Tensor(f"{stem}_scale", scale_shape, "f32"),
+    )
+    scale_bc = broadcast_to(graph, scale, shape)
+    normalized = graph.add_node(
+        op=ElementwiseOp(op="divide"),
+        inputs=[activation, scale_bc],
+        output=Tensor(f"{stem}_normalized", shape, "f32"),
+    )
+    bits = graph.add_node(
+        op=ElementwiseOp(op=f"to_{fmt}"),
+        inputs=[normalized],
+        output=Tensor(f"{stem}_bits", shape, fmt),
+    )
+    decoded = graph.add_node(
+        op=ElementwiseOp(op=f"from_{fmt}"),
+        inputs=[bits],
+        output=Tensor(f"{stem}_decoded", shape, source.dtype),
+    )
+    restored = graph.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[decoded, scale_bc],
+        output=Tensor(f"{stem}_value", shape, source.dtype),
+    )
+
+    # Trace inventories promote these intermediates to auxiliary outputs before
+    # fusion. That preserves the genuine encode/scale boundary needed by a native
+    # W8A8 contraction without changing ordinary model-call outputs.
+    graph.nodes[bits].hints.set("trace.materialize", True)
+    graph.nodes[scale].hints.set("trace.materialize", True)
+    return restored
+
+
+def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
+    """Spell checkpoint-declared dynamic FP8 activations in front of eligible linears.
+
+    The official ``quant_method: fp8`` declaration supplies both the activation
+    scheme and format. A linear is eligible only when its already-spelled weight
+    cone contains that same FP8 storage dtype. Shared projection inputs reuse one
+    quantized activation value. The zero-safe per-row scale is ``max(amax(abs(x)),
+    1e-12) / finite_max``. Returns the number of rewired linears; unsupported or
+    weight-only declarations are a no-op.
+    """
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+    model_dir = _resolve_model_dir(model_id_or_path)
+    enabled, declared_fmt = _dynamic_activation_declaration(_fp8_quant_config(model_dir))
+    if not enabled:
+        return 0
+
+    eligible: list[tuple[str, str, str]] = []
+    for node in list(graph.nodes.values()):
+        if not isinstance(node.op, LinearOp) or len(node.inputs) < 2:
+            continue
+        activation, weight = node.inputs[:2]
+        formats = _cone_storage_formats(graph, weight)
+        if len(formats) != 1 or (declared_fmt is not None and formats != {declared_fmt}) or _cone_has_fp8_encode(graph, activation):
+            continue
+        eligible.append((node.id, activation, next(iter(formats))))
+
+    rewritten: dict[tuple[str, str], str] = {}
+    for linear_id, activation, fmt in eligible:
+        key = (activation, fmt)
+        restored = rewritten.get(key)
+        if restored is None:
+            restored = rewritten[key] = _spell_dynamic_activation(graph, activation, fmt)
+        graph.replace_input(linear_id, activation, restored)
+    if eligible:
+        formats = ", ".join(sorted({fmt for _linear, _activation, fmt in eligible}))
+        logger.info("spelled dynamic %s activation algebra for %d linear(s) from %s", formats, len(eligible), model_dir)
+    return len(eligible)
 
 
 def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) -> tuple[int, int, int, int] | None:

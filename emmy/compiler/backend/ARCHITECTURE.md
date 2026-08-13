@@ -27,10 +27,12 @@ distinction is whether the graph has been fused yet. See
 
 Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect graph through **real PyTorch**, the eager /
 `torch.compile` baseline for `emmy run --ir`. Each frontend / tensor op is mapped to its torch twin
-(`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`, `LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`→
-the torch elementwise/reduce, layout ops→view/transpose/cat). `is_runnable(graph)` is `True` only when every compute op
-has a mapping — layout/data-dependent ops that appear post-decomposition (`IndexMapOp` / `GatherOp` / `ScatterOp`) are
-unsupported, so `run --ir` falls back to emmy-only benchmarking for non-frontend IR. `build_callable(graph,
+(`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`,
+`LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`→the torch elementwise/reduce, layout ops→view/transpose/cat).
+FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 and reinterprets its storage, while
+`from_f8*` performs the inverse reinterpretation before widening. `is_runnable(graph)` is `True` only when every
+compute op and every elementwise operation name has a mapping. Data-dependent `GatherOp` / `ScatterOp` remain
+unsupported, so `run --ir` falls back to emmy-only benchmarking for those graphs. `build_callable(graph,
 input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target

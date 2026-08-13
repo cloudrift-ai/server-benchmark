@@ -82,11 +82,15 @@ def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, ...]:
     :func:`gate_values` defaults the dict path.
 
     The default applies when the NAME is absent from ``names``, which is the matrix-side spelling of the dict
-    path's "key absent from the row" — a column that exists but holds 0.0 is a measured zero, not a default, and
-    must stay one. The two therefore agree whenever a pool's column list is its rows' own feature names. They can
-    read a pool differently only where a gate name is in ``names`` while the pool never stamped it; the resulting
-    split count of 0.0 versus 1.0 changes the term only under a fitted threshold of 1.0 or below, and only for a
-    row that also carries a nonzero finalize (a finalize of 0 zeroes the term outright).
+    path's "key absent from the row". It cannot key off the VALUE: :meth:`Group.matrix` fills a name the pool
+    never stamped with a zeros column, so by then "unstamped" and "stamped 0.0" are the same bits, and defaulting
+    a present zero would rewrite a genuine ``D_splitk=0`` into a 1. The fitter also cannot trim the gate names
+    out per pool, because one ``names`` list indexes the weight vector for every pool in the fit.
+
+    So the two paths read a pool differently in exactly one situation: a gate name in ``names`` that the pool
+    never stamped. That does not arise — the featurizer stamps the split count alongside the finalize flag, and
+    over 1.33 M enumerated candidate rows the 536 917 carrying a nonzero finalize all carry ``D_splitk`` too.
+    Rows without a finalize are unaffected regardless, since it zeroes the whole term.
 
     Copies, never column views: the fitter z-scores its pools IN PLACE, and these values must stay in raw units —
     the interaction compares a split COUNT against its threshold."""
@@ -139,17 +143,17 @@ class LinearModel:
 
     def explain_features(self, feats: dict) -> dict[str, float]:
         """EXACT per-term decomposition of :meth:`quality` (higher = predicted faster): each nonzero linear term
-        by its feature name, plus the atomic-free interaction as a ``gate:*`` pseudo-term. Invariant
-        (unit-tested): the terms sum to the quality :meth:`mean_score_features` exponentiates, so a two-row term
-        diff is the model's exact preference gap. (The float-safety clip is ignored here — it exists for
-        finiteness, never inside the live range.)"""
-        w_set = self.weight_set(self.is_dynamic_row(feats))
-        terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
-        finalize, splitk = gate_values(feats)
+        by its feature name, plus the atomic-free interaction as a ``gate:*`` pseudo-term. A two-row term diff is
+        therefore the model's exact preference gap. (The float-safety clip is ignored here — it exists for
+        finiteness, never inside the live range.)
+
+        Both parts come from the same two helpers :meth:`quality` totals, so the decomposition cannot drift from
+        the score it decomposes. What differs is only the assembly: a named entry per term here, one number
+        there."""
+        terms = self._linear_terms(feats)
+        finalize, _ = gate_values(feats)
         if finalize:
-            terms["gate:atomic_free"] = atomic_free_term(
-                finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
-            )
+            terms["gate:atomic_free"] = self._gate_term(feats)
         return terms
 
     # --- linear-only: the quantity the fit optimizes -----------------------------------------------------
@@ -157,11 +161,25 @@ class LinearModel:
     def quality(self, feats: dict) -> float:
         """The ranking quantity itself (higher = predicted faster), before the monotone ``exp(-scale·)`` wrapper:
         the linear weights over ``feats`` plus the atomic-free interaction. Routes itself on the row's stamp —
-        a live candidate always carries the full featurization."""
+        a live candidate always carries the full featurization.
+
+        The gate is added OUTSIDE the sum, not folded in as one more term. ``sum`` over floats is compensated
+        (Neumaier) on this interpreter, so where the compensation is applied is observable: including the gate in
+        the summed sequence moves the result by an ULP, and an ULP is enough to flip a rank tie in a pool where
+        candidates score equal. The two spellings are otherwise the same number."""
+        return sum(self._linear_terms(feats).values()) + self._gate_term(feats)
+
+    def _linear_terms(self, feats: dict) -> dict[str, float]:
+        """The weighted feature terms, keyed by feature — the linear half of the score. Terms that would be
+        ``±0.0`` (an absent or zero feature) are dropped: they are exactly neutral in the total, and naming them
+        in a decomposition would only pad it."""
         w_set = self.weight_set(self.is_dynamic_row(feats))
-        quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
+        return {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
+
+    def _gate_term(self, feats: dict) -> float:
+        """The atomic-free interaction's contribution for one row — the non-linear half of the score."""
         finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
-        return quality + atomic_free_term(finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold)
+        return atomic_free_term(finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold)
 
     def quality_rows(self, mat: np.ndarray, names, *, dynamic: bool) -> np.ndarray:
         """:meth:`quality` over a whole packed pool — column ``j`` of ``mat`` is feature ``names[j]``.

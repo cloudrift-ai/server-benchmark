@@ -1,6 +1,5 @@
 """Configuration checks for the 2026 compiler-submission experiments."""
 
-import json
 import subprocess
 from pathlib import Path
 
@@ -309,20 +308,17 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
     assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_lane_and_point.values())
 
 
-def test_gemma_image_provenance_pins_shared_vllm_revision(project_root) -> None:
+def test_gemma_arms_share_one_immutable_image(project_root) -> None:
     directory = Path(project_root) / EXP / "serving_gemma4_rtx5090"
-    text = (directory / "IMAGE_PROVENANCE.md").read_text(encoding="utf-8")
-    provenance = json.loads((directory / "IMAGE_PROVENANCE.json").read_text(encoding="utf-8"))
     tasks = enumerate_tasks([str(directory)])
-    assert "91df0fad4dc98a67c7659d9dbd915245d5c43d96" in text
-    assert "sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0" in text
-    assert "sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3" in text
-    assert {task.recipe.engine.llm.vllm.image for task in tasks} == {provenance["image"]}
+    assert {task.recipe.engine.llm.vllm.image for task in tasks} == {
+        "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3"
+    }
     assert {task.recipe.engine.llm.vllm.entrypoint for task in tasks if task.variant.params["arm"] == "stock"} == {
-        provenance["stock_entrypoint"]
+        "python3 -m vllm.entrypoints.openai.api_server"
     }
     assert all(
-        f'"architectures":["{provenance["emmy_architecture"]}"]' in task.recipe.engine.llm.vllm.extra_args
+        '"architectures":["EmmyGenModel"]' in task.recipe.engine.llm.vllm.extra_args
         for task in tasks
         if task.variant.params["arm"] == "emmy"
     )

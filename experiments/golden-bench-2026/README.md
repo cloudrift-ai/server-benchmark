@@ -140,11 +140,12 @@ digests, driver/CUDA state, and failures. A compatibility fallback is not native
 math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
 traces and does not establish a W8A8-only result without the deferred target filter.
 
-The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings. Their immutable images
-also record the same vLLM source revision. The
-[image provenance contract](serving_gemma4_rtx5090/IMAGE_PROVENANCE.md) is checked against the recipe before a run; an
-intelligent reviewer rejects the A/B if the final evidence shows different scheduler settings, runtime revisions, or
-model semantics. `emmy bench` does not compare outputs or make this scientific decision.
+The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
+`cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3`
+image, which records vLLM source revision `91df0fad4dc98a67c7659d9dbd915245d5c43d96`. The stock arm overrides the
+image entrypoint with `python3 -m vllm.entrypoints.openai.api_server`; the Emmy arm selects `EmmyGenModel`. An
+intelligent reviewer rejects the A/B if the final evidence shows different scheduler settings, runtime revisions,
+package inventories, or model semantics. `emmy bench` does not compare outputs or make this scientific decision.
 
 The Gemma delta supports a matched end-to-end serving-system speedup claim. Stock uses vLLM's native route while Emmy
 uses `EmmyGenModel`, so this A/B does not isolate compiler kernels alone. A compiler-caused end-to-end claim requires
@@ -186,8 +187,8 @@ the entire 40-task matrix under a new source ID.
   on the authorized host before publication.
 - The suite makes no TP8 kernel claim; datacenter kernel results retain the stated unsharded corpus boundary.
 - End-to-end speedup claims require matched hardware, model revision, engine revision, workload, and stock/Emmy arms.
-- The Gemma system table additionally requires matched scheduler settings, image provenance, and a documented
-  intelligent semantic comparison; it is not labeled compiler-caused without a same-route reference arm.
+- The Gemma system table additionally requires matched scheduler settings, image digest/runtime revision, and a
+  documented intelligent semantic comparison; it is not labeled compiler-caused without a same-route reference arm.
 - Native end-to-end quantization claims require the reviewer to identify the exact method and backend in raw logs and
   reject fallback paths; a recipe alone is planned evidence only.
 - Datacenter claims remain per-system. Results are not generalized from TP8 to TP4, or across GPU generations.

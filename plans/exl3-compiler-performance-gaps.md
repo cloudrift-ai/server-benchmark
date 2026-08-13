@@ -22,8 +22,8 @@ head remains compressed and builds its row program from the same generic algebra
 - Historical exact-checkpoint diagnostics measured a removed fused route-and-expert path near 86 microseconds per
   sparse layer, a grouped generic experiment near 1.0 milliseconds, and ten direct M=1 programs near 1.3 milliseconds.
   These figures are diagnostic context only: they were not measured on this source and must not be used as results.
-- Existing model reports pin older images. They do not qualify throughput, context capacity, or request-time behavior
-  for the compiler-only implementation.
+- Historical measurements came from older images. They do not qualify throughput, context capacity, or request-time
+  behavior for the compiler-only implementation, so no final EXL3 recipe or results report is retained yet.
 
 ## Planned compiler work
 

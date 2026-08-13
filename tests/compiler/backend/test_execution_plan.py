@@ -15,7 +15,6 @@ import pytest
 from emmy.compiler.backend.plan import (
     PLAN_FORMAT_GENERATED,
     PLAN_FORMAT_INDIRECT,
-    PLAN_FORMAT_SCALARS,
     PLAN_FORMAT_VERSION,
     WeightSpec,
     _encode_load_ops,
@@ -102,29 +101,9 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_SCALARS) + 1
+    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED) + 1  # past every format the runtime speaks
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
-
-
-def test_plan_scalar_argument_projection_and_round_trip():
-    """Static native-kernel dimensions remain typed by-value launch arguments."""
-    graph = _sample_graph()
-    op = graph.nodes["y"].op
-    op.arg_order = ("x", "size_m", "w", "alpha", "eps", "div", "y")
-    op.scalar_args = (("size_m", "i32", 1), ("alpha", "f32", 0.25))
-    op.dynamic_smem = True
-
-    plan = plan_from_graph(graph)
-    assert plan.launches[0].scalar_args == (("size_m", "i32", 1), ("alpha", "f32", 0.25))
-    assert plan.launches[0].dynamic_smem
-    wire = json.loads(json.dumps(plan_to_dict(plan)))
-    assert wire["format"] == PLAN_FORMAT_SCALARS
-    assert plan_from_dict(wire) == plan
-
-    wire["format"] = PLAN_FORMAT_VERSION
-    with pytest.raises(ValueError, match="cannot carry scalar arguments"):
-        plan_from_dict(wire)
 
 
 def _indirect_graph() -> Graph:

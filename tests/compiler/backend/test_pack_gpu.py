@@ -13,7 +13,6 @@ from emmy.compiler.backend.pack import load_pack, pack_path, save_pack
 from emmy.compiler.backend.plan import plan_from_graph
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from tests.compiler.helpers import requires_cuda
@@ -30,31 +29,6 @@ def _plan():
     g.inputs = ["x"]
     g.outputs = ["y"]
     return plan_from_graph(Pipeline.build(CUDA_PASSES).run(g))
-
-
-def _scalar_plan():
-    graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (32,), "f32"), node_id="x")
-    graph.add_node(
-        CudaOp(
-            kernel_source="""
-extern "C" __global__ void scale_i32(const float* x, float* y, int scale) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < 32) y[i] = x[i] * scale;
-}
-""",
-            kernel_name="scale_i32",
-            arg_order=("x", "y", "scale"),
-            grid=((1,), (1,), (1,)),
-            block=((32,), (1,), (1,)),
-            scalar_args=(("scale", "i32", 3),),
-        ),
-        ["x"],
-        Tensor("y", (32,), "f32"),
-        node_id="y",
-    )
-    graph.inputs, graph.outputs = ["x"], ["y"]
-    return plan_from_graph(graph)
 
 
 def _run(plan, x):
@@ -79,17 +53,6 @@ def test_pack_round_trip_runs_identically(tmp_path):
         assert spec.source is None and spec.binary_key
     np.testing.assert_allclose(_run(stored, x), ref)
     np.testing.assert_allclose(ref, np.exp(x), rtol=1e-3, atol=1e-4)
-
-
-def test_pack_round_trip_preserves_typed_scalar_launch(tmp_path):
-    plan = _scalar_plan()
-    x = np.arange(32, dtype=np.float32)
-    pdir = pack_path(tmp_path, _KEY)
-    save_pack(pdir, {"scalar": plan}, key=_KEY)
-    loaded = load_pack(pdir, key=_KEY)
-    assert loaded is not None
-    assert loaded["scalar"].launches[0].scalar_args == (("scale", "i32", 3),)
-    np.testing.assert_array_equal(_run(loaded["scalar"], x), x * 3)
 
 
 def test_pack_key_mismatch_falls_back(tmp_path):

@@ -67,10 +67,7 @@ def compute_live_intervals(scratch_names: list[str], launches: list) -> dict[str
         reads = set(ln.arg_names)
         reads.update(d.src_buf for d in ln.tma_descriptors)
         for name in reads:
-            # A zeroed output may also be launch-local read/write workspace: the memset
-            # establishes its initial state, then this same launch consumes and overwrites it.
-            # Ordinary output names in arg_order remain writes, not reads.
-            if name in scratch and (name not in writes or name in ln.zero_outputs):
+            if name in scratch and name not in writes:
                 last_read[name] = i
     intervals: dict[str, tuple[int, int]] = {}
     for name in scratch_names:

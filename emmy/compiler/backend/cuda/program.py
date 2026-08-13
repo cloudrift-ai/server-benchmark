@@ -393,20 +393,6 @@ def _launch(
     kernel = compiled.kernels[launch.kernel_name]
     desc_args = desc_args or {}
     sym_values = sym_values or {}
-    scalar_types = {
-        "i32": np.int32,
-        "i64": np.int64,
-        "u32": np.uint32,
-        "u64": np.uint64,
-        "f32": np.float32,
-        "f64": np.float64,
-    }
-    scalar_args = {}
-    for name, dtype, value in launch.scalar_args:
-        try:
-            scalar_args[name] = scalar_types[dtype](value)
-        except KeyError as exc:
-            raise ValueError(f"unsupported CUDA scalar argument dtype {dtype!r}") from exc
     if launch.indirect_args:
         # Indirect operands: the marked arg's position expands in place to (table, sel, slot)
         # — the kernel resolves ``table[sel[slot]]`` in its body preamble. Table/selector are
@@ -416,18 +402,13 @@ def _launch(
         parts: list = []
         for name in launch.arg_names:
             entry = indirect.get(name)
-            if name in scalar_args:
-                parts.append(scalar_args[name])
-            elif entry is not None:
+            if entry is not None:
                 parts.extend((arrays[entry[0]], arrays[entry[1]], entry[2]))
             else:
                 parts.append(desc_args.get(name) if name in desc_args else arrays[name])
         args = tuple(parts)
     else:
-        args = tuple(
-            scalar_args[name] if name in scalar_args else desc_args.get(name) if name in desc_args else arrays[name]
-            for name in launch.arg_names
-        )
+        args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
     # Symbolic axes appear as ``int`` kernel params after buffers + TMA
     # descriptors — append their resolved values to the arg pack.
     if launch.runtime_args:
@@ -441,8 +422,6 @@ def _launch(
     smem_bytes = launch.smem_bytes
     if smem_bytes > _STATIC_SMEM_CAP:
         _ensure_dynamic_smem_attr(kernel, smem_bytes)
-        kernel(grid, block, args, shared_mem=smem_bytes)
-    elif launch.dynamic_smem:
         kernel(grid, block, args, shared_mem=smem_bytes)
     else:
         kernel(grid, block, args, shared_mem=0)

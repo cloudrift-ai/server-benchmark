@@ -60,9 +60,6 @@ class CudaOp(Op):
     grid: tuple[GridDimSpec, GridDimSpec, GridDimSpec] = ((1,), (1,), (1,))
     block: tuple[GridDimSpec, GridDimSpec, GridDimSpec] = ((1,), (1,), (1,))
     smem_bytes: int = 0
-    # Native sources may declare ``extern __shared__`` even below the 48 KiB
-    # opt-in threshold. Emmy-rendered kernels use static storage in that regime.
-    dynamic_smem: bool = False
     zero_outputs: tuple[str, ...] = ()
     # Buffers this kernel zero-writes as a DELEGATED prologue (``ZeroPrologue`` stmts injected
     # by ``005_delegate_zero_init``): downstream kernels' atomic accumulators. Not read at
@@ -72,12 +69,6 @@ class CudaOp(Op):
     comment: str = ""
     tma_descriptors: tuple[TmaDescMeta, ...] = field(default_factory=tuple)
     runtime_args: tuple[str, ...] = ()
-    # By-value scalar parameters: ``(arg_name, dtype, value)``. The name stays in
-    # ``arg_order`` at the kernel-signature position; the runtime substitutes the typed
-    # scalar instead of looking up a device buffer. Kept distinct from ``runtime_args``:
-    # those resolve symbolic extents per launch, while these are immutable properties of
-    # one compiled invocation.
-    scalar_args: tuple[tuple[str, str, int | float], ...] = ()
     # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input. The kernel
     # signature replaces ``const T* <arg>`` with ``const T* const* <table>, const int* <sel>,
     # int <slot>`` and resolves the base pointer in a body preamble; ``arg_order`` keeps the
@@ -96,16 +87,7 @@ class CudaOp(Op):
         perf cache nor blocks an isolated-kernel tune from transferring to a whole-model
         compile."""
         src = self.kernel_source.replace(self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
-        return digest(
-            type(self).__name__,
-            src,
-            self.arg_order,
-            self.grid,
-            self.block,
-            self.smem_bytes,
-            self.dynamic_smem,
-            self.scalar_args,
-        )
+        return digest(type(self).__name__, src, self.arg_order, self.grid, self.block, self.smem_bytes)
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

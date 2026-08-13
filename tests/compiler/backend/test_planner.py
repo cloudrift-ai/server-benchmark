@@ -23,14 +23,12 @@ class _Launch:
         tma_src: list[str] | None = None,
         zero_outputs: list[str] | None = None,
         zero_prologues: list[str] | None = None,
-        writes: list[str] | None = None,
     ) -> None:
         self.node_id = node_id
         self.arg_names = tuple(arg_names)
         self.tma_descriptors = tuple(_Tma(s) for s in (tma_src or []))
         self.zero_outputs = tuple(zero_outputs or [])
         self.zero_prologues = tuple(zero_prologues or [])
-        self.writes = tuple(writes or [])
 
 
 class _Tma:
@@ -166,9 +164,3 @@ def test_zero_prologue_starts_interval_at_delegating_launch():
     assert iv["acc"] == (0, 4)  # starts at the DELEGATING launch, ends after its last reader
     assert iv["p"] == (0, 2)
     assert iv["mid"] == (1, 3)
-
-
-def test_zeroed_launch_local_workspace_is_self_consumed():
-    """Native kernels may read/write a zero-initialized auxiliary output internally."""
-    launches = [_Launch("y", ["x", "y", "workspace"], zero_outputs=["workspace"], writes=["y", "workspace"])]
-    assert compute_live_intervals(["workspace"], launches) == {"workspace": (0, 1)}

@@ -71,7 +71,6 @@ include = ["emmy*"]
 [tool.setuptools.package-data]
 "emmy.compiler.pipeline.search" = ["goldens/*.yaml"]
 "emmy.compiler.pipeline.search.prior" = ["*.json"]
-"emmy.serving.native.exl3" = ["LICENSE.exllamav3", "README.md", "upstream/*.h", "upstream/*.cuh", "upstream/quant/*.cuh"]
 # Staged out of the top-level recipes/ by `scripts/prepare_dist.py --recipes`
 # (which `make wheel` and the publish workflow both run) — recipes/ sits outside
 # the emmy package, so setuptools cannot collect it in place.

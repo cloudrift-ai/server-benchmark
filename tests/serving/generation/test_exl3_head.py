@@ -19,14 +19,13 @@ def _source(*, bits=6, hidden=128, vocab=256, marker="mul1"):
     return source
 
 
-def test_volta_k6_coded_head_is_native_and_keeps_logical_vocab():
+def test_coded_head_is_architecture_independent_and_keeps_logical_vocab():
     spec = Exl3HeadSpec.from_source(
         _source(vocab=512),
         hidden_size=128,
         vocab_size=500,
         tensor_parallel_size=1,
         tied=False,
-        compute_capability=(7, 0),
     )
     assert spec == Exl3HeadSpec(bits=6, codebook=2, hidden_size=128, stored_vocab_size=512, vocab_size=500)
 
@@ -36,13 +35,11 @@ def test_volta_k6_coded_head_is_native_and_keeps_logical_vocab():
     [
         ({"tensor_parallel_size": 2}, _source()),
         ({"tied": True}, _source()),
-        ({"compute_capability": (6, 1)}, _source()),
-        ({"compute_capability": (7, 0)}, _source(bits=2)),
         ({}, _source(marker=None)),
     ],
 )
 def test_unsupported_coded_head_keeps_decoded_fallback(kwargs, source):
-    base = dict(hidden_size=128, vocab_size=256, tensor_parallel_size=1, tied=False, compute_capability=(8, 0))
+    base = dict(hidden_size=128, vocab_size=256, tensor_parallel_size=1, tied=False)
     assert Exl3HeadSpec.from_source(source, **(base | kwargs)) is None
 
 
@@ -56,7 +53,6 @@ def test_coded_head_rejects_ambiguous_marker_and_bad_storage():
             vocab_size=256,
             tensor_parallel_size=1,
             tied=False,
-            compute_capability=(7, 0),
         )
 
 
@@ -66,10 +62,7 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
 
     from emmy.serving.exl3_head import Exl3CodedHead
 
-    if torch.cuda.get_device_capability() < (7, 0):
-        pytest.skip("native coded head requires SM70 or newer")
-    bits = 5 if torch.cuda.get_device_capability() < (8, 0) else 2
-    tensors, decoded = exl3_linear_tensors("lm_head", 256, 128, K=bits, cb=2)
+    tensors, decoded = exl3_linear_tensors("lm_head", 256, 128, K=2, cb=2)
     source = {name: tensor.numpy() for name, tensor in tensors.items()}
     spec = Exl3HeadSpec.from_source(
         source,
@@ -77,10 +70,11 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
         vocab_size=251,
         tensor_parallel_size=1,
         tied=False,
-        compute_capability=torch.cuda.get_device_capability(),
     )
     assert spec is not None
     head = Exl3CodedHead(spec, source)
+    assert len(head.program.compiled.launches) > 1
+    assert all("exl3" not in launch.kernel_name.lower() for launch in head.program.compiled.launches)
     pointers = {name: head.program.arrays[name].data.ptr for name in ("lm_head.trellis", "lm_head.suh", "lm_head.svh")}
     x = (torch.randn(2, 128, device="cuda") * 0.1).half()
     got = head(x)
@@ -97,5 +91,4 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
             vocab_size=256,
             tensor_parallel_size=1,
             tied=False,
-            compute_capability=(7, 0),
         )

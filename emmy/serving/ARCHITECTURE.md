@@ -260,14 +260,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the
   generic factorized contraction from `loader/trellis.py`; all per-expert sources remain
   table-resolved inputs and no decoded dense expert weight exists.
-  Uniform-codebook, uniform-bit EXL3 groups have a narrower single-token tier in `exl3_moe`: one route-preparation
-  launch sorts the fixed top-k assignments and clears the fp32 result, then a pinned fused kernel reads the existing
-  E-leading codes and channel vectors through device pointer tables. It produces the complete fp32 routed sum in one
-  launch instead of replaying top-k expert programs plus a combine. The pointer-table object owns the source tensors,
-  so captured replay cannot outlive their storage. The tier is restricted to fp16 activations and route weights,
-  SiLU, codebook 1 or 2, one bit rate across gate/up/down, and SM80 or newer; every mismatch or build failure retains
-  the graph-compiled fixed-slot path. The pinned source provenance and license live with the CUDA closure under
-  `serving/native/exl3`; no ExLlamaV3 Python or binary dependency is loaded at runtime.
+  Single-token sparse decode uses the generic fixed-slot tier: the selected experts resolve the same E-leading coded
+  tensor inputs through pointer tables, replay their factorized compiler programs, and combine the routed outputs in
+  fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
@@ -284,9 +280,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 
   **EXL3 trunk.** Serving always requests the coded trunk from `load_quantized_split`; placeholder
   module parameters are never read. Birth-time spelling re-sources the traced constants from the
-  checkpoint and keeps trunk linears on generic factorized contractions, never a dense weight. The pinned native coded
-  GEMV remains a compiler operation for explicitly qualified consumers; the coded output head uses its static-M1 Volta
-  K6 residual implementation without changing trunk selection. Any unmatched coded trunk weight aborts compilation.
+  checkpoint and keeps trunk linears on generic factorized contractions, never a dense weight. The coded output head
+  invokes the same factorized spelling directly and stays compressed without a separate native path. Any unmatched
+  coded trunk weight aborts compilation.
 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
@@ -337,7 +333,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   sources it from one of
   three places: `lm_head.weight` in the stream, the tied embed alias, or — on an **EXL3 checkpoint, which has no
   `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint. An eligible
-  untied single-TP coded head remains compressed and runs the same static-M1 native GEMV with fp32 logits;
+  untied single-TP coded head remains compressed and runs the same factorized compiler algebra with fp32 logits;
   `LogitsProcessor(logits_as_input=True)` then applies scale/softcap. Unsupported coded heads decode in out-feature
   blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
   Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
@@ -364,7 +360,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
   Laguna EXL3 contract therefore preserves its fp32 residual stream across ranks while q/k/v and attention stay fp16.
   The coded output head remains whole only on the last rank (`tp_size == 1` within that pipeline stage); no
-  `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the static-M1 program
+  `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the coded compiler program
   row-by-row, while captured decode requires one sampled row. Speculative decoding is unsupported with pipeline
   parallelism.
   **Speculative decoding (MTP drafter, vllm#41745 — gemma-4-assistant).** vLLM's drafter shares the target's embedding

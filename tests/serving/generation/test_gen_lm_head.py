@@ -119,7 +119,7 @@ def test_exl3_coded_head_decodes_from_the_checkpoint(tmp_path):
     np.testing.assert_allclose(got.astype(np.float32), ref.astype(np.float32), rtol=1e-3, atol=0)
 
 
-def test_native_exl3_head_loads_codes_without_decoding_weight(tmp_path, monkeypatch):
+def test_compiler_exl3_head_loads_codes_without_decoding_weight(tmp_path, monkeypatch):
     _write_coded_head(tmp_path, kt=8, nt=16, k_bits=6)
     model, _ = _model(model_id=str(tmp_path), vocab=256, hidden=128)
     source = vllm_model_gen._coded_lm_head_source(str(tmp_path))
@@ -132,7 +132,7 @@ def test_native_exl3_head_loads_codes_without_decoding_weight(tmp_path, monkeypa
     assert _load(model) == {"lm_head.weight"}
     assert model._coded_head is marker
     assert model._coded_head_source is None
-    assert torch.isnan(model.lm_head.weight).all(), "the native path must not materialize the dense head"
+    assert torch.isnan(model.lm_head.weight).all(), "the compiler path must not materialize the dense head"
 
 
 def test_exl3_coded_head_zero_fills_vocab_padding(tmp_path):

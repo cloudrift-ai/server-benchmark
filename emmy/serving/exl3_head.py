@@ -1,4 +1,4 @@
-"""Device-resident EXL3 output head over the compiler's native static-M1 operation."""
+"""Device-resident EXL3 output head spelled through the ordinary compiler pipeline."""
 
 from __future__ import annotations
 
@@ -24,9 +24,8 @@ class Exl3HeadSpec:
         vocab_size: int,
         tensor_parallel_size: int,
         tied: bool,
-        compute_capability: tuple[int, int] | None = None,
     ) -> Exl3HeadSpec | None:
-        """Return the native head contract, or ``None`` for the decoded fallback."""
+        """Return the coded compiler-head contract, or ``None`` for the decoded fallback."""
         if tied or tensor_parallel_size != 1:
             return None
         if "lm_head.mcg" in source and "lm_head.mul1" in source:
@@ -47,16 +46,6 @@ class Exl3HeadSpec:
             raise ValueError(f"EXL3 coded lm_head has invalid svh storage {svh.dtype}{svh.shape}")
         if stored_hidden != hidden_size or stored_vocab < vocab_size:
             raise ValueError(f"EXL3 coded lm_head stores {(stored_vocab, stored_hidden)}, expected at least {(vocab_size, hidden_size)}")
-        if stored_hidden % 128 or stored_vocab % 256:
-            return None
-        if compute_capability is None:
-            from emmy.compiler.target import compute_capability as live_compute_capability  # noqa: PLC0415
-
-            compute_capability = live_compute_capability()
-        if compute_capability < (7, 0):
-            return None
-        if compute_capability < (8, 0) and bits not in (5, 6, 7):
-            return None
         return cls(bits, codebook, stored_hidden, stored_vocab, vocab_size)
 
 
@@ -70,7 +59,7 @@ class Exl3CodedHead:
         from emmy.compiler.backend.plan import plan_from_graph
         from emmy.compiler.graph import Graph, Tensor
         from emmy.compiler.ir.base import ConstantOp, InputOp
-        from emmy.compiler.ir.frontend.ir import Exl3GemvOp
+        from emmy.compiler.loader.trellis import spell_factored_linear
 
         graph = Graph()
         graph.add_node(InputOp(), [], Tensor("x", (1, spec.hidden_size), "f16"), node_id="x")
@@ -85,21 +74,22 @@ class Exl3CodedHead:
                 Tensor(path, value.shape, dtype),
                 node_id=path,
             )
-        graph.add_node(
-            Exl3GemvOp(
-                bits=spec.bits,
-                codebook=spec.codebook,
-                weight_shape=(spec.stored_vocab_size, spec.hidden_size),
-                residual=True,
-            ),
-            ["x", "lm_head.trellis", "lm_head.suh", "lm_head.svh"],
-            Tensor("logits", (1, spec.stored_vocab_size), "f32"),
-            node_id="logits",
+        logits = spell_factored_linear(
+            graph,
+            "lm_head.trellis",
+            "lm_head.suh",
+            "lm_head.svh",
+            cb=spec.codebook,
+            weight_shape=(spec.stored_vocab_size, spec.hidden_size),
+            x="x",
+            bias=None,
+            out=Tensor("logits", (1, spec.stored_vocab_size), "f32"),
+            weight_name="lm_head",
         )
-        graph.inputs, graph.outputs = ["x"], ["logits"]
+        graph.inputs, graph.outputs = ["x"], [logits]
         plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
-        if len(plan.launches) != 1 or not plan.launches[0].scalar_args:
-            raise RuntimeError("EXL3 coded lm_head did not lower to one native static-M1 launch")
+        if not plan.launches:
+            raise RuntimeError("EXL3 coded lm_head produced no compiler launches")
         feed = {"x": np.zeros((1, spec.hidden_size), dtype=np.float16), **arrays}
         with gpu_lock():
             self.program = CompiledProgram.build_from_plan(plan, feed)

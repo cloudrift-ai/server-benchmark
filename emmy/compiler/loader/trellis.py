@@ -280,15 +280,13 @@ def spell_factored_linear(
     bias: str | None,
     out: Tensor,
     weight_name: str,
-    prefer_native: bool = False,
 ) -> str:
     """Spell one coded linear directly as generic factorized contractions.
 
     The executable graph never owns a materialized decoded weight.  Packed storage is
     expanded only at the core contraction's scalar B use, while the two Hadamard factors
-    are applied on the activation/result sides. This is the birth-time EXL3 spelling. An
-    explicitly selected static M1 contraction retains one transient format op until
-    target-aware decomposition; the default is ordinary tensor algebra.
+    are applied on the activation/result sides. This is the birth-time EXL3 spelling;
+    everything below this function sees only ordinary tensor algebra.
     """
     n, k = weight_shape
     code_shape = tuple(d.as_static() for d in graph.nodes[codes].output.shape)
@@ -316,32 +314,6 @@ def spell_factored_linear(
         bias_shape = tuple(d.as_static() for d in bias_node.output.shape)
         if bias_shape != (n,) or bias_node.output.dtype.name not in {"f16", "f32"}:
             raise ValueError(f"coded linear {weight_name}: bias must be f16/f32[{n}], got {bias_node.output.dtype.name}{bias_shape}")
-
-    # A single-row, unpadded, cb2 linear may lower to the pinned native GEMV. Keep
-    # the decision target-independent here: the decomposition rule either emits one
-    # CudaOp for the active architecture or calls back with ``prefer_native=False``
-    # to recover this exact generic spelling.
-    leading = x_node.output.shape[:-1]
-    one_row = all(d.is_static for d in leading) and np.prod([d.as_static() for d in leading], dtype=np.int64) == 1
-    bits = code_shape[-1] // 16
-    if (
-        prefer_native
-        and bias is None
-        and cb == 2
-        and one_row
-        and (k_pad, n_pad) == (k, n)
-        and k % 128 == 0
-        and n % 256 == 0
-        and x_node.output.dtype.name == "f16"
-        and out.dtype.name in {"f16", "f32"}
-    ):
-        from emmy.compiler.ir.frontend.ir import Exl3GemvOp  # noqa: PLC0415
-
-        return graph.add_node(
-            op=Exl3GemvOp(bits=bits, codebook=cb, weight_shape=(n, k), residual=True),
-            inputs=[x, codes, suh, svh],
-            output=out,
-        )
 
     b = _Builder(graph, weight_name)
     windows, kt, nt = _unpack_windows(b, codes)

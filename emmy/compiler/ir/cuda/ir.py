@@ -76,7 +76,7 @@ class CudaOp(Op):
     # ``arg_order`` at the kernel-signature position; the runtime substitutes the typed
     # scalar instead of looking up a device buffer. Kept distinct from ``runtime_args``:
     # those resolve symbolic extents per launch, while these are immutable properties of
-    # one compiled invocation (the native coded GEMV's static M/K/N is the live case).
+    # one compiled invocation.
     scalar_args: tuple[tuple[str, str, int | float], ...] = ()
     # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input. The kernel
     # signature replaces ``const T* <arg>`` with ``const T* const* <table>, const int* <sel>,

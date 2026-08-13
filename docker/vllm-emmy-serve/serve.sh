@@ -40,6 +40,8 @@
 #                        the memory/shape lane exported as EMMY_GEN_* by warm and baked into
 #                        the image. They are compiler/pack-key inputs even though they do not
 #                        add vLLM argv. A warm-shape prefill field overrides the pinned bucket.
+#   SERVE_V2_MODEL_RUNNER
+#                        opt into vLLM's V2 runner after model-specific serving qualification.
 
 # Docker must declare the optional build ENV keys so verify can compare the baked image to
 # its source config. Preserve the historical opt-out semantics at runtime: an empty build arg
@@ -48,6 +50,11 @@
 [ -n "${EMMY_GEN_PREFILL_CAPACITY:-}" ] || unset EMMY_GEN_PREFILL_CAPACITY
 [ -n "${EMMY_GEN_PREFILL_BUCKET:-}" ] || unset EMMY_GEN_PREFILL_BUCKET
 [ -n "${EMMY_GEN_M1_TIER:-}" ] || unset EMMY_GEN_M1_TIER
+if [ -n "${SERVE_V2_MODEL_RUNNER:-}" ]; then
+    export VLLM_USE_V2_MODEL_RUNNER="$SERVE_V2_MODEL_RUNNER"
+else
+    unset VLLM_USE_V2_MODEL_RUNNER
+fi
 
 # The architectures override is what routes the model to the plugin; the quantization arm
 # rides beside it. One spelling, shared with emmy/commands/serve.py's json.dumps output.

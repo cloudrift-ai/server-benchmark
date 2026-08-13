@@ -135,7 +135,7 @@ def _remote_digest(destination: str, runner: CommandRunner) -> str | None:
     result = runner(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         error = (result.stderr or "").lower()
-        if any(marker in error for marker in ("manifest unknown", "no such manifest")):
+        if any(marker in error for marker in ("manifest unknown", "no such manifest")) or error.strip().endswith(": not found"):
             return None
         raise PublishError(f"could not inspect registry destination {destination!r}: {(result.stderr or '').strip()}")
     try:

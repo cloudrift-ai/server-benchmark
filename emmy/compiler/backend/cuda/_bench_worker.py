@@ -18,7 +18,8 @@ Protocol (length-prefixed pickle on stdin/stdout):
   and ``want_ref`` (return that run's ``(input_data, outputs)`` as ``run_io`` — the reference
   the parent feeds each pinned row's wrong-answer check).
 - Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
-  "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None}``
+  "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None,
+  "greedy_error": str|None, "reference_run_us": float|None}``
   or ``{"ok": False, "error": str, "traceback": str}`` on exception.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
 - A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
@@ -136,26 +137,44 @@ async def _run_job(req: dict) -> dict:
         # In-process within this child — the parent's SIGKILL is the wall-timeout backstop.
         backend = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0)
         kind, payload = spec
-        accuracy_error = run_io = correctness = None
+        accuracy_error = run_io = correctness = greedy_error = reference_run_us = None
+        retire_worker = False
         if kind == "frontend_graph":
             from emmy.commands.run import bench_lowered_vs_torch
 
             want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
-            response = await bench_lowered_vs_torch(
-                payload,
-                req["graph"],
-                backend,
-                seed=req["seed"],
-                do_bench=True,
-                warmup=req["warmup"],
-                iters=req["iters"],
-                bench_backends=req["bench_backends"],
-                strict_accuracy=req.get("strict_accuracy", False),
-                return_reference=want_reference,
-            )
-            results, bench, avail, captured, accuracy_error = response[:5]
-            if want_reference:
-                correctness, run_io = response[5:]
+            refs, ref_times = [], []
+            try:
+                response = await bench_lowered_vs_torch(
+                    payload,
+                    req["graph"],
+                    backend,
+                    seed=req["seed"],
+                    do_bench=True,
+                    warmup=req["warmup"],
+                    iters=req["iters"],
+                    bench_backends=req["bench_backends"],
+                    ref_out=refs if want_reference else None,
+                    ref_us_out=ref_times if want_reference else None,
+                    strict_accuracy=req.get("strict_accuracy", False),
+                    return_reference=want_reference,
+                )
+                results, bench, avail, captured, accuracy_error = response[:5]
+                if want_reference:
+                    correctness, run_io = response[5:]
+            except RuntimeError as exc:
+                # An embedded Loop golden has no Torch twin. Its first greedy execution can
+                # finish and produce the candidates' same-input reference before a later
+                # repeated timing crosses the watchdog. Preserve only that completed
+                # reference; the parent marks greedy timing failed and never selects it.
+                if payload is not None or not refs:
+                    raise
+                results, bench, avail, captured, accuracy_error = None, None, False, False, None
+                greedy_error = f"{type(exc).__name__}: {exc}"
+                retire_worker = _hung(exc)
+            if run_io is None:
+                run_io = refs[0] if refs else None
+            reference_run_us = ref_times[0] if ref_times else None
         elif kind == "trace_args":
             import types
 
@@ -166,19 +185,24 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
-            if req.get("accuracy"):
+            if req.get("accuracy") or req.get("strict_accuracy"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
                 # inputs, run the emmy program on them, compare vs the eager forward. A
                 # numeric failure skips the bench — the parent aborts on the verdict, so
                 # benching a miscompiling program would be wasted GPU time. ``want_ref``
                 # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
                 # reference (bounded: pinned rows only exist for --code inputs).
-                from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output
+                from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output, _strict_correctness_proof
 
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 eager_out = _eager_output(module, args_t, kwargs)
-                accuracy_error = _check_accuracy(run_result.outputs, eager_out)
+                if req.get("strict_accuracy"):
+                    correctness = _strict_correctness_proof(run_result.outputs, eager_out)
+                    if correctness["status"] != "pass":
+                        accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
+                else:
+                    accuracy_error = _check_accuracy(run_result.outputs, eager_out)
                 if accuracy_error is not None:
                     return {
                         "result": None,
@@ -210,6 +234,9 @@ async def _run_job(req: dict) -> dict:
             "captured": captured,
             "accuracy_error": accuracy_error,
             "run_io": run_io,
+            "greedy_error": greedy_error,
+            "reference_run_us": reference_run_us,
+            "_retire_worker": retire_worker,
             "correctness": correctness,
         }
 
@@ -253,7 +280,9 @@ def main() -> None:
             return
         dirty = False
         try:
-            resp = {"ok": True, **asyncio.run(_run_job(pickle.loads(body)))}
+            result = asyncio.run(_run_job(pickle.loads(body)))
+            dirty = bool(result.get("_retire_worker", False))
+            resp = {"ok": True, **result}
         except BaseException as exc:  # noqa: BLE001 — surface every failure mode to the parent
             # A bare ``SystemExit`` repr hides the cause (a CLI-style ``sys.exit`` after a
             # logged error) — point the parent at the traceback + stderr, where it lives.

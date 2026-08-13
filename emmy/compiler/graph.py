@@ -19,6 +19,7 @@ its only users.
 
 from __future__ import annotations
 
+import heapq
 import itertools
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -1064,7 +1065,9 @@ class Graph:
     def topological_order(self) -> list[str]:
         """Return node ids in topological order (inputs before consumers).
 
-        Kahn's algorithm in O(N+E) using the maintained ``_users`` index.
+        Kahn's algorithm using the maintained ``_users`` index. The ready queue is ordered by node
+        id: ``_users`` stores sets and graph slices may be assembled from sets, so insertion order
+        cannot keep persisted Torch/Loop programs independent of Python's per-process hash seed.
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
         for node in self.nodes.values():
@@ -1072,14 +1075,15 @@ class Graph:
             in_degree[node.id] += len(deps - {node.id})
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        heapq.heapify(queue)
         result: list[str] = []
         while queue:
-            nid = queue.pop(0)
+            nid = heapq.heappop(queue)
             result.append(nid)
             for consumer_id in self.users(nid):
                 in_degree[consumer_id] -= 1
                 if in_degree[consumer_id] == 0:
-                    queue.append(consumer_id)
+                    heapq.heappush(queue, consumer_id)
 
         if len(result) != len(self.nodes):
             raise ValueError("Graph has a cycle")

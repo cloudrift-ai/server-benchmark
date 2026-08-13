@@ -285,8 +285,8 @@ def spell_factored_linear(
 
     The executable graph never owns a materialized decoded weight.  Packed storage is
     expanded only at the core contraction's scalar B use, while the two Hadamard factors
-    are applied on the activation/result sides.  This is the birth-time EXL3 spelling;
-    every emitted operation is ordinary tensor algebra and no format identity survives.
+    are applied on the activation/result sides. This is the birth-time EXL3 spelling;
+    everything below this function sees only ordinary tensor algebra.
     """
     n, k = weight_shape
     code_shape = tuple(d.as_static() for d in graph.nodes[codes].output.shape)

@@ -1,12 +1,14 @@
 """Explicit working-golden replay for ``compile`` / ``run``."""
 
+import asyncio
+import copy
 from types import SimpleNamespace
 
 import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
@@ -115,6 +117,34 @@ def test_working_file_golden_conflicts_with_direct_input(run_cli, tmp_path):
     assert "mutually exclusive" in stdout + stderr
 
 
+def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
+    """A repeated shape name must not silently choose between distinct embedded targets."""
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path)
+    second = copy.deepcopy(document["configs"][0])
+    loop = loop_graph_from_wire(document["loops"][second["target"]["loop"]])
+    loop.nodes["y"].op.name = "working_second_loop"
+    second["target"]["loop"] = len(document["loops"])
+    document["loops"].append(loop_graph_to_wire(loop))
+    document["configs"].append(second)
+    dump_golden_file(document, path, overwrite=True)
+
+    with pytest.raises(SystemExit) as exc:
+        resolve_golden_arg(_args(path))
+    assert exc.value.code == 2
+    assert "resolves to 2 different embedded program targets" in caplog.text
+
+    scoped = copy.deepcopy(document)
+    scoped["configs"] = [scoped["configs"][1]]
+    scoped_path = tmp_path / "working-scoped.yaml"
+    dump_golden_file(scoped, scoped_path, overwrite=True)
+    args = _args(scoped_path)
+    resolve_golden_arg(args)
+    assert args._golden_graph.nodes["y"].op.name == "working_second_loop"
+
+
 def test_working_proposal_supplies_graph_but_is_not_automatically_pinned(tmp_path):
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _pinned_samples_for_ir
@@ -193,3 +223,180 @@ def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
     assert stage == "loop"
     assert passes == _passes_after_stage("loop")
     assert passes != CUDA_PASSES
+
+
+def test_emmy_only_benchmark_returns_same_input_reference():
+    """Embedded Loop replay can return its greedy inputs/outputs without a Torch twin."""
+    import numpy as np
+
+    from emmy.commands.run import bench_lowered_vs_torch
+
+    graph = Graph()
+    graph.add_node(ConstantOp(name="y", value=2.0), [], Tensor("y", (1,)), node_id="y")
+    graph.outputs = ["y"]
+    outputs = {"y": np.array([2.0], dtype=np.float32)}
+
+    class FakeBackend:
+        def run(self, _graph, *, input_data):
+            return SimpleNamespace(outputs=outputs), None
+
+        async def benchmark_async(self, *_args, **_kwargs):
+            return SimpleNamespace(time_ms=0.001, captured=True)
+
+    refs = []
+    asyncio.run(
+        bench_lowered_vs_torch(
+            None,
+            graph,
+            FakeBackend(),
+            seed=0,
+            do_bench=True,
+            warmup=1,
+            iters=1,
+            bench_backends="emmy",
+            ref_out=refs,
+        )
+    )
+    assert len(refs) == 1
+    assert refs[0][0] == {"y": [2.0]}
+    assert refs[0][1] is outputs
+
+
+def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
+    """A reference-free Loop target owns one device input allocation, not a redundant Torch copy."""
+    import numpy as np
+
+    from emmy.commands import run as run_module
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (8,), "f16"), node_id="x")
+    graph.outputs = ["x"]
+
+    class FakeBackend:
+        def run(self, _graph, *, input_data):
+            assert input_data["x"].shape == (8,)
+            return SimpleNamespace(outputs={"x": np.ones(8, dtype=np.float16)}, time_ms=0.001), None
+
+        async def benchmark_async(self, *_args, **_kwargs):
+            return SimpleNamespace(time_ms=0.001, captured=True)
+
+    monkeypatch.setattr(
+        run_module,
+        "_to_cuda_tensor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reference-free replay must not make a Torch copy")),
+    )
+    asyncio.run(
+        run_module.bench_lowered_vs_torch(
+            None,
+            graph,
+            FakeBackend(),
+            seed=0,
+            do_bench=True,
+            warmup=1,
+            iters=1,
+            bench_backends="emmy",
+        )
+    )
+
+
+def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_path, caplog):
+    """Exact Loop targets have no Torch twin, so pinned replay must compare against the greedy Loop execution."""
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline import Pipeline
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path, state="verified")
+    args = _args(
+        path,
+        ir=None,
+        bench=True,
+        ab=None,
+        debug=False,
+        dump_dir=None,
+        bench_backends="emmy",
+        warmup=5,
+        iters=20,
+        seed=0,
+        json=None,
+        profile=False,
+    )
+    resolve_golden_arg(args)
+
+    reference = ({"x": object()}, {"y": object()})
+    returned = {"reference": reference, "greedy_error": None, "reference_run_us": None}
+    seen = {}
+
+    class FakePipeline:
+        def run(self, graph, **_kwargs):
+            return graph
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, _graph, **kwargs):
+            seen["want_ref"] = kwargs["want_ref"]
+            return {
+                "results": {},
+                "result": None,
+                "captured": False,
+                "torch_available": False,
+                "accuracy_error": None,
+                "run_io": returned["reference"],
+                "greedy_error": returned["greedy_error"],
+                "reference_run_us": returned["reference_run_us"],
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    class FakeDump:
+        @staticmethod
+        def resolve(_path):
+            return None
+
+    async def fake_isolated(*_args, **_kwargs):
+        return None
+
+    async def fake_pinned(_backend, _source, _pins, **kwargs):
+        seen["ref"] = kwargs["ref"]
+        return []
+
+    monkeypatch.setattr(Pipeline, "build", lambda _passes: FakePipeline())
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
+    monkeypatch.setattr(run_module, "_bench_golden_variants", fake_pinned)
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+
+    run_module._handle_run_ir(args, FakeBackend, FakeDump)
+
+    assert seen == {"want_ref": True, "ref": reference}
+
+    async def fail_if_isolated(*_args, **_kwargs):
+        raise AssertionError("a failed greedy timing must not be re-benched or made eligible")
+
+    seen.clear()
+    returned["greedy_error"] = "HungKernelError: repeated timing crossed the watchdog"
+    returned["reference_run_us"] = 4_000_000.0
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fail_if_isolated)
+    with pytest.raises(SystemExit) as exc:
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+    assert exc.value.code == 1
+    assert seen == {"want_ref": True, "ref": reference}
+    assert "untimed greedy is ineligible; pinned rows still bench" in caplog.text
+
+    seen.clear()
+    returned["greedy_error"] = None
+    returned["reference_run_us"] = None
+    returned["reference"] = None
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
+    with pytest.raises(SystemExit) as exc:
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+    assert exc.value.code == 1
+    assert seen == {"want_ref": True}
+    assert "requires same-input greedy outputs" in caplog.text

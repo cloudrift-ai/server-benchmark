@@ -177,7 +177,7 @@ This design provides:
 3. **Computed properties** — `LLMConfig.gpus_per_instance` derives from `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` without parsing strings.
 4. **Deep merge support** — named fields participate in matrix merging naturally. An `extra_args` string cannot be partially overridden.
 
-### Controlled Workload Flags (`benchmark.seed` / `temperature` / `ignore_eos`)
+### Controlled Workload Flags
 
 `BenchmarkConfig` carries three optional knobs that pin the bench-client workload for controlled cross-engine
 comparisons: `seed` reproduces the same random prompt set across runs and engines, `temperature: 0` forces greedy
@@ -185,6 +185,10 @@ decoding, and `ignore_eos: true` makes every request generate exactly `random_ou
 identical work. Each unset field emits no client flag (prior behavior); note that no `temperature` means the server's
 default sampling, not greedy. `temperature` / `ignore_eos` are generation-only and are skipped for embedding recipes
 (`benchmark/workload.py`).
+
+`benchmark.num_warmups` (default 0) makes the bench client complete that many requests before it starts measuring.
+Use it when the serving engine performs request-time initialization after the deployment health check. The warmup
+requests use the same controlled workload configuration and run before every measured repeat.
 
 `benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
 the model is deployed once, only the client run repeats. The text result then holds one stanza per repeat, and the

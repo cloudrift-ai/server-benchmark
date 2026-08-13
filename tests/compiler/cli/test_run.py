@@ -1454,7 +1454,7 @@ def test_write_ab_json_greedy_isolated_block(tmp_path):
         json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
     )
     results = {"Eager PyTorch": 100.0, "torch.compile": 50.0, "Emmy": 25.0}
-    _write_ab_json(args, results, greedy, bench, [], greedy_iso=iso)
+    _write_ab_json(args, results, greedy, bench, [], greedy_iso=iso, greedy_reference_us=510.0)
     rec = json.loads((tmp_path / "ab.json").read_text())
     assert rec["backends"]["Eager PyTorch"] == {
         "latency_us": 100.0,
@@ -1465,8 +1465,9 @@ def test_write_ab_json_greedy_isolated_block(tmp_path):
     assert rec["backends"]["torch.compile"]["speedup_vs_eager"] == 2.0
     assert rec["backends"]["Emmy"]["speedup_vs_eager"] == 4.0
     assert rec["greedy"]["total_us"] == 500.0
+    assert rec["greedy"]["reference_run_us"] == 510.0
     iso_rec = rec["greedy"]["isolated"]
-    assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0
+    assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0 and iso_rec["e2e_us"] is None
     assert iso_rec["kernels"][0]["us"] == 400.0 and iso_rec["flags"] == []
 
 

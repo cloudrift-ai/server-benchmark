@@ -201,6 +201,7 @@ def test_from_dict_full():
             "num_prompts": 128,
             "random_input_len": 2000,
             "random_output_len": 3000,
+            "num_warmups": 8,
         },
         "deploy": {
             "gpu": "NVIDIA H200",
@@ -218,6 +219,7 @@ def test_from_dict_full():
     assert recipe.engine.llm.vllm.extra_args == "--kv-cache-dtype fp8"
     assert recipe.benchmark.max_concurrency == 64
     assert recipe.benchmark.num_prompts == 128
+    assert recipe.benchmark.num_warmups == 8
     assert recipe.deploy.gpu == "NVIDIA H200"
     assert recipe.deploy.gpu_count == 8
 
@@ -256,6 +258,7 @@ def test_from_dict_benchmark_defaults():
     assert recipe.benchmark.num_prompts == 256
     assert recipe.benchmark.random_input_len == 8000
     assert recipe.benchmark.random_output_len == 8000
+    assert recipe.benchmark.num_warmups == 0
 
 
 def test_from_dict_with_extra_env():

@@ -213,6 +213,12 @@ def _append_trace_inventory(
         origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
         inventory.append((node_id, node, folded, origins))
     origin_counts = Counter(origins for _node_id, _node, _folded, origins in inventory if origins)
+    used_names = {
+        realization["name"]
+        for entry in entries
+        for realization in entry.get("realizations", [])
+        if isinstance(realization, dict) and isinstance(realization.get("name"), str)
+    }
 
     for node_id, node, folded, origins in inventory:
         key = node.op.cache_key()
@@ -220,6 +226,20 @@ def _append_trace_inventory(
         name = f"{node.op.name or node_id}.{suffix}"
         if name_prefix:
             name = f"{name_prefix}.{name}"
+        if name in used_names:
+            # One kernel body/cache key can occur at multiple exact Loop
+            # targets whose boundary shapes or checkpoint sources differ.
+            # ``emmy run --golden`` resolves by name, so retaining the bare
+            # duplicate makes the generated file impossible to replay. Node
+            # ids are deterministic within the persisted source program and
+            # distinguish these otherwise same-bodied target sites.
+            base = f"{name}.{node_id}"
+            name = base
+            duplicate = 2
+            while name in used_names:
+                name = f"{base}.{duplicate}"
+                duplicate += 1
+        used_names.add(name)
         if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:

@@ -124,9 +124,10 @@ class BenchmarkConfig:
     ``random_output_len`` tokens. Unset fields emit no flag, keeping the client's defaults
     (note: an unset temperature is the server's default sampling, not greedy).
 
-    ``repeats`` reruns the identical bench-client workload N times against the one deployed
-    server; the JSON result then reports per-field mean and stddev across the runs, so the
-    spread is run-to-run noise, not workload variation."""
+    ``num_warmups`` runs requests before measurement so request-time initialization does not
+    contaminate the first repeat. ``repeats`` reruns the identical measured workload N times
+    against the one deployed server; the JSON result then reports per-field mean and stddev
+    across the runs, so the spread is run-to-run noise, not workload variation."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -135,6 +136,7 @@ class BenchmarkConfig:
     seed: int | None = None
     temperature: float | None = None
     ignore_eos: bool = False
+    num_warmups: int = 0
     repeats: int = 1
 
 
@@ -245,6 +247,7 @@ class Recipe:
             "seed",
             "temperature",
             "ignore_eos",
+            "num_warmups",
             "repeats",
         }
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
@@ -259,6 +262,7 @@ class Recipe:
             seed=bench_dict.get("seed"),
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
+            num_warmups=bench_dict.get("num_warmups", 0),
             repeats=bench_dict.get("repeats", 1),
         )
 

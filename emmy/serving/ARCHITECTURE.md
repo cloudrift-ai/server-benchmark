@@ -202,8 +202,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture boot
   is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
   `--enforce-eager` then).
-  When the model declares `routed_scaling_factor`, the expert program applies it to each routed expert result;
-  an always-on dense shared expert remains unscaled and folds into `h` before the routed combine.
+  When the model declares `routed_scaling_factor`, the expert program ordinarily applies it to each routed expert
+  result; an always-on dense shared expert remains unscaled and folds into `h` before the routed combine. Laguna
+  EXL3 instead folds its base factor and the format's `interm_div=128` inverse into router weights. Its embedding and
+  residual stream stay fp32 through every block, while norms, q/k/v, paged-attention output, and gate/up intermediates
+  stay fp16. Checkpoint-provenanced attention, dense, routed, and shared down outputs return fp32; routed and fixed-slot
+  combines accumulate fp32, and the final norm returns fp16 for the head. The marked post program returns the fp32
+  base residual, fp16 normalized activation, and fp32 shared result separately; the runner adds base + shared + routed
+  without a narrowing cast. Ordinary routers and non-Laguna checkpoints retain their existing hot paths.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
   static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
@@ -259,6 +265,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the
   generic factorized contraction from `loader/trellis.py`; all per-expert sources remain
   table-resolved inputs and no decoded dense expert weight exists.
+  Single-token sparse decode uses the generic fixed-slot tier: the selected experts resolve the same E-leading coded
+  tensor inputs through pointer tables, replay their factorized compiler programs, and combine the routed outputs in
+  fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
@@ -275,8 +285,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 
   **EXL3 trunk.** Serving always requests the coded trunk from `load_quantized_split`; placeholder
   module parameters are never read. Birth-time spelling re-sources the traced constants from the
-  checkpoint and replaces each coded linear directly with generic factorized contractions. Any
-  unmatched coded trunk weight aborts compilation instead of expanding to a dense fallback.
+  checkpoint and keeps trunk linears on generic factorized contractions, never a dense weight. The coded output head
+  invokes the same factorized spelling directly and stays compressed without a separate native path. Any unmatched
+  coded trunk weight aborts compilation.
 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
@@ -323,10 +334,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
   generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
   decode to empty output). The trunk compute (embed + per-layer
-  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head`, and `load_weights` sources it from one of
+  pre/post + final norm) is the `EmmyGenRunner`; the last vLLM stage owns the output-head boundary, and `load_weights`
+  sources it from one of
   three places: `lm_head.weight` in the stream, the tied embed alias, or — on an **EXL3 checkpoint, which has no
-  `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint and decoded in
-  out-feature blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
+  `lm_head.weight` at all** — the coded `lm_head.{trellis,suh,svh}` read straight from the checkpoint. An eligible
+  untied single-TP coded head remains compressed and runs the same factorized compiler algebra with fp32 logits;
+  `LogitsProcessor(logits_as_input=True)` then applies scale/softcap. Unsupported coded heads decode in out-feature
+  blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
   Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
   expert codes this model owns none of. **An unsourced head raises**: vLLM's own strict weight-tracking check waives
   any parameter whose quant method defines `process_weights_after_loading`, which `ParallelLMHead`'s does, so nothing
@@ -343,6 +357,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
+  `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
+  owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
+  are filtered before shard files open, so a rank never reads or materializes another stage's coded weights. Execution
+  plan names and pack identity retain absolute layer numbers and the interval, preventing one stage's plans from being
+  replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
+  Laguna EXL3 contract therefore preserves its fp32 residual stream across ranks while q/k/v and attention stay fp16.
+  The coded output head remains whole only on the last rank (`tp_size == 1` within that pipeline stage); no
+  `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the coded compiler program
+  row-by-row, while captured decode requires one sampled row. Speculative decoding is unsupported with pipeline
+  parallelism.
   **Speculative decoding (MTP drafter, vllm#41745 — gemma-4-assistant).** vLLM's drafter shares the target's embedding
   by reaching into `target.model.embed_tokens` (stock model classes nest their trunk under `.model`; the emmy trunk lives
   in the runner instead). So — only when a draft is configured — the model exposes a thin `.model` shim
@@ -475,11 +500,15 @@ Recorded follow-ups, in impact order:
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
   a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
-  the warm boot uses the hub id) and adds `quant_sha`, the loader's digest of the checkpoint's compression
-  declaration. That entry is load-bearing, not defensive: the twin is built from a config **stripped** of its
+  the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy
+  consumed after the forward and cannot change a twin program, so base/IT checkpoints with identical tensor geometry
+  share their weight-independent plans. Architecture and geometry fields remain in the digest. The key also adds
+  `quant_sha`, the loader's digest of the checkpoint's compression declaration. That entry is load-bearing, not
+  defensive: the twin is built from a config **stripped** of its
   compression scheme, so two rungs of one coded conversion — same architecture, different per-tensor rates and
   therefore different coded extents — hash identically on `config_sha` alone and would share one pack, each warm
-  overwriting the other's plans.
+  overwriting the other's plans. A marked architecture precision rewrite that runs before trellis spelling also adds
+  an explicit semantic-contract field; this keeps pre-contract packs from bypassing the cold-trace rewrite.
   On a generative pack **miss**, one session-scoped `PlanTemplateCache` also collapses repeated layer profiles within
   that same boot. Its exact graph key retains names, node order, shapes/dtypes, scalar fields, aliases and every hint,
   but replaces checkpoint `source_path` / ordered `source_parts` addresses with binding slots. A hit instantiates a
@@ -493,8 +522,9 @@ Recorded follow-ups, in impact order:
   allocation sidecar, the `lm_head` siblings and the pack key all land on the same commit. It matters for a repo that
   publishes one rung of a conversion per branch — the rungs differ in exactly the per-tensor bit allocation the shape
   keys, the goldens and the coded twins carry. An unpinned load of such a repo warns loudly and names the branches
-  (`warn_if_unpinned`, the library half of `warm.sh`'s hard refusal); a local checkpoint path is revision-free and
-  passes through untouched. The boot logs the RESOLVED snapshot directory, the scheme summary and the digest, which is
+  (`warn_if_unpinned`, the library half of `warm.sh`'s hard refusal). A local checkpoint path passes through untouched,
+  including when vLLM's offline resolver retains the original revision after replacing the repository id with an
+  absolute snapshot path. The boot logs the RESOLVED snapshot directory, the scheme summary and the digest, which is
   how a running server can be checked against the rung it was asked for.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower

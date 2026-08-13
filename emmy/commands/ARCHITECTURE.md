@@ -54,7 +54,8 @@ transports, and the scale-out strategies (`DataParallelismScaleOutStrategy`, `Re
 The post-health **smoke test** branches on the recipe model config. Embedding models (`model.task: embed`) POST
 `/v1/embeddings` and require a non-empty finite vector with L2 norm in [0.9, 1.1]. Generative models use the chat
 endpoint by default ("What is 2+2?" must contain "4"); base checkpoints set `model.smoke_test: completion` to test the
-same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop.
+same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop. Benchmark
+orchestration uses the same probe as a transport-readiness check but does not interpret the returned model content.
 `parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container logs.
 
 `model.revision` is the one immutable Hugging Face revision for a deployment. The model-download phase passes it to
@@ -79,6 +80,14 @@ Benchmark configuration (`load_config()` / `validate_config()`), per-run logging
 task; task results are `(task, ok, timing)` triples), and structured results (`BenchmarkMetrics` / `SystemInfo`
 dataclasses, `parse_benchmark_metrics()`, `compose_json_result()` / `compose_result()` — both take an optional `timing`
 arg feeding the `"timing"` JSON key / `=== Timing ===` text section).
+
+The benchmark library is an experiment-agnostic runner: it records complete client output, server logs, timing,
+system information, and partial observations after failure. It treats execution and evidence-collection failures as
+authoritative, but does not judge model output, metrics, backend selection, or scientific claims. A recipe may use a
+small self-contained post-processing command, but cannot delegate result interpretation or report generation to a
+script. Command recipes may opt into the single `command.strict` integrity contract for clean/content-addressed staged
+inputs, required declared artifacts, and source/GPU/CUDA provenance. The complete boundary lives in
+`emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
 `--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` (nothing is generated); the
@@ -115,7 +124,11 @@ They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. Dynamic-shape parsing, quantized architecture twins and
+and Emmy always rebuild the same module and example inputs. Inductor compiles with
+`fullgraph=True, mode="max-autotune"`; its output must match eager on the same inputs at `rtol=atol=1e-3` before its
+latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
+Emmy-vs-eager proof authoritative. It records max/mean/relative error in `--json` and exits
+nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
 identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
 For a single-layer trace, the loader derives a missing attention `layer_type` from
@@ -125,7 +138,7 @@ modules with independent rotary keys (for example DeepSeek V4's `main` / `compre
 The trace/tune handlers delegate working-golden inventory construction, target reconstruction, proposal measurement,
 and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by
 `run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
-handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
+handlers retain only the workflow's argument validation and user-facing error/reporting.
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
 The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
@@ -133,7 +146,8 @@ structurally identical occurrences are not collapsed and a missing cache key nev
 frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
 Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
 stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
-refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
+refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
+checkpoint-declaration digest in the same YAML.
 
 `emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
 calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct
@@ -143,7 +157,7 @@ warm shapes, symbolic fallbacks, and standard/precision-trading input pin regime
 `realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
 independent serving-shape surface. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
-directly by `tune --golden-file` and verified by `run --golden-file --golden NAME`.
+directly by `tune --golden-file` and verified by `run --golden PATH [--target NAME]`.
 
 The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
 dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
@@ -171,12 +185,16 @@ With `--bench`, each target's `62_kernel_bench.json` records whether an eager re
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
 
-`emmy compile/run --golden-file PATH --golden NAME` is the verification counterpart: it resolves the name only in
-that explicit working YAML and compiles its exact provenance or Loop IR target, without canonical-corpus or live-card
-filtering. Inventory and proposal rows select the graph but are not trusted as automatic A/B pins; only verified rows
-with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded
-Loop IR stores stable algebra rather than derived structural stamps, so `run --golden` replays it through the full
-compiler pipeline. A direct `run --ir` input remains a stage-complete artifact and runs only the later passes.
+`emmy compile --golden-file PATH --golden NAME` and `emmy run --golden PATH [--target NAME]` are the verification
+counterparts. They resolve targets only in the explicit working YAML and compile its exact provenance or Loop IR,
+without canonical-corpus or live-card filtering. `run` visits every distinct target sequentially in the current
+process unless `--target` narrows the file to one exact or unambiguous substring match. With several targets,
+`--json DIR` writes one readable JSON record per target; there is no repeat or child-process orchestration layer.
+Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
+graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
+proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
+derived structural stamps, so `run --golden` replays it through the full compiler pipeline. A direct `run --ir` input
+remains a stage-complete artifact and runs only the later passes.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
@@ -221,7 +239,7 @@ For each task in group:
     +-- set gpu_device_ids if task.gpu_count < group.gpu_count
     +-- deploy(DeployParams) -> compose up
     +-- run_benchmark_workload()
-    +-- save results
+    +-- capture raw server log and save raw or partial results
     +-- on_task_done callback (--commit-results: git add + commit + push)
     +-- teardown() (skipped with --no-teardown)
     |

@@ -94,6 +94,22 @@ def test_replace_node():
     assert "red2" in [o for o in g.outputs]
 
 
+def test_replace_input_rewires_only_one_consumer():
+    g = _make_matmul_graph()
+    replacement = g.add_node(
+        op=ElementwiseOp(op="negative"),
+        inputs=["A"],
+        output=Tensor("negative_a", ("M", "K", "N")),
+        node_id="negative_a",
+    )
+
+    g.replace_input("ew", "A", replacement)
+
+    assert g.nodes["ew"].inputs == ["negative_a", "B"]
+    assert g.users("A") == {"negative_a"}
+    assert g.users("negative_a") == {"ew"}
+
+
 def test_remove_node():
     g = _make_matmul_graph()
     g.outputs = []

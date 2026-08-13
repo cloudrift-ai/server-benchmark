@@ -157,6 +157,10 @@ JSON result's `metrics` becomes the per-field mean, with `metrics_stddev` (sampl
 raw per-repeat metrics) added alongside (`benchmark/results.py`). Because the seed and prompts are identical across
 repeats, the spread measures run-to-run noise, not workload variation.
 
+The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
+result validators. `emmy bench` preserves raw observations but does not interpret whether they support an experiment's
+claim; that decision belongs to review of the completed run directory.
+
 ### Extra Args Ban Enforcement
 
 Users must not duplicate named fields in `extra_args`. The `validate_extra_args()` function enforces this by:
@@ -235,6 +239,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
+  strict: true                     # clean source, required artifacts and provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -246,18 +251,40 @@ The `run` template uses `string.Template` `$var` syntax. Substitution variables 
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
 
-### Aggregate Post-Processing
+Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
+entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
+declared artifacts so partial evidence is not lost.
 
-A recipe may optionally declare an `aggregate` block that runs **locally on the orchestrator** after all variants complete. This is useful for combining per-variant results into comparison tables or summary reports.
+### Inline Post-Processing
+
+A recipe may declare an `aggregate` block for a short local command after its variants complete:
 
 ```yaml
 aggregate:
   run: |
-    ./venv/bin/python scripts/aggregate_sgemm.py $run_dir --output $run_dir/report.md
+    rows="$run_dir/small_m_results.tsv"
+    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
+    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
+      sort |
+      while IFS= read -r result; do
+        jq -r '
+          . as $run
+          | ($run.results // [])[]
+          | select(.dimensions.M <= 128)
+          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
+             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
+          | @tsv
+        ' "$result"
+      done >> "$rows"
   timeout: 60
 ```
 
-The `run` template receives `$run_dir` — the local directory containing all pulled-back result files. It runs via `subprocess.run(shell=True)` on the machine executing `emmy bench`, not on a GPU VM. `AggregateConfig` has two fields: `run` (template) and `timeout` (default 300s).
+The template receives `$run_dir`. The example performs transparent structural processing: it selects the small-M
+rows from each SGEMM JSON and assembles one TSV table. Keep such commands self-contained and readable in the recipe;
+do not invoke an external result-analysis script. This hook may select fields, reshape rows, sort, join, or tabulate
+structured data, but it must not interpret the results or generate a human-readable report such as `RESULTS.md`.
+Agents inspect the raw run and write model-specific reports when richer analysis is required.
 
 ### Docker Options
 

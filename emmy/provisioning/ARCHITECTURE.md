@@ -72,6 +72,14 @@ is always a hard refusal.
 so every task's result reflects its host's stand-up cost. `vm_provision` is omitted for pre-allocated/fixed/local hosts
 (no VM created). See `emmy/commands/ARCHITECTURE.md` → Timing metrics.
 
+## Command source staging
+
+Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
+while ignored files are excluded. Staging returns a manifest containing the Git revision, selected paths, per-file
+SHA-256 digests, working-tree status, and a content-derived source ID. `command.strict` rejects dirty selected paths
+before any transfer. The same manifest is retained in the command result, binding a measurement to the bytes sent to
+the remote host without requiring a `.git` directory there.
+
 ## Error contract
 
 `errors.py` defines two exceptions that providers raise to communicate intent:

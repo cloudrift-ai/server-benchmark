@@ -138,14 +138,13 @@ async def run_command_workload(
     logger.info(f"Running command for {task.variant}:\n{rendered}")
     rc, _, _ = await run_cmd(rendered_with_env, log_output=True, timeout=cmd_cfg.timeout)
     success = rc == 0
-    info: dict = {"rendered_command": rendered, "result_paths": []}
+    info: dict = {"rendered_command": rendered, "exit_code": rc, "result_paths": [], "result_errors": []}
 
     if not success:
         logger.error(f"Command failed (rc={rc}) for {task.variant}")
-        return False, info
 
     if dry_run:
-        return True, info
+        return success, info
 
     # Pull back result files (with glob expansion on the remote). Paths stay task_dir-relative
     # until transfer so the local name can keep the subdir spelling.
@@ -154,7 +153,11 @@ async def run_command_workload(
         if any(c in pattern for c in "*?["):
             rel_paths = await _expand_remote_glob(run_cmd, task_dir, pattern)
             if not rel_paths:
-                logger.warning(f"result_files pattern '{pattern}' matched no files in {task_dir}")
+                message = f"result_files pattern '{pattern}' matched no files in {task_dir}"
+                logger.warning(message)
+                info["result_errors"].append(message)
+                if cmd_cfg.strict:
+                    success = False
                 continue
         else:
             rel_paths = [pattern]
@@ -164,8 +167,12 @@ async def run_command_workload(
             local_path.parent.mkdir(parents=True, exist_ok=True)
             rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, f"{task_dir}/{rel}", str(local_path))
             if rc_scp != 0:
-                logger.warning(f"scp_from_remote failed for {task_dir}/{rel}: {stderr}")
+                message = f"scp_from_remote failed for {task_dir}/{rel}: {stderr}"
+                logger.warning(message)
+                info["result_errors"].append(message)
+                if cmd_cfg.strict:
+                    success = False
                 continue
             info["result_paths"].append(str(local_path))
 
-    return True, info
+    return success, info

@@ -155,7 +155,7 @@ def resolve_golden_arg(args) -> None:
 
     Canonical selection retains every measured sibling on ``args.golden_configs``
     for pinned A/B reporting. ``--golden-file`` instead resolves only inside that
-    working document and retains only its VERIFIED siblings as automatic pins;
+    working document and retains its verified siblings, or its one valid direct tune winner, as automatic pins;
     inventory/proposal siblings still select the target graph. No Python snippet
     is generated and dynamic shapes need no CLI reconstruction: they are already
     in the decoded program.
@@ -235,7 +235,19 @@ def resolve_golden_arg(args) -> None:
 
     pinned = matches
     if document is not None:
-        pinned = [record for record in matches if record.measurements is not None]
+        verified = [record for record in matches if record.measurements is not None]
+        winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
+        valid_winner = (
+            len(winners) == 1
+            and winners[0].ranking.get("source") == "tune"
+            and winners[0].ranking.get("status") == "ok"
+            and winners[0].ranking.get("measured_knobs") == winners[0].knobs
+            and bool(winners[0].knobs)
+        )
+        if winners and not valid_winner:
+            logger.error("golden %r must contain one valid direct tune winner with matching measured knobs", name)
+            sys.exit(2)
+        pinned = verified or winners
     args.golden_configs = [Sample.from_golden(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
@@ -640,12 +652,17 @@ def _trace_model(
         # quantization metadata; only generic tensor algebra enters decomposition.
         # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
-            from emmy.compiler.loader.quant import spell_quantized_constants, spell_trellis_constants  # noqa: PLC0415
+            from emmy.compiler.loader.quant import (  # noqa: PLC0415
+                spell_dynamic_fp8_activations,
+                spell_quantized_constants,
+                spell_trellis_constants,
+            )
             from emmy.compiler.trace.huggingface import retarget_constants_to_model  # noqa: PLC0415
 
             if wrapper is not None:
                 retarget_constants_to_model(graph, wrapper, model)
             spell_quantized_constants(graph, str(quant_dir))
+            spell_dynamic_fp8_activations(graph, str(quant_dir))
             spell_trellis_constants(graph, str(quant_dir))
         return graph
 

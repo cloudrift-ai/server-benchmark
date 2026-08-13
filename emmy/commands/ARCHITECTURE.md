@@ -9,15 +9,15 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
-commands/agent ─► agent (tracked skill runner and tool schemas)
+commands/recipe ─► recipe (catalog queries and onboarding shell creation)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
-- `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
+- `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping, catalog
+  queries, and onboarding shell creation
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
-- `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
 - `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
   runner
 - `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
@@ -39,9 +39,9 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 ### `emmy/recipe/` — Recipe Library
 
 Recipe loading, configuration dataclasses (`Recipe`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`,
-`SglangConfig`, `BenchmarkConfig`), deep merge / hardware resolution / extra-arg validation, and engine flag mapping
-(`VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`). `load_recipe()` returns a `Recipe` dataclass; all consumers use attribute access
-(e.g. `recipe.engine.llm.tensor_parallel_size`).
+`SglangConfig`, `BenchmarkConfig`), deep merge / hardware resolution / extra-arg validation, engine flag mapping
+(`VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`), compact catalog queries, and onboarding shell creation. `load_recipe()` returns a
+`Recipe` dataclass; all consumers use attribute access (e.g. `recipe.engine.llm.tensor_parallel_size`).
 
 ### `emmy/deploy/` — Deploy Library
 
@@ -303,6 +303,9 @@ emmy
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
++-- recipe
+|   +-- list      -- inspect and filter compact recipe metadata
+|   +-- create    -- create a validated onboarding shell
 +-- vm
     +-- create
     |   +-- gpu        -- name a GPU from the hardware table (orchestrator: retries + fallback)
@@ -322,6 +325,20 @@ Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` v
 positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
 installed package, copying it into the current directory first. An existing path always wins over a bundled name.
 See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
+
+### `emmy recipe`
+
+`recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
+Repeat `--tag` to require several tags; `--json` makes the result suitable for lifecycle counts and agent input.
+`recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
+table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
+directory.
+
+```bash
+emmy recipe list [ROOT] [--tag TAG]... [--json]
+emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
+  --deployment GPU COUNT [--deployment GPU COUNT]...
+```
 
 ### `emmy deploy local`
 
@@ -538,21 +555,6 @@ filter, fallback can cross providers in hardware-table order; `--provider` restr
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
-
-### `emmy agent`
-
-Runs a tracked repository skill non-interactively through an OpenAI-compatible Chat Completions endpoint. The API key
-must arrive through a one-use mode-`0600` file or inherited file descriptor and is removed from every tool subprocess.
-
-```bash
-emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
-emmy agent tools --output /tmp/emmy-agent-tools.json
-```
-
-Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
-from the same definitions the runner sends to the model. See `emmy/agent/ARCHITECTURE.md` for the security and
-workflow-ownership boundary.
 
 ### `emmy fit`
 

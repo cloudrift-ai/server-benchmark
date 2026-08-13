@@ -213,9 +213,22 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 ## Recipe
 
+```bash
+# Inspect recipe metadata or count one lifecycle group in automation.
+emmy recipe list recipes --tag maintained --json
+
+# Create an untested onboarding shell with one to three proposed deployments.
+emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
+  --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
+```
+
 ```yaml
+tags:
+  - maintained
+
 model:
   huggingface: "org/model-name"
+  rationale: "Why this model belongs at its current lifecycle level."
 
 engine:
   llm:
@@ -245,6 +258,11 @@ matrices:
       engine.llm.max_concurrent_requests: [128, 512]
       benchmark.max_concurrency: [128, 512]
 ```
+
+Discovery keeps ten tested recipes tagged `maintained` and records a rationale under every recipe's `model` block.
+Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become
+`obsolete`. New model shells use `onboarding` plus `untested` and propose up to three deployment matrix entries.
+Disabled recipes are not deployable or bundled.
 
 Generic workload (run any tool on the VM, pull back result files):
 
@@ -278,14 +296,6 @@ emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.p
 emmy vm delete cloudrift --instance-id <id>
 ```
 
-## Agent Skills
-
-```bash
-emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
-emmy agent tools # the exact model tool definitions as JSON
-```
-
 ## Development
 
 ```bash
@@ -308,14 +318,13 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 
 ## Project Structure
 
+- [opencode.json](opencode.json) and [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
 - [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
   (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
   - [emmy.py](emmy/emmy.py) — CLI entrypoint
   - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration
   - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
-  - [agent/](emmy/agent/) — tracked-skill runner and bounded model tools
-    (see [ARCHITECTURE.md](emmy/agent/ARCHITECTURE.md))
   - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
   - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))

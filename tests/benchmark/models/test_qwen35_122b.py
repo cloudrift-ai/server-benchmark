@@ -83,7 +83,8 @@ def test_qwen_serving_recipe_is_one_exact_fp16_pp8_tp2_variant(project_root) -> 
 def test_serving_smoke_matches_the_serving_configuration(project_root) -> None:
     serving = yaml.safe_load(Path(project_root, "recipes/Qwen3.5-122B-A10B/recipe.yaml").read_text())
     probe = yaml.safe_load(Path(project_root, "experiments/qwen35-122b/serving_smoke_v100/recipe.yaml").read_text())
-    for section in ("model", "engine", "matrices"):
+    assert {key: value for key, value in serving["model"].items() if key != "rationale"} == probe["model"]
+    for section in ("engine", "matrices"):
         assert probe[section] == serving[section]
     assert probe["benchmark"] == {
         "max_concurrency": 1,

@@ -53,6 +53,20 @@ def test_supported_base_keys_reads_recipes():
     assert all("/" not in k and k == k.lower() for k in keys), "keys must be normalized base names"
 
 
+def test_supported_base_keys_allows_obsolete_model_to_resurface(tmp_path):
+    active = tmp_path / "active" / "recipe.yaml"
+    active.parent.mkdir()
+    active.write_text("tags:\n  - maintained\nmodel:\n  huggingface: org/Active-FP8\n")
+    obsolete = tmp_path / "obsolete" / "recipe.yaml"
+    obsolete.parent.mkdir()
+    obsolete.write_text("tags:\n  - obsolete\nmodel:\n  huggingface: org/Old-FP8\n")
+    best_effort = tmp_path / "best-effort" / "recipe.yaml"
+    best_effort.parent.mkdir()
+    best_effort.write_text("tags:\n  - best-effort\nmodel:\n  huggingface: org/Useful-FP8\n")
+
+    assert new_models.supported_base_keys(tmp_path) == {"active", "useful"}
+
+
 # ── open_source_candidates: keep open-weight, dedup by HF repo ───────────────────────
 
 

@@ -10,13 +10,46 @@ emmy deploy cloud --recipe recipes/<model>          # provisions the VM first
 ```
 
 `emmy deploy` leaves the stack running and prints the endpoint (`--teardown` is the opt-in that stops it instead), so
-a recipe is a deployable artifact. The recipe format itself — matrices, `cross`/`zip`, deep merge, `extra_args`
-validation, `docker_options`, command recipes — is documented in
+maintained and best-effort recipes are deployable artifacts. Obsolete recipes and untested onboarding shells also live
+here for lifecycle continuity, but their tags disable deployment. The recipe format itself — lifecycle tags, matrices,
+`cross`/`zip`, deep merge, `extra_args` validation, `docker_options`, command recipes — is documented in
 [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md); this file is about **what belongs here** and why.
 
-Every `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without a
-checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
-that. Only the recipe files travel — `RESULTS.md` and local benchmark output do not.
+Every runnable `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without
+a checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
+that. Obsolete recipes and onboarding shells remain repository-only. Only the recipe files travel — `RESULTS.md` and
+local benchmark output do not.
+
+## Lifecycle
+
+Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. Other
+useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
+work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
+lower practical VRAM footprint and no retained material advantage in capability or operation, or a clear technical
+reason the recipe should no longer be used. Discovery compares the smallest qualified deployment targets when a
+replacement is named and demotes an invalid obsolete proposal to `best-effort`; it cannot obsolete a recipe in favor
+of one that needs more total physical GPU memory. Each lifecycle decision records its current rationale directly under
+`model`. Obsolete recipes are retained rather than deleted, so their configuration and evidence stay available and a
+later reassessment can return one to the maintained or best-effort set. New discoveries start as minimal shells:
+
+```yaml
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: org/model
+  rationale: Brief evidence-backed reason.
+  task: generate
+matrices:
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 1
+  - deploy.gpu: NVIDIA H100 80GB
+    deploy.gpu_count: 2
+```
+
+The one to three matrix entries are proposed qualification setups, not measured targets. The shell is a handoff to
+model onboarding, not a serving claim. It becomes runnable only after qualification replaces the shell with a
+complete configuration and the `best-effort` lifecycle tag.
 
 ## recipes/ vs experiments/
 

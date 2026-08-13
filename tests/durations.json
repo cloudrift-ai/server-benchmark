@@ -1,5 +1,4 @@
 {
- "tests/agent/test_runner.py::test_agent_tools_cli_prints_definitions": 0.61,
  "tests/architecture/test_layering.py::test_checkpoint_format_names_stop_at_frontend_decomposition": 0.05,
  "tests/benchmark/models/test_gemma4_recipes_dryrun.py::test_recipe_dry_run": 0.46,
  "tests/benchmark/test_bench_dryrun.py::test_bench_command_recipe_dry_run": 0.46,

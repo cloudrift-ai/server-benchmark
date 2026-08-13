@@ -2,11 +2,16 @@
 
 ## Overview
 
-The `recipe` package owns all recipe-related logic: YAML loading, matrix expansion for benchmark parameter sweeps, typed configuration dataclasses, engine flag mapping, and extra_args validation.
+The `recipe` package owns all recipe-related logic: YAML loading, matrix expansion for benchmark parameter sweeps,
+typed configuration dataclasses, engine flag mapping, catalog queries, onboarding shell creation, and `extra_args`
+validation.
 
 ## Modules
 
-- `types.py` — dataclasses: `Recipe`, `DeployConfig`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`, `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
+- `types.py` — dataclasses: `Recipe`, `DeployConfig`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`,
+  `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
+- `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
+- `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
@@ -16,12 +21,42 @@ The `recipe` package owns all recipe-related logic: YAML loading, matrix expansi
 
 ### Bundled Recipes Are Copied Out Before Use
 
-A wheel carries every `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because `recipes/`
-sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in site-packages,
-whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories there. So
-`resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe into the
-current directory and returns that path. An existing directory always takes precedence, so a name that matches both
-a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because
+`recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
+site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories
+there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe
+into the current directory and returns that path. An existing directory always takes precedence, so a name that
+matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+
+### Recipe Lifecycle Tags
+
+The optional top-level `tags` list records whether a recipe belongs to the actively supported set:
+
+```yaml
+tags:
+  - maintained
+```
+
+The lifecycle tags are mutually exclusive. `maintained` is a tested recipe selected for periodic testing and
+optimization. `best-effort` is a useful runnable recipe outside that periodic set. `obsolete` preserves a recipe in
+git while disabling deploy, benchmark, publish, and wheel staging; it is used only when an all-around better model for
+the same task is available at a comparable or lower practical VRAM footprint, or when a technical limitation means
+the recipe should no longer be used. Low demand or age alone is not enough. Discovery stores every lifecycle reason in
+`model.rationale`. A new discovery shell carries both `onboarding` and `untested`; it contains the model ID, task,
+rationale, and one to three proposed `deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until
+onboarding replaces it with a qualified `best-effort` recipe. Untagged recipes remain runnable for backward
+compatibility and are classified by the next discovery lifecycle run.
+
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
+rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
+
+`model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
+does not affect engine arguments, deployment, or benchmark behavior.
+
+`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. Its compact
+records contain only the identity, tags, task, rationale, and expanded deployment setups needed for lifecycle work.
+`create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
+GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 
 ### Matrix Expansion for Benchmark Sweeps
 

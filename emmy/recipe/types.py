@@ -102,6 +102,8 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Why this model belongs in the recipe inventory at its current lifecycle level.
+    rationale: str | None = None
     # Immutable Hugging Face revision used by both model prefetch and the serving engine.
     revision: str | None = None
     # What the model serves: "generate" (completion/chat, the default) or
@@ -188,6 +190,7 @@ class DeployConfig:
 class Recipe:
     """Complete recipe configuration."""
 
+    tags: tuple[str, ...] = ()
     model: ModelConfig = field(default_factory=ModelConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
@@ -206,6 +209,7 @@ class Recipe:
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
+            rationale=model_dict.get("rationale"),
             revision=model_dict.get("revision"),
             task=model_dict.get("task", "generate"),
             smoke_test=model_dict.get("smoke_test", "chat"),
@@ -287,6 +291,7 @@ class Recipe:
             )
 
         return cls(
+            tags=tuple(d.get("tags", ())),
             model=model,
             engine=EngineConfig(llm=llm),
             benchmark=benchmark,

@@ -187,27 +187,3 @@ def test_stage_artifacts_rejects_unmanifested_ignored_experiment(tmp_path):
 
     with pytest.raises(ValueError, match="outside its artifact manifest"):
         onboarding_artifacts.stage_artifacts(tmp_path, [Path("experiments/Model/recipe.yaml")])
-
-
-def test_stage_artifacts_accepts_manifested_onboarding_plan_deletion(tmp_path):
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    plan = tmp_path / "plans" / "onboard-org-model.md"
-    plan.parent.mkdir(parents=True)
-    plan.write_text("plan\n")
-    subprocess.run(["git", "add", str(plan.relative_to(tmp_path))], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-qm", "plan"], cwd=tmp_path, check=True)
-    plan.unlink()
-
-    relative = onboarding_artifacts._relative_artifact(tmp_path, "plans/onboard-org-model.md")
-    onboarding_artifacts.stage_artifacts(tmp_path, [relative])
-
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--name-status"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert staged == "D\tplans/onboard-org-model.md\n"

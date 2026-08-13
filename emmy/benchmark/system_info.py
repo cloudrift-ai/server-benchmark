@@ -38,6 +38,15 @@ echo "=== GPU DETAILS ==="
 nvidia-smi 2>/dev/null || echo "N/A"
 
 echo ""
+echo "=== GPU PROVENANCE ==="
+nvidia-smi --query-gpu=index,name,uuid,driver_version,pstate,temperature.gpu,clocks.sm,clocks.mem,power.draw,power.limit \
+  --format=csv,noheader,nounits 2>/dev/null || echo "N/A"
+
+echo ""
+echo "=== CUDA COMPILER ==="
+(nvcc --version 2>/dev/null || /usr/local/cuda/bin/nvcc --version 2>/dev/null) || echo "N/A"
+
+echo ""
 echo "=== DISK USAGE ==="
 df -h 2>/dev/null || echo "N/A"
 

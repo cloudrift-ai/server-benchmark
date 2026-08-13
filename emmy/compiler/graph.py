@@ -584,6 +584,26 @@ class Graph:
         self.inputs = [new_id if i == old_id else i for i in self.inputs]
         self.outputs = [new_id if o == old_id else o for o in self.outputs]
 
+    def replace_input(self, consumer_id: str, old_buf: str, new_buf: str) -> None:
+        """Replace one consumer edge while keeping the buffer indexes consistent.
+
+        Unlike :meth:`replace_node`, this rewires only ``consumer_id``. It is the
+        graph-mutation primitive for birth-time frontend spelling that inserts an
+        explicit value transform in front of selected consumers without redirecting
+        the transform's own input edge.
+        """
+        if consumer_id not in self.nodes:
+            raise KeyError(f"Consumer node {consumer_id!r} not found")
+        if new_buf not in self._producers and new_buf not in self.nodes:
+            raise KeyError(f"Replacement buffer {new_buf!r} not found")
+        consumer = self.nodes[consumer_id]
+        if old_buf not in consumer.inputs:
+            raise ValueError(f"Consumer {consumer_id!r} does not read buffer {old_buf!r}")
+        consumer.inputs = [new_buf if item == old_buf else item for item in consumer.inputs]
+        consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+        self._users.get(old_buf, set()).discard(consumer_id)
+        self._users.setdefault(new_buf, set()).add(consumer_id)
+
     def splice(
         self,
         fragment: Graph,

@@ -1,0 +1,35 @@
+# Recent 27B model that fits the RTX 4090 in AWQ INT4. This is a system-qualification baseline until an Emmy engine
+# arm is present; it must not be described as an Emmy end-to-end speedup by itself.
+model:
+  huggingface: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+  revision: e5cc0400fb2403c437c2c40a7c52fb5ae93fda18
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.95
+    context_length: 8192
+    max_concurrent_requests: 8
+    vllm:
+      image: "vllm/vllm-openai@sha256:04563c302537a91aa49ebdfbceda96111c5712275999b7e8804fa598f0b5641d"
+      extra_args: >-
+        --language-model-only --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+        --no-enable-prefix-caching
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA GeForce RTX 4090"
+      deploy.gpu_count: 1
+      repeat: [0, 1, 2, 3, 4]
+      zip:
+        benchmark.random_input_len: [128, 1024, 4096]
+        benchmark.random_output_len: [128, 256, 1024]
+        benchmark.max_concurrency: [8, 4, 1]
+        benchmark.num_prompts: [64, 24, 8]

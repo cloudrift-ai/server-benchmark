@@ -1,0 +1,35 @@
+# Primary Blackwell TP8/EP qualification using the same GLM-5.2 architecture as the H200 lane. Intelligent result
+# review must confirm the native NVFP4 MoE backend; a fallback is compatibility evidence.
+model:
+  huggingface: "nvidia/GLM-5.2-NVFP4"
+  revision: aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.90
+    context_length: 262144
+    max_concurrent_requests: 32
+    vllm:
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      extra_args: >-
+        --enable-expert-parallel --kv-cache-dtype fp8_e4m3 --no-enable-prefix-caching
+        --tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA B200"
+      deploy.gpu_count: 8
+      repeat: [0, 1, 2, 3, 4]
+      zip:
+        benchmark.random_input_len: [256, 8192, 32768]
+        benchmark.random_output_len: [256, 256, 1024]
+        benchmark.max_concurrency: [32, 16, 1]
+        benchmark.num_prompts: [128, 64, 6]

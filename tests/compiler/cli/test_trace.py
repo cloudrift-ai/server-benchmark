@@ -196,6 +196,27 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     assert all(set(entry["target"]) == {"origins"} for entry in first_doc["configs"])
 
 
+def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 32), "f16"), node_id="x")
+    bits = graph.add_node(ElementwiseOp("to_f8e4m3"), ["x"], Tensor("x_bits", (4, 32), "f8e4m3"), node_id="x_bits")
+    graph.nodes[bits].hints.set("trace.materialize", True)
+    graph.add_node(ElementwiseOp("from_f8e4m3"), [bits], Tensor("out", (4, 32), "f16"), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    path = tmp_path / "working.yaml"
+    result = write_trace_inventory(
+        graph,
+        path,
+        model_quant_digest="0123456789abcdef",
+    )
+    document = load_golden_file(path)
+
+    assert result.target_count == 2
+    assert document["model_quant_digest"] == "0123456789abcdef"
+    assert "x_bits" in document["programs"][0]["outputs"]
+
+
 def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16, 64), "f16"), node_id="x")

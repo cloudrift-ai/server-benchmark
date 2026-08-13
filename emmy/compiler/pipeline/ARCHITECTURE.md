@@ -674,6 +674,12 @@ the partition fork predict for this kernel" are trace queries, never accumulated
 (`Run.resolve`) with the greedy pick (`greedy_decide`) — NOT a search. No frontier, no tree, no benching. The graph is
 copied once per attempt and resolved in place — no per-fork copies.
 
+`emmy run --golden PATH --strict` consumes a working golden rather than changing search. It visits every distinct
+target sequentially in the current process, or one target selected with `--target NAME`. A valid directly measured
+tune winner is an automatic exact pin; verified rows remain automatic pins as before. The ordinary strict run accepts
+only captured whole-forward timing with direct eager correctness at `rtol=atol=1e-3`. Process isolation and repeated
+observations come from independent command invocations, not a second orchestration layer inside `run`.
+
 **Greedy flattens forks before ranking.** The lazy fork tree is an MCTS structure — it stages knob choices across
 levels (`BR` → `BM/BN` → `FM/FN`) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level: a branch
 carries only a *partial* tile, and `features.knob_features` can't compute its area / occupancy until `FM/FN` are

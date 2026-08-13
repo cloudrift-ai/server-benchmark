@@ -8,6 +8,7 @@ target identity needed by search consumers directly as data.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -364,7 +365,11 @@ def validate_golden_file(
 ) -> None:
     if not isinstance(document, Mapping):
         raise ValueError("golden document must be a mapping")
-    _require_keys(document, {"gpu_name", "compute_cap", "model", "programs", "loops", "configs"}, "golden document")
+    _require_keys(
+        document,
+        {"gpu_name", "compute_cap", "model", "model_quant_digest", "programs", "loops", "configs"},
+        "golden document",
+    )
     gpu_name = document.get("gpu_name")
     if gpu_name is not None and (not isinstance(gpu_name, str) or not gpu_name):
         raise ValueError("gpu_name must be a non-empty string")
@@ -375,6 +380,9 @@ def validate_golden_file(
         raise ValueError("repository golden requires gpu_name")
     if document.get("model") is not None and not isinstance(document["model"], str):
         raise ValueError("model must be a string")
+    quant_digest = document.get("model_quant_digest")
+    if quant_digest is not None and (not isinstance(quant_digest, str) or re.fullmatch(r"[0-9a-f]{16}", quant_digest) is None):
+        raise ValueError("model_quant_digest must be a 16-character lowercase hexadecimal digest")
     try:
         programs = validate_program_pool(document.get("programs"))
     except ValueError as exc:

@@ -9,6 +9,7 @@ class VllmConfig:
     """vLLM engine-specific configuration."""
 
     image: str = "vllm/vllm-openai:v0.17.0"
+    entrypoint: str | None = None
     extra_args: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
 
@@ -61,11 +62,13 @@ class LLMConfig:
     def entrypoint(self) -> str | None:
         """Docker entrypoint override for the active engine.
 
-        vLLM images have a built-in entrypoint; SGLang images do not,
-        so we must provide one explicitly.
+        vLLM normally uses the image entrypoint but may override it for a same-image
+        control. SGLang images do not provide one, so its launcher is explicit.
         """
         if self.sglang is not None:
             return "python3 -m sglang.launch_server"
+        if self.vllm is not None:
+            return self.vllm.entrypoint
         return None
 
     @property

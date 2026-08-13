@@ -247,6 +247,7 @@ class Recipe:
             "seed",
             "temperature",
             "ignore_eos",
+            "num_warmups",
             "repeats",
         }
         unsupported_benchmark_fields = set(bench_dict) - workload_fields

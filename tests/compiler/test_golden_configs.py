@@ -155,17 +155,3 @@ def test_program_index_must_resolve_in_document() -> None:
     document["configs"][0]["program"] = len(document["programs"])
     with pytest.raises(ValueError, match="does not resolve"):
         validate_golden_file(document)
-
-
-def test_full_program_loop_target_keeps_the_rejected_fused_candidate() -> None:
-    """The deploy-floor target must retain its producer when standalone slicing would price a plain contraction."""
-    document = load_golden_file(_GOLDENS / "v100_sm70_laguna_s_2_1_fp8.yaml")
-    config = next(
-        config
-        for config in document["configs"]
-        if any(realization["name"] == "k_linear_13ff57.full_graph_offer" for realization in config["realizations"])
-    )
-    loop_wire = document["loops"][config["target"]["loop"]]
-
-    assert [node["id"] for node in loop_wire["nodes"] if node["op"] == "loop"] == ["mul_13", "add_7"]
-    assert config["realizations"][0]["knobs"]["STAGE"] == "d1/sync"

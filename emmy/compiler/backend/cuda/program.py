@@ -1879,6 +1879,7 @@ async def benchmark_compare_worker_async(
         "run_io": resp.get("run_io"),
         "greedy_error": resp.get("greedy_error"),
         "reference_run_us": resp.get("reference_run_us"),
+        "correctness": resp.get("correctness"),
     }
 
 

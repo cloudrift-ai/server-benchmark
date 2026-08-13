@@ -236,6 +236,10 @@ brake does not split it. The automatic brake is also limited to unary/single-sou
 gated activation such as GeGLU/SwiGLU remains an evidence-controlled placement choice, preserving its GPU golden
 coverage until that entire cone has been measured.
 
+Fusion also lets a decomposed contraction's pointwise product reunite with its sole sum-reduction consumer before an
+upstream activation-bearing cone is spliced into the product. Otherwise pass order can materialize the full M×K×N
+product, whose work-growth then prevents the reduction merge; ordinary softmax/attention reduction order is unchanged.
+
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure

@@ -137,14 +137,15 @@ async def _run_job(req: dict) -> dict:
         # In-process within this child — the parent's SIGKILL is the wall-timeout backstop.
         backend = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0)
         kind, payload = spec
-        accuracy_error = run_io = greedy_error = reference_run_us = None
+        accuracy_error = run_io = correctness = greedy_error = reference_run_us = None
         retire_worker = False
         if kind == "frontend_graph":
             from emmy.commands.run import bench_lowered_vs_torch
 
+            want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
             refs, ref_times = [], []
             try:
-                results, bench, avail, captured, accuracy_error = await bench_lowered_vs_torch(
+                response = await bench_lowered_vs_torch(
                     payload,
                     req["graph"],
                     backend,
@@ -153,9 +154,14 @@ async def _run_job(req: dict) -> dict:
                     warmup=req["warmup"],
                     iters=req["iters"],
                     bench_backends=req["bench_backends"],
-                    ref_out=refs if req.get("want_ref") else None,
-                    ref_us_out=ref_times if req.get("want_ref") else None,
+                    ref_out=refs if want_reference else None,
+                    ref_us_out=ref_times if want_reference else None,
+                    strict_accuracy=req.get("strict_accuracy", False),
+                    return_reference=want_reference,
                 )
+                results, bench, avail, captured, accuracy_error = response[:5]
+                if want_reference:
+                    correctness, run_io = response[5:]
             except RuntimeError as exc:
                 # An embedded Loop golden has no Torch twin. Its first greedy execution can
                 # finish and produce the candidates' same-input reference before a later
@@ -166,7 +172,8 @@ async def _run_job(req: dict) -> dict:
                 results, bench, avail, captured, accuracy_error = None, None, False, False, None
                 greedy_error = f"{type(exc).__name__}: {exc}"
                 retire_worker = _hung(exc)
-            run_io = refs[0] if refs else None
+            if run_io is None:
+                run_io = refs[0] if refs else None
             reference_run_us = ref_times[0] if ref_times else None
         elif kind == "trace_args":
             import types
@@ -225,6 +232,7 @@ async def _run_job(req: dict) -> dict:
             "greedy_error": greedy_error,
             "reference_run_us": reference_run_us,
             "_retire_worker": retire_worker,
+            "correctness": correctness,
         }
 
 

@@ -1077,3 +1077,53 @@ def test_pending_product_exp_residual_correctness():
     w = rng.standard_normal((6, 8)).astype(np.float32)
     r = rng.standard_normal((4, 6)).astype(np.float32)
     _assert_correctness(_make_pending_product_into_exp_residual_add, {"act": act, "w": w, "r": r})
+
+
+def test_product_reduction_fuses_before_upstream_activation():
+    """An activation feeding a decomposed contraction must not strand its M×K×N product."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    graph = _make_pending_product_into_exp_residual_add()
+    graph.rename_node("act", "act_src")
+    a0, a1 = Var("a0"), Var("a1")
+    activation = LoopOp(
+        body=Body(
+            (
+                Loop(
+                    axis=Axis("a0", Dim(4)),
+                    body=Body(
+                        (
+                            Loop(
+                                axis=Axis("a1", Dim(8)),
+                                body=Body(
+                                    (
+                                        Load(name="x", input="act_src", index=(a0, a1)),
+                                        Assign(name="xa", op="tanh", args=("x",)),
+                                        Write(output="act", index=(a0, a1), value="xa"),
+                                    )
+                                ),
+                            ),
+                        )
+                    ),
+                ),
+            )
+        )
+    )
+    graph.add_node(activation, ["act_src"], Tensor("act", (4, 8)), node_id="act")
+    graph.replace_input("ew", "act_src", "act")
+
+    before = graph.copy()
+    fused = Pipeline.build(["loop/fusion"]).run(graph)
+    bare = [node.id for node in _kernel_nodes(fused) if not _has_update(node.op.body) and len(node.output.shape) > 2]
+    assert bare == [], f"activation fusion stranded a product workspace: {bare}"
+
+    inputs = {
+        "act_src": rng.standard_normal((4, 8)).astype(np.float32),
+        "w": rng.standard_normal((6, 8)).astype(np.float32),
+        "r": rng.standard_normal((4, 6)).astype(np.float32),
+    }
+    _assert_close(_run(before, inputs), _run(fused, inputs))

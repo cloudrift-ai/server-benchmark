@@ -53,10 +53,9 @@ so allocation failure is reported synchronously instead of surfacing later as an
 
 ## Compiler qualification
 
-The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml) contains 17
-current compiler targets and 20 independently correctness-verified realizations with paired deployable O3 and
-reference timings. All 15 full-program deploy offers matched stored realizations with zero gaps, drift, fall-through,
-or compile failures.
+The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml) contains 22
+current compiler targets and 25 verified realizations with paired deployable O3 and reference timings. All 15
+full-program deploy offers matched stored realizations with zero gaps, drift, fall-through, or compile failures.
 Representative exact-layer traces and all checkpoint tensor OIDs established that the documentation-only model
 revision does not change the traced inventory.
 

@@ -262,6 +262,43 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     assert refs[0][1] is outputs
 
 
+def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
+    """A reference-free Loop target owns one device input allocation, not a redundant Torch copy."""
+    import numpy as np
+
+    from emmy.commands import run as run_module
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (8,), "f16"), node_id="x")
+    graph.outputs = ["x"]
+
+    class FakeBackend:
+        def run(self, _graph, *, input_data):
+            assert input_data["x"].shape == (8,)
+            return SimpleNamespace(outputs={"x": np.ones(8, dtype=np.float16)}, time_ms=0.001), None
+
+        async def benchmark_async(self, *_args, **_kwargs):
+            return SimpleNamespace(time_ms=0.001, captured=True)
+
+    monkeypatch.setattr(
+        run_module,
+        "_to_cuda_tensor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reference-free replay must not make a Torch copy")),
+    )
+    asyncio.run(
+        run_module.bench_lowered_vs_torch(
+            None,
+            graph,
+            FakeBackend(),
+            seed=0,
+            do_bench=True,
+            warmup=1,
+            iters=1,
+            bench_backends="emmy",
+        )
+    )
+
+
 def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_path, caplog):
     """Exact Loop targets have no Torch twin, so pinned replay must compare against the greedy Loop execution."""
     from emmy.commands import run as run_module

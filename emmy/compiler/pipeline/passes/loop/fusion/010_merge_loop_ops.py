@@ -175,6 +175,27 @@ def _merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if any("__cut_" in node_id for node_id in region - {sink.id}):
         raise RuleSkipped("region crosses a decided placement cut")
 
+    # Finish a materialized product's reduction before growing its producer cone. Tensor
+    # decomposition spells a contraction as ``pointwise product -> sum``. If an upstream
+    # activation reaches the product first, splicing it there creates the full ``M x K x N``
+    # product workspace; the subsequent reduction merge can then exceed the work-growth cap
+    # and strand that enormous buffer. Deferring one scan lets the product and reduction reunite
+    # first, after which the upstream cone can fuse into the complete contraction normally.
+    # This is an ordering rule, not a shape specialization: it applies to an activation-bearing
+    # producer cone feeding a multiplicative product whose sole Loop consumer add-reduces it.
+    # The activation condition keeps ordinary softmax/attention reduction order unchanged.
+    sink_users = list(graph.users(sink.id))
+    sink_stmts = tuple(sink.op.body.iter())
+    region_stmts = tuple(stmt for node_id in region - {sink.id} for stmt in graph.nodes[node_id].op.body.iter())
+    has_activation = not any(isinstance(stmt, Accum) for stmt in region_stmts) and any(
+        isinstance(stmt, Assign) and stmt.op.name in {"exp", "silu", "tanh"} for stmt in region_stmts
+    )
+    is_product = any(isinstance(stmt, Assign) and stmt.op.name == "multiply" for stmt in sink_stmts)
+    if has_activation and is_product and not any(isinstance(stmt, Accum) for stmt in sink_stmts) and len(sink_users) == 1:
+        consumer = graph.nodes[sink_users[0]]
+        if isinstance(consumer.op, LoopOp) and any(isinstance(stmt, Accum) and stmt.op.name == "add" for stmt in consumer.op.body.iter()):
+            raise RuleSkipped(f"consumer {consumer.id!r} must absorb the product before its producer cone")
+
     duplicated = _duplicated_contraction(graph, region)
     if duplicated is not None:
         raise RuleSkipped(f"contraction {duplicated!r} would be duplicated across statistic/value paths")

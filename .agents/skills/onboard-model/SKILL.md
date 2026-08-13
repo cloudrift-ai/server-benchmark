@@ -21,7 +21,8 @@ Turn a Hugging Face model ID and an exact `(GPU name, GPU count)` into reviewed 
 Repository storage is intentionally minimal. Do not commit experiment `RESULTS.md` files, benchmark JSON/TXT/logs,
 dated run snapshots, plots, compiler run summaries, partial working goldens, or onboarding-summary files unless the
 caller explicitly asks to retain a particular experiment result. Keep measurement output ignored or outside the
-checkout long enough to write the final recipe report, then remove task-owned copies from the checkout.
+checkout long enough to write the final recipe report, then remove task-owned copies from the checkout. Experiment
+YAML is reproducibility input and may remain committed.
 
 Use only the supplied SSH server. The caller owns VM creation and deletion; this skill owns deployed workloads and
 must tear them down before returning. Never switch GPU type, count, provider, model quantization, or model checkpoint
@@ -202,10 +203,9 @@ count, workload, context, request count, client concurrency, warm-up, and precis
 When Emmy is ineligible, run only the pinned mainstream lane. The experiment may contain a context/concurrency grid
 needed to justify the recommended recipe, but it must not contain a dummy Emmy lane.
 
-Use comparison lanes only to select the recommended configuration. Benchmark the precision lane selected in section
-5. The canonical model report is not a comparison report: include performance only for the engine and configuration
-selected by `recipes/<model>/recipe.yaml`. If the recipe uses Emmy, report the selected Emmy precision lane; if it
-uses vLLM or SGLang without Emmy, report that lane.
+Use comparison lanes to select and explain the recommended configuration. Benchmark the precision lane selected in
+section 5. Include the comparisons that matter for this model's decision and clearly identify the engine and
+configuration selected by `recipes/<model>/recipe.yaml`; do not force unrelated models into one table layout.
 
 Commit only a canonical experiment `recipe.yaml` when the comparison configuration remains useful. Do not commit raw
 successful results, failed run directories, dated recipe snapshots, rendered duplicates, caches, credentials, logs,
@@ -217,6 +217,12 @@ the selected result directly in the recipe report, then remove task-owned measur
 
 Create `recipes/<model>/RESULTS.md` only beside a valid recommended recipe. If serving qualification cannot produce a
 valid recipe, create no `RESULTS.md` in the repository; the caller-supplied external summary is the failure record.
+Creating or updating a valid serving recipe without creating or refreshing its `RESULTS.md` is incomplete.
+
+Do not expect `emmy bench` or recipe post-processing to interpret the run. After measurement, inspect `tasks.json`,
+every task JSON and text result, complete server logs, failures, and declared artifacts. Reconcile them with the
+recipe matrix and the model's protocol before deciding what the evidence supports. A short inline `aggregate.run`
+may arrange files mechanically, but do not add or call a result-analysis script; assemble the report directly.
 
 Before writing performance numbers, find a successful raw result for the exact selected recipe configuration: model
 revision, engine image tag or digest, GPU name/count, precision policy, context, concurrency, workload, and engine
@@ -224,14 +230,10 @@ knobs must all match. Re-run that lane with the existing `emmy bench` experiment
 does not identify the selected engine. Update the report from the new measurement, but do not commit its raw output.
 Never estimate a missing value, copy a competing engine's result, or combine metrics from different runs.
 
-Keep the main performance section at the best qualified result for each comparable selected-recipe workload; do not
-accumulate a chronology of revalidations. When a newer run improves the lane, replace the main numbers. When a newer
-run regresses, retain the best result in the main section and add one final `## Current regression` section with the
-newer exact configuration, deltas, and known cause. Remove that section completely as soon as a later run recovers;
-if the recovery is a new best, promote it to the main section. Compare complete runs without cherry-picking individual
-metrics or combining measurements from different runs.
-
-Use measurements only. Include:
+Choose the report structure that makes this model's evidence easy to understand. A dense model, a quantized model, a
+multimodal model, and an Emmy compiler qualification may need different sections, metrics, and comparisons. There is
+no required heading order or universal table. Prefer a compact narrative and only the tables that clarify the result.
+Use measurements only, compare complete runs without cherry-picking, and include the relevant subset of:
 
 - date, repository revision, model revision, GPU name/count, driver, CUDA, and pinned image tags or digests;
 - exact workload used for the selected measurement;
@@ -240,15 +242,13 @@ Use measurements only. Include:
 - Emmy eligibility and the evidence for the decision;
 - complete/partial/none compiler coverage, tuned target counts, O3 verification, and every remaining compiler gap;
   link the repository golden only when coverage is complete;
-- the selected recipe engine's performance lane only, identified by the exact image and relevant engine knobs;
+- the selected recipe engine's performance lane, identified by the exact image and relevant engine knobs, plus any
+  comparison needed to justify why it was selected;
 - one clean `emmy bench experiments/<model>/<name> ...` reproduction command using a retained experiment YAML;
   filter a comparison recipe to the selected engine and precision lane, and do not use `--commit-results`;
-- for an Emmy recipe, its serving results, kernel-tuning summary, and published image tag;
-- for a vLLM or SGLang recipe without Emmy, that engine's serving results without an Emmy or other baseline column;
-- for an Emmy recipe, the accuracy result that authorized FAST_MATH or the quality regression that retained standard
-  Emmy;
-- the best deployable compiler realization for each target or shape, not superseded tuning tables; retain an
-  improvement factor when it is useful, but keep older absolute timings out of the main performance section;
+- for an Emmy recipe, its serving result, kernel-tuning summary, published image tag, and the accuracy result that
+  authorized FAST_MATH or the quality regression that retained standard Emmy;
+- for a vLLM or SGLang recipe without Emmy, that engine's serving result without a comparison column;
 - the recommended serving configuration, limitations, and any unresolved upstream issue.
 
 Keep the report useful without the working directory. It must not link to experiment output or an experiment report.
@@ -288,8 +288,8 @@ login, or no Docker login was performed because the stock-only path did not requ
 
 Write this JSON object atomically to the caller-supplied summary path outside the repository and print that path as the
 final line. List every repository file created, modified, or deleted by the onboarding run in `artifacts`. List only a
-complete repository golden in `compiler_artifacts`, and only retained experiment configuration files in
-`experiment_artifacts`. Do not list or commit raw measurement output.
+complete repository golden in `compiler_artifacts`, and only retained experiment YAML in `experiment_artifacts`. Do
+not list or commit raw measurement output.
 
 ```json
 {

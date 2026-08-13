@@ -147,13 +147,17 @@ class LinearModel:
         therefore the model's exact preference gap. (The float-safety clip is ignored here — it exists for
         finiteness, never inside the live range.)
 
-        Both parts come from the same two helpers :meth:`quality` totals, so the decomposition cannot drift from
-        the score it decomposes. What differs is only the assembly: a named entry per term here, one number
-        there."""
-        terms = self._linear_terms(feats)
-        finalize, _ = gate_values(feats)
+        This is THE definition of what the score is made of — :meth:`quality` is its total, so the decomposition
+        and the number it decomposes are one thing rather than two that have to be kept in step. Terms that would
+        be ``±0.0`` (an absent or zero feature, or the gate on a row with no finalize kernel) are dropped: they
+        are neutral in the total and would only pad the explanation."""
+        w_set = self.weight_set(self.is_dynamic_row(feats))
+        terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
+        finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
         if finalize:
-            terms["gate:atomic_free"] = self._gate_term(feats)
+            terms["gate:atomic_free"] = atomic_free_term(
+                finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
+            )
         return terms
 
     # --- linear-only: the quantity the fit optimizes -----------------------------------------------------
@@ -163,23 +167,11 @@ class LinearModel:
         the linear weights over ``feats`` plus the atomic-free interaction. Routes itself on the row's stamp —
         a live candidate always carries the full featurization.
 
-        The gate is added OUTSIDE the sum, not folded in as one more term. ``sum`` over floats is compensated
-        (Neumaier) on this interpreter, so where the compensation is applied is observable: including the gate in
-        the summed sequence moves the result by an ULP, and an ULP is enough to flip a rank tie in a pool where
-        candidates score equal. The two spellings are otherwise the same number."""
-        return sum(self._linear_terms(feats).values()) + self._gate_term(feats)
-
-    def _linear_terms(self, feats: dict) -> dict[str, float]:
-        """The weighted feature terms, keyed by feature — the linear half of the score. Terms that would be
-        ``±0.0`` (an absent or zero feature) are dropped: they are exactly neutral in the total, and naming them
-        in a decomposition would only pad it."""
-        w_set = self.weight_set(self.is_dynamic_row(feats))
-        return {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
-
-    def _gate_term(self, feats: dict) -> float:
-        """The atomic-free interaction's contribution for one row — the non-linear half of the score."""
-        finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
-        return atomic_free_term(finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold)
+        The total of :meth:`explain_features`, so "what the score is" is written once. The alternative — summing
+        the linear part and adding the gate after it — differs in the last bit, because ``sum`` over floats is
+        compensated (Neumaier) and that changes where the compensation lands. Two candidates an ULP apart are a
+        tie either way, and the fit's own descent scores through :func:`quality_columns`, not this path."""
+        return sum(self.explain_features(feats).values())
 
     def quality_rows(self, mat: np.ndarray, names, *, dynamic: bool) -> np.ndarray:
         """:meth:`quality` over a whole packed pool — column ``j`` of ``mat`` is feature ``names[j]``.

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Efficient mid-size FP8 fits Pro6000 and H200 single-GPU with strong serving throughput."
+  rationale: "Maintained as the single-GPU mid-size Qwen3.6 path on Pro 6000 and H200, with the full 262K context and H200 MTP coverage."
 
 engine:
   llm:

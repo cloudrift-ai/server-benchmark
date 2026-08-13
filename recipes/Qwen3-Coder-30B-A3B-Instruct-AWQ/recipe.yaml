@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Coder-specialized MoE in AWQ fits consumer RTX 5090 with strong coding benchmarks."
+  rationale: "Maintained for coding-focused MoE coverage on one RTX 5090; the AWQ checkpoint leaves room for a 114K context window on consumer hardware."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Next-gen coder useful on Pro6000 for longer context though 30B-A3B covers consumer."
+  rationale: "Retained for a 262K coding-focused FP8 deployment on one Pro 6000; the maintained 30B AWQ recipe covers the smaller RTX 5090 tier."
 
 engine:
   llm:

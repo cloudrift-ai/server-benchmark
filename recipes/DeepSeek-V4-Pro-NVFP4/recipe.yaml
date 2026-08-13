@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "nvidia/DeepSeek-V4-Pro-NVFP4"
-  rationale: "Retained on a best-effort basis because discovery did not establish an all-around better replacement."
+  rationale: "Retained for the highest-capacity DeepSeek V4 Pro option and its verified eight-B200 long-context deployment; the hardware cost keeps it outside periodic testing."
 
 # DeepSeek-V4-Pro: 1.6T / 49B-active MoE, CSA+HCA hybrid attention, MIT, native 1M ctx.
 # Engine = vLLM (NOT SGLang): SGLang #25704 produces NaN/garbage on DeepSeek-V4-Pro NVFP4 on

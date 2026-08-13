@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B"
-  rationale: "Base 12B continuation model fills consumer RTX 4090 workload coverage."
+  rationale: "Retained for base-checkpoint continuation workloads on one RTX 5090; it uses the completion smoke test rather than chat."
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion
 

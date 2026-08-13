@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Largest MoE in set useful for research but resource-intensive for routine serving."
+  rationale: "Retained for the largest Qwen3.5 MoE deployment and multi-platform scaling coverage; its eight-GPU footprint makes periodic testing low priority."
 
 engine:
   llm:

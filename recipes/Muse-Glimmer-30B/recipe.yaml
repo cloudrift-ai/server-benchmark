@@ -3,8 +3,10 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "Meta Superintelligence Labs 30B open-weight agentic model (Apache 2.0), trending #1 with 1022 HF score and 1060 likes. vLLM + SGLang supported. 30B params ≈ 60 GB BF16 fits comfortably on 1×H200 (141 GB). Multimodal text+image->text fills a gap in emmy's recipe set."
+  rationale: "This 29.6B text-and-image agent model combines tool use, failure recovery, 131K context, and a separate DFlash drafter. Onboard the BF16 checkpoint on one Pro 6000 and one H200; quantized consumer deployment can follow as a separate checkpoint."
   task: generate
 matrices:
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+    deploy.gpu_count: 1
   - deploy.gpu: NVIDIA H200 141GB
     deploy.gpu_count: 1

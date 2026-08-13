@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
-  rationale: "Large MoE with V100 pipeline support covers deprecated hardware fleet serving."
+  rationale: "Maintained for the qualified 16×V100 pipeline-parallel path, preserving large-MoE serving coverage on the Volta fleet."
   revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate
 

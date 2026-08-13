@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Google 31B multimodal with 9.9M HF downloads, strong reasoning and vision on H200."
+  rationale: "Maintained as the 31B Gemma 4 BF16 serving baseline on one H200 and as the reference configuration for the FP8 variant."
 
 engine:
   llm:

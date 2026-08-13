@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Mid-size embedding complements maintained 8B model between edge and production tiers."
+  rationale: "Retained as the middle Qwen3 embedding size for stock-vLLM versus Emmy plugin comparisons on RTX 4090 and 5090."
   task: embed
 
 engine:

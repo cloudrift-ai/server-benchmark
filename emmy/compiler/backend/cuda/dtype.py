@@ -26,6 +26,11 @@ _CUDA_NAME: dict[DataType, str] = {
     # the M2 fragment-path convert is what first emits these in source.
     _dtype.F8E4M3: "__nv_fp8_e4m3",
     _dtype.F8E5M2: "__nv_fp8_e5m2",
+    # Packed e2m1 pairs move as raw bytes. The cuda_fp4.h ``__nv_fp4x2_e2m1``
+    # spelling is deliberately not used: it would put a CUDA 12.8 floor on every
+    # kernel that merely stores the type, and in-kernel decode is hand-written
+    # (render helpers), not header-provided.
+    _dtype.F4E2M1x2: "unsigned char",
     _dtype.F16x2: "__half2",
     # Raw int16 checkpoint carriers are represented directly in generic tensor algebra.
     _dtype.I16: "short",
@@ -58,6 +63,7 @@ _CUDA_INCLUDE: dict[DataType, str | None] = {
     _dtype.BF16: "<cuda_bf16.h>",
     _dtype.F8E4M3: "<cuda_fp8.h>",
     _dtype.F8E5M2: "<cuda_fp8.h>",
+    _dtype.F4E2M1x2: None,  # raw-byte spelling, no cuda_fp4.h (see _CUDA_NAME)
     _dtype.F16x2: "<cuda_fp16.h>",
 }
 
@@ -85,10 +91,12 @@ _C_NAME_BYTES: dict[str, int] = {
     "bf16": 2,
     "__nv_fp8_e4m3": _dtype.F8E4M3.nbytes,
     "__nv_fp8_e5m2": _dtype.F8E5M2.nbytes,
+    "unsigned char": _dtype.F4E2M1x2.nbytes,
     "i16": 2,
     "i32": 4,
     "i64": 8,
     "f64": 8,
+    "long long": 8,
     "unsigned short": 2,
     "unsigned int": 4,
     "unsigned long long": 8,

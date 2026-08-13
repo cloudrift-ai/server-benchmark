@@ -155,6 +155,9 @@ protection (the down projection sum-contracts the exp-bearing SwiGLU activation,
 softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
+NVFP4 groundwork lives in the dtype layer: `f4e2m1x2` (a uint8 element carrying a packed pair of e2m1 codes) with
+its LUT decode `decode_f4x2` and a raw-byte CUDA spelling; no loader family or kernel consumes it yet.
+
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.
 Checkpoint discovery, sibling pairing, codebook markers, and allocation metadata remain in

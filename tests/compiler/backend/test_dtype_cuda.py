@@ -32,6 +32,17 @@ def test_cuda_name_int_dtypes():
     assert cuda_name("long") == "long long"
 
 
+def test_cuda_name_table_consistent_with_byte_sizes():
+    """Every C spelling in ``_CUDA_NAME`` resolves through ``nbytes_of`` to its dtype's
+    own byte size, and the table is injective (the ``canonical_from_cuda_name``
+    inverse relies on that)."""
+    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME
+
+    for dtype, cname in _CUDA_NAME.items():
+        assert nbytes_of(cname) == dtype.nbytes, (dtype.name, cname)
+    assert len(set(_CUDA_NAME.values())) == len(_CUDA_NAME)
+
+
 def test_canonical_from_cuda_name_int_dtypes():
     # The inverse mapping is what ``Smem.render`` consults to recover the
     # canonical DataType from a kernel-internal C name.

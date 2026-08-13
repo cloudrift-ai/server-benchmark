@@ -155,7 +155,7 @@ def register_run_command(subparsers):
         dest="strict_correctness",
         action="store_true",
         help=(
-            "With --bench on runnable frontend IR or an embedded golden, fail unless every requested backend, "
+            "With --bench on a traced model, runnable frontend IR, or an embedded golden, fail unless every requested backend, "
             "captured timing, exact pin, and direct Emmy-vs-eager comparison is valid."
         ),
     )
@@ -256,9 +256,6 @@ def _handle_run_once(args):
     if args.strict_correctness and not args.bench:
         logger.error("--strict requires --bench")
         sys.exit(2)
-    if args.strict_correctness and ir_path is None and not hasattr(args, "_golden_graph"):
-        logger.error("--strict currently requires runnable frontend IR or an embedded --golden")
-        sys.exit(2)
     if not torch.cuda.is_available():
         logger.error("CUDA GPU required")
         sys.exit(1)
@@ -356,8 +353,11 @@ def _handle_run_once(args):
         "dynamic": list(args.dynamic) if getattr(args, "dynamic", None) else None,
     }
 
+    strict_correctness = bool(getattr(args, "strict_correctness", False))
+
     async def _bench_session():
-        greedy_fail = results = bench = accuracy_error = ab_ref = golden_benches = greedy_iso = None
+        greedy_fail = results = bench = accuracy_error = correctness = ab_ref = golden_benches = greedy_iso = None
+        greedy_reference_us = None
         captured = True
         try:
             try:
@@ -370,6 +370,7 @@ def _handle_run_once(args):
                     iters=args.iters,
                     accuracy=not skip_accuracy,
                     want_ref=bool(pinned),
+                    strict_accuracy=strict_correctness,
                 )
             except RuntimeError as exc:
                 # Worker SIGKILL (hung kernel), in-child bench budget, EOF — the greedy
@@ -378,6 +379,8 @@ def _handle_run_once(args):
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 accuracy_error, ab_ref = resp["accuracy_error"], resp["run_io"]
+                correctness = resp.get("correctness")
+                greedy_reference_us = resp.get("reference_run_us")
             if pinned and accuracy_error is None:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
@@ -385,9 +388,29 @@ def _handle_run_once(args):
                 golden_benches = await _bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref)
         finally:
             await backend.aclose_async_worker()
-        return greedy_fail, results, bench, captured, accuracy_error, golden_benches, greedy_iso
+        return (
+            greedy_fail,
+            results,
+            bench,
+            captured,
+            accuracy_error,
+            golden_benches,
+            greedy_iso,
+            greedy_reference_us,
+            correctness,
+        )
 
-    greedy_fail, results, bench, captured, accuracy_error, golden_benches, greedy_iso = asyncio.run(_bench_session())
+    (
+        greedy_fail,
+        results,
+        bench,
+        captured,
+        accuracy_error,
+        golden_benches,
+        greedy_iso,
+        greedy_reference_us,
+        correctness,
+    ) = asyncio.run(_bench_session())
 
     if accuracy_error is not None:
         # Correctness gate: the deployed program computes the wrong answer, so no latency
@@ -404,13 +427,30 @@ def _handle_run_once(args):
         notes = [n for n in (_symbolic_bench_note(_collect_sym_env([compiled])), capture_note) if n]
         _print_table(results, note="\n".join(notes) if notes else None)
     _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+    strict_errors = (
+        _strict_benchmark_errors(args, results, bench, captured, correctness, golden_benches) if strict_correctness else None
+    )
     if getattr(args, "json", None):
-        _write_ab_json(args, results or {}, compiled, bench, golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+        _write_ab_json(
+            args,
+            results or {},
+            compiled,
+            bench,
+            golden_benches,
+            greedy_fail=greedy_fail,
+            greedy_iso=greedy_iso,
+            greedy_reference_us=greedy_reference_us,
+            correctness=correctness,
+            strict_errors=strict_errors,
+        )
+    for error in strict_errors or []:
+        logger.error("strict: %s", error)
     _record_bench_nodes(args, golden_benches, greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
-        greedy_fail is not None
+        bool(strict_errors)
+        or greedy_fail is not None
         or (greedy_iso is not None and greedy_iso.status != "ok")
         or any(gb.status != "ok" for gb in golden_benches or [])
     ):

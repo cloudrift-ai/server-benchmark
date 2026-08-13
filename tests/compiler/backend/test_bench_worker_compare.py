@@ -476,6 +476,64 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     assert benched and resp["results"] == {"Emmy": 1.0}
 
 
+def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) -> None:
+    """Model-ID runs use the same strict eager proof as runnable frontend IR."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.backend.cuda import _bench_worker
+
+    module = object()
+    monkeypatch.setattr(
+        "emmy.commands.compile.load_or_trace",
+        lambda _args: (object(), "slug", (module, (), {})),
+    )
+    monkeypatch.setattr("emmy.commands.run._bind_inputs", lambda *_args, **_kwargs: {"x": [0.0]})
+    monkeypatch.setattr("emmy.commands.run._eager_output", lambda *_args, **_kwargs: {"n0": [2.0]})
+    monkeypatch.setattr(
+        "emmy.commands.run._strict_correctness_proof",
+        lambda outputs, eager: {
+            "status": "pass",
+            "reference": "eager",
+            "rtol": 1e-3,
+            "atol": 1e-3,
+            "max_abs_error": 0.0,
+            "mean_abs_error": 0.0,
+            "max_rel_error": 0.0,
+        },
+    )
+
+    class Backend:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, *_args, **_kwargs):
+            return SimpleNamespace(outputs={"n0": [2.0]}), None
+
+    monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", Backend)
+
+    async def fake_bench(*_args, **_kwargs):
+        return {"Eager PyTorch": 2.0, "Emmy": 3.0}, SimpleNamespace(captured=True), True
+
+    monkeypatch.setattr("emmy.commands.run.bench_full_model_real", fake_bench)
+    resp = asyncio.run(
+        _bench_worker._run_job(
+            {
+                "graph": object(),
+                "torch_spec": ("trace_args", {"input": "org/model"}),
+                "strict_accuracy": True,
+                "accuracy": False,
+                "want_ref": False,
+                "warmup": 0,
+                "iters": 1,
+                "bench_backends": "eager,emmy",
+            }
+        )
+    )
+    assert resp["accuracy_error"] is None
+    assert resp["correctness"]["status"] == "pass"
+    assert resp["results"] == {"Eager PyTorch": 2.0, "Emmy": 3.0}
+
+
 def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) -> None:
     """A completed Loop reference remains usable, but its failed greedy timing remains explicit."""
     from emmy.commands import run as run_mod

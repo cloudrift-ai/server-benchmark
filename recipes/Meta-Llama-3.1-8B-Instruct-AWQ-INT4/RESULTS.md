@@ -44,15 +44,26 @@ the correct answer to `2 + 2`.
 
 ## Compiler qualification
 
-Emmy compiler promotion was evaluated and rejected for this deployment. The loader recognizes FP8 and EXL3 stored
-checkpoint families, but not AWQ's packed 4-bit representation, so a compiler-served path would not preserve the
-qualified checkpoint numerics.
+Emmy's compiler can now recognize this AWQ GEMM checkpoint, stream only the selected layer, preserve packed
+`qweight`/`qzeros`/`scales` tensors, spell their int4 decode algebra into the graph, and feed the packed constants to
+the serving compiler lane. The repair also covers optional attention inputs, non-kernel slice boundaries, unique
+exact-target names, and direct strict eager verification for model-ID runs.
 
-As a diagnostic inventory, layer 0 was traced at sequence lengths 1 and 512. The traces contained 105 and 106 IR
-nodes and produced five and six distinct post-fusion kernel targets. Every target was tuned with an eight-candidate
-budget across all eight V100-SXM2 GPUs. Strict replay failed at both shapes because Emmy returned three outputs where
-eager returned one. At sequence length 512, Emmy also measured 9,137 µs versus 1,438 µs eager; several candidates
-timed out and one attempted a 17.18 GB allocation. No canonical golden or serving integration was retained.
+Layer 0 at sequence length 1 traced to 381 IR nodes. Its seven packed projections fused into four generated kernels.
+The untuned graph passed strict eager comparison at `rtol=atol=1e-3` with 0.000977 maximum absolute error, but took
+941,486 µs versus 1,031 µs eager. All four exact targets were swept with eight candidates across the host's eight
+V100-SXM3 GPUs. Three targets produced winners; every candidate for the dominant attention/linear/reduction target
+exceeded the tuning safety budget. Replaying the usable winners improved Emmy to 797,678 µs versus 1,025 µs eager,
+still 778× slower.
+
+Prefill exposed the remaining structural gap. Sequence length 128 passed the same strict check, but Emmy took
+2,581,686 µs versus 1,197 µs eager. At 256 tokens a generated kernel exceeded the two-second safety limit; at the
+required 512-token shape the execution plan requested a 60.13 GB scratch slab and failed allocation on the 32 GB
+V100. Packed AWQ parsing and correctness are therefore repaired, but the compiler still lacks a bounded,
+tensor-core-friendly fused int4 GEMM schedule. No Emmy golden or Emmy serving promotion was retained.
+
+The serving numbers above do **not** use Emmy-generated kernels. They use the pinned 1Cat/vLLM image's Volta AWQ and
+`FLASH_ATTN_V100` paths, which remain the qualified production backend.
 
 ## Reproduce
 
@@ -73,4 +84,4 @@ The benchmark writes ignored local output. `RESULTS.md` is the only retained mea
 - The exact image is already present on both qualified hosts. A registry pull by this locally resolved digest returned
   `manifest unknown`, so preload or republish that image before using the recipe on a new host.
 - Requalify after changing the image, model revision, driver, context length, or attention backend.
-- Emmy compiler serving is not qualified for this AWQ checkpoint.
+- Emmy compiler serving is not qualified for this AWQ checkpoint; its packed decode path is correct but not deployable.

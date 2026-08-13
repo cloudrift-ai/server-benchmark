@@ -410,10 +410,11 @@ def _compile_split(
     would otherwise report no floor at all.
     ``ckpt`` — ``(checkpoint_dir, id_to_key)`` — switches the TRUNK to the checkpoint-sourced
     lane: every traced constant is re-addressed to its checkpoint key
-    (:func:`_retarget_constants`), ``spell_trellis_constants`` then fires on a serving wrapper
-    for the first time (the compressed lane forced, not env-gated), and the constant feed comes
-    from the shards rather than the live module (:func:`_plan_sources`). This is what puts an
-    EXL3 trunk on the card at its CODED size; without it a trunk linear binds decoded values.
+    (:func:`_retarget_constants`), the checkpoint's AWQ/EXL3 constant speller then fires on a
+    serving wrapper for the first time (the compressed lane forced, not env-gated), and the
+    constant feed comes from the shards rather than the live module (:func:`_plan_sources`).
+    This is what puts a coded trunk on the card at its stored size; without it a trunk linear
+    binds decoded values.
     ``plan_cache`` is a session-scoped, binding-neutral plan-template cache. It runs only on the
     cold path (an explicit pack ``plan`` still wins), after every loader spelling and ABI hint has
     reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
@@ -433,7 +434,7 @@ def _compile_split(
 
             promote_expert_output_float32(graph)
         if ckpt is not None:
-            from emmy.compiler.loader.quant import spell_trellis_constants
+            from emmy.compiler.loader.quant import spell_quantized_constants, spell_trellis_constants
             from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
 
             _retarget_constants(graph, wrapper, ckpt[1])
@@ -441,6 +442,7 @@ def _compile_split(
                 promote_laguna_exl3_post_float32(graph, kind)
             if getattr(wrapper, "_emmy_shared_expert_float32", False):
                 promote_shared_expert_float32(graph)
+            spell_quantized_constants(graph, ckpt[0])
             spell_trellis_constants(graph, ckpt[0])
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs
@@ -781,16 +783,21 @@ class EmmyGenRunner:
         # dense trunk loaded as real values, expert tensors kept fp8 (``load_quantized_split``).
         qdir = quantized_checkpoint_dir(model_id)
         if qdir is not None:
-            # EXL3 keeps the TRUNK coded too — the whole point of a 2-bit checkpoint is that the
-            # decoded trunk (GLM-4.5-Air: ~14 GiB) does not fit beside the experts. fp8 trunks
-            # stay on the decoded lane, where the values are what the fp8 expert path expects.
-            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary, is_exl3_checkpoint
+            # EXL3 and AWQ keep the TRUNK coded too: expanding either checkpoint before compile
+            # gives back most of its memory savings. fp8 trunks stay on the decoded lane, where
+            # the values are what the fp8 expert path expects.
+            from emmy.compiler.loader.quant import (
+                checkpoint_quant_digest,
+                checkpoint_quant_summary,
+                is_awq_checkpoint,
+                is_exl3_checkpoint,
+            )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # EXL3's generic reconstruction algebra is dissolved before lowering, so its
-            # checkpoint sources can stay coded on the card. FP8 keeps the existing
-            # value-trunk lane; only its routed experts are input-spelled today.
-            coded_trunk = is_exl3_checkpoint(qdir)
+            # Generic EXL3/AWQ reconstruction algebra is dissolved before lowering, so its
+            # checkpoint sources can stay coded on the card. FP8 keeps the existing value-trunk
+            # lane; only its routed experts are input-spelled today.
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -858,8 +865,8 @@ class EmmyGenRunner:
         fp8 bits + scales + biases — in place of the twin's expert params (which stay meta
         on the quantized path); the expert programs are then compiled with the decode + scale
         algebra spelled in-graph (``spell_quantized_inputs`` via ``_compile_split``), one program
-        set per distinct expert SHAPE. A store whose ``trunk`` is ``"codes"`` (EXL3) also puts the
-        TRUNK on the checkpoint-sourced lane, so its coded linears stay compressed on the card."""
+        set per distinct expert SHAPE. A store whose ``trunk`` is ``"codes"`` (AWQ/EXL3) also puts
+        the TRUNK on the checkpoint-sourced lane, so its coded linears stay compressed on the card."""
         import numpy as np
         import torch
 
@@ -994,7 +1001,7 @@ class EmmyGenRunner:
         # A CODED trunk (``load_quantized_split(..., compress_trunk=True)``) binds its constants
         # from the CHECKPOINT rather than from the twin's parameters, which are placeholders
         # there. ``id_to_key`` maps a parameter tensor's identity to its full checkpoint path, so
-        # each wrapper's trace can be re-addressed and the trellis speller can fire (see
+        # each wrapper's trace can be re-addressed and its coded-weight speller can fire (see
         # :func:`_retarget_constants`). Everything else keeps the module lane.
         ckpt = None
         if (expert_store or {}).get("trunk") == "codes":

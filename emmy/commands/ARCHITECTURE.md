@@ -187,6 +187,14 @@ and YAML, proves that every structural target has every config-derived realizati
 and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
 a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
+When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's golden-tier
+consultation count (per precision lane) against that checked-in baseline. This catches the regression the verdicts
+cannot: a pass change that removes a kernel's schedule fork deploys it single-option with no golden consultation, so
+its recorded MATCHes vanish without a DRIFT. A count below baseline — or a recorded twin no longer audited — fails
+the gate naming the twin; counts above baseline only log that the baseline is stale. `--update-consult-baseline`
+re-records the file from a passing audit (run it once to seed the baseline, and again whenever an intentional
+compiler change shifts the counts).
+
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
 via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` uses the recipe's `deploy.gpu` for

@@ -22,6 +22,8 @@ def test_verdict_helpers_summarize_and_classify_gaps() -> None:
     assert audit.summarize(records) == Counter({"GAP": 2, "MATCH": 1, "DRIFT": 1, audit.COMPILE_FAIL: 1})
     assert audit.gap_keys(records) == {minor, major}
     assert audit.major_gap_keys(records) == {major}
+    # COMPILE_FAIL is not a golden-tier consultation; an unconsulted graph still counts as 0.
+    assert audit.consultation_counts({**records, "empty": []}) == {"pre": 3, "post": 1, "empty": 0}
 
 
 def test_audit_card_keeps_graph_failures_and_restores_target(monkeypatch) -> None:

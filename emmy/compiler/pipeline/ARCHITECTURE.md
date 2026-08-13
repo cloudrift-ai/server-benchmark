@@ -1177,7 +1177,13 @@ revision, GPU, canonical file, precision regimes, and reachable static/symbolic 
 command requires that exact file and live GPU, validates that every structural target contains every expected
 realization, and re-traces the model's twins weight-free. It compiles each precision lane with only that file's
 records as golden evidence. Each consultation yields MATCH, DRIFT, or GAP; any DRIFT, GAP, or compile failure blocks
-release. The same command also runs the own-program reproduction and offer audit, closing both the pin-only and fused
+release. The verdicts only exist where a fork consults the golden tier, so the audit also ratchets each twin's
+consultation COUNT per lane against the serving config's checked-in `SERVE_CONSULT_BASELINE` JSON
+(`audit.consultation_counts`): a pass change that removes a kernel's schedule fork deploys it single-option with no
+consultation, its recorded MATCHes vanish with zero DRIFT, and the count drop is the only deploy-side signal — a drop
+or a vanished twin blocks release naming the twin, while growth just marks the baseline stale
+(`--update-consult-baseline` re-records it from a passing audit). The same command also runs the
+own-program reproduction and offer audit, closing both the pin-only and fused
 in-model blind spots in one operation. The default correctness suite tests the reusable audit mechanism with
 synthetic verdicts rather than retracing and compiling a model/card matrix. The twins track the installed
 `transformers` modeling code by design: a change to the model forward changes the twins exactly as it changes serving,

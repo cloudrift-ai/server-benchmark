@@ -37,6 +37,9 @@ class ServingConfig:
     golden_file: Path
     realizations: tuple[ServingRealization, ...]
     static_only: bool
+    #: Checked-in per-twin golden-consultation counts (JSON) the release audit ratchets
+    #: against; ``None`` (no ``SERVE_CONSULT_BASELINE``) skips that check.
+    consult_baseline: Path | None = None
 
     @property
     def model_provenance(self) -> str:
@@ -205,6 +208,13 @@ def load_serving_config(path: str | Path) -> ServingConfig:
     golden_path = Path(golden)
     if not golden_path.is_absolute():
         golden_path = _root(source) / golden_path
+    consult_baseline = None
+    consult = values.get("SERVE_CONSULT_BASELINE", "").strip()
+    if consult:
+        consult_baseline = Path(consult)
+        if not consult_baseline.is_absolute():
+            consult_baseline = _root(source) / consult_baseline
+        consult_baseline = consult_baseline.resolve()
     realizations = _realizations(values, source, static_only=static_only)
     if static_only and realizations != (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),):
         raise ValueError(f"{source}: static-only release warm shapes must stay in the standard M=1 lane")
@@ -216,6 +226,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         golden_file=golden_path.resolve(),
         realizations=realizations,
         static_only=static_only,
+        consult_baseline=consult_baseline,
     )
 
 

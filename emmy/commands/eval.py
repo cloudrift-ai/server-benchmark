@@ -44,6 +44,7 @@ is the load-bearing output here.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sys
@@ -151,6 +152,12 @@ def register_eval_command(subparsers) -> None:
         required=True,
         metavar="PATH",
         help="Pinned release env that names the model, GPU, golden file, and reachable realization matrix.",
+    )
+    pg.add_argument(
+        "--update-consult-baseline",
+        action="store_true",
+        help="Re-record the SERVE_CONSULT_BASELINE per-twin golden-consultation counts from this audit "
+        "(only when the audit itself passes) instead of ratcheting against them.",
     )
     pg.set_defaults(func=handle_eval_golden)
 
@@ -262,7 +269,7 @@ def handle_eval_online(args) -> None:
 def handle_eval_golden(args) -> None:
     """Validate one file-scoped golden corpus against the pinned serving envelope."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_keys, summarize  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, consultation_counts, gap_keys, summarize  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import (  # noqa: PLC0415
         GoldenFileValidation,
         load_golden_file,
@@ -343,6 +350,7 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
     failed = False
+    consultations: dict[str, dict[str, int]] = {}
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane_records = [record for record in records if record.pins == pins]
         with pinned_knobs(dict(pins)):
@@ -350,6 +358,7 @@ def handle_eval_golden(args) -> None:
         counts = summarize(results)
         gaps = gap_keys(results)
         lane = _format_pins(pins)
+        consultations[lane] = consultation_counts(results)
         logger.info(
             "%s: MATCH %d  DRIFT %d  GAP %d  compile_fail %d",
             lane,
@@ -360,9 +369,83 @@ def handle_eval_golden(args) -> None:
         )
         if counts["DRIFT"] or counts[COMPILE_FAIL] or gaps:
             failed = True
+    if args.update_consult_baseline:
+        if failed:
+            logger.error("serving audit failed — consultation baseline not recorded; fix DRIFT/GAP/compile failures first")
+            sys.exit(1)
+        _record_consult_baseline(serving, consultations)
+        return
+    failed |= _check_consult_baseline(serving, consultations)
     if failed:
         logger.error("serving audit failed: every reachable kernel must match a verified realization")
         sys.exit(1)
+
+
+def _check_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -> bool:
+    """Ratchet the per-twin golden-consultation counts against the serving config's checked-in
+    baseline. The verdict audit above cannot see a kernel that stops forking: it deploys
+    single-option with no golden consultation, so its recorded MATCHes vanish without a DRIFT.
+    A count below baseline — or a twin/lane gone
+    entirely — fails the gate naming the twin; counts above baseline only mark the baseline
+    stale. Returns True on failure."""
+    path = serving.consult_baseline
+    if path is None:
+        logger.info("no SERVE_CONSULT_BASELINE in the serving config — golden-consultation ratchet skipped")
+        return False
+    if not path.exists():
+        logger.error("SERVE_CONSULT_BASELINE names %s but the file does not exist — record it with --update-consult-baseline", path)
+        return True
+    try:
+        baseline = json.loads(path.read_text())
+    except ValueError as exc:
+        logger.error("unreadable consultation baseline %s: %s", path, exc)
+        return True
+    failed = False
+    stale = 0
+    for lane in sorted(baseline):
+        for twin, expected in sorted(baseline[lane].items()):
+            got = consultations.get(lane, {}).get(twin)
+            if got is None:
+                logger.error(
+                    "consultation ratchet: %s [%s] vanished — baseline records %d golden consultations but the twin was not audited",
+                    twin,
+                    lane,
+                    expected,
+                )
+                failed = True
+            elif got < expected:
+                logger.error(
+                    "consultation ratchet: %s [%s] dropped %d -> %d golden consultations — kernels stopped consulting the "
+                    "golden tier (they now deploy without a schedule fork), so their recorded goldens silently no-op",
+                    twin,
+                    lane,
+                    expected,
+                    got,
+                )
+                failed = True
+            elif got > expected:
+                stale += 1
+    new = sum(1 for lane, twins in consultations.items() for twin in twins if twin not in baseline.get(lane, {}))
+    if stale or new:
+        logger.info(
+            "consultation ratchet: baseline %s is stale (%d grown count(s), %d new twin(s)) — re-record with --update-consult-baseline",
+            path.name,
+            stale,
+            new,
+        )
+    if not failed:
+        held = sum(len(twins) for twins in baseline.values())
+        logger.info("consultation ratchet: %d baseline twin count(s) hold (%s)", held, path.name)
+    return failed
+
+
+def _record_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -> None:
+    path = serving.consult_baseline
+    if path is None:
+        logger.error("--update-consult-baseline needs SERVE_CONSULT_BASELINE in the serving config")
+        sys.exit(2)
+    path.write_text(json.dumps(consultations, indent=2, sort_keys=True) + "\n")
+    logger.info("recorded golden-consultation baseline: %s", path)
 
 
 def handle_eval_variants(args) -> None:

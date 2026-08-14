@@ -24,8 +24,8 @@ PREDICATE that answers the reading — `axis is None` for the projection, `is_co
 predicate cannot be constructed, subclassed or annotated, which is the point: there is no type to dispatch on and no
 second place for the fact to live.
 
-- A **ZERO-AXIS** fold is what `Map` was: no monoid, its `lift` IS the per-cell projection. So softmax's normalize,
-  RMSNorm's, and flash's `divide(O, l)` are one kind composed at two depths.
+- A **ZERO-AXIS** fold is what `Map` was: no monoid, its `lift` IS the per-cell projection. So softmax's normalize
+  and RMSNorm's are one kind composed at two depths.
 - The **BILINEAR** shape — operands `(b₀, a, b₁…)` under a `multiply` lift with a componentwise-additive combine — is
   what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`.
 
@@ -55,9 +55,9 @@ Loops carry NO algebra — `Loop` / `StridedLoop` hold only their `AxisRole`. Th
 
 There is no `step` sequence. The composed evaluations DERIVE:
 
-- flash's kv stream λ-spells with its QK score a HOISTED operand edge and its PV synthesized and memoized inside the
-  derived blocked evaluation — `Fold.step_stmts()` is the one consumer read, and `ops.stream_pair` the one reading of
-  the `(score, expectation)` pair that walk produces;
+- a twisted fold with a `Load`-bound expectation operand derives its blocked evaluation with the expectation
+  contraction synthesized and memoized (`_twisted_derived_step`) — `Fold.step_stmts()` is the one consumer read; no
+  recognizer builds such a fold today (the online-softmax carrier is the `(m, d)` pair);
 - split-K's outer reduce is the identity-lift composition — `Fold.composed` is the one read.
 
 `Fold.from_loop` reconstructs the algebra from the loop BODY alone (degenerate facts off its `Accum`s; a twisted merge
@@ -79,8 +79,8 @@ MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the co
 **Edge iff closed** holds BY CONSTRUCTION — operands bind positionally, so a subtree that reads a name from its
 enclosing body cannot be one. The closure SCAN survives only as the validation reading, living with its one consumer
 in `passes/lowering/tile/_cut.py`, where it decides cut legality: closed subtrees may hoist to edges, while combine's
-derived material — flash's PV, whose `P` reads the running state — sits BELOW the seam lattice as a derived schedule
-site excluded from PLACE (`Site.derived`). Flash's QK operand edge IS a PLACE site.
+derived material — a synthesized node reading the carrier's running state — sits BELOW the seam lattice as a derived
+schedule site excluded from PLACE (`Site.derived`). A hoisted operand edge IS a PLACE site.
 
 A cone's SOURCE is the row-invariant prologue (the per-row statistic) and its body the per-cell normalize, so the K
 seam is the node boundary (`ops.cone_seam`). The A/B asymmetry that is real — A M-resident and compute-fillable, B
@@ -115,7 +115,7 @@ lift through the one `_loop_ir_fn` arm.
 | softmax / RMSNorm | `Fold.projection(body=<per-cell normalize>, operands=(<the stat fold>,))` + a sweep `Store` |
 | fused norm→linear / gate⊗up | a zero-axis fold over the product contraction (a fork sibling of its coop-reduce form) |
 | a pure pointwise cell | `Fold.projection(body=…)` with no operands + its root `Store`s |
-| flash | the `TWISTED` fold on the streaming schedule — QK a hoisted operand edge, PV the derived evaluation's synthesized node |
+| SDPA | plain contractions + the softmax term — the online-softmax fusion stores its two reduces as one `TWISTED` fold |
 
 A twisted monoid is a monoid, selected structurally rather than as a distinct kind.
 
@@ -125,7 +125,8 @@ A twisted monoid is a monoid, selected structurally rather than as a distinct ki
 inventory, derived loudly from the TILE slices (`ops.seal_workers` — a cross-site disagreement raises).
 
 Every schedule slice lives in **`TileOp.schedule`**, a dict keyed by the tree-path codec's canonical key. `path.py` is
-ONE walker plus one resolver, short-path-canonical: bare for the primary node, `TILE@dd` / `TILE@pj` on flash. Read
+ONE walker plus one resolver, short-path-canonical: bare for the primary node, axis-suffixed where a kernel holds
+several sites of one family. Read
 and written through `ops.Sched`, which is also the one home of the `(m, n)` binding rule (`Sched.placed` /
 `Sched.tile_of`). The path codec spells `map` / `fold` / `a` / `b` segments off the derived readings — `PLACE@a`'s
 golden rows depend on it. A sliced axis's window is the one `Axis.window`.

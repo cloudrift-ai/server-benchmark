@@ -573,18 +573,9 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
     """The deploy-time :class:`ShapeKey` of a fork's candidate rows. ``base`` carries the shared
     ``S_*`` stamps when ``rows`` are the pool's RAW rows (the golden probe — the stamps live on
     the offer op, not in a pool row); merged rows carry them on ``rows[0]``. The base case is
-    ``from_s_features`` over the shared ``S_*`` stamps — but two restructured-op forks stamp a
-    histogram the classifier can't kind, so each is rebuilt from an OFFER / dtype signature the
-    stamped final op would carry.
-
-    FLASH: the tile pass's RESTRUCTURED twisted op carries re-derived extents ONLY (no
-    ``S_loop_depth``, no op histogram — measured off a live greedy resolve), so the classifier can
-    never mark it ``kind="flash"`` there. It is instead unmistakable from its OFFER: only the twisted
-    lowering forks the two contractions as ``TILE@dd`` + ``TILE@pj``. When the rows carry that pair,
-    the key is rebuilt flash-kinded, with the masked (dynamic) form's reduce extent normalized to the stamped
-    final-op convention (the fork-time masked op still shows head_dim as a visible reduce; the golden
-    keys — and the diagnostics/A-B joins over final stamped ops — have every reduce axis
-    symbolic-excluded, ``reduce_max=0``).
+    ``from_s_features`` over the shared ``S_*`` stamps — but one restructured-op fork stamps a
+    histogram the classifier can't kind, so it is rebuilt from an OFFER signature the stamped
+    final op would carry.
 
     COMPUTED-A CONE (norm→linear / gate⊗up): the fork op is the fused megakernel evaluated on its
     PRE-SPLIT geometry — the RMSNorm statistic reduce has not yet lifted to a second axis
@@ -606,18 +597,7 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
 
     stamps = base if base is not None else rows[0]
     key = ShapeKey.from_s_features(stamps)
-    # ANY row carrying the pair marks the fork (like the cone's sync-STAGE scan below):
-    # the pair may appear only on the warp leaves, and row 0 — whichever leaf the
-    # planner emitted first — need not be one of them.
-    if any({"dd", "pj"} <= {k.split("@", 1)[-1] for k in row if k.startswith("TILE@")} for row in rows):
-        key = ShapeKey(
-            free_prod=key.free_prod,
-            reduce_max=0 if key.is_dyn else key.reduce_max,
-            is_warp=key.is_warp,
-            is_dyn=key.is_dyn,
-            kind="flash",
-        )
-    elif (
+    if (
         key.kind == ""
         # A computed-A cone CONTRACTS: its output is 2-D ``(M, N)``. A standalone RMSNorm
         # STATISTIC kernel produces ONE value per row — without this the cut's own ``__stat``

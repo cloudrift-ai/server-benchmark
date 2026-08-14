@@ -3306,20 +3306,6 @@ configs:
       emmy_us: 359060.4705810547
       reference_backend: emmy-greedy
       reference_us: 359121.15478515625
-- program: 0
-  target:
-    loop: 5
-  realizations:
-  - name: k_linear_reduce_216e34.routing
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@a: cut
-    measurements:
-      emmy_us: 1524.2239832878113
-      reference_backend: emmy-greedy
-      reference_us: 56002.047538757324
 - program: 1
   target:
     loop: 6

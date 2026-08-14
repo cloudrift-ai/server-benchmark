@@ -3,8 +3,8 @@
 Every staged B drain costs one ``ldmatrix.x2``[``.trans``] per fragment, but ``ldmatrix.x4``
 loads four 8×8 matrices — two adjacent B fragments — in one instruction, halving the drain's
 LSU count. Two emitters produce the fusable pattern (which is why this is a PASS, not an
-emitter change — same family as ``050_vectorize_loads``): the warp-flash streaming drains
-(``_twist._frag_contraction`` — K's N-adjacent plain-``x2`` pairs and V's col-adjacent
+emitter change — same family as ``050_vectorize_loads``): the staged mma drains
+(``_atom._staged_inner_atom_loop`` — N-adjacent plain-``x2`` pairs and col-adjacent
 ``x2.trans`` pairs) and the matmul tier's staged drains (``_atom._staged_inner_atom_loop`` —
 ``n.reg`` col-adjacent B fragments per K step).
 

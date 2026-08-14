@@ -326,7 +326,7 @@ class Operand:
     trans: bool = False
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
     # dense). The pad breaks the same-bank stride of a power-of-two row — the flash K/V slabs'
-    # bank-conflict fix (`_twist._PAD`), whose drains are not plain ldmatrix rows; the mma matmul
+    # bank-conflict fix for padded slabs, whose drains are not plain ldmatrix rows; the mma matmul
     # tier uses the software ``swizzle`` above instead (zero smem growth). Mutually exclusive with
     # a non-NONE ``swizzle`` (the XOR's atom derivation assumes dense rows). The fill's logical
     # (row, col) writes stride the padded decl automatically (``render_index`` flattens against

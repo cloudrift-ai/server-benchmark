@@ -157,18 +157,6 @@ def test_warp_grid_orientation_is_physical():
     assert a["D_w_grid_m"] != b["D_w_grid_m"]
 
 
-def test_stage_split_flag_featurizes():
-    """The flash stream enumerates the per-edge transport split (``d1/tma/split``) as a sibling of
-    the plain stage — the ``split`` flag must reach the features and the signature."""
-    from emmy.compiler.pipeline.search.features import tile_signature
-
-    plain = {**_CTX, "TILE@a1": "mma_m16n8k16_f16/f2x2", "WORK": "w4x2", "REDUCE@a1": "", "STAGE@a1": "d1/tma"}
-    split = {**plain, "STAGE@a1": "d1/tma/split"}
-    assert knob_features(plain)["D_stage_split"] == 0.0
-    assert knob_features(split)["D_stage_split"] == 1.0
-    assert tile_signature(plain) != tile_signature(split)
-
-
 def test_enumerated_warp_pool_featurizes_injectively():
     """The propagation property behind all of the above: every tile in the enumerated warp pool
     (``_WARP_UNITS × _WARP_REGS × _WARP_BK`` for one atom) must produce a distinct feature vector
@@ -228,7 +216,7 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
         "D_splitk_roundtrip": 21.0, "D_l2_cells_occ": 2.0,
         "D_w_grid_m": 2.0, "D_w_grid_n": 1.0, "D_w_grid_aspect": 1.0,
         "D_stage_depth": 3.0, "D_stage_prefetch": 1.0, "D_stage_async": 1.0, "D_stage_tma": 1.0,
-        "D_stage_reg_depth": 2.0, "D_stage_split": 0.0,
+        "D_stage_reg_depth": 2.0,
         "D_tma_aspect": 2.0, "D_tma_log2_area": 12.0, "D_tma_grid_m": 2.0, "D_tma_grid_n": 1.0,
         "D_tma_l2_splitk": 1.0,
         "D_wspec_warps": 2.0, "D_raster_group": 8.0, "D_raster_gn": 0.0,

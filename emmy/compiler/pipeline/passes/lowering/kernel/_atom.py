@@ -1046,9 +1046,7 @@ class _MmaOps(_AtomOps):
         c = self.c
         atom, (m, n) = self.tile.atom, mn
         k_axis = c.axis
-        assert isinstance(c.a, Load), (
-            "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
-        )
+        assert isinstance(c.a, Load), "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
         a_load, b_load, b_trans = c.a, c.b, c.b_trans
         k_static = k_axis.extent.is_static

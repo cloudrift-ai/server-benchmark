@@ -87,7 +87,7 @@ from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction, operand_body
-from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled, stream_pair
+from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of, schedule_pin_fingerprint, values_equal
@@ -106,7 +106,6 @@ from emmy.compiler.pipeline.search.space import (
     scalar_tile_moves,
     splitk_moves,
     stage_moves,
-    twisted_warp_moves,
     warp_tile_moves,
 )
 from emmy.compiler.structural import digest
@@ -339,26 +338,12 @@ def _site_tree(op, key) -> tuple[_Node, ...]:
     return build(None)
 
 
-def _streams(node) -> bool:
-    """Whether ``node``'s DERIVED evaluation carries schedule sites of its OWN — the STREAMING
-    PAIR: an iterating fold that is not itself a contraction but whose blocked evaluation contracts
-    (flash's hoisted score edge at the head of the step, its synthesized PV below the seam). Those
-    are real sites (``TILE@dd`` / ``TILE@pj``), which is exactly what makes the stream a two-site
-    term and the enumeration recursive.
-
-    Structural, and deliberately NOT the ``TWISTED`` role: the role is derived by matching the
-    combine's operation family, so a scheduling decision keyed on it would be an operation match
-    wearing an algebraic name. What this asks is how the term is BUILT."""
-    return node.axis is not None and not is_contraction(node) and any(is_contraction(s) for s in node.step_stmts())
-
-
 def _keeps_children(site: Site) -> bool:
-    """Whether the site's nested sites stay sites under the values this term offers. Two shapes
-    keep them: a CONTRACTION, whose COMPUTED operand edges carry their own families (a MATERIALIZED
-    operand is not a site — its transport is the parent's ``STAGE``), and a STREAMING fold, whose
-    derived evaluation schedules the pair it contracts through. Under every other tier the fold's
-    edges lower INLINE in its body, so they are not separately scheduled."""
-    return is_contraction(site.node) or _streams(site.node)
+    """Whether the site's nested sites stay sites under the values this term offers. One shape
+    keeps them: a CONTRACTION, whose COMPUTED operand edges carry their own families (a
+    MATERIALIZED operand is not a site — its transport is the parent's ``STAGE``). Under every
+    other tier the fold's edges lower INLINE in its body, so they are not separately scheduled."""
+    return is_contraction(site.node)
 
 
 def _kids(node: _Node) -> tuple[_Node, ...]:
@@ -391,7 +376,6 @@ class _Term:
         self.proj = _projection(tile.op)
         self.tree = _site_tree(tile.op, self.key)
         self._tiles: dict[int, dict[str, list[TilePlan]]] = {}
-        self._streams: dict[int, _Stream | None] = {}
         self._k_contig: dict[int, bool | None] = {}
         #: The refusal a schedule PIN drew, kept until the walk is done. One inventory declining
         #: a pin is ordinary (the widths are read OFF the inventory, so the pin names a different
@@ -431,14 +415,6 @@ class _Term:
         element = key.partition("@")[2] if key is not None else ""
         return _KNOBS[family].pin_at(element) if element else None
 
-    def stream(self, node) -> _Stream | None:
-        """The mma facts a STREAMING fold's two sites resolve against, or ``None`` when the tier
-        does not apply (a non-16-bit operand, an underivable gmem row stride, a score prologue no
-        fragment can realize). Built once per node — every site of every inventory asks."""
-        if id(node) not in self._streams:
-            self._streams[id(node)] = _stream_of(self, node)
-        return self._streams[id(node)]
-
     def k_contiguous(self, node) -> bool | None:
         """Whether B stores the reduce axis FASTEST (:func:`_k_contiguous`), memoized per node.
 
@@ -476,101 +452,6 @@ class _Term:
         # re-resolved per inventory in :func:`_contraction_values`. The catalog still answers
         # "which inventories can this site spell against".
         return grouped
-
-
-# ---- the streaming pair: what its two sites resolve against -------------------------------------- #
-
-
-@dataclass(frozen=True)
-class _Stream:
-    """The mma facts a STREAMING fold's two schedule sites share — read ONCE off the term, because
-    both sites and the transport resolver ask the same questions of it.
-
-    The score atom is always the f32-ACCUMULATE one: the QK product feeds the online-softmax
-    statistics, so it has no precision to trade. Only the PV gains the f16-accumulate sibling
-    (``pv_atoms``), whose partials promote per streaming block in the realizer."""
-
-    qk: Fold  # the hoisted score edge — the head of the derived step
-    pv: Fold  # the synthesized P@V contraction — combine material, below the seam
-    atom: object  # the score's mma atom
-    pv_atoms: tuple  # the P@V atom, plus its f16-accumulate sibling when the gate offers it
-    d_v: int  # the value dim the P@V fragment tiles exactly
-    tma: bool  # whether a TMA box can encode this trace's K/V operands
-    stageable: bool  # the K/V slabs byte-copy at the atom's operand width
-    q_stageable: bool  # ... and so does Q, which the ``split`` groups additionally stage
-
-
-def _kv_penultimate(load: Load, kv_name: str) -> bool:
-    """Whether a K/V operand's gmem index puts the STREAM axis where TMA's box origin expects it.
-    The box coords are derived POSITIONALLY — batch dims lead, the kv row sits at ``[-2]``, the
-    contiguous head dim last — so an un-transposed ``(B, S, H, D)`` trace (kv at position 1) would
-    leak the raw axis var into the emitted coords. cp.async is unaffected: its fill substitutes by
-    axis NAME."""
-    idx = load.index
-    if len(idx) < 2 or not isinstance(idx[-2], Var) or idx[-2].name != kv_name:
-        return False
-    return not any(kv_name in e.free_vars() for e in (*idx[:-2], idx[-1]))
-
-
-def _stream_of(term: _Term, node) -> _Stream | None:
-    """Read the streaming pair off ``node``, or ``None`` when the fragment tier does not apply.
-
-    The refusals here are TERM readings, not candidate legality: a non-16-bit operand dtype, a
-    score prologue whose bias is indexed beyond ``(m, kv)`` (no fragment realization for it), an
-    underivable gmem row stride (the fragment loaders step operand rows at the buffer's REAL
-    stride, derived from the index + shape) and a fragment-unrealizable projection. Each is a
-    property of the TERM, so it belongs in the choice layer — what a CANDIDATE must satisfy is
-    :mod:`._legality`."""
-    qk, pv = stream_pair(node)
-    inputs = term.tile.inputs
-    if qk is None or pv is None or not inputs or legal.fragment_epilogue(term.proj) is not None:
-        return None
-    if not (isinstance(qk.a, Load) and isinstance(qk.b, Load) and isinstance(pv.b, Load)):
-        return None
-    if not qk.axis.extent.is_static:
-        return None  # the score's fragment K-steps are unrolled — a symbolic head dim has no tier
-    atoms = tuple(name for name in atoms_for(_a_dtype(qk, inputs), ctx=term.ctx) if ATOM_REGISTRY[name].c_to_a_repack)
-    if not atoms:
-        return None
-    atom = ATOM_REGISTRY[atoms[0]]
-    # The two sites' PLACED readings — the ``(m, n)`` pair is a function of the SITE, so it is
-    # taken off the one rule (``Sched._mn_for``, through a bare probe plan) rather than restated.
-    qk_mn, pv_mn = term.sched.placed(qk, TilePlan()).axes, term.sched.placed(pv, TilePlan()).axes
-    if qk_mn is None or pv_mn is None or not pv_mn[1].extent.is_static:
-        return None
-    d_v, kv_name, m_name = pv_mn[1].extent.as_static(), node.axis.name, qk_mn[0].name
-    for s in node.lift.body:
-        if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
-            return None  # a score bias indexed beyond (m, kv) — the fragment realizer cannot load it
-    strides = (
-        gmem_row_stride(qk.a, m_name, inputs),
-        gmem_row_stride(qk.b, (qk_mn[1] if qk.b_trans else qk.axis).name, inputs),
-        gmem_row_stride(pv.b, (pv_mn[1] if pv.b_trans else node.axis).name, inputs),
-    )
-    if any(s is None for s in strides):
-        return None
-
-    def dtype_of(load: Load):
-        t = inputs.get(load.input)
-        return getattr(t, "dtype", None)
-
-    b_dt, a_dt = atom.operand_dtype("b"), atom.operand_dtype("a")
-    # Which atoms EXIST for this operand dtype is a term fact; whether the precision-trading sibling
-    # is OFFERED is the choice layer's gate (:func:`_twisted_values`), which a pin bypasses.
-    sibling = atoms_for(_a_dtype(qk, inputs), acc=_a_dtype(qk, inputs), ctx=term.ctx)
-    return _Stream(
-        qk=qk,
-        pv=pv,
-        atom=atom,
-        pv_atoms=(atom, *(ATOM_REGISTRY[n] for n in sibling)),
-        d_v=d_v,
-        tma=term.ctx.has_tma and _kv_penultimate(qk.b, kv_name) and _kv_penultimate(pv.b, kv_name),
-        # Staging byte-COPIES the operands into slabs typed at the atom's operand width, so an
-        # operand traced at another dtype would deposit wrong-sized elements; gmem-direct fragment
-        # loads convert per element, which is why a mismatch keeps the tier and drops its stage rows.
-        stageable=dtype_of(qk.b) == b_dt and dtype_of(pv.b) == b_dt and qk.axis.extent.as_static() % atom.atom_k == 0,
-        q_stageable=dtype_of(qk.a) == a_dt,
-    )
 
 
 # ---- the term READINGS: the one mechanism above the product ------------------------------------- #
@@ -1134,177 +1015,6 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
 # --- the streaming pair: the two sites, then the stream that must agree with them ---
 
 
-def _narrowed(term: _Term, node, plans: list[TilePlan]) -> tuple[list[TilePlan], bool]:
-    """``plans`` narrowed by the site's live ``TILE`` pin, and whether the pin SELECTED here.
-
-    An EXPLICIT ``TILE@<axis>`` pin is authoritative — it names this site, so a spelling the site
-    does not offer empties it. A BARE pin fans out to every eligible site and cannot say which it
-    meant, so it narrows by MATCHING and a site it names nothing at keeps its catalog
-    (``Knob.narrow``'s no-match-keeps-full-list, the same degrade the pin layer applies everywhere).
-    That is what lets the masked-flash golden form — one bare ``TILE`` spelling the f16-accumulate
-    PV plan — select the PV variant while the score keeps its own f32-accumulate catalog, the pair
-    then reconciling at the stream. The flag is what keeps that degrade from ALSO reading as
-    authority: a pin that named nothing here decides nothing here, precision gates included."""
-    pin = term.pin("TILE", node)
-    if pin is None:
-        return plans, False
-    kept = [p for p in plans if values_equal(TILE.name, pin, p.spell())]
-    if kept or term.keyed_pin("TILE", node) is not None:
-        return kept, True
-    return plans, False
-
-
-def _chain_values(term: _Term, node, work: Workers | None) -> list[TilePlan]:
-    """The CHAIN candidate at the PV site — the FA-2 shared-score form: the value axis leaves the
-    grid and rides a per-thread REGISTER VECTOR, so the score is computed once per streamed key and
-    shared across the columns (against the per-cell tier's redundant recompute per column). Offered
-    on the ``""`` inventory (one thread per query row) when the value axis is the innermost grid
-    axis; per-thread register pressure is the row's own measurable property, ranked by evidence
-    like any other candidate."""
-    if work is not None:
-        return []
-    mn = term.sched.placed(node, TilePlan()).axes
-    grid = term.place.grid
-    if mn is None or not grid or grid[-1].name != mn[1].name or not mn[1].extent.is_static:
-        return []
-    d = mn[1].extent.as_static()
-    return [TilePlan(regs=(1, d))] if 1 < d else []
-
-
-def _twisted_values(term: _Term, site: Site, work: Workers | None, parent: _Node) -> list[dict]:
-    """The values a site of the STREAM's derived evaluation offers — the hoisted score edge
-    (``TILE@dd``) and the synthesized P@V (``TILE@pj``, ``Site.derived``).
-
-    Both are contractions, and neither is a root matmul: the geometry they carry is the STREAM's,
-    so the dispatch is the site's POSITION (the same question :func:`_fill_realized` asks of a
-    cone's statistic), not its node kind. Each site enumerates its own half of the twisted grid and
-    the pair is reconciled at the stream (:func:`_stream_values`) — two sites that must agree, which
-    is what the recursion is for. The DECIDED EMPTY leads: it is the reduce tiers' reading of the
-    same term, where the edge lowers inline in the stream's body."""
-    node, stream = site.node, parent.site.node
-    out = [TilePlan()]
-    ctx = term.stream(stream)
-    if site.derived:
-        out.extend(_chain_values(term, node, work))
-    if ctx is not None and work is not None and work.kind == "warp" and legal.enforce(legal.twisted_warp_columns(work), pinned=False):
-        atom = ctx.atom
-        if legal.enforce(legal.twisted_atom(atom, ctx.d_v), pinned=False):
-            um = work.units[0]
-            bk = -(-ctx.qk.axis.extent.as_static() // atom.atom_k)  # ceil: an overhanging final atom gmem-zero-fills
-            # The grid's ``warps_m`` is the INVENTORY, already fixed above, so what a site
-            # enumerates is the free half — the key-atom / query-tile pair, once each.
-            for nt, fm in dict.fromkeys((nt, fm) for _, nt, fm in twisted_warp_moves()):
-                # A tensor-core row on offer is a fact about the KERNEL, wherever the site sits:
-                # every row then carries ``S_warp_eligible`` so the priors can price "a scalar form
-                # where tensor cores were on offer" (``features.D_scalar_on_warp_eligible``).
-                term.warp_eligible = True
-                if site.derived:
-                    out.extend(
-                        TilePlan(atom=pv, units=(um, 1), regs=(fm, ctx.d_v // pv.atom_n), bk=max(1, nt * atom.atom_n // pv.atom_k))
-                        for pv in ctx.pv_atoms
-                    )
-                else:
-                    out.append(TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk))
-    plans, selected = _narrowed(term, node, out)
-    if not selected and not _f16acc_allowed(term.ctx):
-        # The f16-accumulate P@V sibling rides the precision gate. A pin that SELECTED here is
-        # authoritative and bypasses it (a recorded golden spelling IS the pin); one that named
-        # nothing here decided nothing here, so it must not unlock a precision trade by bleeding.
-        plans = [p for p in plans if not p.is_warp or p.atom is ctx.atom]
-    # Only the SCORE site carries the block-covers-the-extent gate: it is the site whose widths ARE
-    # the streaming key block and the query-row block (the P@V tile covers the value dim by
-    # construction, and its rows are the score's — reconciled at the stream).
-    if not site.derived:
-        plans = [p for p in plans if not p.is_warp or legal.enforce(legal.twisted_block(stream, term.sched.placed(node, p)), pinned=False)]
-    return [{"TILE": p} for p in plans]
-
-
-def _stream_tiles(kids: tuple) -> tuple[TilePlan | None, TilePlan | None]:
-    """The ``(score, P@V)`` slices a stream's child rows decided — ``None`` where the site took the
-    decided empty. The pair travels by SITE, never by position in a flattened list."""
-    out: dict[bool, TilePlan | None] = {False: None, True: None}
-    for child, row in kids:
-        plan = row.plans.get(child.keys.get("TILE"))
-        out[child.site.derived] = plan if plan is not None and plan.is_tiled else None
-    return out[False], out[True]
-
-
-def _stream_stages(term: _Term, node, ctx: _Stream, qk: TilePlan, pv: TilePlan) -> list[Stage | None]:
-    """The K/V stream's RESOLVED transports for one geometry — gmem-direct ``None`` first (the
-    conservative option-0), then every catalog move that resolves against the stream, deduped on the
-    resolved spelling (a depth that clamps under the smem budget spells identically to its shallower
-    sibling). A pinned ``STAGE`` is authoritative: the resolved pin alone, and NO gmem-direct
-    fallback — only this tier stages, so a staging pin that fell through to the chain / reduce
-    siblings would let the prior bury the (necessarily lower-occupancy) staged row under a
-    higher-occupancy scalar one."""
-    budget = term.ctx.max_dynamic_smem
-
-    def resolve(st: Stage) -> Stage | None:
-        if st.transport == "tma" and not ctx.tma:
-            return None
-        if st.split and not (ctx.q_stageable and legal.enforce(legal.stage_split_groups(node), pinned=False)):
-            return None
-        return legal.resolve_twisted_stage(node, ctx.qk, qk, pv, st, budget)
-
-    pin = term.pin("STAGE", node)
-    if pin is not None:
-        return [resolve(Stage.parse(pin))] if pin else [None]
-    if not ctx.stageable:
-        return [None]  # a dtype-mismatched or overhanging operand keeps the tier and drops its stages
-    return _resolved(stage_moves(warp=True), resolve)
-
-
-def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list[dict]:
-    """The STREAM fold's own values, given what its derived evaluation decided.
-
-    A stream whose pair took the decided empty realizes per cell, so it offers the ordinary reduce
-    partition (:func:`_reduce_values`) — the cooperative / ILP / serial tiers, unchanged. A stream
-    whose pair is SCHEDULED realizes the stream itself (fragment residence, or the chain's register
-    vector), and those tiers fold the axis their own way: the partition families would stamp a knob
-    no kernel realizes, so the two are alternatives rather than a product. What the fragment tier
-    does compose with is the cross-CTA SPLIT-KV — ``030_split_reduce`` consumes it, each partial
-    keeping its fragment residence.
-
-    The QK / PV SIBLING EQUALITY is enforced here, because this is where the pair is visible: a
-    mismatched pair yields NO values, so the combination is never built."""
-    qk, pv = _stream_tiles(kids)
-    if qk is None and pv is None:
-        return _reduce_values(term, node)
-    if not legal.enforce(legal.twisted_sites_agree(qk or TilePlan(), pv or TilePlan()), pinned=False):
-        return []
-    ctx = term.stream(node)
-    # A pin the SCHEDULED form cannot honor drops these rows rather than ignoring the pin: the
-    # reduce tiers do realize a partition, so the term still maps — through them.
-    red_pin = term.pin("REDUCE", node)
-    if not (qk is not None and qk.is_warp):
-        if red_pin is not None and ReducePlan.parse(red_pin, work) != ReducePlan():
-            return []
-        if ctx is not None and term.pin("STAGE", node):
-            return []  # only the fragment tier stages; a staging pin must not fall through to the chain
-        return [{"REDUCE": ReducePlan(), "STAGE": None}]  # the chain: one thread per query row, kv serial
-    if ctx is None:
-        return []
-    placed_qk, placed_pv = term.sched.placed(ctx.qk, qk), term.sched.placed(ctx.pv, pv)
-    if red_pin is not None:
-        want = ReducePlan.parse(red_pin, work)
-        # The pin names the PARTITION; which streaming geometry can carry it is the GEOMETRY's
-        # legality, so an incompatible pair drops this row rather than raising — other geometries
-        # still carry the pin, and a shape where none can falls to the reduce tiers, which honor it.
-        if want != ReducePlan() and not (want.needs_split and legal.enforce(legal.splitkv_slice(node, placed_qk, want), pinned=False)):
-            return []
-        reduces = [want]
-    else:
-        reduces = [ReducePlan()]
-        reduces += [p for p in splitk_moves() if legal.enforce(legal.splitkv_slice(node, placed_qk, p), pinned=False)]
-    stages = _stream_stages(term, node, ctx, placed_qk, placed_pv)
-    return [
-        {"REDUCE": red, "STAGE": stage}
-        for red in reduces
-        for stage in stages
-        if not (work is not None and work.producer and not legal.enforce(legal.producer_transport(stage, red), pinned=False))
-    ]
-
-
 def _raster_values(term: _Term) -> list[str]:
     """The ``RASTER`` candidates — kernel-global, and CONTRACTION-scoped: only a 2-D-tiled
     contraction grid decodes the swizzle. A symbolic-axis (masked-tile) grid renders through the
@@ -1327,14 +1037,10 @@ def _site_values(term: _Term, site: Site, work: Workers | None, parent: _Node | 
     what the subtree decided — the stream's transport is sized by the score tile it feeds, and the
     sibling equality between the two flash sites is checked where the pair is visible."""
     node = site.node
-    if parent is not None and _streams(parent.site.node):
-        return _twisted_values(term, site, work, parent)
     if node.axis is None:
         return _strip_values(term, node)
     if is_contraction(node):
         return _contraction_values(term, node, work)
-    if _streams(node):
-        return _stream_values(term, node, work, kids)
     if _fill_realized(parent, site):
         # The one site that offers nothing but the decided empty: its PARENT form realizes the
         # partition itself, so there is no choice left here to spell.
@@ -1462,8 +1168,6 @@ def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> 
     prior-free path deploys."""
     site = node.site
     out: list[Workers | None] = []
-    if parent is not None and _streams(parent.site.node):
-        return out  # the streaming pair's warp map is named ONCE, at the stream (below)
     if site.node.axis is None:
         out.append(None)
     elif is_contraction(site.node):
@@ -1474,11 +1178,6 @@ def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> 
         out.extend(_band_of(p) for p in _contraction_reduces(term, site.node, TilePlan()))
     else:
         out.extend(_band_of(p) for p in _reduce_specs(term, site.node))
-        if _streams(site.node) and term.stream(site.node) is not None:
-            # The stream's own fragment tier: one warp map, shared by both sites it schedules
-            # through (which is why the widths live in the ONE ``WORK`` entry and neither ``TILE``
-            # value carries them). m-only — the twisted carrier has no cross-warp merge.
-            out.extend(Workers(kind="warp", units=(um, 1)) for um in dict.fromkeys(m for m, _, _ in twisted_warp_moves()))
     for child in _kids(node):
         out.extend(_site_inventories(term, child, node))
     return out
@@ -1778,32 +1477,6 @@ def _warp_stream_place(term: _Term, qk: TilePlan, pv: TilePlan) -> Placement:
     return Placement(free=term.place.free, grid=grid)
 
 
-def _stream_option(
-    term: _Term, node, root: _Node, row: dict, rplan: ReducePlan, work, name: str, knobs: dict, nested: Sequence[tuple] = ()
-) -> TileOp:
-    """One row of a stream whose DERIVED EVALUATION is scheduled — the fragment-resident warp form
-    or the chain's register vector. Both re-place the grid (the reduce tiers do not, which is why
-    they stay ``_node_option``'s), and both stamp the pair's slices through ``nested`` exactly as
-    the enumeration keyed them; the stream's own ``REDUCE`` is the cross-CTA split-KV or nothing,
-    and its ``STAGE`` is the K/V transport re-resolved against the same geometry."""
-    qk, pv = _row_stream_tiles(root, row, work)
-    ctx = term.stream(node)
-    spec = row.get(root.keys.get("STAGE"), "") or ""
-    stage = None
-    if qk is not None and qk.is_warp and ctx is not None:
-        placed_qk, placed_pv = term.sched.placed(ctx.qk, qk), term.sched.placed(ctx.pv, pv)
-        place = _warp_stream_place(term, placed_qk, placed_pv)
-        if spec:
-            stage = legal.resolve_twisted_stage(node, ctx.qk, placed_qk, placed_pv, Stage.parse(spec), term.ctx.max_dynamic_smem)
-    else:
-        # The chain: one thread per query row, the value axis off the grid and into the register
-        # vector the P@V slice names.
-        place = Placement(free=term.place.free, grid=tuple(term.place.grid[:-1]))
-    workers = WarpSpec(work.producer) if work is not None and work.producer else None
-    own = [("REDUCE", node, rplan if rplan.stages else None), ("STAGE", node, stage)]
-    return _stamp(term, term.tile.op, name, knobs, [*own, *nested], workers=workers, place=place)
-
-
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     """Factor a STATIC contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
     ``<k>_ks``) becomes the outer :class:`Fold`'s reduce axis, parallelized across CTAs and summed
@@ -1823,8 +1496,8 @@ def _sliced_a(a, sigma: Sigma):
     its gmem index; a COMPUTED cone rewrites its per-cell BODY only — the REDUNDANT-STATISTIC split:
     the cone's row-invariant prologue (the per-row statistic, the K seam ``ops.cone_seam`` reads off
     the node boundary) spans the whole row and stays FULL-ROW in every partition, each recomputing
-    it. That redundancy is what the split trades for parallelism, and it is cheap exactly where the
-    split pays — the small-free decode shapes the offer is occupancy-gated to."""
+    it. That redundancy is what the split trades for parallelism; whether it pays on a given shape
+    is evidence's decision."""
     if isinstance(a, Load):
         return replace(a, index=tuple(sigma.apply(e) for e in a.index))
     return a.with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in a.body)),))
@@ -1935,8 +1608,6 @@ def _materialize(term: _Term, resolved: _Row, row: dict, name: str, knobs: dict)
     if is_contraction(node) and rplan.needs_split:
         # The stage is re-resolved INSIDE against the sliced node, so it stays a spelling here.
         return _splitk_option(term, plan, node, rplan, name, op_knobs, value("STAGE"), nested)
-    if _streams(node) and any(t is not None for t in _row_stream_tiles(root, row, work)):
-        return _stream_option(term, node, root, row, rplan, work, name, op_knobs, nested)
     stage = decided("STAGE")
     if stage is None and value("STAGE"):
         stage = _stage_of(term, node, plan, value("STAGE"))

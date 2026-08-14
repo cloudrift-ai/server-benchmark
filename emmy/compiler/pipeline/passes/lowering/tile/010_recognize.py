@@ -15,17 +15,10 @@ unconditional. (The one exception is PLACEMENT, step 3.5: a ``PLACE`` pin
 cuts the recognized tree into a fragment of un-mapped ``LoopOp``\\ s, and it must resolve BEFORE any
 schedule fork exists, so it cannot wait for ``020``.)
 
-All recognition lives in THIS one rule (no separate flash / softmax pass), in order (each
+All recognition lives in THIS one rule (no separate softmax pass), in order (each
 step unconditional — no knobs):
 
-1. **Flash attention** — an SDPA unit across either supported loop-fusion boundary is
-   the online-softmax twisted reduce over a streaming KV axis; rewrite the unit to one fused
-   flash ``TileOp`` (the ``(m, l, O)`` ``TWISTED`` kv loop over a nested ``CONTRACTION`` score
-   loop), with its free ``(batch…, m, d)`` axes carried on the schedule. Graph rewrite —
-   consumes the score/probability producer. Recognition + construction live in the ``_flash``
-   helper (``try_flash``). A standalone score producer is *deferred* (left a ``LoopOp``,
-   :func:`is_flash_score_producer`) so step 3 doesn't lift it out from under its consumer.
-2. **Online softmax** — an adjacent ``(rowmax, Σ exp)`` reduce pair over the same input fuses
+1. **Online softmax** — an adjacent ``(rowmax, Σ exp)`` reduce pair over the same input fuses
    into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the ``(m, d)``
    exp-family merge dissolved in the body. The ``_softmax`` helper
    (``_fuse``).
@@ -73,11 +66,10 @@ from emmy.compiler.ir.tile import (
     TileOp,
     split_effects,
 )
-from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
-from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
@@ -395,21 +387,6 @@ def _order_free_by_output(node: Fold, free: list, stores: tuple = ()) -> tuple:
 
 
 def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
-    # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
-    # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
-    # normalize, each consuming the Accums the next would match. The fusion is unconditional:
-    # a kernel flash recognition can certify is always fused; an uncertifiable operand cone
-    # falls through to the separate score producer + softmax-then-P@V kernels below.
-    graph = match.graph
-    flash = try_flash(graph, root)
-    if flash is not None:
-        return flash
-    # (2) Defer a flash score producer: the general lift below would turn this scaled-QK
-    # matmul into a ``TileOp`` before its softmax-then-P@V consumer fuses. Leave it a
-    # ``LoopOp`` until the consumer has had its chance to consume it (a later scan re-visits
-    # this node, by then removed).
-    if is_flash_score_producer(graph, root):
-        raise RuleSkipped("flash score producer — defer to its consumer's fusion")
     loop: LoopOp = root.op
     # (3) Online softmax — the sibling-fold tupling: fuse the adjacent (rowmax, Σexp) reduce
     # pair into one streaming pass.

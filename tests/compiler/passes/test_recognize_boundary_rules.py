@@ -390,32 +390,6 @@ def _normed_sdpa_graph():
     return graph
 
 
-def test_normed_gqa_sdpa_certifies_flash():
-    """The fused flash form must certify when gate-free loop fusion moves RMSNorm'd Q/K
-    cones into the repeated score contractions. The existing flash recognizer recovers those
-    cones as computed operand ``Fold`` edges while V remains materialized, so it neither loses
-    normalization semantics nor fragments SDPA into a full [b,h,m,n,d] outer product."""
-    pytest.importorskip("torch")
-
-    def decide(fp):
-        return flatten_leaves(fp.options)[0]
-
-    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_normed_sdpa_graph(), decide)
-    flash = [
-        n.op
-        for n in terminal.nodes.values()
-        if type(n.op).__name__ == "TileOp"
-        and (isinstance(n.op.op, Fold) and n.op.op.axis is None)
-        and n.op.op.operands
-        and getattr(n.op.op.operands[0], "role", None) is AxisRole.TWISTED
-    ]
-    assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
-    src = flash[0].op.operands[0]
-    first = src.step_stmts()[0]
-    assert getattr(first, "role", None) is AxisRole.CONTRACTION, "flash did not absorb the score contraction (fold stayed cut)"
-    assert not isinstance(first.a, Load) and not isinstance(first.b, Load), "normalized Q/K cones were reduced to raw loads"
-
-
 def test_bind_contraction_declined_cone_raises_not_positional():
     """When the ⊗ lift names a COMPUTED A whose cone declines the bind (here: an n-indexed
     load riding the cone), ``bind_contraction`` must raise ``LoweringError`` — the recognizer

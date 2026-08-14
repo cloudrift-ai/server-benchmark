@@ -63,7 +63,7 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   -O1-tuned and -O3 measurements never collide. The bench-worker subprocess
   inherits the env, so its compiles use the same flags.
   `EMMY_UNROLL=<n>` caps which static loops emit `#pragma unroll` (the unroll budget — declared in
-  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there and in `_twist.py`). It is a
+  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). It is a
   pin-only nvcc hint that steers cicc unrolling / register pressure / compile time; it does **not**
   change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
   Unset → each site's built-in cap; `0` → keep every loop rolled.

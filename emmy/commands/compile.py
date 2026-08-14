@@ -610,6 +610,7 @@ def _trace_model(
     from emmy.compiler.loader.safetensors import split_revision
     from emmy.compiler.trace.huggingface import (
         load_architecture_trace_twin,
+        load_quantized_layer_twin,
         load_quantized_trace_twin,
         load_quantized_twin,
         quantized_checkpoint_dir,
@@ -621,10 +622,15 @@ def _trace_model(
     quant_dir = quantized_checkpoint_dir(model_id)
     repo, revision = split_revision(model_id)
     if quant_dir is not None:
-        # Quantized checkpoint (fp8 / EXL3): trace the architecture twin from config,
+        # Quantized checkpoint (FP8 / AWQ / EXL3): trace the architecture twin from config,
         # carrying the decoded real weights (from_pretrained would engage transformers'
         # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
-        model = load_quantized_trace_twin(quant_dir, dtype, layer) if architecture_only else load_quantized_twin(quant_dir, dtype)
+        if architecture_only:
+            model = load_quantized_trace_twin(quant_dir, dtype, layer)
+        elif layer is not None:
+            model = load_quantized_layer_twin(quant_dir, dtype, layer)
+        else:
+            model = load_quantized_twin(quant_dir, dtype)
     elif architecture_only and layer is not None:
         # Inventory traces need shapes and module structure, not checkpoint
         # values. Constructing from config under ``meta`` avoids downloading or

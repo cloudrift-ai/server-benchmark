@@ -12,7 +12,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp
+from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
 from emmy.compiler.pipeline.search.working_golden import load_working_targets, write_trace_inventories, write_trace_inventory
 
@@ -315,6 +315,36 @@ def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
 
     assert record.origins == ()
     assert record.loop_wire is not None
+
+
+def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:
+    graph = Graph()
+    outputs = []
+    for suffix in ("a", "b"):
+        graph.add_node(InputOp(), [], Tensor(f"left_{suffix}", (16,), "i32"), node_id=f"left_{suffix}")
+        graph.add_node(InputOp(), [], Tensor(f"right_{suffix}", (16,), "i32"), node_id=f"right_{suffix}")
+        graph.add_node(
+            ElementwiseOp("subtract"),
+            [f"left_{suffix}", f"right_{suffix}"],
+            Tensor(f"centered_{suffix}", (16,), "i32"),
+            node_id=f"centered_{suffix}",
+        )
+        graph.add_node(CastOp(dtype="f16"), [f"centered_{suffix}"], Tensor(f"values_{suffix}", (16,), "f16"), node_id=f"values_{suffix}")
+        graph.add_node(InputOp(), [], Tensor(f"scale_{suffix}", (16,), "f16"), node_id=f"scale_{suffix}")
+        graph.add_node(
+            ElementwiseOp("multiply"),
+            [f"values_{suffix}", f"scale_{suffix}"],
+            Tensor(f"scaled_{suffix}", (16,), "f16"),
+            node_id=f"scaled_{suffix}",
+        )
+        graph.inputs.extend((f"left_{suffix}", f"right_{suffix}", f"scale_{suffix}"))
+        outputs.append(f"scaled_{suffix}")
+    graph.outputs = outputs
+
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path, force_loop_targets=True)
+    names = [record.name for record in load_golden_records(load_golden_file(path))]
+    assert len(names) == len(set(names))
 
 
 def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) -> None:

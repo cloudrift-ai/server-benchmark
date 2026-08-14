@@ -185,19 +185,24 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
-            if req.get("accuracy"):
+            if req.get("accuracy") or req.get("strict_accuracy"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
                 # inputs, run the emmy program on them, compare vs the eager forward. A
                 # numeric failure skips the bench — the parent aborts on the verdict, so
                 # benching a miscompiling program would be wasted GPU time. ``want_ref``
                 # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
                 # reference (bounded: pinned rows only exist for --code inputs).
-                from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output
+                from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output, _strict_correctness_proof
 
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 eager_out = _eager_output(module, args_t, kwargs)
-                accuracy_error = _check_accuracy(run_result.outputs, eager_out)
+                if req.get("strict_accuracy"):
+                    correctness = _strict_correctness_proof(run_result.outputs, eager_out)
+                    if correctness["status"] != "pass":
+                        accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
+                else:
+                    accuracy_error = _check_accuracy(run_result.outputs, eager_out)
                 if accuracy_error is not None:
                     return {
                         "result": None,

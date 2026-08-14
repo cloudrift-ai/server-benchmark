@@ -452,7 +452,14 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
                         f"got {type(attention_mask).__name__}"
                     )
                 kwargs["attention_mask"] = attention_mask
-            else:
+            elif attention_parameters["attention_mask"].default is inspect.Parameter.empty:
+                # A required declaration still needs an explicit ``None``.
+                # Optional masks must be omitted: torch.export otherwise
+                # retains a scalar placeholder for the non-tensor ``None``,
+                # while the eager input flattener correctly drops it. The
+                # resulting 4-vs-3 phantom input makes direct model benchmarks
+                # impossible even though the default call is semantically
+                # identical.
                 kwargs["attention_mask"] = None
     ple = build_synthetic_ple(block, seq_len, dtype)
     if ple is not None:
@@ -1129,14 +1136,14 @@ class _PassThroughMask:
 
 def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
-    (FP8 scale-paired bits, or EXL3 trellis-coded siblings)."""
-    from emmy.compiler.loader.quant import _exl3_quant_config, _fp8_quant_config  # noqa: PLC0415
+    (FP8 scale-paired bits, AWQ GEMM int4, or EXL3 trellis-coded siblings)."""
+    from emmy.compiler.loader.quant import _awq_quant_config, _exl3_quant_config, _fp8_quant_config  # noqa: PLC0415
 
-    return _fp8_quant_config(p) is not None or _exl3_quant_config(p) is not None
+    return _fp8_quant_config(p) is not None or _awq_quant_config(p) is not None or _exl3_quant_config(p) is not None
 
 
 def quantized_checkpoint_dir(model_id_or_path: str, revision: str | None = None):
-    """The local checkpoint dir when the model is a quantized checkpoint (FP8 or EXL3),
+    """The local checkpoint dir when the model is a supported quantized checkpoint,
     else ``None``.
 
     Detection reads only ``config.json`` (for a repo id, a single cached hub
@@ -1420,11 +1427,13 @@ def load_quantized_split(
     from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard  # noqa: PLC0415
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
         _EXL3_SIBLING_LEAVES,
+        _awq_quant_config,
         _exl3_codebook,
         _exl3_quant_config,
         _fp8_quant_config,
         _is_skipped,
         dequantize,
+        dequantize_awq4,
     )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
@@ -1436,6 +1445,7 @@ def load_quantized_split(
         model = _auto_model_from_config(config)
 
     qc = _fp8_quant_config(model_dir) or {}
+    awq = _awq_quant_config(model_dir)
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
@@ -1481,6 +1491,28 @@ def load_quantized_split(
                 continue
             f = _open(shard_path)
             for k in owned_keys:
+                if awq is not None and k.endswith(".qweight"):
+                    base = k[: -len(".qweight")]
+                    qzeros_key, scales_key = base + ".qzeros", base + ".scales"
+                    if qzeros_key not in index or scales_key not in index:
+                        raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
+                    model_key = _checkpoint_to_model_key(base + ".weight")
+                    if compress_trunk:
+                        coded_trunk.add(model_key)
+                    else:
+                        values = dequantize_awq4(
+                            f.get_tensor(k).numpy(),
+                            _sibling(qzeros_key).numpy(),
+                            _sibling(scales_key).numpy(),
+                            int(awq.get("group_size", awq.get("q_group_size", -1))),
+                        ).T
+                        state[model_key] = torch.from_numpy(values).to(dtype)
+                    fmt = "awq4"
+                    continue
+                if awq is not None and k.endswith((".qzeros", ".scales")):
+                    base = k.rsplit(".", 1)[0]
+                    if base + ".qweight" in index:
+                        continue
                 slot = _expert_slot(k)
                 if slot is not None:
                     layer, name, expert = slot
@@ -1828,3 +1860,28 @@ def load_quantized_trace_twin(model_dir, dtype, layer: int | None):
     if layer is None:
         return load_quantized_twin(model_dir, dtype)
     return load_architecture_trace_twin(model_dir, dtype, layer)
+
+
+def load_quantized_layer_twin(model_dir, dtype, layer: int):
+    """Value-correct, shard-streamed twin for one quantized decoder layer.
+
+    ``emmy run MODEL --layer N`` needs real eager-reference values, unlike the
+    shape-only inventory path, but decoding the complete checkpoint before
+    selecting one layer wastes almost all work and memory. Reuse the serving
+    split loader with one stage interval, then reconstruct decoder-level
+    non-persistent rotary modules on CPU exactly as the architecture twin does.
+    """
+    model, _store = load_quantized_split(
+        model_dir,
+        dtype,
+        layer_range=(layer, layer + 1),
+        include_embed=False,
+        include_norm=False,
+    )
+    decoder = find_text_decoder(model)
+    rotary_type = type(decoder.rotary_emb)
+    decoder.rotary_emb = rotary_type(decoder.config)
+    if getattr(decoder, "swa_rotary_emb", None) is not None:
+        decoder.swa_rotary_emb = type(decoder.swa_rotary_emb)(decoder.config)
+    model.eval()
+    return model

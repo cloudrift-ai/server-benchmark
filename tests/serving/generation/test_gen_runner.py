@@ -115,16 +115,19 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
         runner.final_norm(np.zeros((1, 8), dtype=np.float16))
 
 
-@pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("fp8", False)])
-def test_create_keeps_only_exl3_trunk_coded(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3 stays checkpoint-coded; FP8 preserves its decoded trunk lane."""
+@pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("awq", True), ("fp8", False)])
+def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
+    """EXL3/AWQ stay checkpoint-coded; FP8 preserves its decoded trunk lane."""
     import json
 
     from emmy.compiler.loader import safetensors
     from emmy.compiler.trace import huggingface
     from emmy.serving.gen_runner import EmmyGenRunner
 
-    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": quant_method}}))
+    quant_config = {"quant_method": quant_method}
+    if quant_method == "awq":
+        quant_config.update(bits=4, version="gemm", zero_point=True)
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": quant_config}))
     seen = {}
     fake_model = object()
     fake_store = {"fmt": quant_method}

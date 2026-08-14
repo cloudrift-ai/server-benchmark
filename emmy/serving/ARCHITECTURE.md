@@ -65,17 +65,22 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   with per-request 0-based positions; spans split at `positions == 0`. Hardened for `_dummy_run`'s garbage profiling
   batches (index 0 always opens a span; overlong spans are chopped).
 - `roofline.py` — **boot roofline audit**. `EmmyGenRunner.from_model` event-times each STATIC twin (one layer per
-  attention class; symbolic programs skipped — they sit at capacity shape at boot) against its **weight-streaming
-  floor** (`weight_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy — no per-card table). `weight_bytes`
-  counts bound constants PLUS the weight INPUTS a program takes per launch: a MoE expert program binds no weights
-  at all (its per-expert slices arrive as inputs), so a constants-only floor would be zero and audit nothing. A
-  floor under `MIN_FLOOR_US` is still skipped as timer noise, which at low bit rates an expert launch can be — a
-  2.25 bpw GLM expert streams ~4 MB — so read the expert tiers' silence as "below the noise floor", not "clean".
+  attention class; symbolic programs skipped — they sit at capacity shape at boot) against the higher of two floors:
+  the **weight-streaming floor** (`weight_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy) and the
+  **compute floor** (`2 · weight_elems · m_tokens / matmul_flops`, throughput self-calibrated with an f16 cublas
+  GEMM through torch — no per-card table for either). At m1 decode the weight floor binds; at chunk-prefill widths
+  the compute floor dominates by an order of magnitude — auditing against the weight floor alone misread healthy
+  gemma-4-12B m4096 chunk twins as 24–29x misses (2026-08-12 5090 re-baseline; ~1.4–1.5x against the compute floor).
+  `weight_bytes` counts bound constants PLUS the weight INPUTS a program takes per launch: a MoE expert program
+  binds no weights at all (its per-expert slices arrive as inputs), so a constants-only floor would be zero and
+  audit nothing. A floor under `MIN_FLOOR_US` is still skipped as timer noise, which at low bit rates an expert
+  launch can be — a 2.25 bpw GLM expert streams ~4 MB — so read the expert tiers' silence as "below the noise
+  floor", not "clean".
   Logs a loud WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction
-  (the weight floor is a true lower bound and copy bw undershoots peak), advisory only (never raises, never
-  blocks boot). Born
-  from the 2026-07-29 TinyLlama/4080 incident: a cold deploy served a fused-norm kernel ~150x off the floor (54x
-  TPOT gap) with zero boot-time signal.
+  (each floor is a true lower bound for its regime, both calibrations undershoot peak, quantized weights only
+  underestimate the compute floor, and FAST_MATH kernels can only sit *under* the f32-acc-calibrated compute floor),
+  advisory only (never raises, never blocks boot). Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
+  served a fused-norm kernel ~150x off the floor (54x TPOT gap) with zero boot-time signal.
   **Two structural blind spots, and a compressed model lands in both.** The audit times ONE layer per attention
   class, and `MIN_FLOOR_US` drops anything whose weights stream in under 20 µs — so on GLM-4.5-Air at 2.25 bpw it
   reports on layer 0 alone, and layer 0 is the model's only DENSE layer (it clears the floor only because the

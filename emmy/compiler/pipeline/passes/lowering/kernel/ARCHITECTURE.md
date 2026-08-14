@@ -158,7 +158,10 @@ structurally different primitives — sit behind one `fill`/`commit`/`wait` seam
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, a cooperative shared gather on Volta — or the scalar
-`_scalar_drain`). The staging **decision** does not live here at all: the
+`_scalar_drain`). A fill's gmem-address σ binds **every** tiled output axis, not just the operand's own: the tile
+axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
+CTA-shared across the sibling, so a sibling var can only survive as a value-dead flat-index reshape residue (a
+merged / reshaped weight row), and left unbound it would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
 `Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
 `bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
 shared `reduce` (which emits the loop) apply it verbatim. The `Stage` spells two buffering levels:

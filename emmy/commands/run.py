@@ -155,7 +155,7 @@ def register_run_command(subparsers):
         dest="strict_correctness",
         action="store_true",
         help=(
-            "With --bench on runnable frontend IR or an embedded golden, fail unless every requested backend, "
+            "With --bench on a traced model, runnable frontend IR, or an embedded golden, fail unless every requested backend, "
             "captured timing, exact pin, and direct Emmy-vs-eager comparison is valid."
         ),
     )
@@ -256,9 +256,6 @@ def _handle_run_once(args):
     if args.strict_correctness and not args.bench:
         logger.error("--strict requires --bench")
         sys.exit(2)
-    if args.strict_correctness and ir_path is None and not hasattr(args, "_golden_graph"):
-        logger.error("--strict currently requires runnable frontend IR or an embedded --golden")
-        sys.exit(2)
     if not torch.cuda.is_available():
         logger.error("CUDA GPU required")
         sys.exit(1)
@@ -356,8 +353,11 @@ def _handle_run_once(args):
         "dynamic": list(args.dynamic) if getattr(args, "dynamic", None) else None,
     }
 
+    strict_correctness = bool(getattr(args, "strict_correctness", False))
+
     async def _bench_session():
-        greedy_fail = results = bench = accuracy_error = ab_ref = golden_benches = greedy_iso = None
+        greedy_fail = results = bench = accuracy_error = correctness = ab_ref = golden_benches = greedy_iso = None
+        greedy_reference_us = None
         captured = True
         try:
             try:
@@ -370,6 +370,7 @@ def _handle_run_once(args):
                     iters=args.iters,
                     accuracy=not skip_accuracy,
                     want_ref=bool(pinned),
+                    strict_accuracy=strict_correctness,
                 )
             except RuntimeError as exc:
                 # Worker SIGKILL (hung kernel), in-child bench budget, EOF — the greedy
@@ -378,6 +379,8 @@ def _handle_run_once(args):
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 accuracy_error, ab_ref = resp["accuracy_error"], resp["run_io"]
+                correctness = resp.get("correctness")
+                greedy_reference_us = resp.get("reference_run_us")
             if pinned and accuracy_error is None:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
@@ -385,9 +388,29 @@ def _handle_run_once(args):
                 golden_benches = await _bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref)
         finally:
             await backend.aclose_async_worker()
-        return greedy_fail, results, bench, captured, accuracy_error, golden_benches, greedy_iso
+        return (
+            greedy_fail,
+            results,
+            bench,
+            captured,
+            accuracy_error,
+            golden_benches,
+            greedy_iso,
+            greedy_reference_us,
+            correctness,
+        )
 
-    greedy_fail, results, bench, captured, accuracy_error, golden_benches, greedy_iso = asyncio.run(_bench_session())
+    (
+        greedy_fail,
+        results,
+        bench,
+        captured,
+        accuracy_error,
+        golden_benches,
+        greedy_iso,
+        greedy_reference_us,
+        correctness,
+    ) = asyncio.run(_bench_session())
 
     if accuracy_error is not None:
         # Correctness gate: the deployed program computes the wrong answer, so no latency
@@ -404,13 +427,28 @@ def _handle_run_once(args):
         notes = [n for n in (_symbolic_bench_note(_collect_sym_env([compiled])), capture_note) if n]
         _print_table(results, note="\n".join(notes) if notes else None)
     _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+    strict_errors = _strict_benchmark_errors(args, results, bench, captured, correctness, golden_benches) if strict_correctness else None
     if getattr(args, "json", None):
-        _write_ab_json(args, results or {}, compiled, bench, golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+        _write_ab_json(
+            args,
+            results or {},
+            compiled,
+            bench,
+            golden_benches,
+            greedy_fail=greedy_fail,
+            greedy_iso=greedy_iso,
+            greedy_reference_us=greedy_reference_us,
+            correctness=correctness,
+            strict_errors=strict_errors,
+        )
+    for error in strict_errors or []:
+        logger.error("strict: %s", error)
     _record_bench_nodes(args, golden_benches, greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
-        greedy_fail is not None
+        bool(strict_errors)
+        or greedy_fail is not None
         or (greedy_iso is not None and greedy_iso.status != "ok")
         or any(gb.status != "ok" for gb in golden_benches or [])
     ):
@@ -1952,12 +1990,16 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
     if not valid_proof(correctness):
         errors.append("deployed Emmy row lacks direct strict eager correctness")
 
-    ab_rows = [row for row in pinned_rows or [] if getattr(row.sample, "shape", None) is None]
+    pinned_rows = list(pinned_rows or [])
+    ab_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is None]
+    automatic_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is not None]
+    expected_automatic_rows = len(getattr(args, "golden_configs", []) or [])
+    if len(automatic_rows) != expected_automatic_rows:
+        errors.append(f"expected {expected_automatic_rows} exact working-golden row(s), got {len(automatic_rows)}")
     expected_ab_rows = len(args.ab or [])
     if len(ab_rows) != expected_ab_rows:
         errors.append(f"expected {expected_ab_rows} exact --ab row(s), got {len(ab_rows)}")
-    exact_rows = ab_rows if expected_ab_rows else list(pinned_rows or [])
-    for row in exact_rows:
+    for row in pinned_rows:
         label = row.sample.name
         if row.status != "ok" or row.flags:
             errors.append(f"{label} failed exact-pin integrity: status={row.status}, flags={list(row.flags)}")
@@ -2483,7 +2525,12 @@ def _check_accuracy(outputs, eager_out) -> str | None:
     # output against its positional eager counterpart (graph-output order).
     # Historic single-output behavior (every output vs THE eager tensor) is the
     # degenerate case of the fallback-to-first pairing below.
-    eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
+    if isinstance(eager_out, dict):
+        if set(eager_out) != set(outputs):
+            return f"CORRECTNESS FAIL: output names differ: Emmy={list(outputs)}, eager={list(eager_out)}"
+        eager_refs = [eager_out[name] for name in outputs]
+    else:
+        eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     eager_flats = [t.detach().cpu().flatten().tolist() for t in eager_refs]
     if any(e != e for flat in eager_flats for e in flat):
         return "eager reference contains NaN (reproducer inputs out of domain)"
@@ -2623,7 +2670,7 @@ def _check_accuracy(outputs, eager_out) -> str | None:
                     budget,
                 )
         else:
-            logger.warning("Output size %d does not match eager %d; skipping accuracy", len(values), len(eager_flat))
+            failures.append(f"output {buf_name}: size {len(values)} does not match eager {len(eager_flat)}")
     return f"accuracy check failed vs eager: {'; '.join(failures)}" if failures else None
 
 

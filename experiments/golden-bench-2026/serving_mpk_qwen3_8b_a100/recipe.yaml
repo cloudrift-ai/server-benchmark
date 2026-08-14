@@ -15,10 +15,12 @@
 # latency vs the vLLM lanes' TPOT), and the vLLM lanes carry serving-stack overhead the MPK demo
 # does not; intelligent review states that caveat next to any cross-harness number.
 #
-# The emmy arm deploys COLD on isolated evidence state (fresh tune DB, online checkpoint, cubin
-# cache): A100 Qwen3-8B serving has no golden tier yet, so this is the deploy-evidence-hierarchy
-# result, not a tuned arm. The first emmy boot compiles per-program artifacts; later repeats hit
-# the cubin cache. The health wait is sized for that first boot.
+# The emmy arm is DEFERRED until a tuned A100 baseline exists (golden tier / online evidence for
+# Qwen3-8B on this platform), so the comparison is not made against a cold deploy. As written the
+# arm boots on isolated evidence state (fresh tune DB, online checkpoint, cubin cache) — the cold
+# fallback; point the EMMY_* paths at the tuned evidence when it lands. The first emmy boot
+# compiles per-program artifacts; later repeats hit the cubin cache. The health wait is sized for
+# that first boot.
 #
 # Repro on a pre-allocated A100 (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local

@@ -811,14 +811,13 @@ def _make_projection_norm():
     return g
 
 
-def test_projection_feeding_rms_value_and_statistic_stays_materialized():
-    """RMSNorm reads its input for both x² and x; do not execute an upstream projection twice."""
+def test_projection_feeding_rms_value_and_statistic_fuses_maximally():
+    """RMSNorm reads its input for both x² and x. Fusion is algebra-only and merges the upstream
+    projection anyway — whether the duplicated contraction is worth materializing away is decided
+    by tuned evidence, not by a fusion refusal."""
     result = _decompose_and_fuse(_make_projection_norm())
     kernels = _kernel_nodes(result)
-    assert len(kernels) == 2
-    projection = next(node for node in kernels if set(node.inputs) == {"w", "x"})
-    norm = next(node for node in kernels if node is not projection)
-    assert sum(load.input == projection.id for load in norm.op.loads) == 2
+    assert len(kernels) == 1, f"expected one maximal region, got {[node.id for node in kernels]}"
 
 
 def test_projection_norm_materialization_is_correct():

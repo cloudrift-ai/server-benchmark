@@ -899,8 +899,10 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     assert "emmy_mma_promote_f16acc(_c0_0, _ch0_0);" in src
 
 
-def test_f16acc_enumeration_gate(monkeypatch):
-    """The precision gate is target-aware and one enabled enumeration offers f16acc rows."""
+def test_f16acc_enumeration_policy(monkeypatch):
+    """The precision policy is target-blind: the ``FAST_MATH`` umbrella offers the f16-accumulate
+    forks everywhere they are legal (which sibling deploys is evidence's decision per shape and
+    card), and the precise ``F16_MMA_F32_ACC`` pin stays authoritative in both directions."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import _f16acc_allowed  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
@@ -912,9 +914,9 @@ def test_f16acc_enumeration_gate(monkeypatch):
             monkeypatch.setenv(var, val)
         return _f16acc_allowed(Context.from_target(cc))
 
-    assert not allowed((12, 0)), "gate unset: no f16acc forks"
-    assert allowed((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH on a consumer die must offer the forks"
-    assert not allowed((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH must not offer them on a full-rate f32-acc target"
+    assert not allowed((12, 0)), "policy unset: no f16acc forks"
+    assert allowed((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH offers the forks"
+    assert allowed((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH offers the forks on every target — evidence ranks them"
     assert allowed((9, 0), EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
     assert not allowed((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
 

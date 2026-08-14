@@ -456,9 +456,9 @@ class SyncTransport:
     **asymmetric (B-only) prefetch ring**: only the ``async_operands`` slabs ring (the cp.async
     B copies for chunk ``i+ring-1`` fly under the A fill AND the drain of chunk ``i``), while the
     sync-filled slabs stay single-buffer and fill the CURRENT chunk off the skeleton's ``k0_cur``
-    handle — ringing a compute fill buys no overlap (it runs on the drain's own threads). NOTE:
-    even the B-only ring measured slower on the reference gemma shape (the extra B slot crosses
-    the smem occupancy quantization) — the ring stays pin-only, ``d1`` the deployable form.
+    handle — ringing a compute fill buys no overlap (it runs on the drain's own threads). The
+    ring depths are fork siblings enumerated beside ``d1``; which deploys is evidence's decision
+    per shape and card.
 
     The compute fill assigns each thread a run of ``V`` **contiguous** slab cells (``V`` = the
     16-byte vector width, always dividing the slab's inner extent): the ``row``/``col`` derivation

@@ -9,6 +9,36 @@ walk; the derived `Fold.role` for the loop annotation the materializer reads), n
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
+## Performance is never a pass decision
+
+Passes enumerate; they do not prefer. Every semantically legal alternative is exposed to the search — as a fork
+option, an enumerated row, or a knob value — and the choice among alternatives is made in exactly two places,
+neither of which is a pass:
+
+- a **deployed model** answers every choice from its tuned per-GPU golden file — warm evidence produced by
+  `emmy tune` and promoted after verification;
+- a **cold compile** of an arbitrary kernel answers through the deploy evidence hierarchy, whose last learned tier
+  is the prior — on a fresh machine, the offline model. Cold-deploy quality is the offline prior's responsibility.
+
+Concretely:
+
+- An enumeration never drops, caps, or truncates legal rows because some were measured slow somewhere. A ladder in
+  `search/space.py` is a domain, not a preference history; a row set is a function of the term and its legality
+  alone, never of a hardware profitability fact.
+- A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
+  boundedness reason (the compile must terminate with a tractable option set — fusion's work-growth cap is the
+  canonical instance). "Measured slower", "occupancy", "register pressure", and "profitability" are never refusal
+  reasons; they are the tuner's and the prior's vocabulary, and a fix for a slow configuration is new evidence — a
+  re-tune and a refreshed golden file — never a new compile-time condition.
+- A rewrite motivated by performance is a fork with the un-rewritten form as a sibling, so evidence can decide.
+  Ordering options (which sibling is option-0) is legitimate pass policy — hiding siblings is not.
+- A misdeploy is debugged as an evidence problem: a missing or stale golden row, an unfitted prior, or a gap in the
+  feature/key vocabulary that makes two different candidates indistinguishable. Fix the evidence path; do not fence
+  the compiler.
+
+This boundary is a review judgment, not a scripted check: when a change wants to refuse, cap, or reorder for
+speed, move the decision to a fork plus evidence instead.
+
 ## Quantization is not a concept past the decomposition band
 
 A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).
@@ -221,24 +251,12 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
-Loop fusion first keeps a contraction producer materialized when it fans out into the statistic and value paths of a
-downstream normalization. The N-way splicer shares repeated equal-coordinate demands, but this fan-out would duplicate
-the whole contraction. Reductions that are not contractions remain fusible: softmax intentionally reuses QK inside
-max-shift-exp and then reuses the exponentials for normalization and P@V, and retaining either buffer would prevent
-flash recognition. The remaining profitability guard follows the same structural rule.
-`loop/fusion/010_merge_loop_ops` counts aggregate
-arithmetic and reads, and separately counts transcendental executions. The separate count prevents an expensive
-pointwise producer such as GELU's `tanh`, originally evaluated once per `(M,K)` element, from moving under a
-contraction's `N` loop merely because the contraction's much larger cheap-FMA count hides that duplication. Flash
-attention is the structural exception: a merged softmax-then-P@V offer deliberately streams `exp(score)` without
-materializing the probability matrix, so the tile recognizer owns that composite and the generic transcendental
-brake does not split it. The automatic brake is also limited to unary/single-source activation cones. A multi-source
-gated activation such as GeGLU/SwiGLU remains an evidence-controlled placement choice, preserving its GPU golden
-coverage until that entire cone has been measured.
-
-Fusion also lets a decomposed contraction's pointwise product reunite with its sole sum-reduction consumer before an
-upstream activation-bearing cone is spliced into the product. Otherwise pass order can materialize the full M×K×N
-product, whose work-growth then prevents the reduction merge; ordinary softmax/attention reduction order is unchanged.
+Loop fusion is greedy-maximal and algebra-only: every legal merge is taken. It never weighs shapes, hardware,
+downstream pattern knowledge, or whether one kernel will be faster than two — which form of a region deploys is the
+deploy evidence hierarchy's decision (tuned goldens for a deployed model, the prior for a cold compile). Fusion's
+refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace)
+plus one boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
+nest that no schedule can run and recognition cannot certify.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
@@ -504,7 +522,7 @@ axis. Keeping one key prevents the routing entry from recursively matching its o
 and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`_captured_values`
 in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate
 (cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
-non-terminating case) is refused. Loop fusion brakes on `__cut_` workspace producers — a decided placement is not
+non-terminating case) is refused. Loop fusion stops at `__cut_` workspace producers — a decided placement is not
 fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary pairs). The old `020_cut_edge` /
 `025_sink_row_reduce` / `032_fuse_finalize` realizers stay retired; their non-default placements return only as
 routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut_cone_*` schedule entries stamp the

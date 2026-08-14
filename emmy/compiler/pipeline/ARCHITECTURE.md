@@ -65,7 +65,8 @@ list above is only a summary. **Part 3's "The deploy evidence hierarchy" is the 
 order, of what each tier holds, and of the rule that tiers 1 and 2 apply only to a compile at deployable `-O3` flags.
 
 Structural forks — the ones that change which kernels exist — are stricter. The prior never ranks their options
-directly, and without a trusted online prior the kernel set stays at its default (Part 4).
+directly; the compiler compares whole-kernel-set costs, priced by measurements first and any loaded prior — the
+offline model on a cold machine — for the remainder (Part 4).
 
 ### The four stores
 
@@ -518,8 +519,9 @@ resolves its OWN `(kind, shape)` through the same hierarchy above; see the tile-
 placement-routing section. Keeping the work in one kernel is the default and is what an absent entry means; cutting
 happens only from recorded evidence or a hand-forced pin. That makes routing one of exactly two ways a greedy compile
 can change which kernels exist: a routing golden (or pin) cuts with no prior involved, while a structural fork
-(Part 4) needs the trusted online prior to estimate its cost. Everything else — offline prior and option-0
-included — keeps the default kernel set.
+(Part 4) prices each kernel set through the deploy evidence hierarchy: measurements first, then whichever prior is
+loaded — the offline model on a cold machine, which therefore owns cold kernel-set quality. With no prior at all,
+option-0 keeps the default kernel set.
 
 **Both file-backed inputs to that pick are built once per process.** The parsed online prior and the DB perf index are
 memoized on the source file's `(path, mtime)` — the online file, and the DB file plus its `-wal` sidecar. A generative
@@ -626,7 +628,7 @@ needs no trusted model.
 A calibration that could not be measured at all (`None` — e.g. scipy is missing, or no op group is big enough) passes.
 The gate is an alarm for measured failure, not a demand for proof of quality. It is known to be lenient in one case: a
 small tune (the fit needs only `min_rows` = 50 dataset rows) whose op groups all stay under 8 rows ends up fitted with
-calibration `None` — trustworthy, and therefore owning deploys AND the structural cost estimate, on very little data.
+calibration `None` — trustworthy, and therefore owning deploys, on very little data.
 
 Why the gate exists: `fitted` alone once let a mis-calibrated model own deploys silently (HISTORY.md: "The
 mis-calibrated online model"). Correlating predictions against the training rows catches one failure specifically: the
@@ -670,7 +672,7 @@ tilt"). Sibling-relative normalization cannot saturate, so the clamp is gone.
 - **The prior checkpoint** (`to_json`): `from_json` discards a checkpoint from another version WHOLE — model and
   reservoir rows alike. Rows recorded under a retired version's feature names produce meaningless feature vectors, and
   a refit on them collapses to constant predictions. Note how far that reaches: discarding the checkpoint also deletes
-  the reservoir evidence tier (Part 3) and disables the structural cost estimate (there is no trusted online prior any
+  the reservoir evidence tier (Part 3) and hands the structural cost estimate to the offline half (there is no trusted online prior any
   more) until the machine re-tunes. A version bump therefore changes deploy behavior — the machine drops to
   goldens → DB `perf` rows → offline prior, with no warning at deploy time.
 - **The autotune DB's `node` rows** (a `feat_ver` column, added without rewriting old rows):

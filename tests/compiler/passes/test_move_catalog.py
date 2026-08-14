@@ -119,13 +119,14 @@ def test_schedule_leaf_set_equals_catalog():
         by_tile.setdefault(full_tile(r), []).append(r)
     percell = by_tile[TilePlan()]
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
-    # (the reduce spec's ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
-    # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
-    # Layout gates the bands too (WS5): this fixture's B is canonical ``B[k, n]``, so the plain
-    # coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and only the
-    # transposed band (lanes sweep N) plus the reg-only ILP moves survive.
-    legal_coop = {p for p in coop_reduce_moves() if p.coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)}
-    assert {full_reduce(r) for r in percell} == {ReducePlan(), *legal_coop}
+    # (the reduce spec's ``coop <= extent and reg <= extent`` structural fit) — so the wide
+    # ``b64``–``b512`` folds drop out on this K=64 matmul, exactly as they would on any reduce
+    # narrower than the fold. BOTH band orientations are enumerated regardless of B's layout, and
+    # every split-K width dividing K joins them: which row deploys is evidence's decision; the
+    # classified layout and the grid size only order the cold option-0.
+    legal_coop = {p for p in coop_reduce_moves() if p.coop <= 64 and p.reg <= 64}
+    legal_splitk = {p for p in splitk_moves() if 64 % p.cta == 0}
+    assert {full_reduce(r) for r in percell} == {ReducePlan(), *legal_coop, *legal_splitk}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).

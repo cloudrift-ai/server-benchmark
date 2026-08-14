@@ -298,14 +298,16 @@ def _pick_structural(
     slower cannot displace a measured-faster fused config on a model
     extrapolation alone — a Σ-of-predictions comparison across two different
     kernel families is exposed to the model's absolute-µs error, which doesn't
-    cancel across sides the way it does among siblings of one fork. Gated on
-    the *trusted* ``OnlinePrior`` (``prior.trustworthy``
-    — trained AND passing the reservoir calibration gate): Σ-comparisons
-    through the offline cold-start model are unvalidated, and neither a cold
-    compile nor a mis-calibrated model may change kernel sets."""
+    cancel across sides the way it does among siblings of one fork. Any loaded
+    prior prices the unmeasured remainder — including the offline cold-start
+    model on a cold deploy: fusion is greedy-maximal and algebra-only, so the
+    fused option can be a work-duplicating maximal region, and the offline
+    prior is the designated owner of keeping a cold kernel-set choice sane.
+    Its Σ-comparison quality is a fitting requirement, not a reason to freeze
+    the kernel set at option-0."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    if not price_structural or prior is None or not getattr(prior, "trustworthy", False):
+    if not price_structural or prior is None:
         return None
     op_leaves = [o for o in leaves if not _is_structural_option(o)]
     if not op_leaves:

@@ -1183,6 +1183,18 @@ same-input `emmy-greedy` reference where Loop IR has no runnable frontend twin),
 state and strict promotion fails. Thus repository YAML contains neither mixed routing/schedule rows nor working
 transcripts, while its routing plus child rows reproduce what was measured.
 
+Working-plan verification is deliberately transcript-shaped too. It first exact-replays the whole plan and compiles
+the same source independently through cold greedy, then repeats that pair from each recognized child's identical
+single-node slice. A canonical seeded source supplies activations and loadable constant sources; each compiled graph
+applies its own layout transforms before isolated O3 timing. Exact/greedy outputs must pass the normal same-input
+configuration-parity gate. Only after every pair succeeds does one atomic YAML replacement attach whole and child
+`{emmy_us, reference_us, reference_backend: emmy-greedy}` records. Tune-time `total_us` and child `latency_us` stay
+unchanged because they describe search ranking, not this verification run. Captured timing is mandatory, and a
+multi-launch transcript supplies one end-to-end window rather than accumulated launch-local samples. The adjacent
+machine-readable replay audit binds timing semantics and correctness statistics to stable outer/lowering/child
+terminal keys plus the seed, device context, iteration counts, and compile flags. This gate proves replay integrity and
+schedule parity; direct eager strict correctness remains an independent frontend-semantic audit.
+
 A working realization may be inventory-only, a proposal, or verified. Repository promotion requires an
 explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
 every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before

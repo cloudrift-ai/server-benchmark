@@ -177,12 +177,10 @@ def replay_outer_tuning_plan(graph: Graph, plan: Mapping, *, ctx: Context) -> Gr
     return terminal
 
 
-def replay_child_tuning_plan(outer: Graph, child: Mapping, *, ctx: Context) -> Graph:
-    """Replay one recognized child's independent schedule transcript."""
-    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+def replay_child_source(outer: Graph, child: Mapping) -> Graph:
+    """Recover the exact recognized slice shared by replay and a cold child compile."""
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES  # noqa: PLC0415
 
     node_id = next(
         (nid for nid in outer.topological_order() if outer.nodes[nid].op.cache_key() == child["key"]),
@@ -191,7 +189,15 @@ def replay_child_tuning_plan(outer: Graph, child: Mapping, *, ctx: Context) -> G
     if node_id is None:
         raise ValueError(f"replay_plan child {child['key']} no longer exists in outer terminal")
     producers = frozenset(fused_producer_ids(outer, outer.nodes[node_id]))
-    sub = single_node_graph(outer, node_id, absorb=producers)
+    return single_node_graph(outer, node_id, absorb=producers)
+
+
+def replay_child_tuning_plan(outer: Graph, child: Mapping, *, ctx: Context) -> Graph:
+    """Replay one recognized child's independent schedule transcript."""
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES  # noqa: PLC0415
+
+    sub = replay_child_source(outer, child)
     terminal, _ = _resolve_transcript(
         sub,
         pipeline=Pipeline.build(LOWERING_PASSES),

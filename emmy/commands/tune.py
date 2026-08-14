@@ -30,6 +30,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     persist_proposal_rankings,
     persist_tune_winner,
     validate_working_gpu,
+    verify_and_persist_replay_plans,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,9 +115,18 @@ def register_tune_command(subparsers):
             "to <dump-dir>/kernels.html when a dump dir is set. Can take minutes on a large model."
         ),
     )
-    parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations for --bench (default: 10).")
-    parser.add_argument("--iters", type=int, default=100, help="Measurement iterations for --bench (default: 100).")
-    parser.add_argument("--seed", type=int, default=0, help="RNG seed for --bench random inputs (default: 0).")
+    parser.add_argument(
+        "--verify-replay-plans",
+        action="store_true",
+        help=(
+            "With --golden-file, skip tuning and fresh-verify every replay_plan at O3 against an independently "
+            "lowered emmy-greedy reference on identical deterministic inputs. Verifies the whole program and every "
+            "child, then atomically writes promotion-ready measurements."
+        ),
+    )
+    parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations for --bench / replay verification (default: 10).")
+    parser.add_argument("--iters", type=int, default=100, help="Measurement iterations for --bench / replay verification (default: 100).")
+    parser.add_argument("--seed", type=int, default=0, help="RNG seed for bench / verification inputs (default: 0).")
     parser.add_argument(
         "--gpus",
         type=int,
@@ -593,6 +603,9 @@ def handle_tune(args):
     if getattr(args, "kernel", None) and not getattr(args, "golden_file", None):
         logger.error("--kernel requires --golden-file")
         sys.exit(2)
+    if getattr(args, "verify_replay_plans", False) and not getattr(args, "golden_file", None):
+        logger.error("--verify-replay-plans requires --golden-file")
+        sys.exit(2)
     if not args.code and not args.input and not getattr(args, "golden_file", None):
         # No op to tune → offline mode: refit the online prior on its persisted
         # dataset and print diagnostics (reachability, calibration, golden coverage).
@@ -620,6 +633,65 @@ def handle_tune(args):
         logger.error("--output is only valid for a single tune target; use --dump-dir for multi-target artifacts")
         sys.exit(2)
     validate_trace_adapter_args(args)
+
+    if getattr(args, "verify_replay_plans", False):
+        if args.bench or args.clean or args.output:
+            logger.error("--verify-replay-plans is mutually exclusive with --bench, --clean, and --output")
+            sys.exit(2)
+        if args.warmup < 10 or args.iters < 50:
+            logger.error("--verify-replay-plans requires --warmup >= 10 and --iters >= 50")
+            sys.exit(2)
+        setup_pipeline_runtime(args)
+        verify_flags = apply_nvcc_flags(args, default="")
+        if any(f"-O{level}" in verify_flags for level in range(3)):
+            logger.error("--verify-replay-plans requires deployable O3 codegen, not %s", verify_flags)
+            sys.exit(2)
+        devices = _resolve_devices(args)
+        if len(devices) != 1:
+            logger.error("--verify-replay-plans accepts exactly one device; use --devices ID or --gpus 1")
+            sys.exit(2)
+        ctx = _context_for_device(devices[0], target=getattr(args, "target", None))
+        try:
+            validate_working_gpu(working_document, ctx)
+        except ValueError as exc:
+            logger.error(str(exc))
+            sys.exit(2)
+
+        from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+        backend = CudaBackend(
+            bench_compile_timeout_s=120.0,
+            bench_run_timeout_s=30.0,
+            device_id=devices[0],
+        )
+
+        async def verify():
+            try:
+                return await verify_and_persist_replay_plans(
+                    args.golden_file,
+                    working_document,
+                    backend=backend,
+                    ctx=ctx,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                    seed=args.seed,
+                    kernel=args.kernel,
+                )
+            finally:
+                await backend.aclose_async_worker()
+
+        try:
+            reports = asyncio.run(verify())
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("replay verification failed: %s", exc)
+            sys.exit(1)
+        for report in reports:
+            sys.stderr.write(
+                f"[verify] {report['label']}: exact={report['emmy_us']:.3f}us, "
+                f"emmy-greedy={report['reference_us']:.3f}us\n"
+            )
+        sys.stderr.write(f"[verify] atomically updated {len(reports)} whole/child measurement(s): {args.golden_file}\n")
+        _exit_flushed(0)
 
     from emmy.compiler.pipeline.search import SearchDB
 

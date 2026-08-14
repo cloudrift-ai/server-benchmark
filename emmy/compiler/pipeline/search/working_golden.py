@@ -356,6 +356,361 @@ def validate_working_gpu(document: dict, ctx) -> None:
         raise ValueError(f"working golden targets {file_gpu}, but the live GPU is {ctx.gpu_name}")
 
 
+def _verification_input_maps(graphs: tuple, *, seed: int) -> tuple[dict, ...]:
+    """Build graph-local bindings from one canonical deterministic input source.
+
+    Exact replay and cold greedy may lay constants out differently, so sharing a
+    final ``input_data`` mapping is not generally valid. Instead, activations are
+    keyed by stable input id and loadable constants by source path; each graph then
+    applies its own recorded load transforms to those identical source values.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim  # noqa: PLC0415
+    from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
+    from emmy.compiler.dtype import get as get_dtype
+    from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
+    from emmy.compiler.loader.binder import bind_constants  # noqa: PLC0415
+
+    sym_env: dict[str, int] = {}
+    for graph in graphs:
+        for node in graph.nodes.values():
+            for dim in node.output.shape:
+                if isinstance(dim, Dim) and not dim.is_static:
+                    for name in dim.expr.free_vars():
+                        sym_env.setdefault(name, dim.hint or DEFAULT_SEQ_HINT)
+
+    def static(shape) -> tuple[int, ...]:
+        return tuple(
+            (dim.as_static() if dim.is_static else int(dim.expr.eval(sym_env))) if isinstance(dim, Dim) else int(dim)
+            for dim in shape
+        )
+
+    def spec(shape, dtype) -> tuple[tuple[int, ...], str]:
+        return static(shape), get_dtype(dtype or "f32").name
+
+    def merge(target: dict, key: str, value, kind: str) -> None:
+        previous = target.setdefault(key, value)
+        if previous != value:
+            raise ValueError(f"replay verification {kind} {key!r} has inconsistent declarations: {previous!r} != {value!r}")
+
+    inputs: dict[str, tuple[tuple[int, ...], str]] = {}
+    sources: dict[str, tuple[tuple[int, ...], str]] = {}
+    synthetic: dict[str, tuple[tuple[int, ...], str]] = {}
+    for graph in graphs:
+        for node_id, node in graph.nodes.items():
+            op = node.op
+            if isinstance(op, InputOp):
+                merge(inputs, node_id, spec(node.output.shape, node.output.dtype), "input")
+            elif isinstance(op, ConstantOp) and op.value is None:
+                dtype = op.source_dtype or node.output.dtype
+                if op.source_path:
+                    merge(sources, op.source_path, spec(op.source_shape or node.output.shape, dtype), "constant source")
+                for path, shape in op.source_parts:
+                    merge(sources, path, spec(shape, dtype), "constant source")
+                if not op.source_path and not op.source_parts:
+                    merge(synthetic, node_id, spec(node.output.shape, node.output.dtype), "synthetic constant")
+
+    rng = np.random.default_rng(seed)
+
+    def random_values(shape: tuple[int, ...], dtype: str, *, scale: float):
+        if dtype in {"f8e4m3", "f8e5m2"}:
+            bits = rng.integers(0, 256, shape, dtype=np.uint8)
+            bits[~np.isfinite(decode_f8(bits, dtype))] = np.uint8(0)
+            return bits
+        return rng.standard_normal(shape, dtype=np.float32) * scale
+
+    input_values = {key: random_values(*value, scale=1.0) for key, value in sorted(inputs.items())}
+    source_values = {key: random_values(*value, scale=0.02) for key, value in sorted(sources.items())}
+    synthetic_values = {key: random_values(*value, scale=0.02) for key, value in sorted(synthetic.items())}
+
+    bindings = []
+    for graph in graphs:
+        data: dict[str, object] = {}
+        for node_id, node in graph.nodes.items():
+            if isinstance(node.op, InputOp):
+                data[node_id] = input_values[node_id]
+            elif isinstance(node.op, ConstantOp) and node.op.value is not None:
+                data[node_id] = [float(node.op.value)]
+        data.update(bind_constants(graph, source_values))
+        for node_id, node in graph.nodes.items():
+            if not isinstance(node.op, ConstantOp) or node.op.value is not None or node_id in data:
+                continue
+            if node_id not in synthetic_values:
+                raise ValueError(f"replay verification could not bind constant {node_id!r}")
+            data[node_id] = synthetic_values[node_id].flatten().tolist()
+        bindings.append(data)
+    return tuple(bindings)
+
+
+def _verification_us(bench, *, label: str) -> tuple[float, str]:
+    """Require captured deploy timing and return ``(us, semantics)``."""
+    import math  # noqa: PLC0415
+
+    if getattr(bench, "captured", None) is not True:
+        raise ValueError(f"{label}: replay verification requires CUDA-graph-captured timing")
+    launches = int(getattr(bench, "num_launches", 0) or len(getattr(bench, "per_launch", None) or ()))
+    value = getattr(bench, "e2e_min_ms", None)
+    if launches > 1:
+        if value is None:
+            raise ValueError(f"{label}: multi-launch replay verification requires whole-program e2e_min_ms")
+        value = float(value) * 1000.0
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{label}: invalid whole-program timing {value!r} us")
+        return value, "whole_program_e2e"
+    if value is not None:
+        value = float(value) * 1000.0
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{label}: invalid whole-program timing {value!r} us")
+        return value, "whole_program_e2e"
+    value = getattr(bench, "min_ms", None)
+    if value is None:
+        value = bench.time_ms
+    value = float(value) * 1000.0
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{label}: invalid single-launch timing {value!r} us")
+    return value, "single_launch"
+
+
+def _verification_output_proof(outputs: dict, reference: dict) -> dict:
+    """The normal same-input configuration-parity gate plus audit statistics."""
+    import numpy as np  # noqa: PLC0415
+
+    if set(outputs) != set(reference):
+        return {
+            "status": "fail",
+            "relative_tolerance": 0.05,
+            "error": f"output names differ: exact={sorted(outputs)}, greedy={sorted(reference)}",
+        }
+    worst = 0.0
+    max_abs = 0.0
+    abs_sum = 0.0
+    elements = 0
+    for name, ref in reference.items():
+        actual = np.asarray(outputs[name], dtype=np.float64)
+        wanted = np.asarray(ref, dtype=np.float64)
+        if actual.shape != wanted.shape:
+            return {
+                "status": "fail",
+                "relative_tolerance": 0.05,
+                "error": f"output {name!r} shape {actual.shape} != greedy {wanted.shape}",
+            }
+        if not np.isfinite(actual).all() or not np.isfinite(wanted).all():
+            return {
+                "status": "fail",
+                "relative_tolerance": 0.05,
+                "error": f"output {name!r} contains non-finite values",
+            }
+        delta = np.abs(actual - wanted)
+        denom = float(np.abs(wanted).max()) or 1.0
+        worst = max(worst, float(delta.max()) / denom)
+        max_abs = max(max_abs, float(delta.max()))
+        abs_sum += float(delta.sum())
+        elements += int(delta.size)
+    passed = worst <= 0.05
+    proof = {
+        "status": "pass" if passed else "fail",
+        "relative_tolerance": 0.05,
+        "max_abs_error": max_abs,
+        "mean_abs_error": abs_sum / max(elements, 1),
+        "max_relative_error": worst,
+    }
+    if not passed:
+        proof["error"] = f"rel err {worst:.3f} vs greedy output"
+    return proof
+
+
+async def _verify_replay_pair(
+    exact,
+    greedy,
+    *,
+    backend,
+    seed: int,
+    warmup: int,
+    iters: int,
+    label: str,
+) -> tuple[dict, dict]:
+    """Fresh-bench one exact/cold pair and require same-input output parity."""
+    import uuid  # noqa: PLC0415
+
+    exact_inputs, greedy_inputs = _verification_input_maps((exact, greedy), seed=seed)
+    pair_id = uuid.uuid4().hex
+    exact_bench, exact_outputs = await backend.bench_pinned_async(
+        exact,
+        run_inputs=exact_inputs,
+        run_inputs_key=f"replay-exact-{pair_id}",
+        warmup=warmup,
+        num_iters=iters,
+    )
+    greedy_bench, greedy_outputs = await backend.bench_pinned_async(
+        greedy,
+        run_inputs=greedy_inputs,
+        run_inputs_key=f"replay-greedy-{pair_id}",
+        warmup=warmup,
+        num_iters=iters,
+    )
+    if exact_outputs is None or greedy_outputs is None:
+        raise ValueError(f"{label}: replay verification backend returned no same-input outputs")
+    proof = _verification_output_proof(exact_outputs, greedy_outputs)
+    if proof["status"] != "pass":
+        raise ValueError(f"{label}: wrong-answer: {proof['error']}")
+    exact_us, exact_semantics = _verification_us(exact_bench, label=f"{label}: exact")
+    greedy_us, greedy_semantics = _verification_us(greedy_bench, label=f"{label}: emmy-greedy")
+    measurement = {
+        "emmy_us": exact_us,
+        "reference_us": greedy_us,
+        "reference_backend": "emmy-greedy",
+    }
+    return measurement, {
+        "label": label,
+        "emmy_us": exact_us,
+        "reference_us": greedy_us,
+        "exact_timing_semantics": exact_semantics,
+        "reference_timing_semantics": greedy_semantics,
+        "captured": True,
+        "correctness": proof,
+    }
+
+
+async def verify_replay_plans(
+    document: dict,
+    *,
+    backend,
+    ctx,
+    warmup: int,
+    iters: int,
+    seed: int = 0,
+    kernel: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """Audit every matching replay plan against a fresh cold-greedy reference.
+
+    The returned document is a copy. Callers persist it only after every whole
+    program and every independent child passed, so a timeout, stale transcript,
+    or wrong answer cannot partially verify a working file. ``total_us`` and child
+    ``latency_us`` remain the tune-time ranking observations; verification writes
+    only the canonical measurement records consumed by promotion.
+    """
+    if warmup < 10 or iters < 50:
+        raise ValueError("replay verification requires --warmup >= 10 and --iters >= 50")
+    flags = str(getattr(ctx, "compile_flags", "") or "")
+    if any(f"-O{level}" in flags for level in range(3)):
+        raise ValueError(f"replay verification requires deployable O3 codegen, not {flags}")
+    validate_working_gpu(document, ctx)
+
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.replay_plan import (  # noqa: PLC0415
+        replay_child_source,
+        replay_child_tuning_plan,
+        replay_outer_tuning_plan,
+        replay_tuning_plan,
+    )
+    from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES  # noqa: PLC0415
+
+    verified = copy.deepcopy(document)
+    reports: list[dict] = []
+    matched = 0
+    for config in verified["configs"]:
+        for realization in config["realizations"]:
+            plan = realization.get("replay_plan")
+            if plan is None or (kernel and kernel not in realization["name"]):
+                continue
+            matched += 1
+            record = golden_record_from_entry(verified, config, realization)
+            source = record.target_program
+            with pinned_knobs(record.pin_map):
+                exact = replay_tuning_plan(source.copy(), plan, ctx=ctx)
+                greedy = Pipeline.build(CUDA_PASSES).run(source.copy(), ctx=ctx)
+                measurement, report = await _verify_replay_pair(
+                    exact,
+                    greedy,
+                    backend=backend,
+                    seed=seed,
+                    warmup=warmup,
+                    iters=iters,
+                    label=f"{realization['name']}: whole",
+                )
+                realization["measurements"] = measurement
+                reports.append(
+                    {
+                        **report,
+                        "scope": "whole",
+                        "name": realization["name"],
+                        "outer_terminal_key": plan["outer"]["terminal_key"],
+                        "terminal_key": plan["lowering"]["terminal_key"],
+                    }
+                )
+
+                outer = replay_outer_tuning_plan(source.copy(), plan, ctx=ctx)
+                for index, child in enumerate(plan["lowering"]["children"]):
+                    child_source = replay_child_source(outer, child)
+                    exact_child = replay_child_tuning_plan(outer, child, ctx=ctx)
+                    greedy_child = Pipeline.build(LOWERING_PASSES).run(child_source.copy(), ctx=ctx)
+                    child_measurement, child_report = await _verify_replay_pair(
+                        exact_child,
+                        greedy_child,
+                        backend=backend,
+                        seed=seed,
+                        warmup=warmup,
+                        iters=iters,
+                        label=f"{realization['name']}: child {index} {child['key']}",
+                    )
+                    child["measurements"] = child_measurement
+                    reports.append(
+                        {
+                            **child_report,
+                            "scope": "child",
+                            "name": realization["name"],
+                            "child": index,
+                            "key": child["key"],
+                            "outer_terminal_key": plan["outer"]["terminal_key"],
+                            "terminal_key": child["terminal_key"],
+                        }
+                    )
+    if not matched:
+        suffix = f" matching --kernel {kernel!r}" if kernel else ""
+        raise ValueError(f"working golden contains no replay_plan{suffix}")
+    return verified, reports
+
+
+async def verify_and_persist_replay_plans(path: str | Path, document: dict, **kwargs) -> list[dict]:
+    """Verify a full copy, then atomically write its YAML and adjacent audit."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    verified, reports = await verify_replay_plans(document, **kwargs)
+    ctx = kwargs["ctx"]
+    audit = {
+        "version": 1,
+        "working_file": str(Path(path).resolve()),
+        "gpu_name": getattr(ctx, "gpu_name", None),
+        "compute_cap": list(getattr(ctx, "compute_capability", ()) or ()),
+        "context_key": ctx.structural_key(),
+        "compile_flags": str(getattr(ctx, "compile_flags", "") or ""),
+        "warmup": kwargs["warmup"],
+        "iters": kwargs["iters"],
+        "seed": kwargs.get("seed", 0),
+        "reference_backend": "emmy-greedy",
+        "records": reports,
+    }
+    audit_path = Path(path).with_suffix(Path(path).suffix + ".replay-verify.json")
+    payload = json.dumps(audit, indent=2, sort_keys=True) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=audit_path.parent, prefix=f".{audit_path.name}.", delete=False) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+            temporary = Path(output.name)
+        dump_golden_file(verified, path, overwrite=True)
+        temporary.replace(audit_path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return reports
+
+
 def realized_tuning_knobs(graph) -> dict[str, str] | None:
     """Conflict-free canonical tuning knobs across every CudaOp in ``graph``."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415

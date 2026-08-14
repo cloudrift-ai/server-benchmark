@@ -209,6 +209,19 @@ are hard replay failures. Promotion is automatic only after strict verification 
 whole plan and each child; it then replaces the transcript with one PLACE-only routing record and schedule-only Loop
 IR child records. Unverified exact timings remain working proposal evidence and cannot become repository goldens.
 
+`emmy tune --golden-file PATH --verify-replay-plans` is that reference-free verification workflow. It does no search:
+at deploy O3 it exact-replays each transcript and independently cold-lowers the same source through ordinary
+`emmy-greedy`, generates one deterministic input source per whole/child pair, applies each graph's own constant-layout
+transforms, and fresh-benches both sides through the isolated worker. Output parity is mandatory before the exact
+latency and `reference_backend: emmy-greedy` latency are recorded. The procedure repeats for every independently
+scheduled child, preserves tune-time `total_us` / child `latency_us` as ranking history, and replaces the YAML once
+only after all pairs pass. Timings must be CUDA-graph captured; a multi-launch graph must expose its whole-program
+end-to-end window rather than a sum of isolated launches. An adjacent `.replay-verify.json` audit records terminal
+keys, correctness/error statistics, timing semantics, seed, iteration counts, device context, and compile flags.
+`--warmup` must be at least 10 and `--iters` at least 50; `--kernel` and `--devices ID`
+narrow the run. This same-input Emmy check does not claim frontend semantics: a direct torch-eager strict gate remains
+a separate `run --golden --bench --strict` release check.
+
 Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel

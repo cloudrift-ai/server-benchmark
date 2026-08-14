@@ -1228,7 +1228,11 @@ class _ScalarOps(_AtomOps):
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.axis
         m, n = mn
-        prot = _scalar_protected(c, self.tile, self.lead)
+        # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
+        # fold axes): a replicated read of such a coordinate must keep its name — the loop that
+        # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
+        # emitted references no scope defines.
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*operand_body(c.a), *operand_body(c.b)))
         b_name, a_name = operand_name(c.b), operand_name(c.a)
         a_body, b_body = operand_body(c.a), operand_body(c.b)
         a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
@@ -1239,6 +1243,11 @@ class _ScalarOps(_AtomOps):
         def at_n(j):  # register column ``j``'s n coordinate
             return {n.name: _wrap(n, offset[1].base(j))}
 
+        # Each operand's σ also binds the SIBLING output axis: a value-dead reshape/broadcast
+        # residue can keep a syntactic reference to it in the operand index (the same rule the
+        # staged fills apply — the read is sibling-invariant in VALUE, so any in-bounds
+        # representative evaluates it unchanged, and the bare axis name no longer exists after
+        # the tile split).
         def read_row(i):
             return [] if a_cell else copy_cell(a_body, Sigma(at_m(i)), f"__ar{i}", prot)
 

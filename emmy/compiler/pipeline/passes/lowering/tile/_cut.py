@@ -609,8 +609,8 @@ def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, st
     def leads_cold(alt: _PlacementAlternative) -> bool:
         return alt.realized_value == _FUSE or alt.key == _NESTED_KEY
 
-    repairs = [option for alt, option in zip(alternatives, realized_options) if leads_cold(alt)]
-    cuts = [option for alt, option in zip(alternatives, realized_options) if not leads_cold(alt)]
+    repairs = [option for alt, option in zip(alternatives, realized_options, strict=True) if leads_cold(alt)]
+    cuts = [option for alt, option in zip(alternatives, realized_options, strict=True) if not leads_cold(alt)]
     return [*repairs, base, *cuts]
 
 

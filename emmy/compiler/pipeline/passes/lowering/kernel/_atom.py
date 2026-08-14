@@ -365,12 +365,31 @@ def _clamp_last(idx: Expr, ext: Expr) -> Expr:
     return TernaryExpr(cond=BinaryExpr("<", idx, ext), if_true=idx, if_false=BinaryExpr("-", ext, Literal(1, "int")))
 
 
-def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bool):
+def _side_base(side: Side) -> Expr:
+    """The CTA's tile-base coordinate on ``side`` — ``block·tile`` (always in-bounds: the block
+    count is ``ceil(extent / tile)``, so ``block·tile < extent``)."""
+    return BinaryExpr("*", Var(side.block), Literal(side.tile, "int"))
+
+
+def _sibling_sigma(sibling: Side | None) -> dict[str, Expr]:
+    """The σ entry for the operand's OTHER tiled output axis. A staged slab is CTA-shared across
+    the sibling axis, so the drain contract already requires the operand's gmem address be
+    sibling-invariant in VALUE — but the sibling var can still appear SYNTACTICALLY, through a
+    flat-index reshape residue (a merged / reshaped weight row like ``(m·N + n) % N``, whose ``m``
+    contribution is a multiple of the modulus and folds away). After the tile split the kernel
+    decodes only the ``_b`` / ``_u`` split vars, never the bare axis name, so leaving the sibling
+    unsubstituted emits an undefined identifier. Bind it to the CTA's block base — an in-bounds
+    representative under which a value-dead residue evaluates unchanged."""
+    return {} if sibling is None else {sibling.axis.name: _side_base(sibling)}
+
+
+def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bool, sibling: Side | None = None):
     """The **one** cp.async slab gmem-index factory, for either operand and either tier. The slab's
     inner (contiguous) dim maps to the contraction ``k_axis``, its outer dim to the stationary ``tile``
     axis (``m`` for A, ``n`` for B). For A the tile axis is the slab ROW (K the col); for B they swap
     (``slot[row][col] = A[row_base + row][k0 + col]`` / ``B[k0 + row][col_base + col]``). A masked tile
     coordinate is clamped in-bounds — the overhanging cell reads a duplicate and its store is guarded.
+    A residual reference to the ``sibling`` output axis binds to its block base (:func:`_sibling_sigma`).
     Returns a ``k0 -> ((row, col) -> gmem index)`` map — one K-chunk offset per :func:`staged_kloop`
     fill."""
 
@@ -378,7 +397,13 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
         def gmem(row, col):
             tc, kc = (row, col) if tile_is_row else (col, row)
             t = BinaryExpr("+", tile_base, tc)
-            sig = Sigma({tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t, k_axis.name: BinaryExpr("+", k0, kc)})
+            sig = Sigma(
+                {
+                    tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t,
+                    k_axis.name: BinaryExpr("+", k0, kc),
+                    **_sibling_sigma(sibling),
+                }
+            )
             return tuple(sig.apply(e) for e in operand_index)
 
         return gmem
@@ -388,17 +413,18 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
 
 def _tile_base(mn: tuple[Side, Side]) -> tuple[Expr, Expr]:
     """The CTA tile's ``(row_base, col_base)`` top-left origin — ``(m_b·tile_m, n_b·tile_n)``."""
-    return tuple(BinaryExpr("*", Var(s.block), Literal(s.tile, "int")) for s in mn)
+    return tuple(_side_base(s) for s in mn)
 
 
-def _box_origin(operand_index, *, tile: Side, tile_base: Expr, k_axis):
+def _box_origin(operand_index, *, tile: Side, tile_base: Expr, k_axis, sibling: Side | None = None):
     """The TMA box origin at K-chunk ``k0`` — the operand's OWN gmem index evaluated (σ) at the
     tile base and ``k0``, so an offset operand (a split-K partial's ``ksplit·(K/w) + k``) lands
     the box at its absolute coordinates. For a canonical operand this is exactly ``(tile_base,
-    k0)`` (A, tile axis the slab row) / ``(k0, tile_base)`` (B)."""
+    k0)`` (A, tile axis the slab row) / ``(k0, tile_base)`` (B). A residual reference to the
+    ``sibling`` output axis binds to its block base (:func:`_sibling_sigma`)."""
 
     def at(k0):
-        sig = Sigma({tile.axis.name: tile_base, k_axis.name: k0})
+        sig = Sigma({tile.axis.name: tile_base, k_axis.name: k0, **_sibling_sigma(sibling)})
         return tuple(sig.apply(e) for e in operand_index)
 
     return at
@@ -433,7 +459,7 @@ def _slab_operands(
     cp.async-staged byte slab; 0 everywhere else)."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
-        tile, tile_base = mn[i], base[i]
+        tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
@@ -447,8 +473,8 @@ def _slab_operands(
                 buf=bufs[i],
                 shape=shape,
                 box=box,
-                coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis),
-                index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row),
+                coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, sibling=sibling),
+                index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row, sibling=sibling),
                 swizzle=swizzles[i],
                 dtype=cuda_name(elem) if elem is not None else None,
                 elem_bytes=elem.nbytes if elem is not None else None,
@@ -547,8 +573,8 @@ def _sync_operands(
             tag="a",
             buf=c.a.input,
             shape=(mn[0].tile, bk_elems),
-            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis),
-            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True),
+            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
+            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
             swizzle=swizzles[0],
         )
         async_ops.append(a_op)
@@ -578,8 +604,8 @@ def _sync_operands(
             tag=tag,
             buf=bl.input,
             shape=shape,
-            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis),
-            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans),
+            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, sibling=mn[0]),
+            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans, sibling=mn[0]),
             swizzle=swizzles[1],
             trans=c.b_trans,
         )

@@ -569,7 +569,14 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                         device_id=backends[0].device_id,
                     )
             winner = result.best_reward.searched_winner() if result.best_reward is not None else None
-            persist_tune_winner(args.golden_file, document, target, winner, compile_flags=config.nvcc_flags())
+            persist_tune_winner(
+                args.golden_file,
+                document,
+                target,
+                winner,
+                compile_flags=config.nvcc_flags(),
+                replay_plan=getattr(result, "replay_plan", None),
+            )
         for block in results[0].prior_summaries if results else []:
             sys.stderr.write(block + "\n")
         sys.stderr.write(f"\n[tune] done: {len(results)}/{len(targets)} working-golden target(s)\n")
@@ -757,6 +764,7 @@ def handle_tune(args):
                     target,
                     winner,
                     compile_flags=config.nvcc_flags(),
+                    replay_plan=getattr(result, "replay_plan", None),
                 )
                 sys.stderr.write(f"[tune] updated working golden rankings: {args.golden_file}\n")
             done += 1

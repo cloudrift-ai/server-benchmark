@@ -200,6 +200,15 @@ timing watchdog: JSON records the exact failure and one-run timing, omits the is
 nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
 request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
 of each boundary input; full-program price probes therefore retain the execution path's device-memory contract.
+A direct two-level tune winner is different from a flat proposal. Its working `replay_plan` is the exact ordered
+outer placement and inner scheduling transcript, with the measured whole-program cost and an independent row for
+every resulting child kernel. `compile --golden-file` and `run --golden` resolve each recorded fork exactly; they do
+not merge heterogeneous child schedules into process-global pins or ask the current prior to choose again. A changed
+rule/node/option, a missing scoped `PLACE@…` seam, a changed recognized multiset, and changed CUDA keys or schedules
+are hard replay failures. Promotion is automatic only after strict verification supplies an honest reference for the
+whole plan and each child; it then replaces the transcript with one PLACE-only routing record and schedule-only Loop
+IR child records. Unverified exact timings remain working proposal evidence and cannot become repository goldens.
+
 Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel

@@ -1165,13 +1165,30 @@ dimensions as integers to keep the persistence surface small.
 **One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** Each structural
 config contains only `model`, `program`, `target`, and a non-empty `realizations` array. A realization contains its
 name, positive named dimension `bindings`, and explicit registered input `pins`, plus optional `knobs`, `measurements`,
-and working-only `ranking`. `pins` defines the enumeration regime; `knobs` records the configuration selected and
-measured inside that regime. Empty bindings retain the symbolic program; non-empty bindings specialize it before
-lowering. A working realization may be inventory-only, a proposal, or verified. Repository promotion requires an
+working-only `ranking`, and working-only `replay_plan`. `pins` defines the enumeration regime; `knobs` records the
+configuration selected and measured inside that regime. Empty bindings retain the symbolic program; non-empty
+bindings specialize it before lowering. A two-level winner that changes the kernel set cannot be flattened into one
+knob map: its versioned `replay_plan` stores the ordered outer fork transcript (including every scoped `PLACE@…`
+seam), the recognized-terminal fingerprint, the exact whole-graph lowering transcript and end-to-end measurement,
+plus every recognized child's independent transcript, CUDA fingerprint, schedule row, and measurement. Replay
+consumes the transcript in order and checks rule, node, option kind, knob delta, option count, and both terminal
+fingerprints. The model's pooled `PLACE_sites` / `PLACE_cut` features never enter this persistence surface.
+
+Promotion automatically replays and audits a verified working plan, then splits it along the established trust
+boundary: one PLACE-only `.routing` realization stays on the original pre-placement target and one schedule-only
+realization is interned on exact Loop IR for every independent child. Each child row is recompiled and its CUDA keys
+and knob rows must equal the transcript; their multiplicity-weighted union must equal the whole terminal. Promotion
+does not invent a reference: until the whole plan and every child carry an honest eager/cuBLAS reference (or a
+same-input `emmy-greedy` reference where Loop IR has no runnable frontend twin), the plan remains working proposal
+state and strict promotion fails. Thus repository YAML contains neither mixed routing/schedule rows nor working
+transcripts, while its routing plus child rows reproduce what was measured.
+
+A working realization may be inventory-only, a proposal, or verified. Repository promotion requires an
 explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
 every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
-the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
+the parsed entries; `dump_golden_file(..., validation=PROMOTION)` performs the audited plan split on a copy before
+strict validation. Dumping refuses replacement unless its caller opts in explicitly.
 An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
 entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
 self-contradictory during the all-of offer check. `stamp_schedule_families` drops an earlier bare OFF when a later

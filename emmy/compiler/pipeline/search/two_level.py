@@ -163,6 +163,7 @@ class TwoLevelResult:
     best_reward: InnerReward | None  # its Σ-per-op breakdown
     n_terminals: int  # kernel-set alternatives evaluated by the outer search
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
+    replay_plan: dict | None = None  # exact outer splice + independent child schedule transcript
     prior_summaries: list[str] = field(default_factory=list)  # online-prior stats
 
 
@@ -457,6 +458,10 @@ async def run_two_level_tune(
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
+    # ``Run.drive`` owns and mutates its seed candidate. Keep the pristine target
+    # for the post-search exact transcript capture: replay must begin from the same
+    # stable working-golden program, not from a partially driven candidate.
+    source_graph = graph.copy()
     provenance.seed(graph)
     # One session id for every node row this run writes — minted by the caller
     # (``handle_tune``: one id per CLI invocation) or here as a fallback.
@@ -479,6 +484,7 @@ async def run_two_level_tune(
 
     best_fused: Graph | None = None
     best_reward: InnerReward | None = None
+    best_outer_trace: list[dict] | None = None
     n_terminals = 0
     prior_summaries: list[str] = []
     pool = list(backends) if backends else [backend]
@@ -512,6 +518,7 @@ async def run_two_level_tune(
         )
         if best_reward is None or (reward.ok and reward.total_us < best_reward.total_us):
             best_fused, best_reward = fused.graph, reward
+            best_outer_trace = outer.decision_trace(token)
 
     # Placement rows are whole-kernel-set observations: each outer fork prefix is
     # labeled by the best Σ of its descendants. Feed them to the same online prior
@@ -530,6 +537,7 @@ async def run_two_level_tune(
         prior.checkpoint()
 
     assembled: Graph | None = None
+    replay_plan: dict | None = None
     if best_fused is not None:
         # Lower the winning outer terminal directly. This preserves the measured
         # placement choice independent of a not-yet-refitted prior while each
@@ -542,7 +550,39 @@ async def run_two_level_tune(
         # the tight tune compile budget it could (and did) abort whole-model
         # tunes when a slow-compiling kernel raised. ``--bench`` re-benches
         # the assembled graph at -O3 anyway, which is the deployable number.
-        assembled = Pipeline.build(LOWERING_PASSES).run(best_fused.copy(), ctx=ctx, db=db, dump=dump)
+        from emmy.compiler.pipeline.search.replay_plan import (  # noqa: PLC0415
+            capture_replay_plan,
+            replay_child_tuning_plan,
+            replay_outer_tuning_plan,
+        )
+
+        assert best_reward is not None
+        assert best_outer_trace is not None
+        assembled, replay_plan = capture_replay_plan(
+            source_graph,
+            best_fused,
+            outer_trace=best_outer_trace,
+            ctx=ctx,
+            db=db,
+            dump=dump,
+        )
+        # Persist the cost of THIS transcript, never the outer Σ estimate: DB
+        # evidence or a golden floor can make post-search greedy assembly pick a
+        # different child row from the one that produced ``best_reward``.
+        exact = await pool[0].benchmark_async(assembled)
+        e2e_ms = getattr(exact, "e2e_min_ms", None)
+        replay_plan["total_us"] = float(e2e_ms if e2e_ms is not None else exact.time_ms) * 1000.0
+        replayed_outer = replay_outer_tuning_plan(source_graph, replay_plan, ctx=ctx)
+        for child in replay_plan["lowering"]["children"]:
+            child_graph = replay_child_tuning_plan(replayed_outer, child, ctx=ctx)
+            child_bench = await pool[0].benchmark_async(child_graph)
+            child_e2e_ms = getattr(child_bench, "e2e_min_ms", None)
+            child["latency_us"] = float(child_e2e_ms if child_e2e_ms is not None else child_bench.time_ms) * 1000.0
     return TwoLevelResult(
-        best_fused=best_fused, best_reward=best_reward, n_terminals=n_terminals, assembled=assembled, prior_summaries=prior_summaries
+        best_fused=best_fused,
+        best_reward=best_reward,
+        n_terminals=n_terminals,
+        assembled=assembled,
+        replay_plan=replay_plan,
+        prior_summaries=prior_summaries,
     )

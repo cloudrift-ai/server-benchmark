@@ -921,7 +921,16 @@ class Run:
                 search.push(cand.lazy(), parent=token)
                 continue
             match, options, structural = step
-            forks = [LazyCandidate.from_option(inner=cand, cursor=replace(cand.cursor), match=match, option=opt) for opt in options]
+            forks = [
+                LazyCandidate.from_option(
+                    inner=cand,
+                    cursor=replace(cand.cursor),
+                    match=match,
+                    option=opt,
+                    offered_options=len(options),
+                )
+                for opt in options
+            ]
             search.push(*forks, parent=token, structural=structural)
 
 

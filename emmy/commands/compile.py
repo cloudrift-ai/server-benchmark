@@ -241,13 +241,31 @@ def resolve_golden_arg(args) -> None:
             len(winners) == 1
             and winners[0].ranking.get("source") == "tune"
             and winners[0].ranking.get("status") == "ok"
-            and winners[0].ranking.get("measured_knobs") == winners[0].knobs
-            and bool(winners[0].knobs)
+            and (
+                (
+                    winners[0].replay_plan is not None
+                    and winners[0].ranking.get("measured_plan_key") == winners[0].replay_plan["lowering"]["terminal_key"]
+                )
+                or (
+                    winners[0].replay_plan is None
+                    and winners[0].ranking.get("measured_knobs") == winners[0].knobs
+                    and bool(winners[0].knobs)
+                )
+            )
         )
         if winners and not valid_winner:
             logger.error("golden %r must contain one valid direct tune winner with matching measured knobs", name)
             sys.exit(2)
         pinned = verified or winners
+        exact_plans = [record for record in pinned if record.replay_plan is not None]
+        if len(exact_plans) > 1:
+            logger.error("golden %r contains multiple exact replay plans", name)
+            sys.exit(2)
+        if exact_plans:
+            args._golden_replay_plan = exact_plans[0].replay_plan
+        # A plan owns the primary whole-graph compile. It is not a flat A/B pin
+        # sample; promoted child schedule records resume that role.
+        pinned = [record for record in pinned if record.replay_plan is None]
     args.golden_configs = [Sample.from_golden(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
@@ -437,7 +455,18 @@ def handle_compile(args):
     else:
         logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
 
-    result = Pipeline.build(passes).run(graph, db=db, dump=dump)
+    replay_plan = getattr(args, "_golden_replay_plan", None)
+    if replay_plan is not None:
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline import CUDA_PASSES  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.replay_plan import replay_tuning_plan  # noqa: PLC0415
+
+        if passes != CUDA_PASSES:
+            logger.error("an exact working replay_plan requires the complete CUDA pass pipeline")
+            sys.exit(2)
+        result = replay_tuning_plan(graph, replay_plan, ctx=Context.probe(), dump=dump)
+    else:
+        result = Pipeline.build(passes).run(graph, db=db, dump=dump)
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))
     logger.info("Lowered: %d graph nodes -> %d kernels", initial_count, n_compute)

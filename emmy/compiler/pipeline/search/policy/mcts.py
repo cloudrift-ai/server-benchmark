@@ -333,6 +333,28 @@ class TuningSearch(Search):
                 best = candidate
         return best
 
+    @staticmethod
+    def decision_trace(token: object | None) -> list[dict]:
+        """Ordered exact fork transcript from the root to one terminal token."""
+        if not isinstance(token, SearchNode):
+            raise TypeError(f"decision_trace needs a SearchNode token, got {type(token).__name__}")
+        lineage: list[SearchNode] = []
+        current: SearchNode | None = token
+        while current is not None:
+            lineage.append(current)
+            current = current.parent
+        trace = []
+        for node in reversed(lineage):
+            decision = getattr(node.candidate, "resolved_decision", None) if node.candidate is not None else None
+            if decision is not None:
+                trace.append(
+                    {
+                        **decision,
+                        "knobs": dict(decision["knobs"]),
+                    }
+                )
+        return trace
+
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;
         # ``None`` seeds the run under the root sentinel. ``structural``

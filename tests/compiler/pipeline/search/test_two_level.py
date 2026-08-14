@@ -24,14 +24,18 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.pipeline import LOOP_PASSES, Pipeline, TuningSearch
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file, load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.replay_plan import _cuda_inventory, replay_tuning_plan
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.two_level import (
     LOWERING_PASSES,
     InnerReward,
     OpResult,
 )
+from emmy.compiler.torch_wire import intern_program
 from tests.compiler.helpers import drain_tune, run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on
@@ -426,11 +430,13 @@ def test_inner_reward_parallel_matches_serial(monkeypatch) -> None:
     assert p_by_key == s_by_key, "per-op bests must be identical regardless of slot count"
 
 
-def test_run_two_level_tune_single_terminal_assembles_bests() -> None:
+def test_run_two_level_tune_single_terminal_assembles_bests(tmp_path) -> None:
     """A graph with no placement seams yields one terminal and assembles its best schedules."""
+    source = _two_distinct_matmuls()
+    ctx = Context.from_target((8, 0), gpu_name="NVIDIA A100-SXM4-80GB")
     result = run_two_level(
-        _two_distinct_matmuls(),
-        ctx=Context.from_target((8, 0)),
+        source.copy(),
+        ctx=ctx,
         db=SearchDB(),
         backend=_CountingBackend(),
         patience=_PATIENCE,
@@ -442,15 +448,77 @@ def test_run_two_level_tune_single_terminal_assembles_bests() -> None:
     # The winning kernel set was lowered into a Graph[CudaOp] from the DB.
     assert result.assembled is not None
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
+    assert result.replay_plan is not None
+    assert result.replay_plan["total_us"] > 0
+    assert len(result.replay_plan["lowering"]["children"]) == 2
+
+    replayed = replay_tuning_plan(source.copy(), result.replay_plan, ctx=ctx)
+    expected = [(n.op.cache_key(), n.op.knobs) for n in result.assembled.nodes.values() if isinstance(n.op, CudaOp)]
+    actual = [(n.op.cache_key(), n.op.knobs) for n in replayed.nodes.values() if isinstance(n.op, CudaOp)]
+    assert actual == expected
+
+    stale = {**result.replay_plan, "outer": {**result.replay_plan["outer"], "terminal_key": "stale"}}
+    with pytest.raises(ValueError, match="fingerprint is stale"):
+        replay_tuning_plan(source.copy(), stale, ctx=ctx)
+
+    programs = []
+    program = intern_program(programs, source)
+    document = {
+        "gpu_name": "NVIDIA A100-SXM4-80GB",
+        "compute_cap": [8, 0],
+        "programs": programs,
+        "configs": [
+            {
+                "program": program,
+                "target": {"origins": ["xc", "yc"]},
+                "realizations": [
+                    {
+                        "name": "two-mm",
+                        "bindings": {},
+                        "pins": {"FAST_MATH": False},
+                        "replay_plan": result.replay_plan,
+                        "measurements": {
+                            "emmy_us": result.replay_plan["total_us"],
+                            "reference_us": result.replay_plan["total_us"] * 2.0,
+                            "reference_backend": "torch-eager",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="child .* remains a proposal"):
+        dump_golden_file(document, tmp_path / "unverified.yaml", validation=GoldenFileValidation.PROMOTION)
+    for child in result.replay_plan["lowering"]["children"]:
+        child["measurements"] = {
+            "emmy_us": child["latency_us"],
+            "reference_us": child["latency_us"] * 2.0,
+            "reference_backend": "cublas",
+        }
+    path = tmp_path / "promoted.yaml"
+    dump_golden_file(document, path, validation=GoldenFileValidation.PROMOTION)
+    promoted = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
+    records = load_golden_records(promoted)
+    assert len(records) == 2
+    assert all(record.replay_plan is None and record.knobs for record in records)
+
+    actual = []
+    for record in records:
+        with pinned_knobs({**record.pin_map, **record.knobs}):
+            lowered = Pipeline.build(CUDA_PASSES).run(record.target_program.copy(), ctx=ctx)
+        actual.extend(_cuda_inventory(lowered))
+    assert sorted(actual, key=repr) == sorted(result.replay_plan["lowering"]["kernels"], key=repr)
 
 
-def test_two_level_places_kernel_sets_outside_per_kernel_schedule() -> None:
+def test_two_level_places_kernel_sets_outside_per_kernel_schedule(tmp_path) -> None:
     """PLACE is an outer Σ comparison; its decision survives assembly but not inner node rows."""
     prior = _RecordingPrior()
     db = SearchDB()
+    source = _norm_linear()
+    ctx = Context.from_target((8, 0), gpu_name="NVIDIA A100-SXM4-80GB")
     result = run_two_level(
-        _norm_linear(),
-        ctx=Context.from_target((8, 0)),
+        source.copy(),
+        ctx=ctx,
         db=db,
         backend=_CountingBackend(),
         patience=_PATIENCE,
@@ -474,6 +542,54 @@ def test_two_level_places_kernel_sets_outside_per_kernel_schedule() -> None:
     }
     assert chosen and assembled == chosen, "assembly must lower the measured outer terminal itself"
     assert all(not any(key.startswith("PLACE") for key in row.features) for row in db.iter_nodes())
+    assert result.replay_plan is not None
+    assert result.replay_plan["outer"]["placement"] == chosen
+    assert not ({"PLACE_sites", "PLACE_cut"} & set(result.replay_plan["outer"]["placement"]))
+    persisted = {
+        key: value
+        for decision in result.replay_plan["outer"]["decisions"]
+        for key, value in decision["knobs"].items()
+        if key.startswith("PLACE@")
+    }
+    assert persisted == chosen
+
+    for child in result.replay_plan["lowering"]["children"]:
+        child["measurements"] = {
+            "emmy_us": child["latency_us"],
+            "reference_us": child["latency_us"] * 2.0,
+            "reference_backend": "cublas",
+        }
+    programs = []
+    program = intern_program(programs, source)
+    document = {
+        "gpu_name": "NVIDIA A100-SXM4-80GB",
+        "compute_cap": [8, 0],
+        "programs": programs,
+        "configs": [
+            {
+                "program": program,
+                "target": {"origins": ["xn", "y"]},
+                "realizations": [
+                    {
+                        "name": "norm-linear",
+                        "bindings": {},
+                        "pins": {"FAST_MATH": False},
+                        "replay_plan": result.replay_plan,
+                        "measurements": {
+                            "emmy_us": result.replay_plan["total_us"],
+                            "reference_us": result.replay_plan["total_us"] * 2.0,
+                            "reference_backend": "torch-eager",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "routing-promoted.yaml"
+    dump_golden_file(document, path, validation=GoldenFileValidation.PROMOTION)
+    promoted = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
+    routing = [record for record in load_golden_records(promoted) if record.is_routing]
+    assert len(routing) == 1 and routing[0].knobs == chosen
 
 
 def test_o3_band_is_per_regime_under_a_precision_gate(monkeypatch):

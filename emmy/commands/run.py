@@ -2076,7 +2076,17 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # prior (uniform PUCT → emission-order, option-0) and does not replay tuned
         # variants from the DB; ``db=`` is kept for perf recording only. Wiring a
         # warm-started prior into single-shot compile is a deferred follow-up.
-        graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
+        replay_plan = getattr(args, "_golden_replay_plan", None)
+        if replay_plan is not None:
+            from emmy.compiler.context import Context  # noqa: PLC0415
+            from emmy.compiler.pipeline import CUDA_PASSES  # noqa: PLC0415
+            from emmy.compiler.pipeline.search.replay_plan import replay_tuning_plan  # noqa: PLC0415
+
+            if tail != CUDA_PASSES:
+                raise ValueError("an exact working replay_plan requires the complete CUDA pass pipeline")
+            graph = replay_tuning_plan(graph, replay_plan, ctx=Context.probe(), dump=dump)
+        else:
+            graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference

@@ -71,6 +71,36 @@ def _document(*entries):
     return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
 
 
+def _replay_plan():
+    kernel = {"key": "cuda-key", "knobs": {"TILE": "f2x2", "WORK": "w1x1"}}
+    return {
+        "version": 1,
+        "total_us": 7.0,
+        "outer": {
+            "placement": {"PLACE@a": "cut", "PLACE@product": "fuse"},
+            "decisions": [],
+            "terminal_key": "outer-key",
+            "recognized": [{"key": "child-key", "multiplicity": 1}],
+        },
+        "lowering": {
+            "decisions": [],
+            "terminal_key": "cuda-terminal",
+            "kernels": [kernel],
+            "children": [
+                {
+                    "key": "child-key",
+                    "multiplicity": 1,
+                    "latency_us": 7.0,
+                    "decisions": [],
+                    "terminal_key": "cuda-terminal",
+                    "knobs": dict(kernel["knobs"]),
+                    "kernels": [kernel],
+                }
+            ],
+        },
+    }
+
+
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
     path = tmp_path / "trace.yaml"
     dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
@@ -193,6 +223,24 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     assert len(got["configs"]) == 1
     assert got["configs"][0]["realizations"][0]["name"] == "mm"
     assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+
+
+def test_multi_kernel_tune_winner_persists_full_scoped_replay_plan(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    document, targets = load_working_targets(path)
+    plan = _replay_plan()
+
+    persist_tune_winner(path, document, targets[0], None, compile_flags="-O1", replay_plan=plan)
+
+    got = load_golden_file(path)
+    winner = got["configs"][0]["realizations"][1]
+    assert winner["replay_plan"] == plan
+    assert list(winner["replay_plan"]["outer"]["placement"]) == ["PLACE@a", "PLACE@product"]
+    assert winner["replay_plan"]["lowering"]["kernels"][0]["knobs"] == {"TILE": "f2x2", "WORK": "w1x1"}
+    assert winner["ranking"]["measured_plan_key"] == "cuda-terminal"
+    _, reloaded_targets = load_working_targets(path)
+    assert reloaded_targets[0].proposals == [((0, 1), {"replay_plan": plan})]
 
 
 def test_working_file_rejects_canonical_path_and_symlink(tmp_path):

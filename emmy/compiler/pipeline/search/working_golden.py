@@ -34,6 +34,7 @@ class WorkingGoldenTarget:
     pins: dict[str, object] = field(default_factory=dict)
     program: object | None = None
     entry_indexes: list[tuple[int, int]] = field(default_factory=list)
+    # Proposal payload is either a legacy flat knob row or an exact replay plan.
     proposals: list[tuple[tuple[int, int], dict]] = field(default_factory=list)
 
 
@@ -335,6 +336,8 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
             target.entry_indexes.append(path)
             if "knobs" in realization:
                 target.proposals.append((path, dict(realization["knobs"])))
+            elif "replay_plan" in realization:
+                target.proposals.append((path, {"replay_plan": copy.deepcopy(realization["replay_plan"])}))
 
     if not by_source:
         raise ValueError(f"no working golden targets matched --kernel {kernel!r}")
@@ -378,7 +381,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 
     rankings: list[dict] = []
     limit = len(proposals) if max_candidates is None else min(len(proposals), max_candidates)
-    for proposal_index, (_entry_index, pins) in enumerate(proposals):
+    for proposal_index, (_entry_index, proposal) in enumerate(proposals):
         if proposal_index >= limit:
             rankings.append(
                 {
@@ -389,6 +392,35 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
                 }
             )
             continue
+        replay_plan = proposal.get("replay_plan")
+        if replay_plan is not None:
+            from emmy.compiler.pipeline.search.replay_plan import replay_tuning_plan  # noqa: PLC0415
+
+            try:
+                terminal_graph = replay_tuning_plan(graph.copy(), replay_plan, ctx=ctx)
+                bench = await backend.benchmark_async(terminal_graph)
+                e2e_ms = getattr(bench, "e2e_min_ms", None)
+                latency = float(e2e_ms if e2e_ms is not None else bench.time_ms) * 1000.0
+                rankings.append(
+                    {
+                        "status": "ok",
+                        "latency_us": latency,
+                        "compile_flags": ctx.compile_flags,
+                        "measured_plan_key": replay_plan["lowering"]["terminal_key"],
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - stale working plans are ranking failures, not command aborts
+                rankings.append(
+                    {
+                        "status": "replay_stale",
+                        "latency_us": None,
+                        "compile_flags": ctx.compile_flags,
+                        "measured_plan_key": None,
+                        "error": str(exc),
+                    }
+                )
+            continue
+        pins = proposal
         search = TuningSearch(
             patience=1,
             max_visits=1,
@@ -426,7 +458,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
     """Atomically persist measured proposal feedback."""
     configs = document["configs"]
-    for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
+    for ((entry_index, realization_index), _proposal), ranking in zip(target.proposals, rankings, strict=True):
         realization = configs[entry_index]["realizations"][realization_index]
         if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
             continue
@@ -441,12 +473,50 @@ def persist_tune_winner(
     winner: tuple[dict[str, str], float] | None,
     *,
     compile_flags: str,
+    replay_plan: dict | None = None,
 ) -> None:
-    """Atomically persist one unambiguous directly searched winner."""
+    """Atomically persist a searched winner, including heterogeneous plans."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     configs = document["configs"]
-    if winner is not None:
+    if replay_plan is not None:
+        plan_key = replay_plan["lowering"]["terminal_key"]
+        ranking = {
+            "status": "ok",
+            "latency_us": replay_plan["total_us"],
+            "compile_flags": compile_flags,
+            "measured_plan_key": plan_key,
+            "source": "tune",
+            "tune_winner": True,
+        }
+        matching = [
+            entry_path
+            for entry_path in target.entry_indexes
+            if configs[entry_path[0]]["realizations"][entry_path[1]].get("replay_plan", {}).get("lowering", {}).get("terminal_key")
+            == plan_key
+        ]
+        writable = next(
+            (
+                entry_path
+                for entry_path in matching
+                if golden_entry_state(configs[entry_path[0]]["realizations"][entry_path[1]]) != GoldenEntryState.VERIFIED
+            ),
+            None,
+        )
+        if writable is None and not matching:
+            config_index, realization_index = target.entry_indexes[0]
+            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
+            for key in ("knobs", "replay_plan", "measurements", "ranking"):
+                seed.pop(key, None)
+            seed["replay_plan"] = copy.deepcopy(replay_plan)
+            seed["ranking"] = ranking
+            configs[config_index]["realizations"].append(seed)
+            target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
+        elif writable is not None:
+            realization = configs[writable[0]]["realizations"][writable[1]]
+            realization["replay_plan"] = copy.deepcopy(replay_plan)
+            realization["ranking"] = ranking
+    elif winner is not None:
         winner_knobs, winner_us = winner
         winner_ranking = {
             "status": "ok",
@@ -484,3 +554,117 @@ def persist_tune_winner(
             configs[config_index]["realizations"].append(seed)
             target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
     dump_golden_file(document, path, overwrite=True)
+
+
+def promote_replay_plans(document: dict) -> dict:
+    """Split audited working plans into canonical routing and child rows.
+
+    Repository goldens intentionally never mix placement with schedules.  This
+    transform replays each working transcript, writes one PLACE-only aggregate
+    routing row on the original target, and interns one exact Loop-IR target with
+    a schedule-only row per independently tuned recognized child.
+    """
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.replay_plan import (  # noqa: PLC0415
+        _cuda_inventory,
+        replay_child_tuning_plan,
+        replay_outer_tuning_plan,
+    )
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    promoted = copy.deepcopy(document)
+    loops = promoted.setdefault("loops", [])
+    additions: list[dict] = []
+    ctx = Context.from_target(tuple(promoted["compute_cap"]), gpu_name=promoted.get("gpu_name"))
+
+    for config in promoted["configs"]:
+        kept = []
+        for realization in config["realizations"]:
+            plan = realization.get("replay_plan")
+            if plan is None:
+                kept.append(realization)
+                continue
+            record = golden_record_from_entry(promoted, config, realization)
+            outer = replay_outer_tuning_plan(record.target_program.copy(), plan, ctx=ctx)
+            aggregate_measurement = realization.get("measurements")
+            if aggregate_measurement is None:
+                raise ValueError(
+                    f"replay_plan {realization['name']!r} remains a proposal: promotion requires an exact whole-plan "
+                    "Emmy measurement and an honest eager/cuBLAS (or same-input emmy-greedy) reference"
+                )
+            aggregate_measurement = copy.deepcopy(aggregate_measurement)
+            if plan["outer"]["placement"]:
+                kept.append(
+                    {
+                        "name": f"{realization['name']}.routing",
+                        "bindings": copy.deepcopy(realization["bindings"]),
+                        "pins": copy.deepcopy(realization["pins"]),
+                        "knobs": copy.deepcopy(plan["outer"]["placement"]),
+                        "measurements": aggregate_measurement,
+                    }
+                )
+
+            promoted_children = []
+            for child_index, child in enumerate(plan["lowering"]["children"]):
+                if "measurements" not in child:
+                    raise ValueError(
+                        f"replay_plan child {child['key']} remains a proposal: promotion requires its exact Emmy "
+                        "measurement and an honest eager/cuBLAS or same-input emmy-greedy reference"
+                    )
+                replay_child_tuning_plan(outer, child, ctx=ctx)
+                node_id = next(
+                    (nid for nid in outer.topological_order() if outer.nodes[nid].op.cache_key() == child["key"]),
+                    None,
+                )
+                if node_id is None:
+                    raise ValueError(f"promotion lost recognized child {child['key']}")
+                child_loop = single_node_graph(outer, node_id)
+                for node in child_loop.nodes.values():
+                    if node.op.dialect not in {"tile", "loop"}:
+                        continue
+                    loop_source = next((source for source in node.op.source_chain() if isinstance(source, LoopOp)), None)
+                    if loop_source is None:
+                        raise ValueError(f"promotion child {child['key']} has no Loop IR source boundary")
+                    node.op = loop_source
+                loop_ref = intern_loop_program(loops, child_loop)
+
+                # The promoted flat row must itself reproduce the independently
+                # audited transcript. Scoped schedule keys make heterogeneous
+                # children representable without pooling their choices.
+                with pinned_knobs(child["knobs"]):
+                    compiled = Pipeline.build(CUDA_PASSES).run(child_loop.copy(), ctx=ctx)
+                if _cuda_inventory(compiled) != child["kernels"]:
+                    raise ValueError(f"promotion child {child['key']} cannot be represented by its canonical schedule row")
+                promoted_children.extend(child["kernels"] * child["multiplicity"])
+                additions.append(
+                    {
+                        "program": config["program"],
+                        "target": {"loop": loop_ref},
+                        "realizations": [
+                            {
+                                "name": f"{realization['name']}.child{child_index}.{child['key'][:12]}",
+                                "bindings": copy.deepcopy(realization["bindings"]),
+                                "pins": copy.deepcopy(realization["pins"]),
+                                "knobs": copy.deepcopy(child["knobs"]),
+                                "measurements": copy.deepcopy(child["measurements"]),
+                            }
+                        ],
+                    }
+                )
+            from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+            expected = sorted(
+                ((kernel["key"], canonical_row_key(kernel["knobs"])) for kernel in plan["lowering"]["kernels"]),
+                key=repr,
+            )
+            actual = sorted(((kernel["key"], canonical_row_key(kernel["knobs"])) for kernel in promoted_children), key=repr)
+            if actual != expected:
+                raise ValueError("promoted child rows do not reconstruct the replay_plan CUDA terminal")
+        config["realizations"] = kept
+    promoted["configs"] = [config for config in promoted["configs"] if config["realizations"]]
+    promoted["configs"].extend(additions)
+    return promoted

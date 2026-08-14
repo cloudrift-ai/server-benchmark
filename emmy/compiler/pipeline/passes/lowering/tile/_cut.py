@@ -68,10 +68,16 @@ class _CompactBroadcastCut:
 
     ``axis_positions`` maps the recognized kernel's compact free axes to their direct
     positions in the expanded boundary write.  The realizer uses that inverse map to
-    rewrite every Loop-IR consumer load onto the compact workspace.
+    rewrite every Loop-IR consumer load onto the compact workspace. ``body`` is the
+    complete compact producer cell before that virtual sweep and ``value`` is the SSA
+    value it stores. Keeping both on the alternative makes an extracted ``Store`` and a
+    raw effect tail (the multi-reduction escape) realize through the same path.
     """
 
     axis_positions: tuple[int, ...]
+    body: tuple[Stmt, ...]
+    value: str
+    output: str
 
 
 @dataclass(frozen=True)
@@ -171,26 +177,45 @@ def _compact_broadcast_cut(root, stores: tuple, free: tuple) -> _CompactBroadcas
     gate makes the inverse rewrite exact and generic; affine/non-bijective layouts keep the
     ordinary fused representation.
     """
-    if len(stores) != 1 or not free:
+    if not free:
         return None
-    store = stores[0]
-    if store.sweep is None or store.sweep.name in deep_reads(root.lower()):
+
+    # The common projected-reduction spelling has already split the sweep into a
+    # boundary Store. A cell with several reductions deliberately remains raw Loop IR;
+    # in that escape spelling the exact same boundary is the terminal non-reduce loop.
+    # Recognize only a write-only terminal sweep: any computation under the loop may
+    # depend on its axis and is therefore not a broadcast.
+    body = tuple(root.lower())
+    if len(stores) == 1 and stores[0].sweep is not None:
+        sweep = stores[0].sweep
+        write = stores[0].write
+    elif not stores and body and isinstance(body[-1], Loop) and not body[-1].is_reduce:
+        tail = body[-1]
+        if len(tail.body) != 1 or not isinstance(tail.body[0], Write):
+            return None
+        sweep = tail.axis
+        write = tail.body[0]
+        body = body[:-1]
+    else:
+        return None
+
+    if sweep.name in deep_reads(body):
         return None
     try:
-        if store.sweep.extent.as_static() == 1:
+        if sweep.extent.as_static() == 1:
             return None
     except TypeError:
         pass  # symbolic tensor extents are positive and may expand at runtime
     positions: list[int] = []
     for axis in free:
-        hits = [i for i, expr in enumerate(store.write.index) if isinstance(expr, Var) and expr.name == axis.name]
+        hits = [i for i, expr in enumerate(write.index) if isinstance(expr, Var) and expr.name == axis.name]
         if len(hits) != 1:
             return None
         positions.append(hits[0])
-    sweep_hits = [i for i, expr in enumerate(store.write.index) if isinstance(expr, Var) and expr.name == store.sweep.name]
+    sweep_hits = [i for i, expr in enumerate(write.index) if isinstance(expr, Var) and expr.name == sweep.name]
     if len(sweep_hits) != 1 or sweep_hits[0] in positions:
         return None
-    return _CompactBroadcastCut(tuple(positions))
+    return _CompactBroadcastCut(tuple(positions), body, write.value, write.output)
 
 
 def _is_contraction_loop(loop: Loop) -> bool:
@@ -790,7 +815,7 @@ def _realize_compact_broadcast(match, root: Node, tile_op, free: tuple, stores: 
     """
     graph = match.graph
     old = root.output.name
-    if old in graph.outputs or len(stores) != 1 or stores[0].write.output != old:
+    if old in graph.outputs or cut.output != old:
         return None
     users = sorted(graph.buffer_users(old))
     consumers: list[tuple[Node, LoopOp, str]] = []
@@ -822,7 +847,7 @@ def _realize_compact_broadcast(match, root: Node, tile_op, free: tuple, stores: 
         raise RuleSkipped(f"compact placement already exists — {ws}")
     axes = list(free)
     ws_index = tuple(Var(axis.name) for axis in axes)
-    child_stmts = [*tile_op.lower(), Write(output=ws, index=ws_index, value=stores[0].write.value)]
+    child_stmts = [*cut.body, Write(output=ws, index=ws_index, value=cut.value)]
     child_op = LoopOp(body=Body(tuple(_nest(child_stmts, axes))))
 
     frag = Graph()

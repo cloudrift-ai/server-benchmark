@@ -23,7 +23,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
+from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
@@ -219,6 +219,26 @@ def _expanded_reduce_graph(M: int = 2, H: int = 8, K: int = 4, N: int = 16) -> G
     )
     g.add_node(consumer, ["expanded", "w"], Tensor("y", (Dim(M), Dim(N)), F16), node_id="y")
     g.inputs, g.outputs = ["p", "w"], ["y"]
+    return g
+
+
+def _sdpa_projection_graph() -> Graph:
+    """Symbolic causal attention followed by flatten-heads and output projection.
+
+    The general non-flash attention cell contains two reductions and therefore keeps
+    its trailing head-width expansion as raw Loop IR rather than an extracted Store.
+    """
+    B, H, D, N = 1, 4, 64, 96
+    seq = Dim("seq_len", hint=64)
+    g = Graph()
+    for name in ("q", "k", "v"):
+        g.add_node(InputOp(), [], Tensor(name, (B, H, seq, D), F16), node_id=name)
+    g.add_node(InputOp(), [], Tensor("wo", (N, H * D), F16), node_id="wo")
+    g.add_node(SdpaOp(is_causal=True), ["q", "k", "v"], Tensor("att", (B, H, seq, D), F16), node_id="att")
+    g.add_node(TransposeOp(axes=(1, 2)), ["att"], Tensor("attt", (B, seq, H, D), F16), node_id="attt")
+    g.add_node(ReshapeOp(shape=(B, seq, H * D)), ["attt"], Tensor("attr", (B, seq, H * D), F16), node_id="attr")
+    g.add_node(LinearOp(has_bias=False), ["attr", "wo"], Tensor("o", (B, seq, N), F16), node_id="o")
+    g.inputs, g.outputs = ["q", "k", "v", "wo"], ["o"]
     return g
 
 
@@ -793,6 +813,46 @@ def test_broadcast_rows_are_replayable_and_default_to_maximal(monkeypatch) -> No
     )
     assert replayed.buffer("expanded__cut_compact") is not None
     assert replayed.buffer("expanded") is None
+
+
+def test_raw_multireduction_broadcast_is_a_maximal_first_fork(monkeypatch) -> None:
+    """The SDPA output expansion is visible to placement even when it remains raw Loop IR."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    offered: list[dict] = []
+
+    def choose_maximal(fp):
+        leaves = flatten_leaves(fp.options)
+        rows = [
+            {key: value for key, value in leaf.knobs.items() if key.startswith("PLACE")}
+            for leaf in leaves
+        ]
+        if any("PLACE@broadcast" in row for row in rows):
+            offered.extend(rows)
+        return leaves[0]
+
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(
+        _sdpa_projection_graph(), choose_maximal
+    )
+    assert offered and all(value == "fuse" for value in offered[0].values())
+    assert any(row["PLACE@broadcast"] == "cut" for row in offered[1:])
+    assert out.buffer("o_a_unsq_bc__cut_compact") is None
+    expanded = out.buffer("o_a_unsq_bc")
+    assert expanded is not None and tuple(str(dim) for dim in expanded.shape) == ("1", "seq_len", "256", "96")
+
+
+def test_raw_multireduction_broadcast_exact_replay_materializes_compact(monkeypatch) -> None:
+    """The scoped cut pin reproduces the compact attention boundary and projection wiring."""
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@broadcast=cut")
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(
+        _sdpa_projection_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    compact = out.buffer("o_a_unsq_bc__cut_compact")
+    assert compact is not None and tuple(str(dim) for dim in compact.shape) == ("seq_len", "256")
+    assert out.buffer("o_a_unsq_bc") is None
+    assert out.nodes["o"].inputs == ["o_a_unsq_bc__cut_compact", "wo"]
+    assert out.nodes["o"].op.decision_knobs == {"PLACE@broadcast": "cut"}
 
 
 def test_scoped_place_pin_from_replay_context_cuts_the_cone(monkeypatch) -> None:

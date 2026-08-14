@@ -10,7 +10,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp
+from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_REGISTERS, warp_tile_moves
@@ -223,6 +223,30 @@ def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:
     src, _ = _source(_graph(k=16), Context(compute_capability=(8, 0)))
     assert "mma.sync.aligned.m16n8k16" in src
     assert "emmy_mma884" not in src and "mma.sync.aligned.m8n8k4" not in src
+
+
+@pytest.mark.parametrize(
+    ("cc", "atom", "helper"),
+    [
+        ((7, 0), VOLTA, "emmy_mma884_load_a_gmem"),
+        ((8, 0), AMPERE, "emmy_mma_load_a_gmem"),
+    ],
+)
+def test_gmem_fragment_load_uses_indexed_view_row_stride(monkeypatch, cc, atom, helper) -> None:
+    """A reshape view re-strides rows without changing its source allocation. Both fragment
+    layouts must pass the view's derived 128-element stride to their cooperative gmem loader,
+    rather than falling back to the source tensor's declared 256-element trailing extent."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (128, 256), dtype=F16), node_id="x")
+    graph.add_node(ReshapeOp(shape=(256, 128)), ["x"], Tensor("xr", (256, 128), dtype=F16), node_id="xr")
+    graph.add_node(InputOp(), [], Tensor("w", (128, 16), dtype=F16), node_id="w")
+    graph.add_node(MatmulOp(), ["xr", "w"], Tensor("o", (256, 16), dtype=F16), node_id="o")
+    graph.inputs, graph.outputs = ["x", "w"], ["o"]
+    _pin(monkeypatch, atom)
+
+    src, _ = _source(graph, Context(compute_capability=cc))
+    calls = [line.strip() for line in src.splitlines() if f"{helper}(_a" in line]
+    assert calls and all(line.endswith(", 128);") for line in calls), calls
 
 
 def test_sm70_rejects_a_pinned_modern_atom(monkeypatch) -> None:

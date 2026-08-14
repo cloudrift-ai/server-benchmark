@@ -1448,28 +1448,31 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 # (the split-K option): the inner bilinear ``Fold`` factorizes to mma exactly like a non-split
 # matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
-# ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into the
-# per-launch zero-init'd output (``RegStore.atomic`` → the packed ``__half2`` red, ``zero_outputs``);
+# ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into a
+# per-launch zero-init'd distributive output (``RegStore.atomic`` + ``zero_outputs``). A low-precision
+# result-rounding boundary is intentionally ineligible because rounding each partition changes the sum;
 # scalar-tier atomic split-K is covered by ``test_reduce_coverage``'s cross-CTA matrix.
-def _splitk_mma_graph(m: int, k: int, n: int) -> Graph:
+def _splitk_mma_graph(m: int, k: int, n: int, *, out_dtype=F16) -> Graph:
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (m, k), dtype=F16), node_id="a")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("b", (k, n), dtype=F16), node_id="b")
-    g.add_node(op=MatmulOp(), inputs=["a", "b"], output=Tensor("o", (m, n), dtype=F16), node_id="o")
+    g.add_node(op=MatmulOp(), inputs=["a", "b"], output=Tensor("o", (m, n), dtype=out_dtype), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]
     return g
 
 
 @requires_sm90
 @requires_cuda
-@pytest.mark.parametrize("finalize", ["deferred", "atomic"])
-def test_mma_splitk_finalize(monkeypatch, finalize):
+@pytest.mark.parametrize(("finalize", "out_dtype"), [("deferred", F16), ("atomic", F32)])
+def test_mma_splitk_finalize(monkeypatch, finalize, out_dtype):
     """fp16 MMA split-K through the structural fork (warp ``TILE`` atom + ``REDUCE=g2k``/``g2a``).
     Deferred (``g2k``) sums each partition's C-fragment through a workspace + additive finalize kernel
     on the tensor-core tier — mma present, NO ``atomicAdd``. Atomic (``g2a``) is ONE kernel: each
     partition's C-fragment ``atomicAdd``\\ s into the zero-init'd output via ``RegStore.atomic`` (the
-    packed ``__half2`` red — no ``__partial`` workspace, no finalize node). Both are accurate (the
-    atomic arm adds one f16 rounding per partition — inside the shared 2e-2 tolerance)."""
+    output — no ``__partial`` workspace, no finalize node). The atomic arm declares an F32 tensor
+    result because its projection runs per partition: an F16 tensor-result rounding boundary is
+    non-distributive and must instead use the deferred finalize, which combines in F32 and rounds
+    once."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
@@ -1480,20 +1483,31 @@ def test_mma_splitk_finalize(monkeypatch, finalize):
     rng = np.random.default_rng(4)
     a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
-    compiled = be.compile(_splitk_mma_graph(m, k, n))
+    compiled = be.compile(_splitk_mma_graph(m, k, n, out_dtype=out_dtype))
     src = "\n".join(node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None))
     assert "mma.sync.aligned.m16n8k16" in src, "must be on the tensor-core tier"
     if finalize == "deferred":
         assert "atomicAdd" not in src, "atomic-free split-K must not emit atomicAdd"
         assert "__partial" in src, "the deferred finalize writes partials to a workspace"
     else:
-        assert "atomicAdd(reinterpret_cast<__half2*>" in src, "the atomic finalize rides the packed-pair red"
+        assert "atomicAdd(" in src, "the distributive F32 atomic finalize must emit atomicAdd"
         assert "__partial" not in src, "the atomic finalize is single-kernel (no workspace)"
         zeroed = [n.op.zero_outputs for n in compiled.nodes.values() if getattr(n.op, "zero_outputs", ())]
         assert zeroed == [("o",)], f"the atomic output must be zero-init'd per launch, got {zeroed}"
     out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
     ref = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(out.astype(np.float32), ref, rtol=2e-2, atol=2e-2)
+
+
+def test_mma_splitk_atomic_refuses_f16_result_rounding(monkeypatch) -> None:
+    """A pinned atomic split may not round each partition to F16 before adding it. The scheduler
+    rejects that non-distributive projection before CUDA materialization; ``g2k`` is the legal
+    form because it combines the wide carrier before observing the tensor-result dtype."""
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    with pytest.raises(ValueError, match="atomic split-K can't carry a non-distributive projection"):
+        Pipeline.build(CUDA_PASSES).run(_splitk_mma_graph(128, 512, 128), ctx=Context.from_target((12, 0)))
 
 
 @requires_sm90
@@ -2001,7 +2015,8 @@ def test_regstore_rewrite_preserves_atomic():
 @requires_cuda
 def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
     """The f16acc atom's array-fragment (rolled-store) form threads ``RegStore.atomic`` through the
-    stmt rewrite: the staged ``d2/tma`` + ``g2a`` pin on a deep-K matmul must emit ``atomicAdd``
+    stmt rewrite: the staged ``d2/tma`` + ``g2a`` pin on a deep-K matmul with a distributive F32
+    result must emit ``atomicAdd``
     (the pre-fix render emitted racing plain stores here — the accuracy assert below fails ~4x-low
     values loudly if the flag is ever dropped again)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
@@ -2015,9 +2030,9 @@ def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
     rng = np.random.default_rng(7)
     a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
-    compiled = be.compile(_splitk_mma_graph(m, k, n))
+    compiled = be.compile(_splitk_mma_graph(m, k, n, out_dtype=F32))
     src = "\n".join(node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None))
-    assert "atomicAdd" in src, "the rolled f16acc atomic split-K must emit atomicAdd stores"
+    assert "atomicAdd" in src, "the rolled f16acc atomic split-K must emit F32 atomicAdd stores"
     out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
     ref = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(out.astype(np.float32), ref, rtol=3e-2, atol=3e-2)
@@ -2141,3 +2156,24 @@ def test_transposed_a_warp_pin_raises(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     with pytest.raises(ValueError, match="columns CONTIGUOUSLY"):
         _run_tile_pass(_imap_graph("transpose_a")[0])
+
+
+def test_transposed_a_declines_scalar_copy_stage(monkeypatch) -> None:
+    """The scalar copy stage has the same dense-slab contract as the warp copy stage: its A
+    chunks advance contiguously along K.  An absorbed transpose moves by a whole source row and
+    must resolve the pinned cp.async stage to gmem-direct; a canonical sliced view still stages."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_TILE", "f2x4")
+    monkeypatch.setenv("EMMY_WORK", "t16x8")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
+
+    transposed = _run_tile_pass(_imap_graph("transpose_a")[0])
+    transposed_tile = next(n.op for n in transposed.nodes.values() if isinstance(n.op, TileOp))
+    assert transposed_tile.schedule.get("STAGE") is None, "a strided-K view cannot feed vector cp.async chunks"
+
+    canonical = _run_tile_pass(_imap_graph("slice_a")[0])
+    canonical_tile = next(n.op for n in canonical.nodes.values() if isinstance(n.op, TileOp))
+    stage = canonical_tile.schedule.get("STAGE")
+    assert stage is not None and stage.transport == "cp.async", stage

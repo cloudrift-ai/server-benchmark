@@ -36,7 +36,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.tile import Channel, Fold, Store
-from emmy.compiler.ir.tile.ir import refs_axis
+from emmy.compiler.ir.tile.ir import b_transposed, refs_axis
 from emmy.compiler.pipeline.pipeline import LoweringError
 
 
@@ -361,9 +361,7 @@ def bind_contraction_channels(
     assert common_a is not None
     if any(dtype != product_dtypes[0] for dtype in product_dtypes[1:]):
         raise LoweringError("warp tier: contraction channels disagree on product dtype")
-    b_layouts = {
-        loop.axis.name in channel.b.index[-1].free_vars() if isinstance(channel.b, Load) else False for channel in channels
-    }
+    b_layouts = {b_transposed(channel.b, loop.axis) for channel in channels}
     if len(b_layouts) != 1:
         raise LoweringError("warp tier: product B edges disagree on layout")
     return common_a, tuple(channels), product_dtypes[0], epilogue

@@ -34,7 +34,7 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop
-from emmy.compiler.ir.stmt.passes import has_contraction_tail
+from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
@@ -165,6 +165,22 @@ def coop_band_epilogue(tail) -> str | None:
         return "the transposed coop band needs a per-cell epilogue — this tail sweeps"
     if has_contraction_tail(tail):
         return "the transposed coop band needs a per-cell epilogue — this tail contracts over a new axis"
+    return None
+
+
+def atomic_projection(node: Fold, tail) -> str | None:
+    """Whether an atomic cross-CTA finalize can carry ``node``'s projection.
+
+    Atomic split-K applies the projection to each partition before ``atomicAdd``.  That is legal
+    only for a single additive carrier whose complete projection tail distributes over addition.
+    In particular, a declared low-precision tensor-result copy is a real rounding boundary and
+    does *not* distribute: rounding each partition is not the same operation as rounding the wide
+    accumulated result once.
+    """
+    if len(node.channels) != 1:
+        return "atomic split-K carries exactly one additive contraction channel"
+    if tail and not projection_distributes(tail, (node.acc,)):
+        return "atomic split-K can't carry a non-distributive projection epilogue"
     return None
 
 
@@ -736,6 +752,16 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     if tile.n.mask or c.b_trans:
         return None
     if not inputs or not isinstance(c.a, Load) or not isinstance(c.b, Load) or c.a.input not in inputs:
+        return None
+    # A copy-stage slab is dense in its inner coordinate: A copies contiguous K chunks and every
+    # B channel copies contiguous N chunks.  The declared buffer shape cannot establish that for
+    # an absorbed view — e.g. transpose(A) spells ``x[k, m]`` and moves 128 source elements per K;
+    # issuing a 16-byte cp.async from that base both reads the wrong values and is misaligned for
+    # most rows.  Ask the shared flat-address algebra for the actual coordinate motion.  A blocked
+    # or reshaped view remains legal when its within-run delta is one; the fill's chunks are then
+    # exactly the contiguous runs represented by the view.
+    copy_axes = ((c.a, c.axis.name), *((ch.b, tile.n.axis.name) for ch in c.channels))
+    if any(not isinstance(edge, Load) or (step := gmem_axis_step(edge, axis, inputs)) is None or step[0] != 1 for edge, axis in copy_axes):
         return None
     # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
     # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier

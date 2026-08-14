@@ -1133,6 +1133,69 @@ def _classify_inline_rowmax(lp: Loop, m_var: str) -> tuple[bool, int | None, str
     return causal, window, mask_buf
 
 
+def _classify_materialized_score_masks(graph: Graph, node: Node) -> tuple[bool, int | None, str | None] | None:
+    """Certify masks applied by a standalone materialized score producer.
+
+    Frontend decomposition may place causal/window ``Select`` values and an additive bias on the
+    QK producer *before* softmax. The consumer's rowmax then reads a bare score buffer, so
+    :func:`_classify_rowmax` has no mask chain to report. Walk the producer's output value backward
+    through exactly the same additive grammar and require it to bottom out at the score sum (or
+    its scalar-scale multiply). The returned facts are sufficient for ``_flash_op`` to re-synthesize
+    every accepted statement; any other add/select spelling declines instead of being dropped.
+    """
+    if not isinstance(node.op, LoopOp):
+        return None
+    writes = [stmt for stmt in node.op.body.iter() if isinstance(stmt, Write)]
+    if len(writes) != 1:
+        return None
+    m_var, kv_var = _var_at(writes[0].index, -2), _var_at(writes[0].index, -1)
+    if m_var is None or kv_var is None:
+        return None
+    defs = {name: stmt for stmt in node.op.body.iter() for name in stmt.defines()}
+    cur, _dtypes = _unwrap_identity_copies(node.op.body, writes[0].value)
+    causal, window, mask_buf = False, None, None
+    coord_selects: list[Select] = []
+    while isinstance(defs.get(cur), Assign) and defs[cur].op.name == "add" and len(defs[cur].args) == 2:
+        add = defs[cur]
+        nxt = None
+        for score_name, mask_name in ((add.args[0], add.args[1]), (add.args[1], add.args[0])):
+            mask_def = defs.get(mask_name)
+            if isinstance(mask_def, Select):
+                coord_selects.append(mask_def)
+                nxt = score_name
+                break
+            if isinstance(mask_def, Load) and not _is_loopop(graph, mask_def.input):
+                if mask_buf is not None and mask_buf != mask_def.input:
+                    return None
+                mask_buf = mask_def.input
+                nxt = score_name
+                break
+        if nxt is None:
+            return None
+        cur, _dtypes = _unwrap_identity_copies(node.op.body, nxt)
+
+    terminal = defs.get(cur)
+    if isinstance(terminal, Assign) and terminal.op.name == "multiply":
+        sources = [_unwrap_identity_copies(node.op.body, arg)[0] for arg in terminal.args]
+        sums = [defs.get(source) for source in sources]
+        if sum(isinstance(stmt, Accum) and _is_sum(stmt) for stmt in sums) != 1:
+            return None
+    elif not (isinstance(terminal, Accum) and _is_sum(terminal)):
+        return None
+
+    for select in coord_selects:
+        kind = _coord_select_kind(select, kv_var, m_var)
+        if kind is None:
+            return None
+        if kind[0]:
+            causal = True
+        elif window is not None and window != kind[1]:
+            return None
+        else:
+            window = kind[1]
+    return causal, window, mask_buf
+
+
 def _recognize(graph: Graph, node: Node) -> _FlashMatch | None:
     """Recognize the supported loop-fusion spellings of the existing flash unit.
 
@@ -1518,14 +1581,26 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if qk is None and inline_qk is None and packed is None:
         _fuse_degraded(root, "score producer's Q/K are not certifiable operand edges")
         return None
-    # A mask stranded on the standalone score producer (a coord Select / an additive bias add)
-    # would be silently DROPPED by the canonical re-synthesis below. Decline the fuse rather
-    # than mis-attend. Inline score masks have already been classified above.
+    # A standalone score producer can carry the mask chain itself. Certify and merge those facts
+    # with any masks the consumer rowmax carried; construction then re-synthesizes the complete
+    # chain once. Inline score masks were already classified directly on the rowmax above.
     if found.inline is None and any(
         isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in score_producer.op.body.iter()
     ):
-        _fuse_degraded(root, "score producer carries mask stmts the flash re-synthesis cannot keep")
-        return None
+        score_masks = _classify_materialized_score_masks(graph, score_producer)
+        if score_masks is None:
+            _fuse_degraded(root, "score producer carries uncertifiable mask stmts")
+            return None
+        score_causal, score_window, score_mask_buf = score_masks
+        causal = causal or score_causal
+        if window is not None and score_window is not None and window != score_window:
+            _fuse_degraded(root, "score producer and consumer disagree on the window mask")
+            return None
+        window = window if window is not None else score_window
+        if mask_buf is not None and score_mask_buf is not None and mask_buf != score_mask_buf:
+            _fuse_degraded(root, "score producer and consumer carry distinct additive masks")
+            return None
+        mask_buf = mask_buf if mask_buf is not None else score_mask_buf
     access_indices = None
     q_edge = k_edge = None
     materialized_v = None

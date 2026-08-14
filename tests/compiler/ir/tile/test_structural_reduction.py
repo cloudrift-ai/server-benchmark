@@ -491,6 +491,21 @@ def test_a_computed_b_has_no_gmem_layout() -> None:
     assert _computed_b_contraction().b_trans is False
 
 
+def test_b_layout_uses_coordinate_motion_not_syntactic_axis_occurrence() -> None:
+    """A reshape can delinearize canonical ``B[k,n]`` through the source width. ``k`` remains
+    syntactically present in the final modulo coordinate, but its step there is zero; classifying
+    that as N×K selects the transposed fragment loader and reads the wrong matrix."""
+    flat = Var("k") * 128 + Var("n")
+    b = Load(name="b", input="B", index=(flat / 64, flat % 64))
+    c = Fold.contraction(
+        k_axis=Axis("k", 128),
+        a=Load(name="a", input="A", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=b, acc="o"),),
+    )
+    assert "k" in b.index[-1].free_vars()  # the old occurrence test said transposed
+    assert c.b_trans is False
+
+
 def test_computed_b_lowers_into_the_k_loop() -> None:
     """The computed B body is spliced into the synthesized ``CONTRACTION`` loop ahead of the ⊗
     multiply, exactly as a computed A's is — the same derived loop, no B-specific

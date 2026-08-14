@@ -40,7 +40,7 @@ from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -1091,6 +1091,13 @@ class _MmaOps(_AtomOps):
         channels = self.channels
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
+        # Fragment helpers advance from the caller's base pointer across several logical rows.
+        # Their leading dimension therefore belongs to the *indexed view*, not necessarily the
+        # source buffer's declared trailing extent: reshape/index-map absorption can re-stride a
+        # view while keeping its source allocation unchanged.  Derive both strides from the load
+        # address algebra; ``0`` retains the canonical render-time fallback when the derivation is
+        # intentionally unavailable (for example a symbolic declared row width).
+        a_ldm = gmem_row_stride(a_load, m.axis.name, self.inputs) or 0
 
         def read_row(i):
             cell = offset[0].base(i)
@@ -1101,6 +1108,7 @@ class _MmaOps(_AtomOps):
                     src_buffer=a_load.input,
                     src_index=idx,
                     role="a",
+                    ldm=a_ldm,
                     staged=False,
                     gmem_guard=_guard(m, cell),
                     k_zero=k_zero,
@@ -1114,12 +1122,15 @@ class _MmaOps(_AtomOps):
             for f, (b_load, _acc) in enumerate(channels):
                 assert isinstance(b_load, Load), "gmem-direct mma requires materialized B edges"
                 idx = tuple(Sigma({n.axis.name: cell}).apply(e) for e in b_load.index)
+                b_row = n.axis.name if b_trans else k_axis.name
+                b_ldm = gmem_row_stride(b_load, b_row, self.inputs) or 0
                 out.append(
                     LdmatrixLoad(
                         frag=_fold_frag(f"_b{j}", f),
                         src_buffer=b_load.input,
                         src_index=idx,
                         role="b",
+                        ldm=b_ldm,
                         staged=False,
                         b_trans=b_trans,
                         gmem_guard=_guard(n, cell),

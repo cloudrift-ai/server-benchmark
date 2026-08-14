@@ -84,7 +84,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, Write
 from emmy.compiler.ir.stmt.algebra import M
-from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
+from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction, operand_body
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled, stream_pair
@@ -1054,6 +1054,8 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if pin is not None:
         pinned = ReducePlan.parse(pin, Workers.parse(WORK.raw()))
         if pinned.needs_split:
+            if pinned.finalize == "atomic":
+                legal.enforce(legal.atomic_projection(node, tuple(projection_tail(term.tile))), pinned=True)
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
@@ -1087,9 +1089,8 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if splittable and _free_cells(term.place) // _tile_area(plan) <= _SPLITK_MAX_CTAS:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
-        atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
         for sp in splitk_moves():
-            if sp.finalize == "atomic" and not atomic_ok:
+            if sp.finalize == "atomic" and not legal.enforce(legal.atomic_projection(node, tail), pinned=False):
                 continue  # a non-distributive projection would raise at 030_split_reduce
             if k % sp.cta == 0 and (k // sp.cta) % step == 0:
                 out.append(sp)

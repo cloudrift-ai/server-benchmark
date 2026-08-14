@@ -19,6 +19,7 @@ on the same AST.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -599,6 +600,65 @@ class CastExpr(_ExprOps):
 
 
 Expr = Var | Literal | BinaryExpr | Builtin | FuncCallExpr | TernaryExpr | CastExpr
+
+
+def axis_step(expr: Expr, axis: str) -> tuple[int, int] | None:
+    """How one coordinate expression moves with ``axis`` as ``(delta, run)``.
+
+    ``run == 0`` means the step is unbounded. A positive run means it is exact within each
+    aligned window of that width, which covers blocked ``/`` and ``%`` coordinates. This is a
+    property of the expression algebra, shared by Tile IR's operand-orientation classification
+    and lowering's flat-address stride derivation; keeping it here prevents either layer from
+    inferring layout from mere syntactic variable occurrence.
+    """
+
+    def lit(e: Expr) -> int | None:
+        if isinstance(e, Literal) and isinstance(e.value, int) and not isinstance(e.value, bool):
+            return e.value
+        return None
+
+    def run_gcd(a: int, b: int) -> int:
+        return b if a == 0 else a if b == 0 else math.gcd(a, b)
+
+    def divisible(e: Expr, n: int) -> bool:
+        if (value := lit(e)) is not None:
+            return value % n == 0
+        if isinstance(e, BinaryExpr) and e.op in ("+", "-"):
+            return divisible(e.left, n) and divisible(e.right, n)
+        if isinstance(e, BinaryExpr) and e.op == "*":
+            return divisible(e.left, n) or divisible(e.right, n)
+        return False
+
+    if axis not in expr.free_vars():
+        return 0, 0
+    if isinstance(expr, Var):
+        return 1, 0
+    if not isinstance(expr, BinaryExpr):
+        return None
+    if expr.op in ("+", "-"):
+        left, right = axis_step(expr.left, axis), axis_step(expr.right, axis)
+        if left is None or right is None:
+            return None
+        return left[0] + (right[0] if expr.op == "+" else -right[0]), run_gcd(left[1], right[1])
+    if expr.op == "*":
+        for side, other in ((expr.left, expr.right), (expr.right, expr.left)):
+            if axis in other.free_vars():
+                continue
+            mult = lit(other)
+            step = axis_step(side, axis) if mult is not None else None
+            return None if step is None else (step[0] * mult, step[1])
+        return None
+    if expr.op in ("/", "%") and (n := lit(expr.right)) is not None and n > 0:
+        step = axis_step(expr.left, axis)
+        if step is None:
+            return None
+        delta, run = step
+        if delta % n == 0:
+            return (delta // n, run) if expr.op == "/" else (0, run)
+        rest = expr.left.substitute({axis: Literal(0, "int")})
+        if delta == 1 and run == 0 and divisible(rest, n):
+            return (0, run_gcd(run, n)) if expr.op == "/" else (1, run_gcd(run, n))
+    return None
 
 
 # ---------------------------------------------------------------------------

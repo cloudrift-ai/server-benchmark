@@ -40,16 +40,26 @@ PATTERN = [Pattern("root", KernelOp)]
 @dataclass
 class _StampCtx:
     """Per-walk state. ``buf_dtypes`` maps an op I/O buffer name to its
-    dtype; ``ssa_dtypes`` accumulates as Stmts are stamped."""
+    dtype; ``ssa_dtypes`` accumulates as Stmts are stamped. ``coop_states``
+    names every carrier a cross-thread combine reassigns — those render
+    through the combine's f32 shuffle/slab tree, so their declaration must
+    be f32 even for a selecting fold."""
 
     buf_dtypes: dict[str, DataType]
     ssa_dtypes: dict[str, DataType] = field(default_factory=dict)
+    coop_states: frozenset[str] = frozenset()
+
+
+def _cross_thread_states(body: Body) -> frozenset[str]:
+    from emmy.compiler.ir.kernel.ir import TreeHalve, WarpShuffle  # noqa: PLC0415
+
+    return frozenset(name for s in body.iter() if isinstance(s, (TreeHalve, WarpShuffle)) for name in s.state)
 
 
 def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
     buf_dtypes = {n: t.dtype for n, t in {**op.inputs, **op.outputs}.items()}
-    ctx = _StampCtx(buf_dtypes=buf_dtypes)
+    ctx = _StampCtx(buf_dtypes=buf_dtypes, coop_states=_cross_thread_states(op.body))
     new_body = _stamp_body(op.body, ctx)
     if new_body == op.body:
         raise RuleSkipped("every Load/Assign/Write already stamped")
@@ -94,13 +104,15 @@ def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
     from it). A **selecting** combine (``max`` / ``min``) picks an existing value, so it
     stays in the folded value's dtype — fp16 ``max`` accumulates in fp16. An
     **accumulating** combine (``sum`` / ``prod`` — incl. the matmul fold) builds magnitude,
-    so it promotes fp16 to f32 to avoid precision loss / overflow. Already-stamped Accums
-    keep their dtype."""
+    so it promotes fp16 to f32 to avoid precision loss / overflow. A carrier a cross-thread
+    combine reassigns promotes regardless: the shuffle/slab tree runs at f32, and a __half
+    declaration under it mixes the two C types at every downstream use. Already-stamped
+    Accums keep their dtype."""
     if s.dtype is not None:
         ctx.ssa_dtypes[s.name] = s.dtype
         return s
     value_dt = ctx.ssa_dtypes.get(s.value) or F32
-    dt = value_dt if s.op.selecting else F32
+    dt = value_dt if s.op.selecting and s.name not in ctx.coop_states else F32
     ctx.ssa_dtypes[s.name] = dt
     return replace(s, dtype=dt)
 

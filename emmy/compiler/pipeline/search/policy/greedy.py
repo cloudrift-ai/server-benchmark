@@ -212,6 +212,49 @@ def _uses_cold_offline_prior(prior: object) -> bool:
     return isinstance(prior, OfflinePrior) or (isinstance(prior, FallbackPrior) and not prior.trustworthy)
 
 
+def _cold_placement_lead(fp: ForkPoint, leaves: list) -> object | None:
+    """Capability-derived cold lead for the structural placement fork.
+
+    A contraction whose computed operand no target-available atom can consume inline — every atom
+    for the operand dtype declares ``materialized_edges_only`` — has no hardware contraction tier
+    in its fused form, so keeping it cold deploys a dense projection on the scalar fallback. Lead
+    the fork option that cuts that edge (the ``PLACE@a`` seam, the same spelling routing goldens
+    store for the computed-A form) so the residue re-recognizes as an ordinary contraction over
+    those same atoms. The decision derives solely from structure, operand dtype, and atom
+    legality — never a GPU product, model, or shape. Pins, routing goldens, and the trusted
+    Σ-pricing tier all sit above this lead, and any measured evidence overrides it.
+    """
+    from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import Fold, is_contraction, operand_body  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+
+    fused = next((leaf for leaf in leaves if not _is_structural_option(leaf)), None)
+    op = _leaf_op(fused) if fused is not None else None
+    node = getattr(op, "op", None)
+    if node is None or not is_contraction(node) or not (isinstance(node.a, Fold) and node.a.axis is None):
+        return None
+    inputs = getattr(op, "inputs", None) or {}
+    axis = node.axis.name
+    load = next(
+        (s for s in operand_body(node.a) if isinstance(s, Load) and axis in {nm for expr in s.index for nm in expr.free_vars()}),
+        None,
+    )
+    dtype = getattr(inputs.get(load.input) if load is not None else None, "dtype", None)
+    names = atoms_for(dtype, ctx=fp.ctx)
+    if not names:
+        channel_dtypes = {getattr(inputs.get(ch.b.input), "dtype", None) for ch in node.channels if isinstance(ch.b, Load)}
+        channel_dtypes.discard(None)
+        if len(channel_dtypes) == 1:
+            names = atoms_for(next(iter(channel_dtypes)), ctx=fp.ctx)
+    if not names or not all(ATOM_REGISTRY[name].materialized_edges_only for name in names):
+        return None
+    return next(
+        (leaf for leaf in leaves if _is_structural_option(leaf) and _leaf_knobs(leaf).get("PLACE@a") == "cut"),
+        None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ``greedy_decide`` — the greedy pick as a ``Run.resolve`` decide callback.
 # ``Pipeline.run`` and the structural pricing probes route through this.
@@ -1016,6 +1059,11 @@ def greedy_decide(
             if pick is not None:
                 return pick
             if price_structural:
+                if _uses_cold_offline_prior(the_prior):
+                    lead = _cold_placement_lead(fp, leaves)
+                    if lead is not None:
+                        logger.info("capability-derived placement lead cuts the computed operand over the cold default")
+                        return lead
                 return leaves[0]
             op_leaves = [o for o in leaves if not _is_structural_option(o)]
             if op_leaves:

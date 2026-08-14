@@ -54,6 +54,19 @@ items sit outside this plan's scope (the `to_4 __cut_acc0` cast glue at 4.3 ms/s
 at ~2x floor) and rank ahead of or beside it — see the findings file's ranked list. Milestone B/`bind_io`
 remains dead for TPOT.
 
+## Status (2026-08-13) — whole-chunk-step capture IMPLEMENTED (the promoted item); 5090 bench pending
+
+The promoted follow-up landed as `EMMY_GEN_CHUNK_CAPTURE` (default on): `emmy serve --generate` now asks vLLM for
+`cudagraph_mode: FULL` with token-count capture sizes spanning the prefill widths — the exact chunk width rides
+the chunk twin, the rider top rides the chunk+decode row split (whose `out=` copies now record under capture),
+every other rung rides the capture-aware symbolic programs — and selects `--attention-backend TRITON_ATTN`,
+because mixed-batch FULL capture needs `AttentionCGSupport.ALWAYS` and FA2 declares uniform-batch support only
+(vLLM silently downgrades FULL to FULL_DECODE_ONLY there). This activates Milestone A2's post→pre chaining on
+chunk steps (the eager protective clone was the pointer-breaker) and removes the per-program host framing and
+per-step staging D2D from mixed steps. Off under speculative decoding; MoE keeps its capture-size-1 ladder.
+Validation per the serving findings protocol (small_c1 TTFT, c64 TPOT vs stock, 3 runs, greedy parity) is the
+next step; the decode-attention swap FA2→triton is the one regression risk the A/B must price.
+
 ## Target architecture
 
 ```text

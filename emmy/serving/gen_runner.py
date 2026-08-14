@@ -103,13 +103,16 @@ class _Program:
         per-token-independent; only ``[:T]`` is read out). All cupy work runs on torch's current
         stream so the upload, replay and output read stay ordered.
 
-        ``out`` (A3, eager only): a list of torch CUDA destination views aligned to
-        ``output_names``, each ``[T, …]``. The single protective copy lands directly in the
-        caller's destination (``dest.copy_(view)``) instead of a freshly allocated clone — the
+        ``out`` (A3): a list of torch CUDA destination views aligned to ``output_names``,
+        each ``[T, …]``. The single protective copy lands directly in the caller's
+        destination (``dest.copy_(view)``) instead of a freshly allocated clone — the
         rider path passes slices of one shared joint tensor, so the halves need no
-        ``torch.cat`` (which paid a second full copy plus the allocation). Illegal under an
-        outer capture: the captured branch returns raw views by design (dropping copies is the
-        point there), so ``out`` would silently change semantics — asserted against.
+        ``torch.cat`` (which paid a second full copy plus the allocation). Under an outer
+        capture the copies are RECORDED into the graph (the rider split's captured form —
+        whole-step chunk capture): correct because the destinations are persistent
+        pointer-stable tensors minted on an uncaptured warmup step (``_rider_dest`` guards)
+        and the graph's fixed kernel order runs each half's copy before the other half's
+        kernels overwrite the shared output backing.
 
         Under an OUTER capture (vLLM's whole-step decode cudagraph — torch's current stream is
         capturing) the program's own graph machinery is illegal (nested stream capture aborts, and
@@ -127,7 +130,6 @@ class _Program:
             feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.upload_prefix_device(feed)
             if torch.cuda.is_current_stream_capturing():
-                assert out is None, "run_device(out=...) is an eager-path contract — captured steps return views"
                 self.program.run_once()
                 # Under the outer whole-step capture the output CLONES are dead weight: the graph's
                 # fixed kernel order guarantees every consumer (RoPE — in-place on the view is fine,
@@ -137,7 +139,13 @@ class _Program:
                 # ~4 D2D copy nodes per layer per step from the captured graph (the emmy↔vLLM seam
                 # traffic the decode-gap trace attributed). The uncaptured path keeps the clone —
                 # there the program graph may replay again before the caller consumes the view.
+                # ``out`` (the rider split) keeps its copies even here — they land in the
+                # persistent joint destination, recorded into the graph.
                 outs = self.program.output_prefix_device()
+                if out is not None:
+                    for o, n in zip(out, self.output_names, strict=True):
+                        o.copy_(torch.from_dlpack(outs[n])[:t])
+                    return out
                 return [torch.from_dlpack(outs[n])[:t] for n in self.output_names]
             self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
             self.program.replay_program_graph()
@@ -1836,6 +1844,13 @@ class EmmyGenRunner:
         dtype = ref.dtype if dtype is None else dtype
         d = dests.get((name, cols, dtype))
         if d is None:
+            if torch.cuda.is_current_stream_capturing():
+                # A tensor allocated inside an active capture lives in the graph's private
+                # memory pool, whose blocks are recycled between replays — a "persistent"
+                # destination minted here would silently dangle. vLLM's uncaptured warmup
+                # of each capture size mints every destination first; reaching this raise
+                # means a capture ran without that warmup.
+                raise RuntimeError(f"rider destination {name!r} requested inside an active CUDA-graph capture; warm the width first")
             d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
 
@@ -1864,7 +1879,8 @@ class EmmyGenRunner:
         if 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: both halves copy ONCE, straight into slices of one shared joint destination —
             # no torch.cat (which allocated 3 tensors and re-copied every row per layer per
-            # rider step). Rider steps are eager by construction, run_device's out= contract.
+            # rider step). Under a whole-step capture the copies are recorded (run_device's
+            # out= contract); the destinations are persistent, minted on the warmup step.
             pb = self._prefill_bucket
             hd, nh, nkv, _ = self._attn_meta[layer]
             widths = (nh * hd, nkv * hd, nkv * hd)

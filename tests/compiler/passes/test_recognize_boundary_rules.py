@@ -455,9 +455,11 @@ def test_bind_contraction_declined_cone_raises_not_positional():
 # --------------------------------------------------------------------------- #
 
 
-def _prologue_shape(*, b_layouts):
+def _prologue_shape(*, b_layouts, cone_per_channel=False):
     """The recognized MONOID-producer shape: a per-row statistic reduce, its scalar sweep, and a
-    column loop folding one ⊗-channel per entry of ``b_layouts`` over the shared normalized row."""
+    column loop folding one ⊗-channel per entry of ``b_layouts`` over the shared normalized row.
+    ``cone_per_channel`` spells the fusion-duplicated form: each channel carries its OWN copy of
+    the normalize cone (fresh SSA names, and odd copies commute the multiply's args)."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
@@ -475,12 +477,24 @@ def _prologue_shape(*, b_layouts):
         )
     )
     assert stat is not None
-    kbody = [Load(name="x_k", input="x", index=(Var("m"), Var("k"))), Assign(name="xh", op="multiply", args=("x_k", "rs"))]
+    kbody = (
+        []
+        if cone_per_channel
+        else [Load(name="x_k", input="x", index=(Var("m"), Var("k"))), Assign(name="xh", op="multiply", args=("x_k", "rs"))]
+    )
     for i, trans in enumerate(b_layouts):
         idx = (Var("n"), Var("k")) if trans else (Var("k"), Var("n"))
+        xh = "xh"
+        if cone_per_channel:
+            xh = f"xh{i}"
+            args = (f"x_k{i}", "rs") if i % 2 == 0 else ("rs", f"x_k{i}")
+            kbody += [
+                Load(name=f"x_k{i}", input="x", index=(Var("m"), Var("k"))),
+                Assign(name=xh, op="multiply", args=args),
+            ]
         kbody += [
             Load(name=f"b{i}", input=f"w{i}", index=idx),
-            Assign(name=f"v{i}", op="multiply", args=("xh", f"b{i}")),
+            Assign(name=f"v{i}", op="multiply", args=(xh, f"b{i}")),
             Accum(name=f"acc{i}", value=f"v{i}", op="add"),
         ]
     accs = tuple(f"acc{i}" for i in range(len(b_layouts)))
@@ -514,3 +528,18 @@ def test_channels_with_disagreeing_b_layouts_never_group():
 
     node, free = _prologue_shape(b_layouts=(False, True))
     assert bind_prologue_contraction(node, free) is None
+
+
+def test_duplicated_cone_with_commuted_args_still_shares_one_a():
+    """Gate-free loop fusion inlines the producer cone once PER channel — fresh SSA names, and one
+    copy may spell a commutative op's args the other way round (``x̂·s`` vs ``s·x̂``). Value-tree
+    equality must key both copies equal, or the composition declines and the fused kernel demotes
+    to the scalar tier (found live: the gemma-4 geglu edge's recorded goldens drifted in-model)."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
+    node, free = _prologue_shape(b_layouts=(False, False), cone_per_channel=True)
+    bound = bind_prologue_contraction(node, free)
+    assert bound is not None, "the per-channel cone copies key equal — ONE shared A operand"
+    c_map, _, _stores = bound
+    (product,) = c_map.operands
+    assert len(product.channels) == 2, "both ⊗-folds grouped over the one shared cone"

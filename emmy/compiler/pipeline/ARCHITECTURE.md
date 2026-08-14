@@ -159,7 +159,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
 | `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
-| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
+| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
 | `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-realization pin-only signal). Backs the file-scoped `emmy eval golden` release audit (see Part 7). |
@@ -335,12 +335,21 @@ the shipped weights outside the slice it was fit on.
 
 What a newcomer needs to know about the fit:
 
-- **The fit optimizes the deployed score itself, not a linear stand-in for it.** `OfflinePrior.quality` and the
-  fitter's `quality_rows` are the same function over one shared definition of the non-linear term, and that term's
-  weight and threshold are fitted alongside the feature weights — the optimizer is derivative-free, so a threshold
-  costs it nothing. A scoring constant the fit cannot see is a constant the fit optimizes *around*: while two hand-set
-  gates sat outside the objective, the reported golden ranks were not the deployed ones (on the RTX 5090 matmul
-  goldens, median rank 228 reported against 367 deployed).
+- **The fit optimizes the deployed score itself, not a linear stand-in for it.** Both sides go through one
+  `LinearModel`, which offers the same arithmetic in two access shapes: a per-dict entry for scoring a live
+  candidate, and a matrix entry for scoring a whole candidate pool (one fp16 golden enumerates ~78k rows, so the
+  fitter cannot use the dict path). The non-linear term's weight and threshold are fitted alongside the feature
+  weights — the optimizer is derivative-free, so a threshold costs it nothing. A scoring constant the fit cannot see
+  is a constant the fit optimizes *around*: while two hand-set gates sat outside the objective, the reported golden
+  ranks were not the deployed ones (on the RTX 5090 matmul goldens, median rank 228 reported against 367 deployed).
+- **The trainer is an object, and fitting is pure.** `LinearTrainer` carries the hyperparameters — feature names, the
+  incumbent to chain from, sample count, L2 strength, seed, warm start, and the ranking loss — and `fit(groups)`
+  returns a `LinearFit` without touching the trainer. One instance therefore serves every cross-validation fold with
+  no copying, and a fit is a function of its inputs alone. The two seeding policies are data rather than code: the
+  full-train fit warm-starts from the incumbent, and the fold trainer is the same object under
+  `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
+  fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
+  the metrics header, along with the loss — two fits are only comparable under the same one.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
   each case counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
@@ -356,7 +365,11 @@ What a newcomer needs to know about the fit:
   along with the prior object). A weight key that is no longer used, inside an artifact of the current version, is
   simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
-  the stamped `S_ext_n_symbolic_axis`.
+  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**, and the fit holds it out of
+  the feature matrix structurally rather than by feature view. The reason is identifiability: the stamp is constant
+  across a candidate pool, so a linear term on it shifts every candidate equally and cancels out of the within-pool
+  ranking. The rank objective cannot see such a term at all, which makes whatever value a descent lands on there
+  noise rather than a fitted quantity.
 - One feature interaction sits outside the linear weights, because it cannot be written as one: the atomic-free
   split-K term, which rewards the deferred combine kernel above a split-count threshold and penalizes it below.
   Its weight and its threshold are both fitted. `D_scalar_on_warp_eligible` and `D_splitk_roundtrip` — which express
@@ -661,6 +674,12 @@ the partition fork predict for this kernel" are trace queries, never accumulated
 (`Run.resolve`) with the greedy pick (`greedy_decide`) — NOT a search. No frontier, no tree, no benching. The graph is
 copied once per attempt and resolved in place — no per-fork copies.
 
+`emmy run --golden PATH --strict` consumes a working golden rather than changing search. It visits every distinct
+target sequentially in the current process, or one target selected with `--target NAME`. A valid directly measured
+tune winner is an automatic exact pin; verified rows remain automatic pins as before. The ordinary strict run accepts
+only captured whole-forward timing with direct eager correctness at `rtol=atol=1e-3`. Process isolation and repeated
+observations come from independent command invocations, not a second orchestration layer inside `run`.
+
 **Greedy flattens forks before ranking.** The lazy fork tree is an MCTS structure — it stages knob choices across
 levels (`BR` → `BM/BN` → `FM/FN`) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level: a branch
 carries only a *partial* tile, and `features.knob_features` can't compute its area / occupancy until `FM/FN` are
@@ -778,6 +797,8 @@ predicted to be cheaper first.
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
+  It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
+  inputs and persisted Loop programs stay byte-identical across fresh Python processes.
 - One fold-aware exception: a flash fold offer site's slice CARRIES the score producer its fusion consumes
   (`_flash.fused_producer_ids` → `single_node_graph(absorb=…)`), and the absorbed producer loses its own slice. A
   synthetic-input boundary would make `try_flash` unfusable in-slice, silently degrading every tune trajectory to the
@@ -1144,7 +1165,9 @@ they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` v
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
 entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
-self-contradictory during the all-of offer check. Promotion rejects that ambiguity before the offer audit.
+self-contradictory during the all-of offer check. `stamp_schedule_families` drops an earlier bare OFF when a later
+axis-scoped decision exists but preserves a non-OFF primary-site decision for inspection; promotion rejects or
+explicitly re-keys any remaining ambiguity before the offer audit.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose

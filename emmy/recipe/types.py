@@ -9,6 +9,7 @@ class VllmConfig:
     """vLLM engine-specific configuration."""
 
     image: str = "vllm/vllm-openai:v0.17.0"
+    entrypoint: str | None = None
     extra_args: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
 
@@ -61,11 +62,13 @@ class LLMConfig:
     def entrypoint(self) -> str | None:
         """Docker entrypoint override for the active engine.
 
-        vLLM images have a built-in entrypoint; SGLang images do not,
-        so we must provide one explicitly.
+        vLLM normally uses the image entrypoint but may override it for a same-image
+        control. SGLang images do not provide one, so its launcher is explicit.
         """
         if self.sglang is not None:
             return "python3 -m sglang.launch_server"
+        if self.vllm is not None:
+            return self.vllm.entrypoint
         return None
 
     @property
@@ -99,6 +102,8 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Why this model belongs in the recipe inventory at its current lifecycle level.
+    rationale: str | None = None
     # Immutable Hugging Face revision used by both model prefetch and the serving engine.
     revision: str | None = None
     # What the model serves: "generate" (completion/chat, the default) or
@@ -119,9 +124,10 @@ class BenchmarkConfig:
     ``random_output_len`` tokens. Unset fields emit no flag, keeping the client's defaults
     (note: an unset temperature is the server's default sampling, not greedy).
 
-    ``repeats`` reruns the identical bench-client workload N times against the one deployed
-    server; the JSON result then reports per-field mean and stddev across the runs, so the
-    spread is run-to-run noise, not workload variation."""
+    ``num_warmups`` runs requests before measurement so request-time initialization does not
+    contaminate the first repeat. ``repeats`` reruns the identical measured workload N times
+    against the one deployed server; the JSON result then reports per-field mean and stddev
+    across the runs, so the spread is run-to-run noise, not workload variation."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -130,6 +136,7 @@ class BenchmarkConfig:
     seed: int | None = None
     temperature: float | None = None
     ignore_eos: bool = False
+    num_warmups: int = 0
     repeats: int = 1
 
 
@@ -151,6 +158,8 @@ class CommandConfig:
             matched file is pulled back as {variant}_{basename}.
         timeout: Per-task command timeout in seconds.
         env: Extra environment variables to set on the remote command.
+        strict: Require a clean staged source tree, every declared result file,
+            and complete source/GPU/CUDA provenance.
     """
 
     stage: list[str] = field(default_factory=list)
@@ -158,15 +167,12 @@ class CommandConfig:
     result_files: list[str] = field(default_factory=list)
     timeout: int = 1800
     env: dict[str, str] = field(default_factory=dict)
+    strict: bool = False
 
 
 @dataclass
 class AggregateConfig:
-    """Post-processing step that runs locally after all variants complete.
-
-    The ``run`` template receives ``$run_dir`` (the local directory containing
-    all pulled-back result files). Runs on the orchestrator, not on a GPU VM.
-    """
+    """Small, self-contained post-processing step run after a recipe matrix."""
 
     run: str = ""
     timeout: int = 300
@@ -186,6 +192,7 @@ class DeployConfig:
 class Recipe:
     """Complete recipe configuration."""
 
+    tags: tuple[str, ...] = ()
     model: ModelConfig = field(default_factory=ModelConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
@@ -204,6 +211,7 @@ class Recipe:
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
+            rationale=model_dict.get("rationale"),
             revision=model_dict.get("revision"),
             task=model_dict.get("task", "generate"),
             smoke_test=model_dict.get("smoke_test", "chat"),
@@ -231,6 +239,21 @@ class Recipe:
         )
 
         bench_dict = d.get("benchmark", {})
+        workload_fields = {
+            "max_concurrency",
+            "num_prompts",
+            "random_input_len",
+            "random_output_len",
+            "seed",
+            "temperature",
+            "ignore_eos",
+            "num_warmups",
+            "repeats",
+        }
+        unsupported_benchmark_fields = set(bench_dict) - workload_fields
+        if unsupported_benchmark_fields:
+            names = ", ".join(sorted(unsupported_benchmark_fields))
+            raise ValueError(f"unsupported benchmark fields: {names}; benchmark only describes workload generation")
         benchmark = BenchmarkConfig(
             max_concurrency=bench_dict.get("max_concurrency", 128),
             num_prompts=bench_dict.get("num_prompts", 256),
@@ -239,6 +262,7 @@ class Recipe:
             seed=bench_dict.get("seed"),
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
+            num_warmups=bench_dict.get("num_warmups", 0),
             repeats=bench_dict.get("repeats", 1),
         )
 
@@ -259,6 +283,7 @@ class Recipe:
                 result_files=list(cmd_dict.get("result_files", [])),
                 timeout=cmd_dict.get("timeout", 1800),
                 env=dict(cmd_dict.get("env", {})),
+                strict=cmd_dict.get("strict", False),
             )
 
         aggregate = None
@@ -270,6 +295,7 @@ class Recipe:
             )
 
         return cls(
+            tags=tuple(d.get("tags", ())),
             model=model,
             engine=EngineConfig(llm=llm),
             benchmark=benchmark,

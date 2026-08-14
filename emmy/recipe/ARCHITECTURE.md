@@ -2,11 +2,16 @@
 
 ## Overview
 
-The `recipe` package owns all recipe-related logic: YAML loading, matrix expansion for benchmark parameter sweeps, typed configuration dataclasses, engine flag mapping, and extra_args validation.
+The `recipe` package owns all recipe-related logic: YAML loading, matrix expansion for benchmark parameter sweeps,
+typed configuration dataclasses, engine flag mapping, catalog queries, onboarding shell creation, and `extra_args`
+validation.
 
 ## Modules
 
-- `types.py` — dataclasses: `Recipe`, `DeployConfig`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`, `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
+- `types.py` — dataclasses: `Recipe`, `DeployConfig`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`,
+  `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
+- `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
+- `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
@@ -16,12 +21,42 @@ The `recipe` package owns all recipe-related logic: YAML loading, matrix expansi
 
 ### Bundled Recipes Are Copied Out Before Use
 
-A wheel carries every `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because `recipes/`
-sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in site-packages,
-whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories there. So
-`resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe into the
-current directory and returns that path. An existing directory always takes precedence, so a name that matches both
-a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because
+`recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
+site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories
+there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe
+into the current directory and returns that path. An existing directory always takes precedence, so a name that
+matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+
+### Recipe Lifecycle Tags
+
+The optional top-level `tags` list records whether a recipe belongs to the actively supported set:
+
+```yaml
+tags:
+  - maintained
+```
+
+The lifecycle tags are mutually exclusive. `maintained` is a tested recipe selected for periodic testing and
+optimization. `best-effort` is a useful runnable recipe outside that periodic set. `obsolete` preserves a recipe in
+git while disabling deploy, benchmark, publish, and wheel staging; it is used only when an all-around better model for
+the same task is available at a comparable or lower practical VRAM footprint, or when a technical limitation means
+the recipe should no longer be used. Low demand or age alone is not enough. Discovery stores every lifecycle reason in
+`model.rationale`. A new discovery shell carries both `onboarding` and `untested`; it contains the model ID, task,
+rationale, and one to three proposed `deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until
+onboarding replaces it with a qualified `best-effort` recipe. Untagged recipes remain runnable for backward
+compatibility and are classified by the next discovery lifecycle run.
+
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
+rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
+
+`model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
+does not affect engine arguments, deployment, or benchmark behavior.
+
+`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. Its compact
+records contain only the identity, tags, task, rationale, and expanded deployment setups needed for lifecycle work.
+`create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
+GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 
 ### Matrix Expansion for Benchmark Sweeps
 
@@ -142,7 +177,7 @@ This design provides:
 3. **Computed properties** — `LLMConfig.gpus_per_instance` derives from `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` without parsing strings.
 4. **Deep merge support** — named fields participate in matrix merging naturally. An `extra_args` string cannot be partially overridden.
 
-### Controlled Workload Flags (`benchmark.seed` / `temperature` / `ignore_eos`)
+### Controlled Workload Flags
 
 `BenchmarkConfig` carries three optional knobs that pin the bench-client workload for controlled cross-engine
 comparisons: `seed` reproduces the same random prompt set across runs and engines, `temperature: 0` forces greedy
@@ -151,11 +186,19 @@ identical work. Each unset field emits no client flag (prior behavior); note tha
 default sampling, not greedy. `temperature` / `ignore_eos` are generation-only and are skipped for embedding recipes
 (`benchmark/workload.py`).
 
+`benchmark.num_warmups` (default 0) makes the bench client complete that many requests before it starts measuring.
+Use it when the serving engine performs request-time initialization after the deployment health check. The warmup
+requests use the same controlled workload configuration and run before every measured repeat.
+
 `benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
 the model is deployed once, only the client run repeats. The text result then holds one stanza per repeat, and the
 JSON result's `metrics` becomes the per-field mean, with `metrics_stddev` (sample stddev) and `metrics_repeats` (the
 raw per-repeat metrics) added alongside (`benchmark/results.py`). Because the seed and prompts are identical across
 repeats, the spread measures run-to-run noise, not workload variation.
+
+The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
+result validators. `emmy bench` preserves raw observations but does not interpret whether they support an experiment's
+claim; that decision belongs to review of the completed run directory.
 
 ### Extra Args Ban Enforcement
 
@@ -235,6 +278,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
+  strict: true                     # clean source, required artifacts and provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -246,18 +290,40 @@ The `run` template uses `string.Template` `$var` syntax. Substitution variables 
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
 
-### Aggregate Post-Processing
+Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
+entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
+declared artifacts so partial evidence is not lost.
 
-A recipe may optionally declare an `aggregate` block that runs **locally on the orchestrator** after all variants complete. This is useful for combining per-variant results into comparison tables or summary reports.
+### Inline Post-Processing
+
+A recipe may declare an `aggregate` block for a short local command after its variants complete:
 
 ```yaml
 aggregate:
   run: |
-    ./venv/bin/python scripts/aggregate_sgemm.py $run_dir --output $run_dir/report.md
+    rows="$run_dir/small_m_results.tsv"
+    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
+    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
+      sort |
+      while IFS= read -r result; do
+        jq -r '
+          . as $run
+          | ($run.results // [])[]
+          | select(.dimensions.M <= 128)
+          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
+             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
+          | @tsv
+        ' "$result"
+      done >> "$rows"
   timeout: 60
 ```
 
-The `run` template receives `$run_dir` — the local directory containing all pulled-back result files. It runs via `subprocess.run(shell=True)` on the machine executing `emmy bench`, not on a GPU VM. `AggregateConfig` has two fields: `run` (template) and `timeout` (default 300s).
+The template receives `$run_dir`. The example performs transparent structural processing: it selects the small-M
+rows from each SGEMM JSON and assembles one TSV table. Keep such commands self-contained and readable in the recipe;
+do not invoke an external result-analysis script. This hook may select fields, reshape rows, sort, join, or tabulate
+structured data, but it must not interpret the results or generate a human-readable report such as `RESULTS.md`.
+Agents inspect the raw run and write model-specific reports when richer analysis is required.
 
 ### Docker Options
 

@@ -12,7 +12,11 @@ every boot. So the shape is asserted here rather than left to a comment.
 
 import os
 
+import pytest
+import yaml
+
 from emmy.benchmark.tasks import enumerate_tasks
+from emmy.recipe.lifecycle import recipe_is_runnable
 
 RECIPE = "gemma-4-12B-it"
 BASE_RECIPE = "gemma-4-12B"
@@ -24,10 +28,23 @@ WARMED_MAX_NUM_BATCHED_TOKENS = 4128
 WARMED_DECODE_BUCKET = "32"
 
 
+def _require_runnable(recipes_dir, name):
+    directory = os.path.join(recipes_dir, name)
+    with open(os.path.join(directory, "recipe.yaml")) as recipe_file:
+        config = yaml.safe_load(recipe_file)
+    if not recipe_is_runnable(config):
+        pytest.skip(f"{name} is disabled by its lifecycle tag")
+    return directory
+
+
+def _tasks(recipes_dir, name=RECIPE):
+    return enumerate_tasks([_require_runnable(recipes_dir, name)])
+
+
 def test_recipe_dry_run(run_cli, make_bench_config, recipes_dir, tmp_path):
     """The recipe deploys under the dry-run machinery as a single unit."""
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, RECIPE)
+    recipe = _require_runnable(recipes_dir, RECIPE)
     rc, stdout, stderr = run_cli("bench", recipe, "--config", config_path, "--dry-run")
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
     assert "docker compose pull" in stdout
@@ -37,7 +54,7 @@ def test_recipe_dry_run(run_cli, make_bench_config, recipes_dir, tmp_path):
 def test_recipe_is_a_single_serving_variant(recipes_dir):
     """One variant, no sweep. A recipe that expands to many is an experiment in the wrong
     directory — `experiments/gemma-4-12B/` is where workload grids belong."""
-    tasks = enumerate_tasks([os.path.join(recipes_dir, RECIPE)])
+    tasks = _tasks(recipes_dir)
     assert len(tasks) == 1, f"serving recipe expanded to {len(tasks)} variants"
     assert tasks[0].recipe.model.revision == "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
 
@@ -55,7 +72,7 @@ def test_recipe_carries_no_benchmark_grid(recipes_dir):
 def test_serving_config_matches_the_image_warmed_shape(recipes_dir):
     """The point of the serving recipe: its shape equals the image's warmed shape, so a boot
     hits the execution-plan pack instead of re-running the compiler frontend per program."""
-    recipe = enumerate_tasks([os.path.join(recipes_dir, RECIPE)])[0].recipe
+    recipe = _tasks(recipes_dir)[0].recipe
     llm = recipe.engine.llm
     assert llm.context_length == WARMED_MAX_MODEL_LEN
     assert f"--max-num-batched-tokens {WARMED_MAX_NUM_BATCHED_TOKENS}" in llm.vllm.extra_args
@@ -64,7 +81,7 @@ def test_serving_config_matches_the_image_warmed_shape(recipes_dir):
 
 def test_serves_emmy_on_the_fast_math_fork(recipes_dir):
     """The recommended stack: the published emmy image, EmmyGenModel, fast math on."""
-    llm = enumerate_tasks([os.path.join(recipes_dir, RECIPE)])[0].recipe.engine.llm
+    llm = _tasks(recipes_dir)[0].recipe.engine.llm
     assert "cloudriftai/vllm-emmy" in llm.vllm.image
     assert "EmmyGenModel" in llm.vllm.extra_args
     assert llm.vllm.extra_env.get("EMMY_FAST_MATH") == "1"
@@ -80,7 +97,7 @@ def test_recipe_shape_agrees_with_the_release_config(project_root, recipes_dir):
     values = dict(
         ln.split("=", 1) for ln in open(env_path).read().splitlines() if ln.strip() and not ln.lstrip().startswith("#") and "=" in ln
     )
-    llm = enumerate_tasks([os.path.join(recipes_dir, RECIPE)])[0].recipe.engine.llm
+    llm = _tasks(recipes_dir)[0].recipe.engine.llm
     assert values["SERVE_MODEL"] == "google/gemma-4-12B-it"
     assert int(values["SERVE_MAX_MODEL_LEN"]) == llm.context_length
     assert f"--max-num-batched-tokens {values['SERVE_MAX_NUM_BATCHED_TOKENS']}" in llm.vllm.extra_args
@@ -89,7 +106,7 @@ def test_recipe_shape_agrees_with_the_release_config(project_root, recipes_dir):
 
 def test_base_recipe_is_one_pinned_completion_server(recipes_dir):
     """The separately requested base checkpoint has no chat contract or benchmark grid."""
-    directory = os.path.join(recipes_dir, BASE_RECIPE)
+    directory = _require_runnable(recipes_dir, BASE_RECIPE)
     tasks = enumerate_tasks([directory])
     assert len(tasks) == 1
 
@@ -97,9 +114,12 @@ def test_base_recipe_is_one_pinned_completion_server(recipes_dir):
     assert recipe.model.huggingface == "google/gemma-4-12B"
     assert recipe.model.revision == "023679ed352de9bb66cc873c9009ce3482585c08"
     assert recipe.model.smoke_test == "completion"
-    assert recipe.engine.llm.context_length == 16384
-    assert recipe.engine.llm.gpu_memory_utilization == 0.95
-    assert "vllm/vllm-openai@sha256:" in recipe.engine.llm.vllm.image
+    assert recipe.engine.llm.context_length == 131072
+    assert recipe.engine.llm.max_concurrent_requests == 64
+    assert recipe.engine.llm.gpu_memory_utilization == 0.96
+    assert "cloudriftai/vllm-emmy-gemma-4-12b" in recipe.engine.llm.vllm.image
+    assert recipe.engine.llm.vllm.extra_env["EMMY_FAST_MATH"] == "1"
+    assert recipe.engine.llm.vllm.extra_env["VLLM_USE_V2_MODEL_RUNNER"] == "1"
 
     raw = open(os.path.join(directory, "recipe.yaml")).read()
     body = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))

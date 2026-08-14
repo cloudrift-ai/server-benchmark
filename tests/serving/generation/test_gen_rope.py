@@ -39,7 +39,7 @@ def test_laguna_multi_rope_is_served_length_bounded_and_dtype_correct():
             "full_attention": yarn,
         },
     )
-    runner = SimpleNamespace(layer_meta=lambda _i: (8, 2, 1, 8**-0.5))
+    runner = SimpleNamespace(layer_meta=lambda _i: (8, 2, 1, 8**-0.5), global_layer_id=lambda i: i)
 
     with set_current_vllm_config(VllmConfig()):
         rotaries = _build_rotaries(config, runner, 3, max_position=7, dtype=torch.float16)

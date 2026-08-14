@@ -572,7 +572,14 @@ def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, st
                 output=output,
             )
         )
-    return [*realized_options, base] if any(alt.realized_value == _FUSE for alt in alternatives) else [base, *realized_options]
+    # Only a repair-flavored alternative (one that re-fuses placement's own residue, spelled
+    # ``fuse``) may lead the cold option 0 — it strictly shrinks memory. An ordinary value-seam
+    # ``cut`` materializes its seam value, which for an accumulator seam is the whole
+    # pre-reduction product; letting it lead cold turned a 512-token MLP block into a 120 GB
+    # workspace. Cuts stay behind the maximal fused base and win only by evidence.
+    repairs = [option for alt, option in zip(alternatives, realized_options) if alt.realized_value == _FUSE]
+    cuts = [option for alt, option in zip(alternatives, realized_options) if alt.realized_value != _FUSE]
+    return [*repairs, base, *cuts]
 
 
 def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:

@@ -1,12 +1,13 @@
 """Atomize — resolve the algebra→hardware-atom binding structurally.
 
 The warp matmul materializer needs to know which operand is the mma ``a`` vs ``b`` (by
-axis-in-index), the fold accumulator, and the projection epilogue.
-:func:`bind_contraction` reads them **structurally** off the annotated ``CONTRACTION`` reduce loop
-— the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
-the ``(a_load, b_load, acc, epilogue)`` facts ``010_recognize._nodify_contraction`` stamps onto the
-contraction structural node at RECOGNIZE time (the node
-is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
+axis-in-index), every fold accumulator, and the projection epilogue.
+:func:`bind_contraction_channels` reads them **structurally** off the annotated ``CONTRACTION``
+reduce loop — the operand ``Load``\\ s indexed over the K axis and its additive ``Accum`` targets —
+and returns one shared A edge plus every ``(b, accumulator)`` channel for
+``010_recognize._nodify_contraction`` to stamp onto the contraction structural node at RECOGNIZE
+time (the node is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself).
+The one-channel form delegates to :func:`bind_contraction`. Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕
 algebra a property of the loop, so no per-algebra op-tree node class is needed. The cooperative reduce
 needs no binding here — its accumulator dtype + shuffle/tree
@@ -231,8 +232,12 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     k_name = loop.axis.name
     body = list(loop.body)
     loads = [s for s in body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
-    a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index)), None)
-    b_leaf = next((ld for ld in loads if n_name in _idx_vars(ld.index)), None)
+    # A fragment is stationary across N and a B fragment is stationary across M. Merely
+    # containing the expected axis is insufficient: a reshaped/broadcast contraction can expose
+    # one load indexed by (m, n, k), which is valid scalar algebra but cannot be shared by an mma
+    # output tile. Declining the binding keeps that form on the general PLANAR path.
+    a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index) and n_name not in _idx_vars(ld.index)), None)
+    b_leaf = next((ld for ld in loads if n_name in _idx_vars(ld.index) and m_name not in _idx_vars(ld.index)), None)
     fold = next((s for s in body if isinstance(s, Accum)), None)
     if fold is None:
         raise LoweringError("warp tier: contraction loop has no fold accumulator")
@@ -287,6 +292,80 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
     return a_leaf, b_leaf, acc, epilogue
+
+
+def bind_contraction_channels(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, tuple[Channel, ...], Body]:
+    """Bind every additive channel of one bilinear reduce loop.
+
+    A one-channel loop delegates to :func:`bind_contraction`, retaining its computed-operand and
+    multiplicative-factor handling. A product loop is the general sibling form: every accumulated
+    lift must be a multiply, every channel must share the same A value tree, and the B edges must
+    agree on layout so one staged slab can serve the group. The result is independent of target
+    hardware; schedule selection later decides whether any available atom can realize the product.
+    """
+    body = list(loop.body)
+    folds = [s for s in body if isinstance(s, Accum)]
+    if not folds:
+        raise LoweringError("warp tier: contraction loop has no fold accumulator")
+    if len(folds) == 1:
+        a, b, acc, epi = bind_contraction(loop, m_name, n_name, epilogue)
+        edge = b if isinstance(b, Load) else Fold.projection(body=Body(tuple(b)))
+        return a, (Channel(b=edge, acc=acc),), epi
+    if any(fold.op.name != "add" for fold in folds):
+        raise LoweringError("warp tier: product contraction channels must use additive folds")
+
+    k_name = loop.axis.name
+    loads = {s.name: s for s in body if isinstance(s, Load) and s.is_scalar}
+    defs = {s.name: s for s in body if isinstance(s, (Load, Assign))}
+    a_edges: list[Load | list] = []
+    a_keys: list[tuple] = []
+    channels: list[Channel] = []
+    covered: set[int] = {id(fold) for fold in folds}
+
+    for fold in folds:
+        lift = defs.get(fold.value)
+        if not isinstance(lift, Assign) or lift.op.name != "multiply" or len(lift.args) != 2:
+            raise LoweringError("warp tier: every product channel must fold one multiply lift")
+        b_name = next(
+            (
+                arg
+                for arg in lift.args
+                if (ld := loads.get(arg)) is not None
+                and k_name in _idx_vars(ld.index)
+                and n_name in _idx_vars(ld.index)
+                and m_name not in _idx_vars(ld.index)
+            ),
+            None,
+        )
+        if b_name is None:
+            raise LoweringError("warp tier: product channel has no materialized B edge stationary across M")
+        b = loads[b_name]
+        a_name = next(arg for arg in lift.args if arg != b_name)
+        a = loads.get(a_name)
+        if a is not None:
+            used = _idx_vars(a.index)
+            if k_name not in used or m_name not in used or n_name in used:
+                raise LoweringError("warp tier: product A edge is not stationary across N")
+            a_edge: Load | list = a
+        else:
+            cone = map_cone(body, a_name)
+            if not cone or any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
+                raise LoweringError("warp tier: product A cone does not bind")
+            a_edge = cone
+        a_edges.append(a_edge)
+        a_keys.append(_cone_value_key(a_name, defs))
+        channels.append(Channel(b=b, acc=fold.name))
+        covered.add(id(lift))
+        covered.update(id(st) for st in map_cone(body, a_name) or ())
+        covered.add(id(b))
+
+    if len(set(a_keys)) != 1:
+        raise LoweringError("warp tier: product channels do not share one A value")
+    if len({k_name in channel.b.index[-1].free_vars() for channel in channels}) != 1:
+        raise LoweringError("warp tier: product B edges disagree on layout")
+    if any(isinstance(st, (Load, Assign)) and id(st) not in covered for st in body):
+        raise LoweringError("warp tier: product contraction has an unbound value")
+    return a_edges[0], tuple(channels), epilogue
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:
@@ -442,4 +521,4 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     return Fold.projection(body=Body((*prefix, *tail_ops)), operands=(node,)), n_ax, (Store(write=write),)
 
 
-__all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone"]
+__all__ = ["bind_contraction", "bind_contraction_channels", "bind_prologue_contraction", "make_cone", "map_cone"]

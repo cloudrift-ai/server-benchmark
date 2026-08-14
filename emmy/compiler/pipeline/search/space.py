@@ -22,7 +22,12 @@ scheduler spells each row ONCE, site-local, where it becomes stored state. ``STA
 :class:`~emmy.compiler.ir.schedule.Stage` slices in the same currency; ``RASTER`` stays a codec string
 (it has no slice type of its own).
 
-Two groups:
+Three groups:
+
+- **Structural placement knob** (``PLACE``) — the per-seam ``fuse`` / ``cut`` decision offered
+  after algebra recognition. It changes which kernels exist, so it is measured and priced by the
+  structural fork; the offer kernel's ``S_*`` features plus pooled ``PLACE_sites`` / ``PLACE_cut``
+  features train only on whole-kernel-set rewards and never enter an individual resulting kernel's schedule row.
 
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
@@ -44,6 +49,23 @@ from emmy.compiler.pipeline.knob import Knob, KnobType
 from emmy.compiler.pipeline.search.domain import Bound, Dimension, Space
 
 logger = logging.getLogger(__name__)
+
+
+def _place_features(value) -> dict[str, float]:
+    """One scoped seam's contribution to a pooled placement row."""
+    return {"PLACE_sites": 1.0, "PLACE_cut": 1.0 if str(value) == "cut" else 0.0}
+
+
+# Kernel placement is a structural decision, separate from every resulting kernel's schedule.
+# It has no OFF fill because a tree may have several scoped ``PLACE@path`` keys and the owning
+# placement fork stamps every legal seam explicitly.
+PLACE = Knob(
+    "PLACE",
+    KnobType.STR,
+    hints=("fuse", "cut"),
+    help="Per-seam kernel placement (PLACE@<path>=fuse|cut), decided by the structural placement fork.",
+    features=_place_features,
+)
 
 # --- Schedule codec knobs ---------------------------------------------------
 

@@ -22,7 +22,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import SearchDB
@@ -139,6 +139,42 @@ def _two_identical_matmuls() -> Graph:
     g.inputs = ["xa", "xb", "ya", "yb"]
     g.outputs = [c1, c2]
     return g
+
+
+def _norm_linear() -> Graph:
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 16)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (16,)), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("w", (16, 32)), node_id="w")
+    g.add_node(RmsNormOp(), ["x", "nw"], Tensor("xn", (2, 16)), node_id="xn")
+    g.add_node(MatmulOp(), ["xn", "w"], Tensor("y", (2, 32)), node_id="y")
+    g.inputs, g.outputs = ["x", "nw", "w"], ["y"]
+    return g
+
+
+class _RecordingPrior:
+    """Uniform search prior that retains every streamed training row."""
+
+    fitted = False
+    trajectory = ()
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[dict, float]] = []
+
+    def score(self, knobs) -> float:  # noqa: ARG002
+        return 0.0
+
+    def record_bench(self, knobs, median, status) -> None:  # noqa: ARG002
+        return None
+
+    def add_rows(self, rows) -> None:
+        self.rows.extend(rows)
+
+    def maybe_refit(self, *, force=False) -> bool:  # noqa: ARG002
+        return False
+
+    def checkpoint(self) -> None:
+        return None
 
 
 def _fuse(graph: Graph) -> Graph:
@@ -391,8 +427,7 @@ def test_inner_reward_parallel_matches_serial(monkeypatch) -> None:
 
 
 def test_run_two_level_tune_single_terminal_assembles_bests() -> None:
-    """With no fusion forks today the outer yields one terminal; the assembled
-    graph greedy-replays the per-op bests."""
+    """A graph with no placement seams yields one terminal and assembles its best schedules."""
     result = run_two_level(
         _two_distinct_matmuls(),
         ctx=Context.from_target((8, 0)),
@@ -400,13 +435,45 @@ def test_run_two_level_tune_single_terminal_assembles_bests() -> None:
         backend=_CountingBackend(),
         patience=_PATIENCE,
     )
-    assert result.n_terminals == 1, "no multi-option fusion forks today → exactly one outer terminal"
+    assert result.n_terminals == 1, "no realizable placement seam → exactly one outer terminal"
     assert result.best_reward is not None and result.best_reward.ok
     assert len(result.best_reward.per_op) == 2
 
-    # The winning fusion was greedy-assembled into a Graph[CudaOp] from the DB.
+    # The winning kernel set was lowered into a Graph[CudaOp] from the DB.
     assert result.assembled is not None
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
+
+
+def test_two_level_places_kernel_sets_outside_per_kernel_schedule() -> None:
+    """PLACE is an outer Σ comparison; its decision survives assembly but not inner node rows."""
+    prior = _RecordingPrior()
+    db = SearchDB()
+    result = run_two_level(
+        _norm_linear(),
+        ctx=Context.from_target((8, 0)),
+        db=db,
+        backend=_CountingBackend(),
+        patience=_PATIENCE,
+        prior=prior,
+        manage_prior=False,
+    )
+
+    assert result.n_terminals > 1, "the outer search must compare fused and materialized kernel sets"
+    placement_rows = [row for row, _ in prior.rows if any(key.startswith("PLACE") for key in row)]
+    assert placement_rows
+    assert all(any(key.startswith("S_") for key in row) for row in placement_rows)
+    values = {value for row in placement_rows for key, value in row.items() if key.startswith("PLACE")}
+    assert values >= {"fuse", "cut"}
+
+    assert result.best_fused is not None and result.assembled is not None
+    chosen = {
+        key: value for node in result.best_fused.nodes.values() for key, value in node.op.decision_knobs.items() if key.startswith("PLACE")
+    }
+    assembled = {
+        key: value for node in result.assembled.nodes.values() for key, value in node.op.decision_knobs.items() if key.startswith("PLACE")
+    }
+    assert chosen and assembled == chosen, "assembly must lower the measured outer terminal itself"
+    assert all(not any(key.startswith("PLACE") for key in row.features) for row in db.iter_nodes())
 
 
 def test_o3_band_is_per_regime_under_a_precision_gate(monkeypatch):

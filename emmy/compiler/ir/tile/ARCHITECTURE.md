@@ -77,10 +77,11 @@ positionally per scope with the cross-scope aliasing pattern kept). Consumed by 
 MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone built by `_atomize.make_cone`).
 
 **Edge iff closed** holds BY CONSTRUCTION — operands bind positionally, so a subtree that reads a name from its
-enclosing body cannot be one. The closure SCAN survives only as the validation reading, living with its one consumer
-in `passes/lowering/tile/_cut.py`, where it decides cut legality: closed subtrees may hoist to edges, while combine's
-derived material — flash's PV, whose `P` reads the running state — sits BELOW the seam lattice as a derived schedule
-site excluded from PLACE (`Site.derived`). Flash's QK operand edge IS a PLACE site.
+enclosing body cannot be one. Recognition binds every channel of a product operand and rejects a constructed root
+projection with unbound value reads. The same order- and scope-aware closure reading decides cut legality in
+`passes/lowering/tile/_cut.py`: closed subtrees may hoist to edges, while combine's derived material — flash's PV,
+whose `P` reads the running state — sits BELOW the seam lattice as a derived schedule site excluded from PLACE
+(`Site.derived`). Flash's QK operand edge IS a PLACE site.
 
 A cone's SOURCE is the row-invariant prologue (the per-row statistic) and its body the per-cell normalize, so the K
 seam is the node boundary (`ops.cone_seam`). The A/B asymmetry that is real — A M-resident and compute-fillable, B

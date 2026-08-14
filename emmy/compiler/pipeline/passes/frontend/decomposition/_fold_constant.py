@@ -29,11 +29,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.pipeline import RuleSkipped
 from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment
-from emmy.compiler.target import compute_capability
 
 
 def _feeds_only_matvecs(graph: Graph, root: Node) -> bool:
@@ -70,7 +70,7 @@ def _feeds_only_matvecs(graph: Graph, root: Node) -> bool:
     return bool(verdicts) and all(verdicts)
 
 
-def fold_into_constant(graph: Graph, root: Node, inp_x: Node, out: Tensor) -> Graph | None:
+def fold_into_constant(graph: Graph, root: Node, inp_x: Node, out: Tensor, ctx: Context) -> Graph | None:
     """Append ``root.op`` to ``inp_x.op.load_ops`` and rebuild the constant.
 
     Skips scalar constants (``value is not None``) — the loader never
@@ -79,8 +79,8 @@ def fold_into_constant(graph: Graph, root: Node, inp_x: Node, out: Tensor) -> Gr
     """
     from emmy.compiler.ir.frontend.ir import TransposeOp  # noqa: PLC0415
 
-    if compute_capability() < (9, 0) and not (isinstance(root.op, TransposeOp) and _feeds_only_matvecs(graph, root)):
-        raise RuleSkipped("TMA path inactive (compute capability < sm_90) and not an M=1 matvec weight — fold not needed")
+    if not ctx.has_tma and not (isinstance(root.op, TransposeOp) and _feeds_only_matvecs(graph, root)):
+        raise RuleSkipped("TMA path inactive and not an M=1 matvec weight — fold not needed")
     if not isinstance(inp_x.op, ConstantOp):
         raise RuleSkipped("input is not a ConstantOp")
     if inp_x.op.value is not None:

@@ -252,12 +252,19 @@ state component: O rides the normal fragment store into the f32 `__partial` work
 **Inline operands — the mma tier's `sync` transport.** A matmul with a pure producer cone on either operand reaches
 the warp tier through a COMPUTED edge: recognition stores the producer tree inline on that edge
 (`_atomize.make_cone`), and the schedule offers a MANDATORY resolved `sync` `Stage` (there is no gmem-direct sibling —
-a copy transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
+a copy transport cannot evaluate a cone). A multi-channel product uses the same mandatory transport even when all
+edges are materialized, because the direct emitters carry one B/C channel while `sync` allocates one slab and
+fragment chain per channel. `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
 ordinary scalar tensor algebra per shared-memory slab cell, feeding the unchanged `ldmatrix` drain. A is stored in
 canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Materialized peer operands use the
 same vectorized `cp.async` path as ordinary staged matmul, so a generic compact-storage B producer can be evaluated
 directly into Tensor Core fragments without first constructing its expanded dense matrix. This facility is defined
 entirely in generic tensor/loop IR; checkpoint formats are already dissolved before it is selected.
+
+Any materialized edge under `sync` requires the target's `cp.async` capability because that is the transport's copy
+lane. If the capability, exact-cover geometry, dtype, or shared-memory budget declines the warp row, the product's
+demoted `Fold` reading remains schedulable by the general reduce path. Lowering assertions remain backstops; an
+unsupported transport is never emitted as a schedule candidate.
 
 The compute fill assigns each thread a contiguous run of slab cells (the row/col derivation hoists out of the
 per-cell code and the cone replicates with a `__c<j>` SSA suffix). A materialized canonical B uses the K-major

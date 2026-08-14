@@ -1,12 +1,10 @@
 """Phase 4 — placement routing + the cut realizer.
 
-ROUTING entries (PLACE-only golden knobs) and authoritative ``PLACE`` pins resolve a cut BEFORE
-any schedule fork exists; the realizer splits the recognized tree at the seam into un-mapped
-``LoopOp`` pieces that re-recognize as fresh roots (recursive — a piece's entry may itself cut).
-Fuse is the default by ABSENCE: with no pin and no entry, recognition is byte-untouched (the
-digest harness holds separately). These tests run off-GPU: the pieces compile through the full
-CUDA pass list with deterministic option-0 resolution, so kernel SETS and buffer wiring are
-asserted without a device (GPU accuracy is covered by the e2e smoke on the 5090 host).
+Placement offers the maximal fused region plus every realizable single-seam cut before schedule
+enumeration. ROUTING entries (PLACE-only golden knobs) and authoritative ``PLACE`` pins collapse
+that fork; otherwise option-0 is fused and search may measure the fragments. Cut pieces re-recognize
+and schedule as fresh roots, recursively. These tests run off-GPU through the full CUDA pass list,
+asserting fork identity, kernel sets, and buffer wiring.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
@@ -76,6 +74,21 @@ def _activation_linear_graph(S: int = 2, H: int = 16, inter: int = 32) -> Graph:
     g.add_node(ElementwiseOp("silu"), ["x"], Tensor("xa", (Dim(S), Dim(H)), dtype=F16), node_id="xa")
     g.add_node(MatmulOp(), ["xa", "w"], Tensor("y", (Dim(S), Dim(inter)), dtype=F16), node_id="y")
     g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def _norm_gate_up_graph(S: int = 2, H: int = 16, inter: int = 32) -> Graph:
+    g = Graph()
+    _inp(g, "x", (1, S, H))
+    _inp(g, "wn", (H,))
+    _inp(g, "wg", (H, inter))
+    _inp(g, "wu", (H, inter))
+    g.add_node(RmsNormOp(), ["x", "wn"], Tensor("xn", (1, Dim(S), Dim(H)), dtype=F16), node_id="xn")
+    g.add_node(MatmulOp(), ["xn", "wg"], Tensor("gate", (1, Dim(S), Dim(inter)), dtype=F16), node_id="gate")
+    g.add_node(MatmulOp(), ["xn", "wu"], Tensor("up", (1, Dim(S), Dim(inter)), dtype=F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Dim(S), Dim(inter)), dtype=F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Dim(S), Dim(inter)), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["x", "wn", "wg", "wu"], ["o"]
     return g
 
 
@@ -157,7 +170,123 @@ def test_place_sites_are_the_non_root_nodes() -> None:
 
 def test_rms_norm_deploys_unchanged_under_default_fuse(monkeypatch) -> None:
     out = _compile(_rms_graph(), None, monkeypatch)
-    assert len(_kernel_ids(out)) == 1, "no routing entry and no pin = fuse = the recognized form"
+    assert len(_kernel_ids(out)) == 1, "cold option-0 keeps the recognized form fused"
+
+
+def _placement_rows(graph: Graph, ctx: Context) -> list[dict]:
+    """Capture the first placement fork and keep its fused option."""
+    from emmy.compiler.pipeline.knob import family_of
+
+    rows: list[dict] = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        offered = [
+            {key: value for key, value in (getattr(leaf, "knobs", {}) or {}).items() if family_of(key) == "PLACE"} for leaf in leaves
+        ]
+        if not rows and offered and all(offered):
+            rows.extend(offered)
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    return rows
+
+
+def test_unpinned_placement_offers_fused_and_every_legal_cut(monkeypatch) -> None:
+    """Placement is a structural fork, not an edit to the maximal fused region."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    rows = _placement_rows(_norm_linear_graph(S=2, H=16, inter=32), Context.from_target((9, 0)))
+    assert len(rows) >= 2
+    assert all(value == "fuse" for value in rows[0].values())
+    assert all(set(row) == set(rows[0]) for row in rows), "every option must spell the same seam keys"
+    assert all(sum(value == "cut" for value in row.values()) == 1 for row in rows[1:])
+
+
+def test_placement_space_is_capability_independent(monkeypatch) -> None:
+    """Recognition and placement enumerate the same algebraic seams on every target."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    rows = [
+        _placement_rows(_norm_linear_graph(S=2, H=16, inter=32), Context.from_target(target))
+        for target in ((8, 0), (9, 0), (10, 0), (12, 0))
+    ]
+    assert rows and all(row == rows[0] for row in rows[1:])
+
+
+def test_selecting_place_cut_schedules_each_resulting_kernel(monkeypatch) -> None:
+    """A cut is followed by independent recognition and schedule enumeration for both pieces."""
+    from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    selected = False
+
+    def decide(fp):
+        nonlocal selected
+        leaves = flatten_leaves(fp.options)
+        if not selected:
+            cut = next(
+                (leaf for leaf in leaves if any(family_of(key) == "PLACE" and value == "cut" for key, value in leaf.knobs.items())),
+                None,
+            )
+            if cut is not None:
+                selected = True
+                return cut
+        return leaves[0]
+
+    out, trace = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((9, 0))).resolve(
+        _norm_linear_graph(S=2, H=16, inter=32), decide
+    )
+    kernels = [node.op for node in out.nodes.values() if getattr(node.op, "kernel_source", None)]
+    assert selected and len(kernels) >= 2
+    assert any(decision.chosen_kind == "graph" for decision in trace)
+    assert all(any(family_of(key) in SCHEDULE_FAMILIES for key in kernel.knobs) for kernel in kernels)
+    assert all(not any(family_of(key) == "PLACE" for key in kernel.knobs) for kernel in kernels)
+    assert all(any(family_of(key) == "PLACE" for key in kernel.decision_knobs) for kernel in kernels)
+    assert all(all(family_of(key) == "PLACE" for key in kernel.decision_knobs) for kernel in kernels)
+
+
+def test_shared_a_product_cut_retains_every_contraction_channel(monkeypatch) -> None:
+    """A cut materializes the shared A edge; recursive recognition must preserve the whole product."""
+    from emmy.compiler.ir.tile import Fold, TileOp
+    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.tile.ops import axis_names
+    from emmy.compiler.pipeline.search.two_level import outer_pipeline
+
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@a=cut")
+    graph, _ = Run(pipeline=outer_pipeline(), ctx=Context.from_target((9, 0))).resolve(
+        _norm_gate_up_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    products = []
+    for node in graph.nodes.values():
+        if not isinstance(node.op, TileOp):
+            continue
+        root = node.op.op
+        contraction = root.operands[0] if isinstance(root, Fold) and root.axis is None and root.operands else root
+        if is_contraction(contraction) and len(contraction.channels) > 1:
+            products.append((node.op, root, contraction))
+    assert len(products) == 1
+    tile, root, product = products[0]
+    assert len(product.channels) == 2
+    assert not (root.lift.free_names() - axis_names(root) - {axis.name for axis in tile.place.free})
+
+    lowered = _compile(_norm_gate_up_graph(), "PLACE@a=cut", monkeypatch)
+    assert all(not isinstance(node.op, TileOp) for node in lowered.nodes.values())
+
+
+def test_nested_placement_delta_excludes_the_inherited_parent_choice() -> None:
+    """Recursive placement replay compares both metadata channels on the recognized root."""
+    from emmy.compiler.pipeline.pipeline import _option_decision
+
+    fragment = Graph()
+    fragment.add_node(
+        InputOp(decision_knobs={"PLACE@a": "cut", "PLACE@b": "cut"}),
+        [],
+        Tensor("out", (), dtype=F16),
+        node_id="out",
+    )
+    assert _option_decision(fragment, {"PLACE@a": "cut"}) == {"PLACE@b": "cut"}
 
 
 def test_rms_norm_place_cut_splits_stat_and_scale(monkeypatch) -> None:

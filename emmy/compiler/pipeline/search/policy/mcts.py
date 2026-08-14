@@ -219,7 +219,9 @@ class TuningSearch(Search):
         # not just its fork-prefix — so knobs stamped at deterministic lowering
         # steps (FK / BK / STAGE / …) reach the prior. Falls back to the
         # fork-prefix when no candidate is supplied.
-        token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
+        token.realized_knobs = (
+            {**self._node_knobs(token), **self._realized_knobs(candidate)} if candidate is not None else self._node_knobs(token)
+        )
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
         token.bench_stats = stats
         token.bench_status = status

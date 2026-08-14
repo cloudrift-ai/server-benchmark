@@ -760,7 +760,7 @@ def greedy_decide(
     Structural (``Graph``-splicing) options are priced with the trained prior
     grounded in measured DB evidence — :func:`_pick_structural` — so an
     unpinned ``compile`` / ``run`` can deploy the kernel sets ``tune`` measured
-    best (the demoted-matmul split); cold, the structural leaf is filtered and
+    best (for example, a placement cut); cold, the structural leaf is filtered and
     kernel sets stay unchanged.
     ``price_structural=False`` keeps the filter behavior — used by
     ``Pipeline.run``'s retry after a structural pick failed to lower, and by

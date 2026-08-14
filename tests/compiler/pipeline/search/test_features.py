@@ -14,6 +14,14 @@ from emmy.compiler.pipeline.search.features import knob_features
 _CTX = {"S_ext_free_prod": 512.0, "S_ext_reduce_prod": 2048.0, "S_reduce_add": 1.0, "H_sm_count": 128.0}
 
 
+def test_scoped_place_rows_encode_kernel_set_choice() -> None:
+    fused = knob_features({"PLACE@a": "fuse", "PLACE@b": "fuse"})
+    cut = knob_features({"PLACE@a": "cut", "PLACE@b": "fuse"})
+    assert fused["PLACE_sites"] == cut["PLACE_sites"] == 2.0
+    assert fused["PLACE_cut"] == 0.0
+    assert cut["PLACE_cut"] == 1.0
+
+
 def _feats(reduce_codec: str, work: str = "", **extra):
     """A tileless reduce row: the site-local ``REDUCE`` value plus the ``WORK`` inventory its
     cooperative width lives in."""

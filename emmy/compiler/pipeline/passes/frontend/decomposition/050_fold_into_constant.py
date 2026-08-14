@@ -23,6 +23,7 @@ Companion rule ``060_fold_reshape_into_constant`` does the same for
 
 from __future__ import annotations
 
+from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.pipeline import Match, Pattern
@@ -31,6 +32,6 @@ from emmy.compiler.pipeline.passes.frontend.decomposition._fold_constant import 
 PATTERN = [Pattern("root", TransposeOp)]
 
 
-def rewrite(match: Match, root: Node, inp_x: Node, out: Tensor) -> Graph | None:
+def rewrite(match: Match, root: Node, inp_x: Node, out: Tensor, ctx: Context) -> Graph | None:
     graph = match.graph
-    return fold_into_constant(graph, root, inp_x, out)
+    return fold_into_constant(graph, root, inp_x, out, ctx)

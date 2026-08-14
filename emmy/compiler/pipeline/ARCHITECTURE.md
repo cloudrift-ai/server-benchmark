@@ -1178,6 +1178,11 @@ plus every recognized child's independent transcript, CUDA fingerprint, schedule
 consumes the transcript in order and checks rule, node, option kind, knob delta, option count, and both terminal
 fingerprints. The model's pooled `PLACE_sites` / `PLACE_cut` features never enter this persistence surface.
 
+Tune-winner persistence fails closed. A tune that produced neither an exact plan nor a scalar winner writes a
+target-scoped `no_exact_pin` ranking marker, and every stale `tune_winner` or marker ranking from an earlier tune is
+retired to `superseded` — so a strict publication run cannot mistake an older winner or an unchanged inventory for
+this run's success.
+
 Promotion automatically replays and audits a verified working plan, then splits it along the established trust
 boundary: one PLACE-only `.routing` realization stays on the original pre-placement target and one schedule-only
 realization is interned on exact Loop IR for every independent child. Each child row is recompiled and its CUDA keys

@@ -11,7 +11,7 @@ axes onto the grid and offers the scheduling forks; materialization back to loop
 ``lowering/kernel``.
 
 Nothing here reads a knob or a pin — recognition is structure, and every choice it makes is
-unconditional. (The one exception is PLACEMENT ROUTING, step 3.5: a routing golden / ``PLACE`` pin
+unconditional. (The one exception is PLACEMENT, step 3.5: a ``PLACE`` pin
 cuts the recognized tree into a fragment of un-mapped ``LoopOp``\\ s, and it must resolve BEFORE any
 schedule fork exists, so it cannot wait for ``020``.)
 
@@ -429,13 +429,12 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # it from the graph again when a later pass matches the scheduled op.
     map_tile = TileOp(op=node, name=loop.name, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
     pro = bind_prologue_contraction(node, free)
-    # (3.5) PLACEMENT ROUTING (phase 4) — resolved FIRST, before any schedule fork exists: a
-    # ROUTING golden (PLACE-only knobs for this kernel's (kind, shape)) or an authoritative
+    # (3.5) PLACEMENT — resolved FIRST, before any schedule fork exists: an authoritative
     # PLACE pin cuts the recognized tree into a fragment of un-mapped LoopOps; each piece
-    # re-recognizes as a fresh root on the pass-scan restart and resolves its OWN entry
-    # (recursive — a piece's entry may itself cut). No entry / no pin = fuse = the recognized
-    # form, by absence. The fused (computed-A) reading is the routing reference tree when it
-    # binds — its seams (the `a` cone edge) are the ones a routing entry spells.
+    # re-recognizes as a fresh root on the pass-scan restart (recursive — a deeper pin key may
+    # cut a piece again). No pin = fuse = the recognized form, by absence. The fused
+    # (computed-A) reading is the reference tree when it binds — its seams (the `a` cone edge)
+    # are the ones a ``PLACE`` pin spells.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
     seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if seam is not None:

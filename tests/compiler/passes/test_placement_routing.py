@@ -211,43 +211,6 @@ def test_pin_naming_no_seam_is_skipped(monkeypatch) -> None:
 # --- routing entries drive the same realizer -------------------------------------------------------
 
 
-def test_routing_golden_cuts_without_a_pin(monkeypatch) -> None:
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090")
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    # Goldens are -O3 truth: under make test's -Xcicc -O1 lane the routing consult (like the
-    # schedule golden tier) is silent — force the deployable regime, the audit's own move.
-    with config.nvcc_flags_override(""):
-        ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-        out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
-    assert any("__cut_" in k for k in _kernel_ids(out)), "the routing entry cuts with no pin present"
-
-
-def test_stat_free_computed_a_routing_golden_uses_its_fused_key(monkeypatch) -> None:
-    """A stat-free activation→linear record deploys through the canonical computed-A key."""
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    gpu_name = "NVIDIA GeForce RTX 5090"
-    entry = SimpleNamespace(
-        name="activation-linear.routing",
-        knobs={"PLACE@a": "cut"},
-        is_routing=True,
-        gpu_name=gpu_name,
-        compute_cap=(12, 0),
-        emmy_us=1.0,
-        shape_key=replace(ShapeKey.from_matmul(2, 32, 16, "fp16"), kind="fused"),
-    )
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    with config.nvcc_flags_override(""):
-        out = _compile(_activation_linear_graph(), None, monkeypatch, ctx=Context.from_target((12, 0), gpu_name=gpu_name))
-    kernels = _kernel_ids(out)
-    assert any("__cut_" in k for k in kernels), kernels
-    assert "y" in kernels, "the residue matmul keeps the original output"
-
-
 def test_schedule_pin_suppresses_the_routing_entry(monkeypatch) -> None:
     """Any live schedule-family pin marks a pinned re-record / ``--ab`` compile, and pins are
     authoritative over every golden tier — the recorded routing entry must not reroute it. This

@@ -115,7 +115,7 @@ logger = logging.getLogger(__name__)
 
 #: The per-site schedule families this enumeration decides, IN THE ORDER their keys lead the fork
 #: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the seam
-#: family — resolved from routing goldens / pins, never enumerated here.
+#: family — resolved from ``PLACE`` pins, never enumerated here.
 #:
 #: Not a copy of ``path.SLICE_FAMILIES`` even though the members match: that one answers "which
 #: families key a slice" (a set) and this one "in what order do their levels nest" (a sequence).

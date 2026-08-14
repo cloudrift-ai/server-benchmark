@@ -169,13 +169,13 @@ lower endpoint exceeds one. The equal-weight four-point summary is the geometric
 10,000-draw seed-0 bootstrap that resamples the five pairs within each point. "Faster across the matrix" requires
 all four points and the summary to meet the same lower-bound rule.
 
-For every serving task, intelligent review must confirm `successful_requests == num_prompts`, `failed_requests == 0`,
-the complete preregistered matrix, the intended backend from the raw logs, and plausible outputs and metrics. `emmy
-bench` records these facts but does not accept or reject them. No performance outlier is removed. A machine-readable
-deployment, client, or network failure before a complete metric may trigger one rerun of the entire stock/Emmy pair
-for that workload/repeat; retain and disclose both failed originals. A second failure makes the point incomplete. A
-semantic mismatch or post-metric performance anomaly is never a rerun reason; after a code/configuration fix, restart
-the entire 40-task matrix under a new source ID.
+For every serving task, intelligent review of the raw output must confirm `successful_requests == num_prompts`,
+`failed_requests == 0`, the complete preregistered matrix, the intended backend from the raw logs, and plausible
+outputs and metrics. `emmy bench` preserves the raw output but does not parse, accept, or reject measurements. No
+performance outlier is removed. A machine-readable deployment, client, or network failure before a complete metric
+may trigger one rerun of the entire stock/Emmy pair for that workload/repeat; retain and disclose both failed
+originals. A second failure makes the point incomplete. A semantic mismatch or post-metric performance anomaly is
+never a rerun reason; after a code/configuration fix, restart the entire 40-task matrix under a new source ID.
 
 ## Megakernel comparison lane
 

@@ -79,9 +79,8 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
         f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c 'vllm bench serve {' '.join(_bench_args(recipe))}'"
     )
 
-    # benchmark.repeats reruns the identical client workload against the one deployed
-    # server; the returned output then carries one result stanza per repeat, which the
-    # results parser aggregates into mean/stddev. A failed repeat fails the task.
+    # benchmark.repeats reruns the identical client workload against one deployed
+    # server. The raw output retains one stanza per repeat; a failed repeat fails the task.
     bench_command_str = build_bench_command(recipe)
     outputs = []
     for _ in range(max(1, bench.repeats)):

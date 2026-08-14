@@ -14,6 +14,9 @@ tracked skills and CloudRift inference endpoint.
 | **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
 | **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
+There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
+from a developer checkout through the tracked `.claude/skills/run-experiment` skill.
+
 ## Pull-request checks
 
 **Tests** installs the CI dependency set on Python 3.13. Its lint job runs Ruff check and format verification; its test
@@ -134,7 +137,7 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 
 ## Repository configuration
 
-Agent and experiment workflows use these repository secrets as applicable:
+Agent workflows use these repository secrets as applicable:
 
 - `CLOUDRIFT_API_KEY` for model discovery and CloudRift provisioning;
 - `HF_TOKEN` for gated checkpoints;

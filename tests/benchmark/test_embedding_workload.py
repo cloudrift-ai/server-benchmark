@@ -1,6 +1,5 @@
-"""Embedding-recipe bench command + metrics parsing + smoke-response checks."""
+"""Embedding-recipe bench command and smoke-response checks."""
 
-from emmy.benchmark.record import parse_benchmark_metrics
 from emmy.benchmark.workload import build_bench_command
 from emmy.deploy.orchestrate import _check_chat_response, _check_completion_response, _check_embedding_response, _smoke_response_check
 from emmy.recipe.types import Recipe
@@ -28,37 +27,6 @@ def test_generate_bench_command_unchanged():
     cmd = build_bench_command(_recipe("generate"))
     assert "--backend" not in cmd
     assert "--random-output-len 1" in cmd
-
-
-# Captured from a real `vllm bench serve --backend openai-embeddings` run (v0.22.1).
-_EMBED_BENCH_OUTPUT = """\
-============ Serving Benchmark Result ============
-Successful requests:                     32
-Failed requests:                         0
-Maximum request concurrency:             8
-Benchmark duration (s):                  0.12
-Total input tokens:                      4096
-Request throughput (req/s):              277.99
-Total token throughput (tok/s):          35582.34
-----------------End-to-end Latency----------------
-Mean E2EL (ms):                          27.28
-Median E2EL (ms):                        15.49
-P99 E2EL (ms):                           70.07
-==================================================
-"""
-
-
-def test_parse_embeddings_bench_output():
-    m = parse_benchmark_metrics(_EMBED_BENCH_OUTPUT)
-    assert m.successful_requests == 32
-    assert m.failed_requests == 0
-    assert m.request_throughput == 277.99
-    assert m.total_token_throughput == 35582.34
-    assert m.mean_e2el_ms == 27.28
-    assert m.p99_e2el_ms == 70.07
-    # Generation-only metrics stay unset rather than mis-parsing.
-    assert m.mean_ttft_ms is None
-    assert m.total_generated_tokens is None
 
 
 def test_check_embedding_response():

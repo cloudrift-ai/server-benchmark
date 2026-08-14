@@ -164,9 +164,9 @@ emmy bench experiments/gemma-4-12B/* --local                            # On thi
 emmy bench experiments/gemma-4-12B/* --ssh user@host1 --ssh user@host2  # Pre-allocated hosts
 ```
 
-Each real run replaces the experiment's `results/` directory and writes one YAML experiment record per matrix row.
-Use `$run-experiment` to run or customize an experiment, assemble the records and `RESULTS.md`, and commit the durable
-last-run snapshot.
+Each real run replaces the experiment's `results/` directory and writes one system-only YAML experiment record per
+matrix row. Use `$run-experiment` to run or customize an experiment, assemble the records and factual `RESULTS.md`
+artifact index, and commit the durable last-run snapshot without interpreting experiment data.
 
 ## Deploy
 

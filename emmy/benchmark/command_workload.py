@@ -108,8 +108,7 @@ async def run_command_workload(
 ) -> tuple[bool, dict]:
     """Run one command-recipe task on the remote VM.
 
-    Returns (success, info) where info contains the rendered command and a
-    list of locally-pulled result paths.
+    Returns the execution status and locally pulled artifact paths or transfer errors.
     """
     from emmy.provisioning.ssh_transport import scp_from_remote
 
@@ -138,7 +137,7 @@ async def run_command_workload(
     logger.info(f"Running command for {task.variant}:\n{rendered}")
     rc, _, _ = await run_cmd(rendered_with_env, log_output=True, timeout=cmd_cfg.timeout)
     success = rc == 0
-    info: dict = {"rendered_command": rendered, "exit_code": rc, "result_paths": [], "result_errors": []}
+    info: dict = {"result_paths": [], "result_errors": []}
 
     if not success:
         logger.error(f"Command failed (rc={rc}) for {task.variant}")

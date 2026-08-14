@@ -3,28 +3,20 @@
 import asyncio
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from emmy.benchmark.bench_logging import _get_group_logger, active_run_dir, add_group_file_handler
 from emmy.benchmark.command_workload import run_command_workload
-from emmy.benchmark.record import (
-    artifact,
-    command_measurement,
-    create_record,
-    finish_record,
-    inference_measurement,
-    missing_command_provenance,
-    new_run_id,
-    parse_machine_info,
-    start_record,
-    write_record,
+from emmy.benchmark.experiment_record import (
+    Artifact,
+    ExperimentRecord,
+    Infrastructure,
 )
-from emmy.benchmark.system_info import collect_system_info
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
 from emmy.deploy import DeployParams
 from emmy.deploy import deploy as deploy_entry
 from emmy.deploy import teardown as teardown_entry
-from emmy.deploy.compose import generate_compose
 from emmy.planner import BenchmarkTask, ExecutionGroup
 from emmy.provisioning.cloud import delete_cloud_vm, provision_cloud_vm
 from emmy.provisioning.host import RemoteHost
@@ -32,6 +24,7 @@ from emmy.provisioning.remote import provision_remote
 from emmy.provisioning.ssh_transport import REMOTE_DEPLOY_DIR, make_run_cmd
 from emmy.provisioning.staging import stage_to_remote
 from emmy.redact import redact_secrets, register_secret
+from emmy.system_info import SystemInformation
 from emmy.timing import (
     PHASE_BENCHMARK,
     PHASE_COMMAND,
@@ -43,47 +36,49 @@ from emmy.timing import (
 
 
 def _persist(task: BenchmarkTask, dry_run: bool) -> None:
-    if not dry_run:
-        write_record(task)
+    if not dry_run and task.record is not None:
+        task.record.write(task.record_path())
 
 
 def _ensure_records(group: ExecutionGroup, dry_run: bool) -> None:
     code_hash = BenchmarkTask.compute_code_hash()
-    run_id = new_run_id(code_hash)
+    run_id = ExperimentRecord.new_run_id(code_hash)
     for task in group.tasks:
         if task.record is None:
-            task.record = create_record(task, run_id, code_hash)
-        start_record(task.record, "provisioning")
+            task.record = ExperimentRecord.create(task, run_id, code_hash)
+        task.record.start("provisioning")
         _persist(task, dry_run)
 
 
-def _infrastructure(group: ExecutionGroup, group_label: str, conn, *, preallocated: bool) -> dict:
-    info = {
-        "group": group_label,
-        "requested_gpu": group.gpu_name,
-        "requested_gpu_count": group.gpu_count,
-        "address": conn.address,
-        "ssh_port": conn.ssh_port,
-        "provider": None,
-        "instance_id": None,
-        "zone": None,
-        "state": "external" if preallocated else "active",
-    }
+def _infrastructure(group: ExecutionGroup, group_label: str, conn, *, preallocated: bool) -> Infrastructure:
+    provider = None
+    instance_id = None
+    zone = None
     if conn.delete_info:
-        info["provider"] = conn.delete_info[0]
-        info["instance_id"] = conn.delete_info[1]
+        provider = conn.delete_info[0]
+        instance_id = conn.delete_info[1]
         if conn.delete_info[0] == "gcp" and len(conn.delete_info) > 2:
-            info["zone"] = conn.delete_info[2]
-    return info
+            zone = conn.delete_info[2]
+    return Infrastructure(
+        group=group_label,
+        requested_gpu=group.gpu_name,
+        requested_gpu_count=group.gpu_count,
+        address=conn.address,
+        ssh_port=conn.ssh_port,
+        provider=provider,
+        instance_id=instance_id,
+        zone=zone,
+        state="external" if preallocated else "active",
+    )
 
 
-def _base_artifacts(task: BenchmarkTask, group_label: str) -> list[dict]:
-    if task.run_dir is None:
+def _base_artifacts(task: BenchmarkTask, group_label: str) -> list[Artifact]:
+    if task.run_dir is None or task.record is None:
         return []
-    artifacts = [artifact(task, task.run_dir / "benchmark.log", "run_log")]
+    artifacts = [task.record.artifact(task, task.run_dir / "benchmark.log", "run_log")]
     group_log = task.run_dir / f"benchmark_{group_label}.log"
     if group_log.exists():
-        artifacts.append(artifact(task, group_log, "group_log"))
+        artifacts.append(task.record.artifact(task, group_log, "group_log"))
     return artifacts
 
 
@@ -98,9 +93,9 @@ def _finalize_failure(
 ) -> None:
     if task.record is None:
         return
-    if not task.record["artifacts"]:
-        task.record["artifacts"] = _base_artifacts(task, group_label)
-    finish_record(task.record, success=False, stage=stage, timing=timing, error=error)
+    if not task.record.artifacts:
+        task.record.artifacts = _base_artifacts(task, group_label)
+    task.record.finish(success=False, stage=stage, timing=timing, error=error)
     _persist(task, dry_run)
 
 
@@ -158,7 +153,7 @@ async def run_execution_group(
 
         infrastructure = _infrastructure(group, group_label, conn, preallocated=preallocated_conn is not None)
         for task in group.tasks:
-            task.record["execution"]["infrastructure"] = dict(infrastructure)
+            task.record.execution.infrastructure = replace(infrastructure)
             _persist(task, dry_run)
 
         first_recipe = group.tasks[0].recipe if group.tasks else None
@@ -171,10 +166,10 @@ async def run_execution_group(
             )
 
         sysinfo_run_cmd = make_run_cmd(conn.address, ssh_key, conn.ssh_port, dry_run=dry_run)
-        machine = parse_machine_info(await collect_system_info(sysinfo_run_cmd))
+        system = await SystemInformation.retrieve(sysinfo_run_cmd)
         for task in group.tasks:
-            task.record["machine"] = machine
-            task.record["execution"]["stage"] = "staging"
+            task.record.system = system
+            task.record.execution.stage = "staging"
             _persist(task, dry_run)
 
         repo_dir_remote: str | None = None
@@ -202,7 +197,7 @@ async def run_execution_group(
             )
         for task in group.tasks:
             if task.recipe.kind == "command":
-                task.record["provenance"]["source"] = stage_manifest
+                task.record.provenance.source = stage_manifest
                 _persist(task, dry_run)
 
         for task in group.tasks:
@@ -216,14 +211,14 @@ async def run_execution_group(
             for phase_name, seconds in group_timer.phases.items():
                 task_timer.record(phase_name, seconds, log=False)
             gpu_device_ids = list(range(task.gpu_count))
-            task.record["execution"]["stage"] = "command" if recipe.kind == "command" else "deploy"
+            task.record.execution.stage = "command" if recipe.kind == "command" else "deploy"
             _persist(task, dry_run)
 
             if recipe.kind == "command":
                 run_cmd = make_run_cmd(conn.address, ssh_key, conn.ssh_port, dry_run=dry_run)
-                run_id = task.record["execution"]["run_id"]
+                run_id = task.record.execution.run_id
                 task_dir_remote = f"{REMOTE_DEPLOY_DIR}/{group_label}/{task.variant}/{run_id}"
-                command_info: dict = {"rendered_command": None, "exit_code": None, "result_paths": [], "result_errors": []}
+                command_info: dict = {"result_paths": [], "result_errors": []}
                 try:
                     async with task_timer.ameasure(PHASE_COMMAND):
                         success, command_info = await run_command_workload(
@@ -242,23 +237,18 @@ async def run_execution_group(
                     success = False
                     command_info["error"] = str(exc)
                 if recipe.command.strict and not dry_run:
-                    if errors := missing_command_provenance(machine, stage_manifest):
+                    if errors := task.record.missing_command_provenance():
                         command_info["provenance_errors"] = errors
                         success = False
                 if errors := command_info.get("provenance_errors"):
                     task_logger.error("Required command provenance is missing: %s", ", ".join(errors))
 
                 timing = task_timer.as_dict()
-                task.record["artifacts"] = _base_artifacts(task, group_label)
-                portable_result_paths = []
+                task.record.artifacts = _base_artifacts(task, group_label)
                 for result_path in command_info.get("result_paths", []):
-                    result_artifact = artifact(task, Path(result_path), "command_result")
-                    task.record["artifacts"].append(result_artifact)
-                    portable_result_paths.append(result_artifact["path"])
-                command_info["result_paths"] = portable_result_paths
-                task.record["measurement"] = command_measurement(command_info)
+                    task.record.artifacts.append(task.record.artifact(task, Path(result_path), "command_result"))
                 error = command_info.get("error") or "; ".join(command_info.get("result_errors", [])) or None
-                finish_record(task.record, success=success, stage="command", timing=timing, error=error)
+                task.record.finish(success=success, stage="command", timing=timing, error=error)
                 _persist(task, dry_run)
                 task_results.append((task, success or dry_run, timing))
                 completed.add(id(task))
@@ -292,12 +282,12 @@ async def run_execution_group(
                 completed.add(id(task))
                 continue
 
-            task.record["execution"]["stage"] = "benchmark"
+            task.record.execution.stage = "benchmark"
             _persist(task, dry_run)
             task_logger.info("Running benchmark...")
             run_cmd = make_run_cmd(conn.address, ssh_key, conn.ssh_port, dry_run=dry_run)
             async with task_timer.ameasure(PHASE_BENCHMARK):
-                success, output, stderr, bench_command = await run_benchmark_workload(run_cmd, recipe, dry_run=dry_run)
+                success, output, stderr, _bench_command = await run_benchmark_workload(run_cmd, recipe, dry_run=dry_run)
 
             benchmark_log = task.benchmark_log_path()
             if not dry_run:
@@ -315,14 +305,18 @@ async def run_execution_group(
                     await teardown_entry(params)
 
             timing = task_timer.as_dict()
-            compose_content = generate_compose(recipe, model_dir, hf_token, gpu_device_ids=gpu_device_ids)
-            task.record["measurement"] = inference_measurement(output, compose_content, bench_command)
-            task.record["artifacts"] = [
+            task.record.artifacts = [
                 *_base_artifacts(task, group_label),
-                artifact(task, benchmark_log, "benchmark_output"),
-                artifact(task, server_log_path, "server_log", status=server_log["status"], exit_code=server_log["exit_code"]),
+                task.record.artifact(task, benchmark_log, "benchmark_output"),
+                task.record.artifact(
+                    task,
+                    server_log_path,
+                    "server_log",
+                    status=server_log["status"],
+                    exit_code=server_log["exit_code"],
+                ),
             ]
-            finish_record(task.record, success=success, stage="benchmark", timing=timing, error=stderr or None)
+            task.record.finish(success=success, stage="benchmark", timing=timing)
             _persist(task, dry_run)
             task_results.append((task, success or dry_run, timing))
             completed.add(id(task))
@@ -334,7 +328,7 @@ async def run_execution_group(
                 continue
             timer = task_timers.get(id(task))
             timing = timer.as_dict() if timer is not None else group_timer.as_dict()
-            stage = task.record["execution"]["stage"] if task.record else "execution"
+            stage = task.record.execution.stage if task.record else "execution"
             _finalize_failure(
                 task,
                 stage=stage,
@@ -371,17 +365,16 @@ async def run_execution_group(
 
         if infrastructure_state is not None:
             for task in group.tasks:
-                if task.record is None or task.record["execution"]["infrastructure"] is None:
+                if task.record is None or task.record.execution.infrastructure is None:
                     continue
-                task.record["execution"]["infrastructure"]["state"] = infrastructure_state
+                task.record.execution.infrastructure.state = infrastructure_state
                 if cleanup_error:
-                    task.record["execution"]["cleanup_error"] = cleanup_error
-                    if task.record["status"] == "succeeded":
-                        finish_record(
-                            task.record,
+                    task.record.execution.cleanup_error = cleanup_error
+                    if task.record.status == "succeeded":
+                        task.record.finish(
                             success=False,
                             stage="vm_cleanup",
-                            timing=task.record["execution"]["timing_seconds"],
+                            timing=task.record.execution.timing_seconds,
                             error=cleanup_error,
                         )
                 _persist(task, dry_run)

@@ -33,7 +33,7 @@ The full measurement protocol is published in the
 [Gemma 4 optimization record](https://riftstack.ai/research/optimizing-gemma-4-12b-rtx).
 The grid held context at 16,384 and used the same Emmy FAST_MATH engine, while selecting decode and prefill buckets
 for each concurrency point. The final recipe keeps the warmed interactive default, decode bucket 32; use the retained
-experiment YAML to reproduce the full performance grid.
+experiment recipe to reproduce the full performance grid.
 
 ## FAST_MATH accuracy and compiler qualification
 
@@ -53,7 +53,7 @@ emmy bench experiments/gemma-4-12B/serving_rtx5090 --ssh dikobraz@kenshin \
 ```
 
 The filter selects only the recipe's Emmy FAST_MATH engine lane. Use `$run-experiment` to retain the latest raw results,
-experiment records, and experiment report.
+system-only experiment records, and factual artifact index.
 
 ## Limits
 

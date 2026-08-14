@@ -147,8 +147,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Matrix** — A recipe section that describes several values to test. `cross` creates every combination; `zip`
   pairs values by position.
 - **Experiment row** — One executed variant of an experiment recipe.
-- **Experiment record** — The versioned YAML record for one experiment row. It contains timestamps, status, the
-  expanded recipe and matrix parameters, source and machine provenance, timing, measurements, and raw-artifact paths.
+- **Experiment record** — The typed, versioned YAML record for one experiment row. It contains timestamps, status,
+  row identity and matrix parameters, source provenance, execution lifecycle, generic system information, and
+  raw-artifact paths. It never contains interpreted or parsed experiment measurements.
 - **Raw experiment results** — Logs and declared measurement files preserved under an experiment's `results/`
   directory. They are evidence referenced by experiment records, not a second structured result format.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.

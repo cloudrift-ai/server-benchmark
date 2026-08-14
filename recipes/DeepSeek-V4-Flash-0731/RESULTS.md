@@ -66,4 +66,4 @@ emmy bench experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3 --ssh riftuser@1
 
 The experiment runs four client repeats. The first warms the complete unique prompt set after deployment; use repeats
 two through four to reproduce the reported steady result. Use `$run-experiment` to retain the latest raw results,
-experiment records, and experiment report.
+system-only experiment records, and factual artifact index.

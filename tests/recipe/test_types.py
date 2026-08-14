@@ -312,7 +312,7 @@ def test_from_dict_without_docker_options():
 
 
 def test_from_dict_rejects_inline_postprocessing():
-    with pytest.raises(ValueError, match="summarize experiment records in RESULTS.md"):
+    with pytest.raises(ValueError, match="aggregate is not supported"):
         Recipe.from_dict({"aggregate": {"run": "printf done", "timeout": 60}})
 
 

@@ -19,11 +19,11 @@ from emmy.benchmark import (
     validate_config,
 )
 from emmy.benchmark.execution import _run_groups_on_hosts
+from emmy.benchmark.experiment_record import ExperimentRecord
 from emmy.benchmark.fixed_hosts import (
     resolve_fixed_hosts,
     validate_hosts_cover_groups,
 )
-from emmy.benchmark.record import create_record, finish_record, new_run_id, write_record
 from emmy.planner import BenchmarkTask
 from emmy.planner.group_by_model_and_gpu import GroupByModelAndGpuPlanner
 from emmy.recipe import resolve_recipe_dir
@@ -156,13 +156,13 @@ def handle_bench(args):
             recipe_results_dirs[resolved] = BenchmarkTask.prepare_results_dir(resolved, overwrite=not dry_run)
 
     code_hash = BenchmarkTask.compute_code_hash()
-    run_id = new_run_id(code_hash)
+    run_id = ExperimentRecord.new_run_id(code_hash)
     for task in tasks:
         resolved = str(Path(task.recipe_dir).resolve())
         task.setup_results_dir(recipe_results_dirs[resolved])
-        task.record = create_record(task, run_id, code_hash)
+        task.record = ExperimentRecord.create(task, run_id, code_hash)
         if not dry_run:
-            write_record(task)
+            task.record.write(task.record_path())
 
     log_file_paths = []
     if not dry_run:
@@ -193,10 +193,10 @@ def handle_bench(args):
         if isinstance(r, Exception):
             root_logger.error(f"Group {i} generated an exception: {r}")
             for task in groups[i].tasks:
-                if task.record and task.record["status"] not in {"succeeded", "failed"}:
-                    finish_record(task.record, success=False, stage="execution", timing={}, error=str(r))
+                if task.record and task.record.status not in {"succeeded", "failed"}:
+                    task.record.finish(success=False, stage="execution", timing={}, error=str(r))
                     if not dry_run:
-                        write_record(task)
+                        task.record.write(task.record_path())
                 all_results.append((task, False, {}))
         else:
             all_results.extend(r)

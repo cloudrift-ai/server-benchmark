@@ -192,13 +192,14 @@ Use it when the serving engine performs request-time initialization after the de
 requests use the same controlled workload configuration and run before every measured repeat.
 
 `benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
-the model is deployed once, only the client run repeats. The experiment record's `measurement.metrics` holds the
-per-field mean, with `metrics_stddev` (sample stddev) and `repetitions` (the raw per-repeat metrics) alongside. Because
-the seed and prompts are identical across repeats, the spread measures run-to-run noise, not workload variation.
+the model is deployed once, only the client run repeats. Every client stanza remains in the raw benchmark artifact;
+the experiment record does not parse or aggregate those measurements. Because the seed and prompts are identical
+across repeats, a separate intelligent review may use their spread to assess run-to-run noise rather than workload
+variation.
 
 The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
-result validators. `emmy bench` preserves raw observations but does not interpret whether they support an experiment's
-claim; that decision belongs to the `run-experiment` skill's review of the complete row records and raw evidence.
+result validators. `emmy bench`, the experiment record, and the `run-experiment` skill preserve raw observations but
+do not interpret whether they support an experiment's claim.
 
 ### Extra Args Ban Enforcement
 

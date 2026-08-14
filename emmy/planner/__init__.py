@@ -1,5 +1,7 @@
 """Planner: group benchmark tasks into execution groups for VM allocation."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -7,10 +9,14 @@ import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from emmy.hardware import gpu_short_name
 from emmy.planner.variant import Variant
 from emmy.recipe.types import Recipe
+
+if TYPE_CHECKING:
+    from emmy.benchmark.experiment_record import ExperimentRecord
 
 
 @dataclass
@@ -21,7 +27,7 @@ class BenchmarkTask:
     variant: Variant
     recipe: Recipe
     run_dir: Path | None = None
-    record: dict | None = field(default=None, repr=False, compare=False)
+    record: ExperimentRecord | None = field(default=None, repr=False, compare=False)
 
     @property
     def gpu_name(self) -> str:

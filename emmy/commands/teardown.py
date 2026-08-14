@@ -6,9 +6,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-import yaml
-
-from emmy.benchmark.record import utc_timestamp, write_record_path
+from emmy.benchmark.experiment_record import ExperimentRecord
 from emmy.deploy.orchestrate import run_teardown
 from emmy.provisioning.cloud import delete_cloud_vm
 from emmy.provisioning.ssh_transport import make_run_cmd
@@ -16,21 +14,21 @@ from emmy.provisioning.ssh_transport import make_run_cmd
 logger = logging.getLogger(__name__)
 
 
-def _load_active_instances(directory: Path) -> dict[tuple, list[tuple[Path, dict]]]:
+def _load_active_instances(directory: Path) -> dict[tuple, list[tuple[Path, ExperimentRecord]]]:
     """Group active infrastructure handles from row records."""
     paths = [*directory.glob("*.experiment.yaml"), *(directory / "results").glob("*.experiment.yaml")]
-    instances: dict[tuple, list[tuple[Path, dict]]] = defaultdict(list)
+    instances: dict[tuple, list[tuple[Path, ExperimentRecord]]] = defaultdict(list)
     for path in sorted(set(paths)):
-        record = yaml.safe_load(path.read_text(encoding="utf-8"))
-        infrastructure = (record.get("execution") or {}).get("infrastructure") or {}
-        if infrastructure.get("state") != "active":
+        record = ExperimentRecord.read(path)
+        infrastructure = record.execution.infrastructure
+        if infrastructure is None or infrastructure.state != "active":
             continue
         key = (
-            infrastructure.get("provider"),
-            infrastructure.get("instance_id"),
-            infrastructure.get("zone"),
-            infrastructure.get("address"),
-            infrastructure.get("ssh_port", 22),
+            infrastructure.provider,
+            infrastructure.instance_id,
+            infrastructure.zone,
+            infrastructure.address,
+            infrastructure.ssh_port,
         )
         instances[key].append((path, record))
     return instances
@@ -53,8 +51,8 @@ async def _handle_teardown(args):
     errors = []
     for key, records in instances.items():
         provider, instance_id, zone, address, ssh_port = key
-        infrastructure = records[0][1]["execution"]["infrastructure"]
-        label = infrastructure.get("group", "unknown")
+        infrastructure = records[0][1].execution.infrastructure
+        label = infrastructure.group
         logger.info(f"[{label}] {address} ({provider}: {instance_id})")
 
         if address:
@@ -81,9 +79,9 @@ async def _handle_teardown(args):
             logger.info("  VM deleted.")
 
         for path, record in records:
-            record["execution"]["infrastructure"]["state"] = "deleted"
-            record["execution"]["infrastructure"]["deleted_at"] = utc_timestamp()
-            write_record_path(path, record)
+            record.execution.infrastructure.state = "deleted"
+            record.execution.infrastructure.deleted_at = ExperimentRecord.utc_timestamp()
+            record.write(path)
 
     if errors:
         logger.info(f"Failed to clean up {len(errors)} instance(s): {', '.join(errors)}")

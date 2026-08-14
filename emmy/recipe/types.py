@@ -200,7 +200,7 @@ class Recipe:
     def from_dict(cls, d: dict) -> "Recipe":
         """Build a Recipe from a (post-merge, post-migrate) config dict."""
         if "aggregate" in d:
-            raise ValueError("aggregate is not supported; summarize experiment records in RESULTS.md")
+            raise ValueError("aggregate is not supported")
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),

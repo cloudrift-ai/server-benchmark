@@ -77,20 +77,21 @@ providers.
 
 Benchmark configuration (`load_config()` / `validate_config()`), per-run logging, task enumeration
 (`enumerate_tasks()`), execution (`run_execution_group()` — times provisioning per group + deploy/bench/teardown per
-task; task results are `(task, ok, timing)` triples), and the sole structured output (`record` — benchmark/machine
-parsers, the versioned experiment-record schema, lifecycle transitions, and atomic YAML persistence).
+task; task results are `(task, ok, timing)` triples), and the sole structured output (`experiment_record` — the typed
+experiment-record schema, lifecycle transitions, and atomic YAML serialization). Top-level `system_info` owns the
+shared typed host-information probe used by experiment records and fixed-host GPU detection.
 
-The benchmark library is an experiment-agnostic runner: it records complete client output, server logs, timing,
-system information, and partial observations after failure. It treats execution and evidence-collection failures as
-authoritative, but does not judge model output, metrics, backend selection, or scientific claims. Recipes cannot run
-post-processing or report generation. Command recipes may opt into the single `command.strict` integrity contract for
-clean/content-addressed staged inputs, required declared artifacts, and source/GPU/compiler provenance. The complete
-boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
+The benchmark library is an experiment-agnostic runner: it retains complete client output, server logs, timing,
+generic system information, and partial raw artifacts after failure. It treats execution and artifact-collection
+failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
+backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
+may opt into the single `command.strict` integrity contract for clean/content-addressed staged inputs, required
+declared artifacts, and source/GPU/compiler provenance. The complete boundary lives in
+`emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
-`--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` (nothing is generated); the
-output's labels (request/token throughput, E2EL percentiles — no TTFT/TPOT/ITL) already parse via
-`parse_benchmark_metrics`' missing-field-tolerant label regexes.
+`--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` because nothing is generated.
+The client output remains an uninterpreted raw artifact.
 
 ### `planner/` — Planner Layer
 
@@ -269,13 +270,13 @@ time) / `engine_warmup` (profile + KV cache + warmup, derived from vLLM's `init 
 `cuda_graph_capture`. When the engine-init line isn't present (older vLLM / SGLang) the unattributed time collapses into
 a single `other` remainder. All of these are a breakdown of `model_load_and_warmup`, so they are **excluded from
 `total`** (which would otherwise double-count). Near-zero phases
-(`container_cleanup`, health poll, `system_info`) are intentionally not timed, so the phases don't fully sum to raw
-wall-clock.
+(`container_cleanup`, health poll, system-information retrieval) are intentionally not timed, so the phases don't
+fully sum to raw wall-clock.
 
 **Attribution:** provisioning runs once per `ExecutionGroup` (shared VM) but is seeded into each task's timer, so every
-task's result reflects what it cost to stand up its host. `vm_provision` is omitted for fixed/local hosts (no VM
-created). `timing["benchmark"]` is wall-clock (incl. the docker bench-client startup), distinct from
-`metrics.benchmark_duration_s` (the server-measured window).
+task's record reflects what it cost to stand up its host. `vm_provision` is omitted for fixed/local hosts (no VM
+created). `timing["benchmark"]` is the wall-clock client phase, including docker bench-client startup. Workload timing
+values stay only in raw experiment artifacts.
 
 **Output:** `bench` persists timing under `execution.timing_seconds` in each experiment record and prints a per-task
 `TIMING` table in the end-of-run summary (`commands/bench/__init__.py::_format_timing_table`).
@@ -286,8 +287,8 @@ breakdown at the end.
 
 When the user supplies pre-allocated hosts via `--local` and/or `--ssh user@host[:port]`,
 `bench` skips cloud provisioning entirely. `benchmark/fixed_hosts.py` resolves each host
-into an `AllocatedHost(conn, gpu_name, gpu_count)` (GPU detected via PCI sysfs through the
-existing `detect_local_gpus()` / `detect_remote_gpus()` helpers), then validates that every
+into an `AllocatedHost(conn, gpu_name, gpu_count)` (GPU detected through `detect_local_gpus()` /
+`detect_remote_gpus()` using the shared `system_info` PCI probe), then validates that every
 planned `ExecutionGroup` can run on at least one supplied host. The dispatcher
 `_run_groups_on_hosts()` routes each group to a compatible idle host (locking per-host so
 each runs at most one group at a time) and calls `run_execution_group(...,
@@ -618,7 +619,8 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
 Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, assemble
-the records and `RESULTS.md`, and commit the complete last-run snapshot. The CLI itself performs no Git operation.
+the system-only records and factual `RESULTS.md` artifact index, and commit the complete last-run snapshot. Neither the
+CLI nor the skill interprets experiment data; the CLI itself performs no Git operation.
 
 ## Adding a New VM Provider
 

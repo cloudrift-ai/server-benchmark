@@ -264,9 +264,15 @@ def _build_emmy(block, x, rotary_emb, pos_emb, dump=None, debug=False):
                 continue
             if not isinstance(node.op, ConstantOp):
                 continue
+            # A checkpoint parameter is always statically shaped; a constant carrying a symbolic
+            # dim (a shape-derived scalar re-materialized by the trace) can only bind by value.
+            if not all(getattr(d, "is_static", True) for d in node.output.shape):
+                if node.op.value is not None:
+                    input_data[nid] = [node.op.value]
+                continue
             size = 1
             for d in node.output.shape:
-                size *= int(d)
+                size *= d.as_static() if hasattr(d, "as_static") else int(d)
             matched = False
             for key, param in block.named_parameters():
                 safe_key = "p_" + key.replace(".", "_")
@@ -320,7 +326,8 @@ def _build_emmy(block, x, rotary_emb, pos_emb, dump=None, debug=False):
 
         return backend, compiled
     except Exception as e:
-        logger.warning("Emmy pipeline failed: %s", e)
+        logger.warning("Emmy pipeline failed: %s", e, exc_info=True)
+        block.cuda()  # tracing moved the block to cpu; the torch-only fallback benches it on device
         return None
 
 

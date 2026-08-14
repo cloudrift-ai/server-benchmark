@@ -133,6 +133,89 @@ def test_run_device_aliased_input_backing_replays_live():
     assert torch.allclose(out, ref2, rtol=1e-2, atol=1e-2)
 
 
+def test_rider_split_inside_outer_capture_replays_live():
+    """The chunk+decode twin row SPLIT (a rider-width step) under an outer torch CUDA-graph
+    capture — the rider-top rung of whole-step chunk capture. Both halves run
+    ``run_device(out=...)``, whose copies into the persistent shared joint destinations must
+    RECORD into the graph (the destinations were minted on the uncaptured warmup, exactly as
+    vLLM's per-size warmup guarantees), and the replay must be LIVE: new values in the same
+    input tensors flow through both halves. Checked against the SYMBOLIC program at the same
+    width (independent kernels — hence a tolerance, not bit equality)."""
+    pytest.importorskip("cupy")
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+    )
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64, prefill_bucket=32)
+    assert runner.prefill_bucket == 32 and runner.rider_width == 16
+    t = 48  # the rider top: chunk 32 + decode 16
+    attn_width = config.num_attention_heads * 16  # head_dim = hidden / heads
+    hidden = (torch.randn(t, config.hidden_size, device="cuda") * 0.3).contiguous()
+    attn = (torch.randn(t, attn_width, device="cuda") * 0.3).contiguous()
+    residual = (torch.randn(t, config.hidden_size, device="cuda") * 0.3).contiguous()
+
+    def sym_pre(h):
+        return [o.clone() for o in runner._pre[0].run_device_sym([h])]
+
+    def sym_post(a, r):
+        return [o.clone() for o in runner._post[0].run_device_sym([a, r])]
+
+    close = lambda a, b: torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)  # noqa: E731
+
+    # Uncaptured warmup: mints the rider destinations and warms both twins at this width,
+    # and pins the split against the symbolic program on the same values.
+    warm_pre = runner.forward_layer_pre_device(0, hidden)
+    pre_ptrs = [w.data_ptr() for w in warm_pre]
+    for w, r in zip(warm_pre, sym_pre(hidden), strict=True):
+        close(w, r)
+    warm_post = runner._route_post_device(0, attn, residual)
+    for w, r in zip(warm_post, sym_post(attn, residual), strict=True):
+        close(w, r)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        pre_out = runner.forward_layer_pre_device(0, hidden)
+        post_out = runner._route_post_device(0, attn, residual)
+    # The captured outputs are the SAME persistent destination slices the warmup minted —
+    # nothing was allocated inside the capture.
+    assert [o.data_ptr() for o in pre_out] == pre_ptrs
+
+    # Replay must be LIVE through both halves of both programs.
+    torch.manual_seed(1)
+    h2 = (torch.randn_like(hidden) * 0.3).contiguous()
+    a2 = (torch.randn_like(attn) * 0.3).contiguous()
+    r2 = (torch.randn_like(residual) * 0.3).contiguous()
+    ref_pre = sym_pre(h2)
+    ref_post = sym_post(a2, r2)
+    hidden.copy_(h2)
+    attn.copy_(a2)
+    residual.copy_(r2)
+    g.replay()
+    torch.cuda.synchronize()
+    for o, r in zip(pre_out, ref_pre, strict=True):
+        assert o.shape[0] == t
+        close(o, r)
+    for o, r in zip(post_out, ref_post, strict=True):
+        close(o, r)
+
+
 def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live():
     """The fixed-slot MoE decode step (post_attn twin → router → index_select staging → k slot
     launches → score matmul) under an outer torch CUDA-graph capture — what vLLM's whole-step

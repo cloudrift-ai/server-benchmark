@@ -143,6 +143,10 @@ def test_child_env_is_idempotent_when_bin_already_leads(monkeypatch):
     assert _child_env()["PATH"] == f"{bin_dir}:/usr/bin"
 
 
+def _capture_cfg(cmd: list[str]) -> dict:
+    return json.loads(cmd[cmd.index("--compilation-config") + 1])
+
+
 def test_serve_cmd_generate_branch():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     assert cmd[cmd.index("--runner") + 1] == "generate"
@@ -151,25 +155,60 @@ def test_serve_cmd_generate_branch():
     # Default = dynamic-dim cap + decode bucket (16): the rider headroom the chunk+decode
     # twin split covers, so full chunk steps keep carrying their decode riders.
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4112"
-    # Whole-step decode capture is the DEFAULT: FULL_DECODE_ONLY graphs, capture sizes
-    # following --max-num-seqs (vLLM default 256 when unset); no --enforce-eager.
+    # Whole-step capture is the DEFAULT: FULL graphs (decode AND chunk/mixed steps), capture
+    # sizes following --max-num-seqs plus the chunk rungs; no --enforce-eager.
     assert "--enforce-eager" not in cmd
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL"
+    sizes = cfg["cudagraph_capture_sizes"]
+    assert {1, 2, 4, 16, 256} <= set(sizes)  # the decode ladder (bucket 16, max_seqs 256)
+    # The chunk width (prefill capacity 4096) and the rider top (chunk + bucket = mnbt).
+    assert {4096, 4112} <= set(sizes)
+    assert max(sizes) == 4112
+    # Mixed-batch full capture needs an ALWAYS-support attention backend; FA2 is
+    # uniform-batch only, so the emmy arm selects TRITON_ATTN.
+    assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
     # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
     # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
     # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
     assert "--gpu-memory-utilization=0.97" in cmd
     stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
     assert "--gpu-memory-utilization=0.9" in stock_cmd
+    assert "--attention-backend" not in stock_cmd
 
 
 def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-seqs", "48"], generate=True)
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    # The decode bucket (16) and the cap itself always ride the list; the ladder fills between.
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 48]' in cfg
+    # The decode bucket (16) and the cap itself always ride the list; the dense ladder fills between.
+    assert {1, 2, 4, 8, 16, 32, 48} <= set(_capture_cfg(cmd)["cudagraph_capture_sizes"])
+
+
+def test_serve_cmd_generate_chunk_capture_off_restores_decode_only(monkeypatch):
+    monkeypatch.setenv("EMMY_GEN_CHUNK_CAPTURE", "0")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL_DECODE_ONLY"
+    assert cfg["cudagraph_capture_sizes"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    assert "--attention-backend" not in cmd
+
+
+def test_serve_cmd_generate_chunk_capture_respects_user_attention_backend():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--attention-backend", "FLASH_ATTN"], generate=True)
+    assert cmd.count("--attention-backend") == 1  # the user's own flag forwards, nothing added
+    assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"  # vLLM downgrades it if the backend can't
+
+
+def test_serve_cmd_generate_chunk_rungs_follow_prefill_bucket(monkeypatch):
+    # The c4/c8 lane shape: chunk quantum 2048, bucket 8, mnbt = chunk + bucket. The rung
+    # list must carry the exact chunk width and the rider top, drop the rider interior
+    # (2049..2055 would each capture a near-duplicate rider graph), and stop at mnbt.
+    monkeypatch.setenv("EMMY_GEN_PREFILL_BUCKET", "2048")
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "8")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "2056"], generate=True)
+    sizes = _capture_cfg(cmd)["cudagraph_capture_sizes"]
+    assert {2048, 2056} <= set(sizes)
+    assert max(sizes) == 2056
+    assert not any(2048 < s < 2056 for s in sizes)
 
 
 def _spec(depth: int) -> list[str]:
@@ -207,9 +246,19 @@ def test_serve_cmd_generate_spec_ladder_is_dense_enough_to_avoid_padding():
 
 
 def test_serve_cmd_generate_capture_sizes_ignore_absent_spec_config():
-    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+    # An unreadable --speculative-config means "no spec adjustment", not a different ladder.
+    bare = _capture_cfg(build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True))
+    unreadable = _capture_cfg(build_serve_cmd(MODEL, stock=False, vllm_args=["--speculative-config", "not-json"], generate=True))
+    assert unreadable == bare
+    assert bare["cudagraph_mode"] == "FULL"
+
+
+def test_serve_cmd_generate_spec_decode_keeps_decode_only_capture():
+    # Chunk capture is not spec-adjusted; under speculative decoding the config stays on the
+    # floored decode-only ladder (and no attention-backend override rides along).
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(2), generate=True)
+    assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL_DECODE_ONLY"
+    assert "--attention-backend" not in cmd
 
 
 def test_serve_cmd_generate_enforce_eager_opts_out_of_capture():

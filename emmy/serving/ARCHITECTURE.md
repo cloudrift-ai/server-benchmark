@@ -170,11 +170,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
   shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays
   where the caller holds a VIEW of the post output — under an outer capture (the no-clone branch) — so the seam
-  copy node drops from captured over-bucket sym decode graphs; EAGER steps still clone (the pointer-breaker), so
-  the chunk-twin chaining activates only once chunk steps are whole-step captured (recorded future work). Safe
+  copy node drops from every captured step; EAGER steps still clone (the pointer-breaker), which is why
+  whole-step CHUNK capture (below) is what activates the chunk-twin chaining. Safe
   because the residual upload copies the previous hidden
-  out of the backing before post overwrites it, rider steps (all tiers alias one backing base) are eager by
-  construction with the chunk head CLONED before the decode tail runs, and the host `rebind` path — which
+  out of the backing before post overwrites it, rider steps (all tiers alias one backing base) copy the chunk
+  head into the persistent joint destination before the decode tail runs — an ordering the eager stream and a
+  captured graph's fixed kernel order both preserve (`run_device`'s `out=` copies RECORD under capture; the
+  destinations are minted on the uncaptured warmup, and `_rider_dest` raises if first asked mid-capture, since a
+  capture-pool allocation would not survive replays) — and the host `rebind` path — which
   re-takes arena views and unwinds the rewire — is never mixed with the device path on one runner (the oracle
   and the device server are separate runners; `tests/serving/generation/test_gen_prefill_device_gpu.py` pins both the
   pointers and the two-phase discipline).
@@ -381,12 +384,25 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces
-  this for seam coherence). Registered in `__init__.py`. **Whole-step decode CUDA graphs are the `emmy serve
-  --generate` DEFAULT**: no `--enforce-eager`; instead a `--compilation-config` with `cudagraph_mode:
-  FULL_DECODE_ONLY` (full cudagraphs need no torch.compile — vLLM wraps the model in its `CUDAGraphWrapper`) and
-  `cudagraph_capture_sizes` laddered up to `--max-num-seqs` (sizes at or below the decode bucket run the static
+  this for seam coherence). Registered in `__init__.py`. **Whole-step CUDA graphs are the `emmy serve
+  --generate` DEFAULT — decode AND chunk/mixed steps**: no `--enforce-eager`; instead a `--compilation-config`
+  with `cudagraph_mode: FULL` (full cudagraphs need no torch.compile — vLLM wraps the model in its
+  `CUDAGraphWrapper`) and
+  `cudagraph_capture_sizes` laddered up to `--max-num-seqs` PLUS token-count chunk rungs spanning the prefill
+  widths (`_chunk_capture_rungs`: dense where short prompts land, geometric above, plus the exact chunk width —
+  the chunk twin's exact grids — and the rider top, served by the chunk+decode row split whose `out=` copies
+  record into the graph). vLLM dispatches every step by PADDED token count, so a partial tail chunk or a mixed
+  prefill+decode step pads to its rung and rides the symbolic programs (`run_device_sym`) under the capture —
+  eager mixed steps' per-program host framing and per-step staging D2D were the measured c64 TPOT loss, and the
+  eager symbolic-prefill burst the short-prompt TTFT loss (2026-08-12 5090 re-baseline). Mixed-batch FULL
+  capture requires an attention backend declaring `AttentionCGSupport.ALWAYS`, so the emmy arm passes
+  `--attention-backend TRITON_ATTN` (FA2 declares uniform-batch support only; on such a backend vLLM silently
+  downgrades FULL back to FULL_DECODE_ONLY — the pre-chunk-capture behavior, also restorable explicitly with
+  `EMMY_GEN_CHUNK_CAPTURE=0`, which drops the rungs and the backend override too). Capture sizes at or below
+  the decode bucket run the static
   decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
-  `test_gen_capture_gpu` / the two-size live-replay test, and BOTH drop their output clones under the outer
+  `test_gen_capture_gpu` (the two-size live-replay test, the rider-split capture test), and BOTH drop their
+  output clones under the outer
   capture (`run_device_sym` mirrors `run_device`'s captured no-clone branch — the graph's fixed kernel order
   makes the views safe, and the per-layer clone D2D nodes leave the captured graph; the uncaptured paths keep
   the clone); over-bucket capture was worth +10.6% req/s at c=64,
@@ -404,8 +420,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   capturing stream — so the whole decode step (embed + 48× pre/RoPE/paged-attention/post + final norm) records
   into ONE vLLM graph and the ~2-per-layer host launches vanish at replay. Opt out with vLLM's own
   `--enforce-eager` (forwards untouched; also forced automatically when `EMMY_GEN_DECODE_BUCKET=0` — nothing is
-  capturable then); a caller-supplied `--compilation-config` wins over the default. Prefill and
-  over-bucket decode batches stay eager under FULL_DECODE_ONLY by construction.
+  capturable then); a caller-supplied `--compilation-config` wins over the default. Steps wider than the top
+  rung (and, under speculative decoding or `EMMY_GEN_CHUNK_CAPTURE=0`, every chunk/mixed step) stay eager by
+  construction.
 
 **The capture ladder under speculative decoding.** vLLM rounds every requested capture size UP to a multiple of
 `query_len = num_speculative_tokens + 1` (`CompilationConfig.adjust_cudagraph_sizes_for_spec_decode`, guarding vLLM

@@ -619,3 +619,98 @@ Final gates:
 The strongest current scoreboard uses the fast-math lane. Any production claim
 must name that numerical mode explicitly and keep its accuracy gates as part
 of the acceptance criteria.
+
+## 2026-08-12 RTX 5090 re-baseline (fcbc880f + pack fix) and step attribution
+
+Re-measured the July losing cells on a rented 5090 (vast.ai, driver 580.126.09, torch 2.11+cu130, vllm 0.23.0,
+transformers pinned 5.12.1, `VLLM_USE_FLASHINFER_SAMPLER=0`), 3 runs per cell per arm, empty online evidence,
+repo goldens only. Measured at **#483 (fcbc880f)**, not main: #482 re-orphaned the gemma-4 fused geglu goldens
+in-model (cold deploys hit 39,623x–104,464x roofline picks; fix in PR #490, pack-import crash fix in PR #488).
+The absolute July targets do NOT transplant to this host — both arms shifted (stock small_c1 TPOT 16.28 → 18.41)
+— so each arm's own stock run is the reference.
+
+| cell | metric | emmy fm | stock | ratio (July ratio) |
+| --- | --- | --: | --: | --- |
+| small_c1 256/256 | TTFT ms | 115.6 | 74.2 | 1.56x (1.15x) — WORSE |
+| small_c1 | TPOT ms | 19.10 | 18.41 | 1.04x (1.05x) — held |
+| rag_c4 8192/256 | TPOT ms | 27.13 | 28.62 | **0.95x WIN** (1.04x) |
+| rag_c4 | tok/s | 109.3 | 105.2 | **1.04x WIN** (1.02x) |
+| rag_c4 | TTFT ms | 2413 | 2407 | 1.00x (0.89x) — win lost |
+| c64 np256 | TPOT ms | 35.08 | 32.09 | 1.09x (1.03x) |
+| c64 np256 | tok/s | 1195 | 1368 | 0.87x (0.86x) — unchanged |
+| c64 np256 | TTFT ms | 1457 | 1415 | 1.03x |
+
+c64 ran with `--max-num-seqs 64` (without it the 128-capture rung admits over-bucket symbolic decode steps —
+`_warn_symbolic_decode` fired — though re-running capped changed TPOT < 0.1 ms, so that leak was immaterial here).
+
+### nsys step attribution (steady-state c64, 25 s windows, `--cuda-graph-trace=node`)
+
+| per decode step | emmy fm | stock |
+| --- | --: | --: |
+| wall | 40.6 ms | 36.7 ms |
+| GPU busy | **29.9 ms** | 30.9 ms |
+| idle (host gaps) | **10.7 ms** | 5.8 ms |
+| kernels/step | 841 | 658 |
+| D2D copied | **170 MB (69 copies)** | 1.1 MB |
+
+**Emmy's in-graph GPU time already beats stock's** (29.9 vs 30.9 ms busy). The whole c64 TPOT loss is
+(a) +4.9 ms/step of host idle on eager mixed prefill+decode steps (gpu_lock + DLPack dispatch + per-step
+staging: the 170 MB/step D2D torrent — the post→pre chaining from vLLM-integration Milestone A2 is inert on
+eager steps by design), and (b) modest kernel headroom inside busy time (corrected 2026-08-13, see below):
+
+- `k_linear_mean_reduce` (fused norm→gate_up matmul) — 164.2 µs x 48/step = 7.9 ms/step at 1.22x its ~134 µs
+  weight-streaming floor: ~1.4 ms/step of headroom.
+- `k_to_4__cut_acc0` (the geglu-cut down matmul) — 76.8 µs x 48/step = 3.7 ms/step at 1.14x its ~68 µs
+  weight-streaming floor: ~0.4 ms/step. The cut's actual glue kernels are negligible: `k_to_4` (the
+  down-output f32→f16 cast, [64, 3840]) runs 0.8 µs and the geglu/norm value piece `__cut_v9` 1.7 µs,
+  ~0.12 ms/step for the whole cut-glue class.
+
+At c1, M=1 decode is healthy: the big weight streams run at 1.08–1.10x their DRAM floors, GPU busy 16.8 ms vs
+a ~12 ms aggregate weight floor, TPOT within 0.7 ms of stock. The 262k-vocab lm_head costs ~1.26 ms/step in
+BOTH arms (near-peak bandwidth — a shared floor, not a gap). The small_c1 TTFT loss (and rag's lost TTFT win)
+is the eager symbolic-prefill burst: geglu-cone kernels ~4–5x floor at prefill widths plus per-layer eager
+framing; the boot roofline also flags the m4096 chunk twins at 24–28x floor (overstated — see the correction:
+those shapes are compute-bound, ~1.4–1.5x their compute floor).
+
+### Correction (2026-08-13): the "to_4 cut-cast" item was a name-collision misread
+
+The original attribution called `k_to_4__cut_acc0` "the materialized accumulator cast of the geglu cut,
+95 µs x ~45/step = 4.3 ms/step of pure glue at ~8x its copy floor (moving ~12 MB)" and ranked fixing it as
+the top c64 action, claiming it flips the TPOT row on its own. That reading is wrong. The nsys per-kernel
+summary groups by kernel NAME, and emmy kernel names recur across serving shapes (the same graph node
+compiles once per twin), so that 95 µs "per-launch average" mixed two different kernels sharing a name:
+
+- 27,542 m64 decode launches at 76.8 µs (grid 240x256, 59 regs, tight 74–80 µs range) — the geglu-cut down
+  matmul streaming its 118 MB weight slab at 1.14x floor, consistent with the recorded
+  `gemma4_12b.mlp_down_fused.m64.lin.cut` golden (84.2 µs). Healthy; nothing to tune.
+- 336 m4096 chunk-prefill launches at 1.62 ms (grid 480x256, 249 regs) — the separately-tracked chunk-twin
+  prefill item, which lands in the ~7 mixed steps of the window, not in every decode step.
+
+Weighted: (27542·76.8 + 336·1621.9) / 27878 = 95.4 µs — exactly the misread figure. The "[64, 30720] f32→f16
+cast" it was mistaken for does not exist as a kernel: the only [64, 30720] value in the layer is the gate_up
+output, written f16 in-kernel by `k_linear_mean_reduce`'s epilogue; the geglu cut's f32 workspace is the down
+accumulator [64, 3840], and its cast (`k_to_4`) runs 0.8 µs. There is no multi-ms cast-glue lever at c64
+decode — the busy-time table above (emmy 29.9 < stock 30.9 ms) was already inconsistent with one.
+
+Same-session second correction: the boot roofline's "m4096 chunk twins at 24–28x floor" compares
+compute-bound prefill matmuls against a weight-streaming floor. Against the compute floor (~210 TFLOPS dense
+f16 with f32 acc, ~2x that in the fm f16-acc lane) the measured chunk kernels are ~1.4–1.5x: down m4096
+1.62 ms vs ~1.15 ms fm floor, gate_up m4096 3.52 ms vs ~2.3 ms. Real headroom, a fraction of "24x".
+
+### Ranked next actions (goal: emmy >= stock on every row) — re-ranked 2026-08-13 per the correction
+
+1. Whole-chunk-step capture (the integration plan's promoted item) — removes the ~5 ms/step host idle and the
+   per-step staging D2D, activates A2 chaining; the only item big enough to flip c64 TPOT (gap 3.0 ms), and
+   the main TTFT lever together with:
+2. Prefill-side kernel quality — sym/chunk geglu cone and the m4096 chunk twins (~1.4–1.5x compute floor; the
+   roofline's 24–28x overstates them).
+3. Fused-norm matmul retune at m64/fm — ~1.4 ms/step headroom on `k_linear_mean_reduce` (1.22x floor) plus
+   ~0.4 ms/step on the geglu-cut down matmul (1.14x): worth a pass only after 1 lands.
+
+Protocol traps recorded for the next measurement session: nsys defaults hide captured-graph kernels
+(`--cuda-graph-trace=node` required, and sampling flags belong on `nsys start`, not `launch`); time the capture
+window against the bench duration (~55 s at c64 np256); `EMMY_PACK_DIR` must be wiped when switching trees on a
+box (pack keys do not hash compiler internals); the 5090 needs `VLLM_USE_FLASHINFER_SAMPLER=0`; transformers
+must satisfy the PR #491 window; and never read per-kernel launch economics off a name-keyed nsys summary —
+split by launch geometry (grid) first, because decode and chunk shapes of the same graph node share one kernel
+name in a serving process (the root of the 2026-08-13 correction above).

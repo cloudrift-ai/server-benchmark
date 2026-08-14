@@ -43,6 +43,17 @@ Session caveats worth keeping: the 5090 golden set was orphaned for the current 
 measurement base (fix in PR #449; the A/B ran on a box-local 12-twin tuned DB instead), and the over-bucket c64
 cell's req/s is bimodal by boot order (8 vs 22 req/s, symmetric across arms) — compare arms on median TPOT.
 
+## Status update (2026-08-12) — re-baseline confirms the re-scoped priorities, with numbers
+
+The RTX 5090 re-baseline + nsys step attribution (see `plans/emmy-serve-performance-findings.md`, 2026-08-12
+section) measured the c64 decode step at **GPU busy 29.9 ms emmy vs 30.9 ms stock** — emmy's in-graph kernel
+time already beats stock — while emmy pays **+4.9 ms/step of host idle** on eager mixed steps (gpu_lock +
+DLPack dispatch + 170 MB/step staging D2D; stock moves 1 MB). WHOLE-CHUNK-STEP CAPTURE is therefore confirmed
+as this plan's next executable item (it also activates A2's chaining, inert on eager steps). Two kernel-quality
+items sit outside this plan's scope (the `to_4 __cut_acc0` cast glue at 4.3 ms/step and the fused-norm matmul
+at ~2x floor) and rank ahead of or beside it — see the findings file's ranked list. Milestone B/`bind_io`
+remains dead for TPOT.
+
 ## Target architecture
 
 ```text

@@ -781,6 +781,56 @@ def test_spell_nvfp4_respects_ignore(tmp_path):
     assert spell_quantized_constants(g, str(tmp_path)) == 0
 
 
+def _nvfp4_matmul_graph(tmp_path):
+    """x [4, 32] @ dequant(w).T — the spelled cone feeding a matmul consumer."""
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp, TransposeOp
+
+    packed, scale_bits, s2 = _nvfp4_checkpoint(tmp_path)
+    g = Graph()
+    x_in = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 32), "f32"), node_id="x")
+    w = g.add_node(
+        op=ConstantOp(name="w", source_path="layer.weight", source_shape=(8, 32), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("w", (8, 32), "f32"),
+        node_id="w",
+    )
+    wt = g.add_node(op=TransposeOp(axes=(1, 0)), inputs=[w], output=Tensor("wt", (32, 8), "f32"))
+    y = g.add_node(op=MatmulOp(), inputs=[x_in, wt], output=Tensor("y", (4, 8), "f32"))
+    g.outputs = [y]
+    g.inputs = [x_in]
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    return g, y, (packed, scale_bits, s2)
+
+
+def test_spelled_nvfp4_matmul_matches_oracle(tmp_path):
+    """The spelled graph's numpy execution: matmul through the decode cone equals the
+    oracle. Runs on graph-op forwards (pre-lowering), so it needs no Cling."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    g, y, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path)
+    x = rng.random((4, 32)).astype(np.float32)
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    result, _ = NumpyBackend().run(g, input_data={**data, "x": x})
+    ref = x @ dequantize_nvfp4(packed, scale_bits, s2).T
+    np.testing.assert_allclose(result.outputs[y], ref, rtol=1e-6)
+
+
+def test_spelled_nvfp4_matmul_fuses_into_one_loop(tmp_path):
+    """Baseline of the pre-kernel-phase lowering: the cone survives constant folding
+    and loop fusion folds the decode into the consumer's single LoopOp — no
+    materialized decoded weight between kernels. Structure only; LoopOp execution
+    goes through the Cling JIT and is covered by the CUDA/CI lanes."""
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    g, _y, _ = _nvfp4_matmul_graph(tmp_path)
+    lowered = Pipeline.build(LOOP_PASSES).run(g)
+    loops = [nid for nid, n in lowered.nodes.items() if type(n.op).__name__ == "LoopOp"]
+    assert len(loops) == 1, f"decode did not fuse into the matmul loop nest: {loops}"
+    consts = {nid for nid, n in lowered.nodes.items() if isinstance(n.op, ConstantOp)}
+    assert consts == {"w_bits", "w_f4_pairs", "w_scale_bits", "w_scale_2"}
+
+
 def test_load_dequantized_state_dict_nvfp4(tmp_path):
     """The twin read of a synthetic NVFP4 checkpoint: the packed trio dequantizes to the
     oracle's exact values, consumed scales drop, activation-quant metadata and bf16

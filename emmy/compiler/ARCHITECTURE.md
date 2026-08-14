@@ -164,9 +164,11 @@ f16 tensor, the format's single rounding point. At graph birth, `spell_quantized
 weight constant into its decode cone. The packed-bits constant feeds a pair-table gather; the e4m3 block-scale
 constant and the f32 per-tensor scale (`weight_scale_2`) fuse into one f16 scale that multiplies the gathered
 values, one scale per 16 along the last axis. The 256×2 byte-to-value-pair table is a `ConstantOp` whose
-`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph. No kernel
-lowering tier consumes the packed dtype yet — a contraction whose operand is this cone lowers through the
-unspecialized lowering tiers, materializing the decoded weight.
+`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph. No kernel-lowering rule knows the packed dtype yet. The fp8 fast paths — byte-slab staging (raw quantized bytes
+staged through shared memory) and the W8A16 mul-hoist (the scale multiply moved out of the reduction loop onto
+the accumulator) — apply only to fp8. A contraction (the matmul-shaped node) that consumes the cone's output
+still compiles and runs: loop fusion merges the decode into the contraction's own loop nest, so no decoded
+weight materializes between kernels, but the packed operand reaches no tensor-core fragment path.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.

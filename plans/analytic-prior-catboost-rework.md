@@ -410,7 +410,15 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
    questions below (loss, masking p/K, monotone list, depth budget) get decided empirically here, each candidate
    config just another metrics file. `--folds both` = the union of the two fold axes (two report sections), not
    nested op×gpu — nesting starves training at this dataset size.
-   **STATUS (2026-07-23): build-order steps 0–3 LANDED; steps 4–5 are the open frontier.**
+   **STATUS (2026-08-13): steps 0–3 LANDED; the CatBoost trainer LANDED on the GOLDEN dataset (a cell this
+   build order did not anticipate — it assumed catboost was freeze-only); step 4's freeze data is still the open
+   frontier.** The `catboost` × `golden` cell exists because the model-class question and the training-data
+   question turned out to be separable: holding the data and the pool-rank objective fixed and changing only the
+   model class is the controlled comparison `plans/offline-prior-and-search-findings.md` B3 half-ran. What landed
+   with it: `CatBoostModel` (base64 `cbm` in the artifact, `kind` dispatching the load), a `QuerySoftMax` trainer
+   with hard-negative mining, the routing stamp demoted from a weight-set selector to an ordinary column, and
+   `TREE_FEATURES` — the view minus every feature that exists only because a linear model cannot form it.
+   Still open here: linear×freeze and catboost×freeze, both waiting on sweep volume.
    - (0) rename — #355 (07-13). (1) extraction + wrapper + preservation tests — #383 (07-20): fit core in
      `search/prior/fit/` (`linear.py`), `golden_knob_heuristics.py` is the thin legacy wrapper. (2) freeze
      command + loader — #382 (07-16, Phase 3 below). (3) metrics file + fold harness + **linear×golden** —

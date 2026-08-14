@@ -7,14 +7,13 @@ descends on — one fp16 golden enumerates ~78k rows, so the per-dict path is no
 module the two were separate transcriptions of the same formula kept in step by a parity test; drift between them
 would mean the fitter optimizing something other than what deploys.
 
-The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` and
-``explain_features``. That is deliberate: ``FallbackPrior`` and the attribution diagnostics already compose priors
-on exactly those, so a holder can delegate to any model through them without a second vocabulary. (``Prior`` also
-declares a batched ``mean_scores_features``; there is no model-side version because this model has no vectorized
-per-dict path — the base's element-wise default over :meth:`~LinearModel.mean_score_features` IS the
-implementation. A model that gains one adds the method then.) :meth:`~LinearModel.quality` /
-:meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking quantity a derivative-free descent
-walks; a tree model has no equivalent.
+The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features``,
+``mean_scores_features`` and ``explain_features``. That is deliberate: ``FallbackPrior`` and the attribution
+diagnostics already compose priors on exactly those, so a holder can delegate to any model through them without a
+second vocabulary. :mod:`.catboost_model` is the other model class answering the same surface.
+:meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking
+quantity a derivative-free descent walks, which a tree model has no additive equivalent of (its matrix entry
+point is ``CatBoostModel.quality_rows``, a booster call rather than a dot product).
 
 Weight-set routing is ONE fact read from ONE place: the ``S_ext_n_symbolic_axis`` stamp
 (:data:`ROUTING_FEATURES`). A symbolic-axis (masked-tile) kernel prices differently from its static counterpart —
@@ -122,6 +121,9 @@ class LinearModel:
     # exp() argument scale — keeps the deployed proxy in a finite, sane range. Rank-neutral (a monotone
     # transform of the quality), so it is carried between fits rather than fitted.
     scale: float
+    # Deleting a feature from a row removes its term exactly, so the ablation diagnostics need no caveat here.
+    # The tree model's twin is False.
+    masking_exact = True
     # The atomic-free interaction's fitted pair (see :func:`atomic_free_term`). Both ARE fitted — they are the
     # one term the fit cannot express as a linear weight, so ``emmy fit`` searches them as descent coordinates
     # alongside the weights. A constant the fit cannot see is a constant the fit optimizes around.
@@ -140,6 +142,12 @@ class LinearModel:
         strictly ordered; beyond it ``exp`` would overflow or underflow anyway. Consumers needing a BOUNDED value
         (the ``FallbackPrior`` tilt multiplier) clamp on their side."""
         return math.exp(max(min(-self.scale * self.quality(feats), 700.0), -700.0))
+
+    def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
+        """Batched :meth:`mean_score_features`, element-wise — this model has no vectorized per-dict path, and
+        the arithmetic is a handful of dict lookups per row. The method exists so both model classes answer the
+        same batched call; the tree model's version is where batching actually buys something."""
+        return [self.mean_score_features(f) for f in feats_list]
 
     def explain_features(self, feats: dict) -> dict[str, float]:
         """EXACT per-term decomposition of :meth:`quality` (higher = predicted faster): each nonzero linear term

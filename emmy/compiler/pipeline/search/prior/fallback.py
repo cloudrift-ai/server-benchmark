@@ -1,60 +1,63 @@
 """``FallbackPrior`` — composes the online + offline priors into the single
 ranking surface the search consumes.
 
+The composition itself — who answers a deploy ranking, and how the two combine for
+PUCT — is a swappable :class:`~emmy.compiler.pipeline.search.prior.blend.Blend`
+strategy, so the interaction can be A/B'd rather than assumed. The class keeps its
+name because "fall back to the cold half" is what the default strategies do:
 ``mean_score`` / ``mean_scores`` / ``pick`` (the deploy + eval + diagnostics
-surface) use the :class:`OnlinePrior` once it's ``trustworthy`` —
-``fitted`` AND passing the reservoir calibration gate (``Prior.trustworthy``;
-a fitted-but-mis-calibrated model is quarantined to offline instead of owning
-deploys) — and fall
-back to the :class:`OfflinePrior` (cold-start heuristic) otherwise — so the
-policies always get a usable ranking and no longer special-case "cold → emission
-order". :meth:`score` (the MCTS *selection* signal — see :mod:`policy.mcts`) is
-the one surface that BLENDS the two even when trusted, so PUCT explores the region
-the heuristic prices well but the data-poor online model buries (the golden-sweep
-fp16 finding). Everything else (training: ``add_rows`` / ``maybe_refit`` /
-``checkpoint`` / ``fit`` / ``to_json``, and inspection: ``_dataset`` /
-``trajectory`` / ``summary`` for diagnostics) delegates to the online half, so
-``tune`` trains and checkpoints CatBoost exactly as before and ``fitted`` reflects
-whether a *trained* model exists.
+surface) use the :class:`OnlinePrior` once it's ``trustworthy`` — ``fitted`` AND
+passing the reservoir calibration gate (``Prior.trustworthy``; a
+fitted-but-mis-calibrated model is quarantined to offline instead of owning
+deploys) — and fall back to the :class:`OfflinePrior` (cold-start heuristic)
+otherwise, so the policies always get a usable ranking and no longer special-case
+"cold → emission order". :meth:`policy` (the MCTS *selection* signal — see
+:mod:`policy.mcts`) is the surface where a strategy may genuinely combine the two,
+as the default ``tilt`` does so PUCT explores the region the heuristic prices well
+but the data-poor online model buries (the golden-sweep fp16 finding).
 
-The two priors are on **different scales**: CatBoost regresses ``log(latency µs)``
-so its ``score`` is calibrated µs, whereas the offline prior is fit by
-learning-to-rank (``emmy fit``) so its ``score`` —
-``exp(-0.1·quality)`` — is an *ordinal* proxy with arbitrary magnitude (only its
-order is meaningful; its neutral "no opinion" value is exactly ``1.0``). So
-:meth:`score` keeps the online µs as the scale and folds the offline in as a
-dimensionless **multiplier** ``offline**W`` centered at that neutral 1.0 — the
-online half sets the per-shape µs scale, the offline half contributes only its
-ranking. ``W`` (``config.offline_tilt``) sizes the nudge: small enough to
-perturb the online order, not replace it. The multiplier is clamped to
-``e**±8`` before the power: the offline proxy itself is unsaturated (strictly
-ordered up to the float-safety bound), so its raw magnitude would otherwise
-zero out or blow up the µs anchor.
+Everything else (training: ``add_rows`` / ``maybe_refit`` / ``checkpoint`` / ``fit``
+/ ``to_json``, and inspection: ``_dataset`` / ``trajectory`` / ``summary`` for
+diagnostics) delegates to the online half, so ``tune`` trains and checkpoints
+CatBoost exactly as before and ``fitted`` reflects whether a *trained* model exists.
+
+The two priors are on **different scales**: the online model regresses
+``log(latency µs)`` so its prediction is calibrated µs, whereas the offline prior is
+fit by learning-to-rank (``emmy fit``) so its score is an *ordinal* proxy with
+arbitrary magnitude — only its order is meaningful. That is why the halves meet only
+in ``policy``, where ``Prior.policy`` has already reduced both to the same
+sibling-relative scale, and why the deploy surface hands the whole question to ONE
+half instead of mixing (``Blend.deploy_half``).
 """
 
 from __future__ import annotations
 
-import math
-
-from emmy import config
 from emmy.compiler.pipeline.search.prior.base import Prior
+from emmy.compiler.pipeline.search.prior.blend import Blend, load_blend
 from emmy.compiler.pipeline.search.prior.offline import OfflinePrior
 from emmy.compiler.pipeline.search.prior.online import OnlinePrior
 
 
 class FallbackPrior(Prior):
     """Online prior with an offline cold-start fallback. Not a dataset owner —
-    its training / inspection surface is the ``online`` prior's. ``mean_score`` /
-    ``mean_scores`` fall back to offline while cold or quarantined
-    (``trustworthy`` — the calibration gate); ``score`` (the MCTS
-    selection signal) blends the offline multiplier in even when trusted."""
+    its training / inspection surface is the ``online`` prior's. Which half answers
+    a deploy ranking, and how the two combine for PUCT, is the ``blend``
+    strategy's call (default ``tilt``; ``EMMY_PRIOR_BLEND`` swaps it)."""
 
-    def __init__(self, online: Prior, offline: Prior | None = None) -> None:
+    def __init__(self, online: Prior, offline: Prior | None = None, *, blend: Blend | None = None) -> None:
         # Deliberately NOT calling super().__init__() — this prior holds no
         # dataset of its own; every stateful attribute delegates to ``online``
         # (see __getattr__), so there's no second reservoir to diverge.
         self.online = online
         self.offline = offline if offline is not None else OfflinePrior()
+        self.blend = blend if blend is not None else load_blend()
+
+    @property
+    def _deploy(self) -> Prior:
+        """The half that owns the deploy ranking right now — ONE reading of the
+        strategy, shared by every scoring surface below so they cannot disagree
+        about which model is answering."""
+        return self.blend.deploy_half(self.online, self.offline, trusted=self.trustworthy)
 
     @property
     def fitted(self) -> bool:
@@ -72,48 +75,33 @@ class FallbackPrior(Prior):
         # while decisions stay offline.
         return self.online.trustworthy
 
-    def score(self, knobs: dict) -> float:
-        # MCTS-selection signal ONLY (deploy/eval go through mean_score/pick).
-        # Cold or quarantined: the offline prior IS the ranking. Trusted: keep the
-        # online µs as the scale and nudge it by the offline's dimensionless ranking
-        # multiplier (``offline**W``, neutral 1.0) so PUCT still explores a region the
-        # heuristic prices well but the online model — having never measured it —
-        # buries (the fp16 small-BK warp tiles at large squares). ``W=0`` recovers
-        # pure-online selection. Scale-correct because the offline factor is
-        # centered at its no-opinion 1.0, so a config the heuristic has no view on
-        # leaves the online prediction untouched.
-        if not self.trustworthy:
-            return self.offline.score(knobs)
-        w = config.offline_tilt()
-        online = self.online.score(knobs)
-        if w == 0.0 or online <= 0.0:
-            return online
-        # The multiplier is a bounded NUDGE on the online µs prediction, not a re-ranking: the
-        # offline proxy is strictly ordered over the full quality range (its exp
-        # argument clips only at the float-safety bound), so its raw magnitude can
-        # span e**±700 — fed straight into the product it would zero out or blow up
-        # the µs scale. Clamp the multiplier to e**±8 (the proxy's historical band)
-        # so a strong offline opinion tops out as a firm nudge.
-        offline = min(max(self.offline.score(knobs), math.exp(-8.0)), math.exp(8.0))
-        return online * offline**w
+    def policy(self, knobs_list: list[dict]) -> list[float]:
+        # MCTS-selection signal ONLY (deploy/eval go through mean_score/pick), and the
+        # one surface where a strategy may combine both halves — safely, because
+        # ``Prior.policy`` normalizes each within the sibling set first.
+        return self.blend.policy(self.online, self.offline, knobs_list, trusted=self.trustworthy)
 
+    # The deploy surface: ONE half answers, and every entry point below reads that
+    # choice from the same place, so the diagnostics always decompose the model that
+    # actually owns decisions.
     def mean_score(self, knobs: dict) -> float:
-        return self.online.mean_score(knobs) if self.trustworthy else self.offline.mean_score(knobs)
+        return self._deploy.mean_score(knobs)
 
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
-        return self.online.mean_scores(knobs_list) if self.trustworthy else self.offline.mean_scores(knobs_list)
+        return self._deploy.mean_scores(knobs_list)
 
-    # Scoring of already-featurized rows (attribution / ablation) — routed through
-    # the same trustworthy gate as mean_score/mean_scores, so the diagnostics
-    # decompose the model that actually owns decisions.
     def mean_score_features(self, feats: dict) -> float:
-        return self.online.mean_score_features(feats) if self.trustworthy else self.offline.mean_score_features(feats)
+        return self._deploy.mean_score_features(feats)
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
-        return self.online.mean_scores_features(feats_list) if self.trustworthy else self.offline.mean_scores_features(feats_list)
+        return self._deploy.mean_scores_features(feats_list)
 
     def explain_features(self, feats: dict) -> dict[str, float] | None:
-        return self.online.explain_features(feats) if self.trustworthy else self.offline.explain_features(feats)
+        return self._deploy.explain_features(feats)
+
+    @property
+    def masking_exact(self) -> bool:
+        return self._deploy.masking_exact
 
     def pick(self, rows: list[dict]) -> tuple[int, float]:
         # Measured -O3 evidence lives in the ONLINE half's reservoir (the
@@ -162,8 +150,9 @@ class FallbackPrior(Prior):
         return getattr(self.online, name)
 
 
-def load_prior(*, seed: int = 0, path=None) -> FallbackPrior:
+def load_prior(*, seed: int = 0, path=None, blend: str | None = None) -> FallbackPrior:
     """The one global prior the search loads: the ``OnlinePrior``
     (warm-started from its checkpoint if present) wrapped with an
-    ``OfflinePrior`` cold-start fallback."""
-    return FallbackPrior(OnlinePrior.load(seed=seed, path=path), OfflinePrior())
+    ``OfflinePrior`` cold-start fallback, composed by the named ``blend``
+    strategy (default: ``EMMY_PRIOR_BLEND``, else ``tilt``)."""
+    return FallbackPrior(OnlinePrior.load(seed=seed, path=path), OfflinePrior(), blend=load_blend(blend))

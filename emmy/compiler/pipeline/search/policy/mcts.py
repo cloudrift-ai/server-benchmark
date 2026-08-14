@@ -5,15 +5,14 @@ signal (greedy and the ``+∞``-unvisited UCB rule are gone).
 
     select   — descend from root, picking at each level
                ``argmax_c [ Q(c) + c · P(c) · √(N_parent+1) / (1+N_c) ]``
-               where ``Q = best_reward / global_best`` and ``P`` is the prior's
-               *predicted* reward on the same scale: the prior predicts latency,
-               which this loop converts to reward (``1/û``) and normalizes by the
-               same ``global_best`` as ``Q``. No softmax, no ``+∞``-unvisited rule
-               → no forced breadth: a confidently-bad sibling gets a small ``P``
-               and is skipped. A cold or absent prior gives a uniform ``P = 1``
-               (PUCT still explores via the exploration term; a single-shot
-               compile with no prior descends emission-order). Live-count
-               filtering skips drained subtrees.
+               where ``Q = best_reward / global_best`` and ``P`` is
+               ``Prior.policy`` over the sibling set — each sibling's predicted
+               preference relative to the best of them, one batched call per
+               fork. No ``+∞``-unvisited rule → no forced breadth: a
+               confidently-bad sibling gets a small ``P`` and is skipped. A cold
+               or absent prior gives a uniform ``P = 1`` (PUCT still explores via
+               the exploration term; a single-shot compile with no prior descends
+               emission-order). Live-count filtering skips drained subtrees.
     expand   — :meth:`TuningSearch.push` adds the engine's spawned
                candidates as children of the ``parent`` token (the
                ``SearchNode`` their spawning candidate was popped with);
@@ -362,13 +361,27 @@ class TuningSearch(Search):
             cur = cur.parent
         return node, node.candidate
 
-    def _prior_score(self, child: SearchNode) -> float:
-        """The prior's predicted *latency* (µs) for a child (``0`` when no model
-        is attached, the model is unfit, or the child is the root sentinel — the
-        ``_select`` loop treats a non-positive prediction as a uniform ``P``)."""
-        if self.prior_model is None or child.candidate is None:
-            return 0.0
-        return self.prior_model.score(self._node_knobs(child))
+    def _prior_policy(self, children: list[SearchNode]) -> list[float]:
+        """The prior's ``P`` for each child — ONE batched call over the whole sibling
+        set, so a vectorized model pays its per-call overhead once per fork rather
+        than once per candidate.
+
+        A child the prior cannot speak about takes the uniform ``1.0`` that keeps the
+        exploration term driving breadth: no model attached, or a node with no candidate
+        (the root sentinel). Such a node is EXCLUDED from the call rather than passed an
+        empty knob dict — an empty row is a row the model has an opinion about (the
+        linear model scores it its neutral value), and normalizing it against real
+        siblings would rank a sentinel among them. A cold model needs no special case
+        here: its all-zero predictions come back uniform from ``Prior.policy`` itself."""
+        if self.prior_model is None:
+            return [1.0] * len(children)
+        live = [i for i, c in enumerate(children) if c.candidate is not None]
+        if not live:
+            return [1.0] * len(children)
+        out = [1.0] * len(children)
+        for i, p in zip(live, self.prior_model.policy([self._node_knobs(children[i]) for i in live]), strict=True):
+            out[i] = p
+        return out
 
     def _select(self, children: list[SearchNode], parent: SearchNode) -> SearchNode:
         """PUCT is the *only* selection rule — the prior is the sole signal.
@@ -376,19 +389,25 @@ class TuningSearch(Search):
             score(c) = Q(c) + c_ucb · P(c) · √(N_parent + 1) / (1 + N_c)
 
         where ``Q = best_reward / global_best`` (``0`` for an unvisited child) and
-        ``P`` is the prior's *predicted reward* on the same scale: the prior
-        predicts latency ``û(c)``, which this loop converts to reward (``1/û``)
-        and normalizes by the same ``global_best`` as ``Q`` — no softmax. A
-        confidently-bad sibling gets a small ``P`` → tiny exploration term → it is
-        deprioritized rather than force-visited. The prior is always consulted —
-        the ``FallbackPrior`` returns the online model's prediction once trained
-        and the ``OfflinePrior`` heuristic cold, so even a fresh ``tune`` is
-        prior-guided, not uniform. Only when there is NO usable prediction (no
-        prior attached, or a non-positive score) does ``P`` fall to a uniform
-        ``1`` so the exploration term still drives breadth. ``c_ucb`` is
-        ``--ucb-c``. With ``explore_eps > 0`` (tune, opt-in) a fraction of steps
-        instead descend a uniformly random live child (ε-greedy); off by default
-        so a single-shot compile / the unit tests stay deterministic. NOTE: a
+        ``P`` is ``Prior.policy`` over this sibling set: each sibling's preference
+        relative to the best of them, so the best scores ``1.0`` and one the model
+        prices 10× slower scores ``0.1``. A confidently-bad sibling therefore gets a
+        small ``P`` → tiny exploration term → it is deprioritized rather than
+        force-visited. The prior is always consulted — the composite prior answers
+        with the online model once trained and the offline one cold, so even a fresh
+        ``tune`` is prior-guided, not uniform. Only where there is NO usable
+        prediction does ``P`` fall back to a uniform ``1`` so the exploration term
+        still drives breadth.
+
+        ``P`` is normalized within the SIBLING SET, not against the tree's
+        ``global_best``: a fork is a choice among its own children, ``global_best``
+        is a moving target set elsewhere in the tree, and the offline prior's scores
+        are not µs at all — pushing their raw magnitude through ``1/û`` is what left
+        the cold policy meaningless (HISTORY.md: "The inert offline tilt").
+
+        ``c_ucb`` is ``--ucb-c``. With ``explore_eps > 0`` (tune, opt-in) a fraction
+        of steps instead descend a uniformly random live child (ε-greedy); off by
+        default so a single-shot compile / the unit tests stay deterministic. NOTE: a
         *random tie-break* under a cold prior was tried and reverted — it discarded
         the heuristic ordering and regressed fp16 tuning ~2×; exploration must
         perturb the prior order, not replace it."""
@@ -396,14 +415,10 @@ class TuningSearch(Search):
             return self._rng.choice(children)
         global_best = self.tree.best_reward or 1.0
         sqrt_parent = math.sqrt(parent.visits + 1)
+        policy = self._prior_policy(children)
         best, best_v = children[0], float("-inf")
-        for c in children:
+        for c, p in zip(children, policy, strict=True):
             q = (c.best_reward / global_best) if c.visits > 0 else 0.0
-            pred_us = self._prior_score(c)
-            if pred_us > 0:
-                p = (1.0 / pred_us) / global_best
-            else:
-                p = 1.0  # cold / absent prior → uniform exploration
             v = q + self._ucb_c * p * sqrt_parent / (1 + c.visits)
             if v > best_v:
                 best_v, best = v, c

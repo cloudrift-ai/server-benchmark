@@ -213,6 +213,18 @@ class LinearTrainer:
     warm_start: bool = True
     objective: Callable[[list[int]], float] = mean_log_rank
 
+    @staticmethod
+    def unfittable(train: list[Group], hold: list[Group]) -> str | None:
+        """Why a cross-validation fold cannot be fit under this model class, or ``None``. Both reasons are about
+        the two weight sets: the dynamic stage seeds from the static one, so a slice with no static cases fits
+        nothing at all, and a holdout needing the dynamic set cannot be scored by a model that never fit one.
+        The fold harness (:func:`~.cv._unfittable`) asks; a model class without weight sets answers nothing."""
+        if not any(not c.dynamic for c in train):
+            return "static weight set unfittable (0 static cases in training)"
+        if any(c.dynamic for c in hold) and not any(c.dynamic for c in train):
+            return "dynamic weight set unfittable (0 dyn cases in training)"
+        return None
+
     def fit(self, groups: list[Group]) -> LinearFit:
         """Fit both weight sets over ``groups``: a static fit over the non-dynamic groups, then the
         dynamic fit over the rest, seeded from the static result in its own z-space (the ``sd_ref``

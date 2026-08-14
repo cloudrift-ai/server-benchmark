@@ -29,11 +29,28 @@ golden-rank eval reported top-1 on the same shapes. Two compounding defects:
   eval could not see the saturation.
 
 Guards now: the exponential clips only at the float-safety bound (~±700) and **must never saturate over live quality
-scores** (the one bounded-value consumer, `FallbackPrior`'s offline multiplier, clamps on its own side); golden rank
+scores** (the one consumer that needs a bounded quantity, PUCT, normalizes within the sibling set instead — see "The
+inert offline tilt" below); golden rank
 is tie-pessimistic (ties count as losses, `prior/fit/rank.dual_rank`), and the optimistic/pessimistic gap is reported
 as a saturation canary. This incident is also why goldens became the first evidence tier of a greedy compile: the
 per-GPU golden files are the only measured data a fresh machine has, so a cold deploy must consult them before any
 model extrapolation. See Parts 3 and 8.
+
+### The inert offline tilt
+
+The composite prior's MCTS selection signal was `online_µs · offline**W`: the online model's predicted latency,
+nudged by the cold heuristic's ranking. Because the offline proxy is ordinal — magnitude up to `e**±700` — the
+multiplier had to be clamped to `e**±8` to stop it swamping the µs scale. Measured over 261 goldens, **255 landed on
+the identical clamped constant**: a documented mechanism contributing exactly zero ranking signal for as long as it
+had existed. Cold it was worse than inert — the offline proxy is not µs at all, so PUCT's `P = (1/û)/global_best`
+divided by an arbitrary magnitude.
+
+The same saturation class as the plateau above, and the same lesson: a clamp applied to a quantity whose scale is
+meaningless does not bound it, it erases it. Guard now: PUCT consumes `Prior.policy`, which normalizes a fork's
+siblings against the best of them (best = `1.0`, one priced 10× slower = `0.1`) before anything combines them.
+Scale-free by construction, so no clamp is needed and none can saturate. `Prior.score` is gone with it (see "Retired
+designs"), and how — or whether — the two halves combine is now a named strategy (`EMMY_PRIOR_BLEND`) rather than a
+hardcoded expression, so `gate` versus `tilt` measures the tilt's contribution instead of assuming it. See Part 3.
 
 ### The `D_pow2_threads` cold-deploy pick
 
@@ -149,8 +166,12 @@ Removed mechanisms, kept here so old branches, DB rows, and habits can be recogn
 - **Per-variant fork scoring** — `Fork.score`, `Search.score_of`, the `lazy_score` / `score_tile_geometry` formulas,
   the DB-best `_best_fork` replay, and the `_priority_*` enumeration sorts. All replaced by the single `Prior`
   ranking path (Part 3): forks carry no score, and nothing materializes a `TileOp` just to rank it.
-- **The `+∞`-unvisited UCB rule and static tiebreaks in MCTS selection** — the prior's predicted reward is now the
-  sole selection signal; a confidently-slow sibling is deprioritized instead of force-benched (Part 5).
+- **The `+∞`-unvisited UCB rule and static tiebreaks in MCTS selection** — the prior's sibling-relative policy is now
+  the sole selection signal; a confidently-slow sibling is deprioritized instead of force-benched (Part 5).
+- **`Prior.score`** — a per-candidate selection signal from the Thompson-draw era. Every model became deterministic,
+  so it had collapsed into `mean_score` everywhere except the composite prior, where it carried the magnitude blend
+  above. Replaced by `Prior.policy`, which scores a whole sibling set in one call (also what makes a tree-backed
+  offline prior affordable in the selection loop).
 - **The `op_effort` "skip already-tuned ops" gate** — it suppressed exactly the prior-driven re-exploration that
   makes re-runs valuable. Replaced by "always re-run, replay from the cache": already-measured variants are served
   from the perf table with no GPU bench (Part 5).

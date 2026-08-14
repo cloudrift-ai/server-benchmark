@@ -38,6 +38,7 @@ from emmy.compiler.pipeline.search import golden_eval
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.prior import OfflinePrior
+from emmy.compiler.pipeline.search.prior.base import normalize_policy
 from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, _PARAM_KEYS
 
@@ -184,29 +185,32 @@ def test_exp_argument_clips_at_the_float_safety_bound_only():
     assert ap.mean_score_features({"D_q": 6900.0}) < ap.mean_score_features({"D_q": 6800.0})
 
 
-def test_fallback_tilt_multiplier_stays_bounded(monkeypatch):
-    """The trusted-online blend must not feed the unsaturated proxy (up to e**±700)
-    straight into the µs product — the multiplier clamps to e**±8."""
+def test_extreme_proxies_still_separate_siblings(monkeypatch):
+    """The regression the retired ``e**±8`` clamp caused: an offline proxy spanning the full
+    ``e**±700`` range used to be clamped before entering the blend, and measurement found 255 of
+    261 goldens pinned to the identical clamped constant — a term contributing zero ranking.
+    Sibling-relative normalization cannot saturate, so extreme proxies still rank."""
     from emmy import config
+    from emmy.compiler.pipeline.search.prior.blend import load_blend
 
-    class _Online:
+    class _Half:
         trustworthy = True
 
-        def score(self, knobs):  # noqa: ARG002 — fixed µs anchor
-            return 100.0
+        def __init__(self, scores):
+            self.scores = scores
 
-    class _Offline:
-        def __init__(self, proxy):
-            self.proxy = proxy
+        def mean_scores(self, rows):  # noqa: ARG002 — fixed per-sibling answers
+            return self.scores
 
-        def score(self, knobs):  # noqa: ARG002 — an extreme unsaturated proxy
-            return self.proxy
+        def policy(self, rows):
+            return normalize_policy(self.mean_scores(rows))
 
     monkeypatch.setattr(config, "offline_tilt", lambda: 1.0)
-    lo = FallbackPrior(_Online(), _Offline(math.exp(-700.0))).score({})
-    hi = FallbackPrior(_Online(), _Offline(math.exp(700.0))).score({})
-    assert lo == 100.0 * math.exp(-8.0), "multiplier must clamp at e**-8, not vanish to ~0"
-    assert hi == 100.0 * math.exp(8.0), "multiplier must clamp at e**+8, not blow up the µs anchor"
+    online = _Half([100.0, 100.0, 100.0])  # no opinion: three identical µs
+    offline = _Half([math.exp(-700.0), 1.0, math.exp(700.0)])  # the full unsaturated span
+    pol = FallbackPrior(online, offline, blend=load_blend("tilt")).policy([{}, {}, {}])
+    assert pol[0] == 1.0, "the sibling the offline half likes best must lead"
+    assert pol[0] > pol[1] > pol[2], "extreme proxies must still order, not collapse onto one constant"
 
 
 def test_evaluate_record_rank_is_tie_pessimistic(monkeypatch):
@@ -292,7 +296,7 @@ def test_offline_ranks_mma_above_every_scalar_split(dynamic):
     rows = _enumerate(512, 1024, 1024, "fp16", CTX)
     ap = OfflinePrior()
     base = _base(512, 1024, 1024, dynamic=dynamic)
-    scored = sorted(rows, key=lambda r: ap.score({**base, **r}))
+    scored = sorted(rows, key=lambda r: ap.mean_score({**base, **r}))
     assert _is_warp(scored[0]), f"top pick must be a warp row, got {_tile_of(scored[0])!r}"
     best_scalar = next((i for i, r in enumerate(scored) if not _is_warp(r)), None)
     assert best_scalar is None or best_scalar > 0, "a scalar row must not outrank every mma row"

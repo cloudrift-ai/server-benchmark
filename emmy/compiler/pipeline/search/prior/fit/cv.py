@@ -45,6 +45,19 @@ def fold_key(case: Group, axis: str) -> str:
     return case.gpu if axis == "gpu" else case.family
 
 
+def _unfittable(trainer, train: list[Group], hold: list[Group]) -> str | None:
+    """Why this fold cannot be scored, or ``None`` — the TRAINER's answer, since what makes a
+    training slice unfittable is a property of the model class. The linear trainer has two such
+    constraints (its weight sets); a tree fit has none, and a trainer that declares no
+    ``unfittable`` (the test stubs, and any model class with no structural requirement on its
+    training slice) is taken at its word.
+
+    A fold that IS unfittable is dropped with its reason recorded, never scored with a stale or
+    empty model."""
+    check = getattr(trainer, "unfittable", None)
+    return check(train, hold) if check is not None else None
+
+
 def case_ranks(case: Group, model) -> tuple[int, int] | None:
     """The case's golden ``(rank, rank_optimistic)`` under a fitted model — any object
     with the trainer protocol's ``score_rows(group) -> scores | None`` (higher =
@@ -109,11 +122,8 @@ def run_axis(cases: list[Group], axis: str, *, trainer) -> dict:
     for f in folds:
         train = [c for c in cases if fold_key(c, axis) != f]
         hold = [c for c in cases if fold_key(c, axis) == f]
-        if not any(not c.dynamic for c in train):
-            excluded[f] = "static weight set unfittable (0 static cases in training)"
-            continue
-        if any(c.dynamic for c in hold) and not any(c.dynamic for c in train):
-            excluded[f] = "dynamic weight set unfittable (0 dyn cases in training)"
+        if reason := _unfittable(trainer, train, hold):
+            excluded[f] = reason
             continue
         model = trainer.fit(train)
         hold_entries = [(c, r) for c in hold if (r := case_ranks(c, model)) is not None]

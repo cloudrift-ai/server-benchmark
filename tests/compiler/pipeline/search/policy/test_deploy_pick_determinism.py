@@ -31,9 +31,6 @@ class _ConstPrior(Prior):
     def fit(self) -> None:  # pragma: no cover — never trained
         pass
 
-    def score(self, knobs: dict) -> float:
-        return 1.0
-
     def mean_score(self, knobs: dict) -> float:
         return 1.0
 

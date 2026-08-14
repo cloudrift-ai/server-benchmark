@@ -8,12 +8,11 @@ CatBoost performed the best.
 Regresses ``y = log(median latency µs)`` on :func:`features.knob_features` — the
 ``S_*`` structural + ``H_*`` hardware/nvcc-regime features let one model tell
 kernels and regimes apart from the feature vector (log space keeps the RMSE fit
-from being dominated by the slow configs, where we least care). :meth:`score` /
-:meth:`mean_score` return the predicted latency in µs (``exp`` of the regressed
-log-latency); the search converts that to reward. **Lower is better** — greedy
-picks the ``mean_score`` *argmin*, and PUCT (see :mod:`policy.mcts`) inverts the
-prediction to a reward. Predictions are deterministic, so :meth:`score` (PUCT
-ranking) and :meth:`mean_score` (greedy + calibration) coincide; PUCT explores via
+from being dominated by the slow configs, where we least care).
+:meth:`mean_score` returns the predicted latency in µs (``exp`` of the regressed
+log-latency). **Lower is better** — greedy picks the *argmin*, and
+``Prior.policy`` turns a sibling set's predictions into PUCT weights (see
+:mod:`policy.mcts`). Predictions are deterministic; PUCT explores via
 its own exploration term rather than a Thompson draw. :meth:`to_json` / :meth:`from_json`
 round-trip the CatBoost model (its native ``cbm`` blob, base64'd) plus the
 reservoir dataset, so a follow-up ``tune`` keeps accumulating and a ``compile`` /
@@ -22,14 +21,11 @@ reservoir dataset, so a follow-up ``tune`` keeps accumulating and a ``compile`` 
 
 from __future__ import annotations
 
-import base64
-import os
-import tempfile
-
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
 from emmy.compiler.pipeline.search.prior.base import Prior
+from emmy.compiler.pipeline.search.prior.catboost_model import from_b64, to_b64
 
 
 class OnlinePrior(Prior):
@@ -89,9 +85,6 @@ class OnlinePrior(Prior):
         )
         model.fit(x, y)
         self._cols, self._model = cols, model
-
-    def score(self, knobs: dict) -> float:
-        return self.mean_score(knobs)
 
     def mean_score(self, knobs: dict) -> float:
         """Predicted median latency in µs (``exp`` of the regressed log-latency);
@@ -197,29 +190,12 @@ class OnlinePrior(Prior):
         return p
 
     def _model_b64(self) -> str | None:
-        """CatBoost has no in-memory to-bytes API, so round-trip the native
-        ``cbm`` file through a tempfile and base64 it for the JSON."""
-        if self._model is None:
-            return None
-        with tempfile.NamedTemporaryFile(suffix=".cbm", delete=False) as f:
-            tmp = f.name
-        try:
-            self._model.save_model(tmp, format="cbm")
-            blob = open(tmp, "rb").read()  # noqa: SIM115
-        finally:
-            os.unlink(tmp)
-        return base64.b64encode(blob).decode("ascii")
+        """This prior's model as a base64 ``cbm`` blob for the checkpoint (``None`` when unfit). The round-trip
+        itself is shared with the offline tree model — one spelling, so the two cannot drift on the format."""
+        return None if self._model is None else to_b64(self._model)
 
     @staticmethod
     def _model_from_b64(b64: str):
         from catboost import CatBoostRegressor  # noqa: PLC0415
 
-        with tempfile.NamedTemporaryFile(suffix=".cbm", delete=False) as f:
-            f.write(base64.b64decode(b64))
-            tmp = f.name
-        try:
-            model = CatBoostRegressor()
-            model.load_model(tmp, format="cbm")
-        finally:
-            os.unlink(tmp)
-        return model
+        return from_b64(b64, CatBoostRegressor())

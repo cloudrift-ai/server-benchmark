@@ -202,8 +202,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   online prior learns from collected measurements.
 - **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
   to use, how strong the regularizer is, which loss to minimize — and producing a model leaves those settings
-  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy's offline-prior
-  trainer is `LinearTrainer`, and the model it produces is a `LinearModel`.
+  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy has two
+  offline-prior trainers, chosen by `emmy fit --trainer`: `LinearTrainer` produces a `LinearModel` (fixed weights
+  over the features), and `CatBoostTrainer` produces a `CatBoostModel` (a ranker built from decision trees).
+- **Blend** — How Emmy's two priors are combined into one answer: which of them decides a compile's schedule, and how
+  the two are weighed against each other when the tuner chooses what to try next. Emmy has several, selected by
+  `EMMY_PRIOR_BLEND`, including single-prior ones used to measure one prior on its own.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,

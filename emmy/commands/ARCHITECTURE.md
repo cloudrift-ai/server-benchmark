@@ -568,17 +568,34 @@ GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY
 ### `emmy fit`
 
 Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
-{linear,catboost}` × `--data {golden,freeze:<path>}` — of which only `linear` × `golden` (the incumbent trainer on the
-golden dataset) exists today; other combinations exit with "not yet supported". `--samples N` (default 0:
-coordinate-descent-from-seed, the incumbent practice), `--l2 λ` (the raw-space L2 penalty strength in the fit loss —
-default the declared tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude
-identified, the D_pow2_threads 686 incident), `--seed`, `--folds {op_family,gpu,both,none}` (default `both`),
-`--features SPEC` (the feature view — comma-separated names, trailing `*` = prefix glob; default
-`D_*,MMA_tier,MMA_acc_bits`, recorded in the metrics header and artifact provenance so two fits are only compared
-under matching views; `fit/group.MATMUL_FEATURES` is a ready spec holding just the 52 features that can move a
-matmul ranking — the rest are either constant within every pool or affine copies of a kept feature, so excluding
-them is expressiveness-neutral), `--out DIR`
-(default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run record two fits
+{linear,catboost}` × `--data {golden,freeze:<path>}` — of which both trainers work on `golden`; `freeze:` exits with
+"not yet supported". The two trainers write the same artifact shape, distinguished by its `kind` field, so either can
+be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the other.
+
+`linear` fits weights by random search + coordinate descent: `--samples N` (default 0: coordinate-descent-from-seed,
+the incumbent practice) and `--l2 λ` (the raw-space L2 penalty strength in the fit loss — default the declared
+tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude identified, the
+D_pow2_threads 686 incident). `catboost` fits a `QuerySoftMax` ranker, one group per candidate pool with the golden
+as its single positive: `--iterations N`, `--negatives K` (sampled negatives per pool per round — the full corpus is
+~38 M rows, so training samples while the rank metric still covers whole pools) and `--rounds R` (the first draws
+negatives uniformly, each further one mines hard negatives from what the current model ranks near the golden —
+**default 1, so mining is off**: the one measurement of it moved top-1 from 545 to 517 over the 1278-case golden
+dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is the expected direction when the negatives
+are unlabeled rather than known-bad). Its fits are not byte-reproducible — CatBoost's histogram build is threaded —
+so two fits are compared by their metrics files rather than by a checksum.
+
+Shared: `--seed`, `--folds {op_family,gpu,both,none}` (default `both`), `--out DIR`, and `--features SPEC` — the
+feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
+the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
+the trainer's own**: `fit/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
+`fit/group.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an additive model
+cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*` interaction mirrors), each
+of which a tree re-derives by splitting on columns the view keeps. `fit/group.MATMUL_FEATURES` is a third ready spec,
+holding just the 52 features that can move a matmul ranking — the rest are either constant within every pool or
+affine copies of a kept feature, so excluding them is expressiveness-neutral. `--out DIR` defaults to
+`_tune/fits/<timestamp>-<trainer>-<data>/`.
+
+A run writes `metrics.json` — the per-run record two fits
 are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and one `cv.<axis>`
 block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and `weights.json`, the full-train
 artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the

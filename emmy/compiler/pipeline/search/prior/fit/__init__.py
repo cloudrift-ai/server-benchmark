@@ -1,6 +1,7 @@
 from emmy.compiler.pipeline.search.prior.fit.group import (
     DEFAULT_FEATURES,
     MATMUL_FEATURES,
+    TREE_FEATURES,
     Group,
     feature_matrix,
     feature_view,
@@ -23,6 +24,7 @@ __all__ = [
     "DEFAULT_FEATURES",
     "DEFAULT_L2",
     "MATMUL_FEATURES",
+    "TREE_FEATURES",
     "Group",
     "LinearFit",
     "LinearTrainer",

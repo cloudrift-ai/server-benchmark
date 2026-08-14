@@ -319,13 +319,38 @@ one because it is what answers on a machine that has no local measurements yet �
 
 ### The offline prior (the cold half)
 
-`OfflinePrior` scores a candidate with a linear formula over the `D_*` features — hand-designed descriptions of a
-tile's geometry and its occupancy — fitted ahead of time. It never falls back on the order the rule emitted its
-options in. The complete scoring function lives in the repo-checked artifact `search/prior/offline_weights.json`:
-both weight sets plus the scalar params, carrying a `feat_ver` version and a `provenance` block. The offline fitter
+`OfflinePrior` scores a candidate over the `D_*` features — hand-designed descriptions of a tile's geometry and its
+occupancy — using a model fitted ahead of time. It never falls back on the order the rule emitted its options in.
+The complete scoring function lives in the repo-checked artifact `search/prior/offline_weights.json`, carrying a
+`feat_ver` version, a `provenance` block, and a **`kind`** naming which model class to rebuild. The offline fitter
 writes it (`search/prior/fit/`, driven by `emmy fit`). Building the training cases from the goldens lives in
 `emmy/commands/fit.py`, because reconstructing the set of candidates a golden competed against needs the command
 layer's tracer for the golden's little PyTorch snippet, which `pipeline/` never imports.
+
+**Two model classes answer that one contract**, and `OfflinePrior` is the adapter over whichever the artifact names:
+
+| `kind` | The model | Fitted by |
+|---|---|---|
+| `linear` | Fixed weights over the features, plus one fitted non-linear interaction, and a *second* weight set for symbolic-axis (masked-tile) kernels. Reviewable as a line-level diff. | `--trainer linear`: random search + coordinate descent minimizing the goldens' mean `log2(rank+1)` |
+| `catboost` | A gradient-boosted tree ranker, shipped as one opaque base64 blob. No second weight set and no hand-built interaction — a tree splits on the routing stamp and forms products from its own columns. | `--trainer catboost`: CatBoost `QuerySoftMax`, one group per candidate pool, the golden its single positive |
+
+The tree trains on **sampled** negatives (uniform, then rounds of hard negatives mined from what the current model
+ranks near the golden) because the full golden corpus is ~38 M rows; the *metric* still ranks each golden inside its
+whole pool, so what is reported stays exactly the deployed quantity. Its fits are not byte-reproducible — CatBoost's
+histogram build is threaded — so two fits are compared by their metrics files, not by a checksum.
+
+The two classes also want **different feature views**, and `emmy fit` defaults each trainer to its own. Roughly a
+third of the `D_*` block exists only because an additive model cannot form it: monotone duplicates of a column that
+is already present, folds like `-|x - target|` around a hand-set target, threshold flags, and interaction mirrors
+such as `D_tma_*`. Every one of those is a split or two on columns the tree already has, so `TREE_FEATURES` excludes
+them — while keeping what axis-aligned splits genuinely cannot reach: a periodic predicate (`D_pow2_threads`), a
+relation *between* two columns (`D_bn_ge_bm`), a difference (`D_w_grid_aspect`), and the knob × state block, whose
+state operand is not a candidate column at all.
+
+One more difference runs all the way through the fit: an absent feature. `Group` stores it as `NaN` and each model
+projects it to its own meaning — `0.0` for the linear model (exact term removal, its documented contract) and `NaN`
+for the tree, which can branch on "not decided" as a state distinct from a knob that is present and legitimately
+zero. That distinction matters most on the MCTS path, where the prior scores *partial* fork prefixes.
 
 `offline_weights.json` is the one artifact anything loads by default. A sibling file in that directory is a **scoped
 experiment**, not a second default: `offline_weights_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
@@ -376,13 +401,14 @@ What a newcomer needs to know about the fit:
   a preference for the tensor-core path, driven by the per-kernel `S_warp_eligible` value the scheduler stamps — used
   to carry hand-set coefficients here as well. They are plain linear terms on features the weight vector already
   holds, so they were double-counting constants the fit could not see, and the fitted weights now carry them alone.
-- **The linear quality score is turned into a positive stand-in for latency by an exponential**
-  (`exp(-scale·quality)`), whose argument is clipped only at the point where floats stop being safe (~±700). **That
-  exponential must never flatten out over the range of quality scores that actually occur.** A clip inside the live
-  range collapses good candidates onto one identical value, and the argmin then falls back on the order the options
-  were emitted in (HISTORY.md: "The saturated-score plateau"). The one consumer that needs a bounded value —
-  `FallbackPrior`'s offline multiplier — clamps to `e**±8` on its own side; the consumers that rank get the
-  strictly-ordered version.
+- **The quality score is turned into a positive stand-in for latency by an exponential**
+  (`exp(-scale·quality)`, in both model classes), whose argument is clipped only at the point where floats stop being
+  safe (~±700). **That exponential must never flatten out over the range of quality scores that actually occur.** A
+  clip inside the live range collapses good candidates onto one identical value, and the argmin then falls back on
+  the order the options were emitted in (HISTORY.md: "The saturated-score plateau"). Every consumer gets the
+  strictly-ordered version; the one that needs a *bounded* quantity — PUCT — derives it by normalizing within the
+  sibling set (`Prior.policy`), which is scale-free rather than clamped and therefore cannot saturate (HISTORY.md:
+  "The inert offline tilt").
 
 ### The online prior (the online half)
 
@@ -403,17 +429,17 @@ The names below recur throughout this document; together they are the whole publ
 
 | Member | Caller | What it is |
 |--------|--------|------------|
-| `score(knobs)` | MCTS selection (PUCT) only | Predicted latency, used to steer exploration. On the composite prior this is the one call that blends the two halves (see the calibration-gate section below). |
-| `mean_score` / `mean_scores` | deploy + eval ranking | The model's latency prediction for one row / for a batch of candidates. `FallbackPrior` routes these to the online half when it is `trustworthy`, else to the offline half — no blending. |
+| `policy(rows)` | MCTS selection (PUCT) only | One fork's sibling set priced against the best of them: the model's preferred sibling scores `1.0`, one it thinks 10× slower scores `0.1`. One batched call per fork. On the composite prior this is the one surface where a blend strategy may combine the two halves (see the calibration-gate section below). |
+| `mean_score` / `mean_scores` | deploy + eval ranking | The model's latency prediction for one row / for a batch of candidates. On the composite prior the blend strategy names ONE half to answer — the online model when it is `trustworthy`, else the offline one, under the default strategies. |
 | `evidence_pick(rows)` | deploy tier 2 | The pick made from measured reservoir rows (defined below). Returns `(index, measured_µs)` or `None`. Consulted whatever the calibration verdict says, because measured evidence needs no trusted model: a quarantined model — or a checkpoint whose reservoir has rows but no fitted model yet — still supplies this tier. |
 | `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the golden tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
 | `sig_groups` | both measured-evidence tiers | How a candidate is matched to measured rows by its `S_*` features. It still matches when the feature set has changed since those rows were written (Part 4) — one rule shared by the reservoir tier and the DB tier. |
 | `trustworthy` | the check that lets the online model decide | `fitted` AND passing the calibration gate. |
-| `mean_score_features` / `explain_features` | diagnostics only | Scoring / decomposing a row that is ALREADY in feature form (Part 8) — which is what lets the attribution views hide individual features that no knob value corresponds to. |
+| `mean_score_features` / `explain_features` | diagnostics only | Scoring / decomposing a row that is ALREADY in feature form (Part 8) — which is what lets the attribution views hide individual features that no knob value corresponds to. `masking_exact` says whether hiding one is exact term removal (only the linear offline model) or a re-route the report must caveat. |
 
 ### The deploy evidence hierarchy
 
-`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `score`. `greedy_decide` (`compile` / `run`, via
+`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `policy`. `greedy_decide` (`compile` / `run`, via
 `Run.resolve`) never explores: at each fork it picks once, working down the list below from the top. **This list is
 the authoritative order** — the summaries elsewhere in this file defer to it.
 
@@ -606,15 +632,34 @@ collapse where model and rows no longer share feature names (constant prediction
 deliberately does NOT catch subtler failures — overfitting to the op families that were tuned, or being wrong about
 absolute µs on ops that were not. Those are what the Part 8 diagnostics exist to surface.
 
-**When the online half is trusted, `mean_score` / `mean_scores` answer with the online model alone**, and `pick` is
-the reservoir evidence first, then the online argmin — the offline half is out of the deploy path entirely. `score`,
-the signal MCTS uses to decide what to explore next, is the one call that still blends the two:
-`online_µs · offline**W`. The offline factor is `exp(-scale·quality)` (with the artifact's fitted scale, ~0.1) clamped
-to `e**±8`. Only its ordering is meaningful, and its no-opinion value is exactly 1.0, so a config the offline
-heuristic has no view on leaves the online prediction untouched. `W` is `config.offline_tilt` (`EMMY_OFFLINE_TILT`,
-default 0.3; `W=0` gives pure-online selection). The point of the blend: PUCT still explores regions the cold
-heuristic rates well but the data-poor online model buries, while the offline factor's arbitrary magnitude never
-touches the µs scale a deploy sees.
+### How the two halves interact: the blend strategy
+
+*Which* half answers, and whether the two ever combine, is a swappable strategy (`search/prior/blend.py`), selected by
+`EMMY_PRIOR_BLEND` and defaulting to `tilt`. It answers two separate questions:
+
+| Strategy | Deploy ranking (`mean_score`, `pick`, the featurized surface) | PUCT selection (`policy`) |
+|---|---|---|
+| `tilt` (default) | online when `trustworthy`, else offline | `p_online · p_offline**W`, renormalized |
+| `gate` | same | the live half's policy alone — no interaction |
+| `online` | online always, calibration gate ignored | online alone |
+| `offline` | offline always, calibration gate ignored | offline alone |
+
+`W` is `config.offline_tilt` (`EMMY_OFFLINE_TILT`, default 0.3; `W=0` gives pure-online selection). The point of the
+tilt: PUCT still explores regions the cold heuristic rates well but the data-poor online model buries, having never
+measured them. The point of `gate` is to measure whether that is true — run the same shape under both and the
+difference is the tilt's whole contribution. `online` / `offline` are single-half A/B arms: they discard the
+calibration guard deliberately, so a change to one half can be measured without the other masking it.
+
+The deploy question is answered with a whole prior rather than a mixed score, and that is a deliberate limit. `pick`'s
+returned score feeds `greedy._pick_structural` as an absolute µs cost estimate; mixing an ordinal proxy into that
+scale is exactly what went wrong on the selection side, so blending there would mean reopening the seam on purpose.
+
+The halves meet only in `policy`, and only after each has been normalized within the sibling set — the online model
+predicts calibrated µs while the offline one is an ordinal proxy spanning `e**±700`, and normalization is what makes
+them the same kind of quantity. The retired design multiplied predicted µs by `offline**W` directly and had to clamp
+the offline factor to `e**±8` to stop it swamping the scale; measurement then found 255 of 261 goldens pinned to the
+identical clamped constant — a documented mechanism contributing exactly nothing (HISTORY.md: "The inert offline
+tilt"). Sibling-relative normalization cannot saturate, so the clamp is gone.
 
 ### Featurizer versioning
 

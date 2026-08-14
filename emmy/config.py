@@ -44,6 +44,7 @@ TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
 TUNE_EPS = "EMMY_TUNE_EPS"
 O3_TOL = "EMMY_O3_TOL"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
+PRIOR_BLEND = "EMMY_PRIOR_BLEND"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
@@ -305,13 +306,23 @@ def o3_tol(default: float = 0.15) -> float:
     return float_env(O3_TOL, default)
 
 
+def prior_blend(default: str = "tilt") -> str:
+    """``EMMY_PRIOR_BLEND`` — how the online and offline priors interact:
+    ``tilt`` (default; online owns deploys, its PUCT policy tilted by the offline
+    one), ``gate`` (no interaction — whichever half is live answers), or the
+    single-half A/B arms ``online`` / ``offline``, which ignore the calibration
+    gate. See :mod:`emmy.compiler.pipeline.search.prior.blend`; an unknown name
+    raises there rather than silently defaulting, so a mislabelled A/B arm cannot
+    report the default's numbers."""
+    return os.environ.get(PRIOR_BLEND) or default
+
+
 def offline_tilt(default: float = 0.3) -> float:
-    """``EMMY_OFFLINE_TILT`` (legacy ``EMMY_ANALYTIC_TILT``) — exponent ``W`` of
-    the cold ``OfflinePrior`` multiplier in :meth:`FallbackPrior.score` (selection
-    only): the online µs are tilted by ``offline**W`` so the heuristic's ranking
-    nudges PUCT exploration toward configs it favors without overriding the online
-    scale (``W=0`` = pure online, large ``W`` = offline dominates). See the method
-    docstring."""
+    """``EMMY_OFFLINE_TILT`` (legacy ``EMMY_ANALYTIC_TILT``) — exponent ``W`` in the
+    ``tilt`` blend's PUCT policy, ``p_online · p_offline**W`` (selection only): the
+    cold heuristic's ranking nudges exploration toward configs it favors without
+    overriding the online model's order (``W=0`` = pure online, large ``W`` = offline
+    dominates). See :class:`~emmy.compiler.pipeline.search.prior.blend.TiltBlend`."""
     raw = _env_aliased(OFFLINE_TILT)
     if not raw:
         return default

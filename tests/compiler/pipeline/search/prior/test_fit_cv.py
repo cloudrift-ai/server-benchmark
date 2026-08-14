@@ -9,11 +9,12 @@ import json
 import numpy as np
 import pytest
 
-from emmy.commands.fit import register_fit_command
+from emmy.commands.fit import TRAINERS, register_fit_command
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_FEATURES,
     MATMUL_FEATURES,
+    TREE_FEATURES,
     Group,
     LinearFit,
     LinearTrainer,
@@ -148,6 +149,25 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
         Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", 0, [{"D_a": 1.0}])
 
 
+def test_matrix_fill_declares_the_absent_semantics():
+    """``Group`` stores absent features as ``NaN`` and each model class projects them to what IT means by
+    absent. Both kinds of absence are covered: a name the pool never stamped, and a key missing from one
+    row whose siblings carry it.
+
+    The ``fill=0.0`` default must stay bit-identical to ``feats.get(k, 0.0)`` — that is the linear model's
+    contract, and the whole dataset is packed once for both trainers."""
+    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    zeros = g.matrix(["D_a", "D_b", "D_never"])
+    assert zeros.tolist() == [[1.0, 2.0, 0.0], [3.0, 0.0, 0.0]]
+
+    nans = g.matrix(["D_a", "D_b", "D_never"], fill=np.nan)
+    assert nans[0].tolist() == [1.0, 2.0] + [pytest.approx(np.nan, nan_ok=True)]
+    assert nans[1][0] == 3.0 and np.isnan(nans[1][1]) and np.isnan(nans[1][2])
+    # A genuine 0.0 is never confused for an absent value under either fill.
+    z = Group.from_dicts("gpuA/z", "z", "warp", "gpuA", 0, [{"D_a": 0.0}])
+    assert z.matrix(["D_a"], fill=np.nan).tolist() == [[0.0]]
+
+
 def test_no_feature_view_can_drop_the_routing_stamp():
     """Routing is not a view choice. A spec that names neither the stamp nor a prefix covering it still
     keeps it — otherwise every pool would route to the static weight set and the run would report a
@@ -155,6 +175,26 @@ def test_no_feature_view_can_drop_the_routing_stamp():
     for spec in (DEFAULT_FEATURES, MATMUL_FEATURES, "D_waves"):
         assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
     assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
+
+
+def test_tree_view_drops_only_what_a_tree_re_derives():
+    """The tree view keeps the raw columns and the terms axis-aligned splits cannot reach, and drops the
+    engineered ones a tree forms for itself. Exclusions never touch the default view."""
+    keep, default = feature_view(TREE_FEATURES), feature_view(DEFAULT_FEATURES)
+    derivable = ("D_l2_threads", "D_near_threads", "D_square", "D_stage_prefetch", "D_splitk_le2", "D_tma_aspect", "D_l2_cells_occ")
+    for name in derivable:
+        assert not keep(name), f"{name} is derivable from a kept column by splits"
+        assert default(name), f"{name} must stay in the linear view, which cannot form it"
+    # Kept: the raw columns, and the terms no split on a kept column can reach — a periodic predicate,
+    # a relation BETWEEN two columns, and the knob x state block whose state operand is not a column.
+    for name in ("D_threads", "D_cells", "D_aspect", "D_stage_depth", "D_splitk", "D_pow2_threads", "D_bn_ge_bm", "D_splitk_excess"):
+        assert keep(name), name
+    assert keep("S_ext_n_symbolic_axis"), "the routing stamp is exempt from every view, exclusions included"
+
+
+def test_feature_view_exclusions_apply_to_names_and_globs():
+    keep = feature_view("D_*,MMA_tier,-D_near_*,-MMA_tier")
+    assert keep("D_threads") and not keep("D_near_area") and not keep("MMA_tier")
 
 
 def test_featurizer_preserves_the_routing_stamp():
@@ -317,18 +357,20 @@ def test_fit_command_defaults_and_unsupported_cells():
     register_fit_command(parser.add_subparsers())
     args = parser.parse_args(["fit"])
     assert (args.trainer, args.data, args.samples, args.seed, args.folds) == ("linear", "golden", 0, 0, "both")
-    assert args.features == DEFAULT_FEATURES
     # --artifact: absent = no extra write, bare = "" (the shipped offline_weights.json), a value = that path.
     assert args.artifact is None
     assert parser.parse_args(["fit", "--artifact"]).artifact == ""
     assert parser.parse_args(["fit", "--artifact", "/tmp/cand.json"]).artifact == "/tmp/cand.json"
 
-    for bad in (
-        parser.parse_args(["fit", "--trainer", "catboost"]),
-        parser.parse_args(["fit", "--data", "freeze:/tmp/x.jsonl"]),
-    ):
-        with pytest.raises(SystemExit, match="not yet supported"):
-            bad.func(bad)
+    # --features defaults to the TRAINER's view, resolved in the handler rather than by argparse:
+    # the linear model needs the engineered step / fold / interaction features, the tree re-derives them.
+    assert args.features is None
+    assert TRAINERS["linear"][1] == DEFAULT_FEATURES
+    assert TRAINERS["catboost"][1] == TREE_FEATURES
+
+    bad = parser.parse_args(["fit", "--data", "freeze:/tmp/x.jsonl"])
+    with pytest.raises(SystemExit, match="not yet supported"):
+        bad.func(bad)
 
 
 def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch):

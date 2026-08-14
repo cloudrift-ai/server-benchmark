@@ -75,8 +75,10 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.expr import axis_step
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -94,6 +96,20 @@ from emmy.compiler.ir.stmt import (
 )
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import digest
+
+
+def b_transposed(edge, axis: Axis) -> bool:
+    """Whether a materialized B edge stores its contraction axis in the last coordinate.
+
+    Layout is coordinate *motion*, not variable occurrence: a delinearizing reshape can retain
+    ``k`` syntactically in ``(k * stride + n) % source_width`` even when its modular step is zero.
+    Unknown nonlinear motion keeps the historical occurrence fallback; a proven zero step is the
+    canonical K-major orientation.
+    """
+    if not isinstance(edge, Load):
+        return False
+    step = axis_step(edge.index[-1], axis.name)
+    return axis.name in edge.index[-1].free_vars() if step is None else step[0] != 0
 
 
 def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
@@ -157,7 +173,12 @@ def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
     this one stmt, and the lowered CUDA is byte-identical), so the edge IS the one-stmt node."""
     cone = Fold.projection(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
     k = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
-    return Fold.contraction(k_axis=k, a=cone, channels=(Channel(b=v_edge, acc=f"{o}__pv"),))
+    return Fold.contraction(
+        k_axis=k,
+        a=cone,
+        channels=(Channel(b=v_edge, acc=f"{o}__pv"),),
+        product_dtype=F32,
+    )
 
 
 def _split_expect(merge: list[Stmt], o: str, v: str, v_edge: Load) -> list[Stmt]:
@@ -479,14 +500,36 @@ class Fold(Stmt):
         return self.channels[0].acc
 
     @property
+    def product_dtype(self) -> DataType | None:
+        """The declared dtype of the bilinear lift's products.
+
+        This is algebra carried by the generated ``Assign`` statements, not a hardware or
+        schedule field.  In particular, a low-precision matmul spells an f32 product feeding its
+        wide accumulator, while a separately materialized pointwise low-precision multiply keeps
+        its own narrow tensor boundary.  All channels of one shared-A contraction use the same
+        product dtype by construction.
+        """
+        assert self._contraction is not None, f"not a contraction fold (role={self.role.value}) — no product dtype"
+        dtypes = tuple(stmt.dtype for stmt in self.lift.body if isinstance(stmt, Assign))
+        assert dtypes and all(dtype == dtypes[0] for dtype in dtypes[1:]), "contraction channels disagree on product dtype"
+        return dtypes[0]
+
+    @property
     def b_trans(self) -> bool:
         """B stored N×K (the K axis last in its index) vs the canonical ``B[k, n]`` — a gmem
         LAYOUT question, so it is meaningful only for a materialized B; a computed B answers
         ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``)."""
-        return isinstance(self.b, Load) and self.axis.name in self.b.index[-1].free_vars()
+        return b_transposed(self.b, self.axis)
 
     @classmethod
-    def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...]) -> Fold:
+    def contraction(
+        cls,
+        *,
+        k_axis: Axis,
+        a,
+        channels: tuple[Channel, ...],
+        product_dtype: DataType | None = None,
+    ) -> Fold:
         """A BILINEAR fold — the matmul cell (what the retired ``Contraction`` kind named). Unlike
         :meth:`projection` this constructor GENERATES algebra: operands `(b₀, a, b₁…)`, the lift
         ``λ(k, b, a, b₂…). (b·a, a·b₂, …)`` and the componentwise-additive ⊕ over the channel
@@ -506,8 +549,8 @@ class Fold(Stmt):
         prim = channels[0]
         operands = (prim.b, a, *(ch.b for ch in channels[1:]))
         a_name = operand_name(a)
-        body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(operand_name(prim.b), a_name))]
-        body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, operand_name(ch.b))) for ch in channels[1:]]
+        body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(operand_name(prim.b), a_name), dtype=product_dtype)]
+        body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, operand_name(ch.b)), dtype=product_dtype) for ch in channels[1:]]
         accs = tuple(ch.acc for ch in channels)
         lift = Lambda(
             params=(k_axis.name, *(operand_name(e) for e in operands)),

@@ -410,7 +410,7 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         else:
             op_callable = (lambda n: lambda ins: _eval(n, ins, sym_env))(node)
         compute_steps.append((nid, op_callable, list(node.inputs), torch_dtype(node.output.dtype)))
-    out_id = graph.outputs[0]
+    out_ids = tuple(graph.outputs)
 
     def fn(*tensors):
         env = dict(scalars)
@@ -418,6 +418,7 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         for nid, op_callable, in_ids, out_dtype in compute_steps:
             v = op_callable([env[i] for i in in_ids])
             env[nid] = v if out_dtype is None else v.to(out_dtype)
-        return env[out_id]
+        outputs = tuple(env[out_id] for out_id in out_ids)
+        return outputs[0] if len(outputs) == 1 else outputs
 
     return fn, [input_tensors[i] for i in tensor_ids]

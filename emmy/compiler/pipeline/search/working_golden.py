@@ -34,6 +34,7 @@ class WorkingGoldenTarget:
     pins: dict[str, object] = field(default_factory=dict)
     program: object | None = None
     entry_indexes: list[tuple[int, int]] = field(default_factory=list)
+    # Proposal payload is either a legacy flat knob row or an exact replay plan.
     proposals: list[tuple[tuple[int, int], dict]] = field(default_factory=list)
 
 
@@ -155,11 +156,18 @@ def _append_trace_inventory(
     seen_loops: set[int] | None = None,
     realizations: list[dict] | None = None,
 ) -> None:
-    """Append one lowered graph to shared trace-inventory pools."""
+    """Append one maximally fused graph to shared trace-inventory pools.
+
+    Placement is a tuner-visible structural fork, so inventory capture must stop before it.
+    Each retained Loop target enters the outer placement search with all legal fused/cut
+    alternatives available instead of baking one machine's current routing evidence into the
+    target ABI.
+    """
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _product_reduction_pair  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
@@ -184,8 +192,11 @@ def _append_trace_inventory(
     input_graph = graph.copy()
     fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
 
-    # Match two-level tuning's fold-aware target set. A flash score producer is
-    # part of its consuming attention target, not a second inventory row.
+    # Match two-level tuning's context-complete target set. A flash score producer is
+    # part of its consuming attention target, not a second inventory row. Likewise, a
+    # placement residue whose expanded product has one additive-reduction consumer must
+    # travel with that consumer: the outer fork needs both endpoints to compare
+    # ``PLACE@product=fuse`` recomposition with retaining the materialized pair.
     absorbed: dict[str, str] = {}
     for node_id in fused.topological_order():
         node = fused.nodes[node_id]
@@ -193,6 +204,8 @@ def _append_trace_inventory(
             continue
         for producer_id in fused_producer_ids(fused, node):
             absorbed[producer_id] = node_id
+        if (consumer := _product_reduction_pair(fused, node, allow_nested_producer=True)) is not None:
+            absorbed[node.id] = consumer.id
 
     targets: list[tuple[str, object]] = []
     for node_id in fused.topological_order():
@@ -323,6 +336,8 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
             target.entry_indexes.append(path)
             if "knobs" in realization:
                 target.proposals.append((path, dict(realization["knobs"])))
+            elif "replay_plan" in realization:
+                target.proposals.append((path, {"replay_plan": copy.deepcopy(realization["replay_plan"])}))
 
     if not by_source:
         raise ValueError(f"no working golden targets matched --kernel {kernel!r}")
@@ -339,6 +354,360 @@ def validate_working_gpu(document: dict, ctx) -> None:
         )
     if file_gpu and ctx.gpu_name and file_gpu != ctx.gpu_name:
         raise ValueError(f"working golden targets {file_gpu}, but the live GPU is {ctx.gpu_name}")
+
+
+def _verification_input_maps(graphs: tuple, *, seed: int) -> tuple[dict, ...]:
+    """Build graph-local bindings from one canonical deterministic input source.
+
+    Exact replay and cold greedy may lay constants out differently, so sharing a
+    final ``input_data`` mapping is not generally valid. Instead, activations are
+    keyed by stable input id and loadable constants by source path; each graph then
+    applies its own recorded load transforms to those identical source values.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim  # noqa: PLC0415
+    from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
+    from emmy.compiler.dtype import get as get_dtype
+    from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
+    from emmy.compiler.loader.binder import bind_constants  # noqa: PLC0415
+
+    sym_env: dict[str, int] = {}
+    for graph in graphs:
+        for node in graph.nodes.values():
+            for dim in node.output.shape:
+                if isinstance(dim, Dim) and not dim.is_static:
+                    for name in dim.expr.free_vars():
+                        sym_env.setdefault(name, dim.hint or DEFAULT_SEQ_HINT)
+
+    def static(shape) -> tuple[int, ...]:
+        return tuple(
+            (dim.as_static() if dim.is_static else int(dim.expr.eval(sym_env))) if isinstance(dim, Dim) else int(dim) for dim in shape
+        )
+
+    def spec(shape, dtype) -> tuple[tuple[int, ...], str]:
+        return static(shape), get_dtype(dtype or "f32").name
+
+    def merge(target: dict, key: str, value, kind: str) -> None:
+        previous = target.setdefault(key, value)
+        if previous != value:
+            raise ValueError(f"replay verification {kind} {key!r} has inconsistent declarations: {previous!r} != {value!r}")
+
+    inputs: dict[str, tuple[tuple[int, ...], str]] = {}
+    sources: dict[str, tuple[tuple[int, ...], str]] = {}
+    synthetic: dict[str, tuple[tuple[int, ...], str]] = {}
+    for graph in graphs:
+        for node_id, node in graph.nodes.items():
+            op = node.op
+            if isinstance(op, InputOp):
+                merge(inputs, node_id, spec(node.output.shape, node.output.dtype), "input")
+            elif isinstance(op, ConstantOp) and op.value is None:
+                dtype = op.source_dtype or node.output.dtype
+                if op.source_path:
+                    merge(sources, op.source_path, spec(op.source_shape or node.output.shape, dtype), "constant source")
+                for path, shape in op.source_parts:
+                    merge(sources, path, spec(shape, dtype), "constant source")
+                if not op.source_path and not op.source_parts:
+                    merge(synthetic, node_id, spec(node.output.shape, node.output.dtype), "synthetic constant")
+
+    rng = np.random.default_rng(seed)
+
+    def random_values(shape: tuple[int, ...], dtype: str, *, scale: float):
+        if dtype in {"f8e4m3", "f8e5m2"}:
+            bits = rng.integers(0, 256, shape, dtype=np.uint8)
+            bits[~np.isfinite(decode_f8(bits, dtype))] = np.uint8(0)
+            return bits
+        return rng.standard_normal(shape, dtype=np.float32) * scale
+
+    input_values = {key: random_values(*value, scale=1.0) for key, value in sorted(inputs.items())}
+    source_values = {key: random_values(*value, scale=0.02) for key, value in sorted(sources.items())}
+    synthetic_values = {key: random_values(*value, scale=0.02) for key, value in sorted(synthetic.items())}
+
+    bindings = []
+    for graph in graphs:
+        data: dict[str, object] = {}
+        for node_id, node in graph.nodes.items():
+            if isinstance(node.op, InputOp):
+                data[node_id] = input_values[node_id]
+            elif isinstance(node.op, ConstantOp) and node.op.value is not None:
+                data[node_id] = [float(node.op.value)]
+        data.update(bind_constants(graph, source_values))
+        for node_id, node in graph.nodes.items():
+            if not isinstance(node.op, ConstantOp) or node.op.value is not None or node_id in data:
+                continue
+            if node_id not in synthetic_values:
+                raise ValueError(f"replay verification could not bind constant {node_id!r}")
+            data[node_id] = synthetic_values[node_id].flatten().tolist()
+        bindings.append(data)
+    return tuple(bindings)
+
+
+def _verification_us(bench, *, label: str) -> tuple[float, str]:
+    """Require captured deploy timing and return ``(us, semantics)``."""
+    import math  # noqa: PLC0415
+
+    if getattr(bench, "captured", None) is not True:
+        raise ValueError(f"{label}: replay verification requires CUDA-graph-captured timing")
+    launches = int(getattr(bench, "num_launches", 0) or len(getattr(bench, "per_launch", None) or ()))
+    value = getattr(bench, "e2e_min_ms", None)
+    if launches > 1:
+        if value is None:
+            raise ValueError(f"{label}: multi-launch replay verification requires whole-program e2e_min_ms")
+        value = float(value) * 1000.0
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{label}: invalid whole-program timing {value!r} us")
+        return value, "whole_program_e2e"
+    if value is not None:
+        value = float(value) * 1000.0
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{label}: invalid whole-program timing {value!r} us")
+        return value, "whole_program_e2e"
+    value = getattr(bench, "min_ms", None)
+    if value is None:
+        value = bench.time_ms
+    value = float(value) * 1000.0
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{label}: invalid single-launch timing {value!r} us")
+    return value, "single_launch"
+
+
+def _verification_output_proof(outputs: dict, reference: dict) -> dict:
+    """The normal same-input configuration-parity gate plus audit statistics."""
+    import numpy as np  # noqa: PLC0415
+
+    if set(outputs) != set(reference):
+        return {
+            "status": "fail",
+            "relative_tolerance": 0.05,
+            "error": f"output names differ: exact={sorted(outputs)}, greedy={sorted(reference)}",
+        }
+    worst = 0.0
+    max_abs = 0.0
+    abs_sum = 0.0
+    elements = 0
+    for name, ref in reference.items():
+        actual = np.asarray(outputs[name], dtype=np.float64)
+        wanted = np.asarray(ref, dtype=np.float64)
+        if actual.shape != wanted.shape:
+            return {
+                "status": "fail",
+                "relative_tolerance": 0.05,
+                "error": f"output {name!r} shape {actual.shape} != greedy {wanted.shape}",
+            }
+        if not np.isfinite(actual).all() or not np.isfinite(wanted).all():
+            return {
+                "status": "fail",
+                "relative_tolerance": 0.05,
+                "error": f"output {name!r} contains non-finite values",
+            }
+        delta = np.abs(actual - wanted)
+        denom = float(np.abs(wanted).max()) or 1.0
+        worst = max(worst, float(delta.max()) / denom)
+        max_abs = max(max_abs, float(delta.max()))
+        abs_sum += float(delta.sum())
+        elements += int(delta.size)
+    passed = worst <= 0.05
+    proof = {
+        "status": "pass" if passed else "fail",
+        "relative_tolerance": 0.05,
+        "max_abs_error": max_abs,
+        "mean_abs_error": abs_sum / max(elements, 1),
+        "max_relative_error": worst,
+    }
+    if not passed:
+        proof["error"] = f"rel err {worst:.3f} vs greedy output"
+    return proof
+
+
+async def _verify_replay_pair(
+    exact,
+    greedy,
+    *,
+    backend,
+    seed: int,
+    warmup: int,
+    iters: int,
+    label: str,
+) -> tuple[dict, dict]:
+    """Fresh-bench one exact/cold pair and require same-input output parity."""
+    import uuid  # noqa: PLC0415
+
+    exact_inputs, greedy_inputs = _verification_input_maps((exact, greedy), seed=seed)
+    pair_id = uuid.uuid4().hex
+    exact_bench, exact_outputs = await backend.bench_pinned_async(
+        exact,
+        run_inputs=exact_inputs,
+        run_inputs_key=f"replay-exact-{pair_id}",
+        warmup=warmup,
+        num_iters=iters,
+    )
+    greedy_bench, greedy_outputs = await backend.bench_pinned_async(
+        greedy,
+        run_inputs=greedy_inputs,
+        run_inputs_key=f"replay-greedy-{pair_id}",
+        warmup=warmup,
+        num_iters=iters,
+    )
+    if exact_outputs is None or greedy_outputs is None:
+        raise ValueError(f"{label}: replay verification backend returned no same-input outputs")
+    proof = _verification_output_proof(exact_outputs, greedy_outputs)
+    if proof["status"] != "pass":
+        raise ValueError(f"{label}: wrong-answer: {proof['error']}")
+    exact_us, exact_semantics = _verification_us(exact_bench, label=f"{label}: exact")
+    greedy_us, greedy_semantics = _verification_us(greedy_bench, label=f"{label}: emmy-greedy")
+    measurement = {
+        "emmy_us": exact_us,
+        "reference_us": greedy_us,
+        "reference_backend": "emmy-greedy",
+    }
+    return measurement, {
+        "label": label,
+        "emmy_us": exact_us,
+        "reference_us": greedy_us,
+        "exact_timing_semantics": exact_semantics,
+        "reference_timing_semantics": greedy_semantics,
+        "captured": True,
+        "correctness": proof,
+    }
+
+
+async def verify_replay_plans(
+    document: dict,
+    *,
+    backend,
+    ctx,
+    warmup: int,
+    iters: int,
+    seed: int = 0,
+    kernel: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """Audit every matching replay plan against a fresh cold-greedy reference.
+
+    The returned document is a copy. Callers persist it only after every whole
+    program and every independent child passed, so a timeout, stale transcript,
+    or wrong answer cannot partially verify a working file. ``total_us`` and child
+    ``latency_us`` remain the tune-time ranking observations; verification writes
+    only the canonical measurement records consumed by promotion.
+    """
+    if warmup < 10 or iters < 50:
+        raise ValueError("replay verification requires --warmup >= 10 and --iters >= 50")
+    flags = str(getattr(ctx, "compile_flags", "") or "")
+    if any(f"-O{level}" in flags for level in range(3)):
+        raise ValueError(f"replay verification requires deployable O3 codegen, not {flags}")
+    validate_working_gpu(document, ctx)
+
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.replay_plan import (  # noqa: PLC0415
+        replay_child_source,
+        replay_child_tuning_plan,
+        replay_outer_tuning_plan,
+        replay_tuning_plan,
+    )
+    from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES  # noqa: PLC0415
+
+    verified = copy.deepcopy(document)
+    reports: list[dict] = []
+    matched = 0
+    for config in verified["configs"]:
+        for realization in config["realizations"]:
+            plan = realization.get("replay_plan")
+            if plan is None or (kernel and kernel not in realization["name"]):
+                continue
+            matched += 1
+            record = golden_record_from_entry(verified, config, realization)
+            source = record.target_program
+            with pinned_knobs(record.pin_map):
+                exact = replay_tuning_plan(source.copy(), plan, ctx=ctx)
+                greedy = Pipeline.build(CUDA_PASSES).run(source.copy(), ctx=ctx)
+                measurement, report = await _verify_replay_pair(
+                    exact,
+                    greedy,
+                    backend=backend,
+                    seed=seed,
+                    warmup=warmup,
+                    iters=iters,
+                    label=f"{realization['name']}: whole",
+                )
+                realization["measurements"] = measurement
+                reports.append(
+                    {
+                        **report,
+                        "scope": "whole",
+                        "name": realization["name"],
+                        "outer_terminal_key": plan["outer"]["terminal_key"],
+                        "terminal_key": plan["lowering"]["terminal_key"],
+                    }
+                )
+
+                outer = replay_outer_tuning_plan(source.copy(), plan, ctx=ctx)
+                for index, child in enumerate(plan["lowering"]["children"]):
+                    child_source = replay_child_source(outer, child)
+                    exact_child = replay_child_tuning_plan(outer, child, ctx=ctx)
+                    greedy_child = Pipeline.build(LOWERING_PASSES).run(child_source.copy(), ctx=ctx)
+                    child_measurement, child_report = await _verify_replay_pair(
+                        exact_child,
+                        greedy_child,
+                        backend=backend,
+                        seed=seed,
+                        warmup=warmup,
+                        iters=iters,
+                        label=f"{realization['name']}: child {index} {child['key']}",
+                    )
+                    child["measurements"] = child_measurement
+                    reports.append(
+                        {
+                            **child_report,
+                            "scope": "child",
+                            "name": realization["name"],
+                            "child": index,
+                            "key": child["key"],
+                            "outer_terminal_key": plan["outer"]["terminal_key"],
+                            "terminal_key": child["terminal_key"],
+                        }
+                    )
+    if not matched:
+        suffix = f" matching --kernel {kernel!r}" if kernel else ""
+        raise ValueError(f"working golden contains no replay_plan{suffix}")
+    return verified, reports
+
+
+async def verify_and_persist_replay_plans(path: str | Path, document: dict, **kwargs) -> list[dict]:
+    """Verify a full copy, then atomically write its YAML and adjacent audit."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    verified, reports = await verify_replay_plans(document, **kwargs)
+    ctx = kwargs["ctx"]
+    audit = {
+        "version": 1,
+        "working_file": str(Path(path).resolve()),
+        "gpu_name": getattr(ctx, "gpu_name", None),
+        "compute_cap": list(getattr(ctx, "compute_capability", ()) or ()),
+        "context_key": ctx.structural_key(),
+        "compile_flags": str(getattr(ctx, "compile_flags", "") or ""),
+        "warmup": kwargs["warmup"],
+        "iters": kwargs["iters"],
+        "seed": kwargs.get("seed", 0),
+        "reference_backend": "emmy-greedy",
+        "records": reports,
+    }
+    audit_path = Path(path).with_suffix(Path(path).suffix + ".replay-verify.json")
+    payload = json.dumps(audit, indent=2, sort_keys=True) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=audit_path.parent, prefix=f".{audit_path.name}.", delete=False) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+            temporary = Path(output.name)
+        dump_golden_file(verified, path, overwrite=True)
+        temporary.replace(audit_path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return reports
 
 
 def realized_tuning_knobs(graph) -> dict[str, str] | None:
@@ -366,7 +735,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 
     rankings: list[dict] = []
     limit = len(proposals) if max_candidates is None else min(len(proposals), max_candidates)
-    for proposal_index, (_entry_index, pins) in enumerate(proposals):
+    for proposal_index, (_entry_index, proposal) in enumerate(proposals):
         if proposal_index >= limit:
             rankings.append(
                 {
@@ -377,6 +746,35 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
                 }
             )
             continue
+        replay_plan = proposal.get("replay_plan")
+        if replay_plan is not None:
+            from emmy.compiler.pipeline.search.replay_plan import replay_tuning_plan  # noqa: PLC0415
+
+            try:
+                terminal_graph = replay_tuning_plan(graph.copy(), replay_plan, ctx=ctx)
+                bench = await backend.benchmark_async(terminal_graph)
+                e2e_ms = getattr(bench, "e2e_min_ms", None)
+                latency = float(e2e_ms if e2e_ms is not None else bench.time_ms) * 1000.0
+                rankings.append(
+                    {
+                        "status": "ok",
+                        "latency_us": latency,
+                        "compile_flags": ctx.compile_flags,
+                        "measured_plan_key": replay_plan["lowering"]["terminal_key"],
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - stale working plans are ranking failures, not command aborts
+                rankings.append(
+                    {
+                        "status": "replay_stale",
+                        "latency_us": None,
+                        "compile_flags": ctx.compile_flags,
+                        "measured_plan_key": None,
+                        "error": str(exc),
+                    }
+                )
+            continue
+        pins = proposal
         search = TuningSearch(
             patience=1,
             max_visits=1,
@@ -414,7 +812,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
     """Atomically persist measured proposal feedback."""
     configs = document["configs"]
-    for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
+    for ((entry_index, realization_index), _proposal), ranking in zip(target.proposals, rankings, strict=True):
         realization = configs[entry_index]["realizations"][realization_index]
         if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
             continue
@@ -429,12 +827,50 @@ def persist_tune_winner(
     winner: tuple[dict[str, str], float] | None,
     *,
     compile_flags: str,
+    replay_plan: dict | None = None,
 ) -> None:
-    """Atomically persist one unambiguous directly searched winner."""
+    """Atomically persist a searched winner, including heterogeneous plans."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     configs = document["configs"]
-    if winner is not None:
+    if replay_plan is not None:
+        plan_key = replay_plan["lowering"]["terminal_key"]
+        ranking = {
+            "status": "ok",
+            "latency_us": replay_plan["total_us"],
+            "compile_flags": compile_flags,
+            "measured_plan_key": plan_key,
+            "source": "tune",
+            "tune_winner": True,
+        }
+        matching = [
+            entry_path
+            for entry_path in target.entry_indexes
+            if configs[entry_path[0]]["realizations"][entry_path[1]].get("replay_plan", {}).get("lowering", {}).get("terminal_key")
+            == plan_key
+        ]
+        writable = next(
+            (
+                entry_path
+                for entry_path in matching
+                if golden_entry_state(configs[entry_path[0]]["realizations"][entry_path[1]]) != GoldenEntryState.VERIFIED
+            ),
+            None,
+        )
+        if writable is None and not matching:
+            config_index, realization_index = target.entry_indexes[0]
+            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
+            for key in ("knobs", "replay_plan", "measurements", "ranking"):
+                seed.pop(key, None)
+            seed["replay_plan"] = copy.deepcopy(replay_plan)
+            seed["ranking"] = ranking
+            configs[config_index]["realizations"].append(seed)
+            target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
+        elif writable is not None:
+            realization = configs[writable[0]]["realizations"][writable[1]]
+            realization["replay_plan"] = copy.deepcopy(replay_plan)
+            realization["ranking"] = ranking
+    elif winner is not None:
         winner_knobs, winner_us = winner
         winner_ranking = {
             "status": "ok",
@@ -472,3 +908,117 @@ def persist_tune_winner(
             configs[config_index]["realizations"].append(seed)
             target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
     dump_golden_file(document, path, overwrite=True)
+
+
+def promote_replay_plans(document: dict) -> dict:
+    """Split audited working plans into canonical routing and child rows.
+
+    Repository goldens intentionally never mix placement with schedules.  This
+    transform replays each working transcript, writes one PLACE-only aggregate
+    routing row on the original target, and interns one exact Loop-IR target with
+    a schedule-only row per independently tuned recognized child.
+    """
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.replay_plan import (  # noqa: PLC0415
+        _cuda_inventory,
+        replay_child_tuning_plan,
+        replay_outer_tuning_plan,
+    )
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    promoted = copy.deepcopy(document)
+    loops = promoted.setdefault("loops", [])
+    additions: list[dict] = []
+    ctx = Context.from_target(tuple(promoted["compute_cap"]), gpu_name=promoted.get("gpu_name"))
+
+    for config in promoted["configs"]:
+        kept = []
+        for realization in config["realizations"]:
+            plan = realization.get("replay_plan")
+            if plan is None:
+                kept.append(realization)
+                continue
+            record = golden_record_from_entry(promoted, config, realization)
+            outer = replay_outer_tuning_plan(record.target_program.copy(), plan, ctx=ctx)
+            aggregate_measurement = realization.get("measurements")
+            if aggregate_measurement is None:
+                raise ValueError(
+                    f"replay_plan {realization['name']!r} remains a proposal: promotion requires an exact whole-plan "
+                    "Emmy measurement and an honest eager/cuBLAS (or same-input emmy-greedy) reference"
+                )
+            aggregate_measurement = copy.deepcopy(aggregate_measurement)
+            if plan["outer"]["placement"]:
+                kept.append(
+                    {
+                        "name": f"{realization['name']}.routing",
+                        "bindings": copy.deepcopy(realization["bindings"]),
+                        "pins": copy.deepcopy(realization["pins"]),
+                        "knobs": copy.deepcopy(plan["outer"]["placement"]),
+                        "measurements": aggregate_measurement,
+                    }
+                )
+
+            promoted_children = []
+            for child_index, child in enumerate(plan["lowering"]["children"]):
+                if "measurements" not in child:
+                    raise ValueError(
+                        f"replay_plan child {child['key']} remains a proposal: promotion requires its exact Emmy "
+                        "measurement and an honest eager/cuBLAS or same-input emmy-greedy reference"
+                    )
+                replay_child_tuning_plan(outer, child, ctx=ctx)
+                node_id = next(
+                    (nid for nid in outer.topological_order() if outer.nodes[nid].op.cache_key() == child["key"]),
+                    None,
+                )
+                if node_id is None:
+                    raise ValueError(f"promotion lost recognized child {child['key']}")
+                child_loop = single_node_graph(outer, node_id)
+                for node in child_loop.nodes.values():
+                    if node.op.dialect not in {"tile", "loop"}:
+                        continue
+                    loop_source = next((source for source in node.op.source_chain() if isinstance(source, LoopOp)), None)
+                    if loop_source is None:
+                        raise ValueError(f"promotion child {child['key']} has no Loop IR source boundary")
+                    node.op = loop_source
+                loop_ref = intern_loop_program(loops, child_loop)
+
+                # The promoted flat row must itself reproduce the independently
+                # audited transcript. Scoped schedule keys make heterogeneous
+                # children representable without pooling their choices.
+                with pinned_knobs(child["knobs"]):
+                    compiled = Pipeline.build(CUDA_PASSES).run(child_loop.copy(), ctx=ctx)
+                if _cuda_inventory(compiled) != child["kernels"]:
+                    raise ValueError(f"promotion child {child['key']} cannot be represented by its canonical schedule row")
+                promoted_children.extend(child["kernels"] * child["multiplicity"])
+                additions.append(
+                    {
+                        "program": config["program"],
+                        "target": {"loop": loop_ref},
+                        "realizations": [
+                            {
+                                "name": f"{realization['name']}.child{child_index}.{child['key'][:12]}",
+                                "bindings": copy.deepcopy(realization["bindings"]),
+                                "pins": copy.deepcopy(realization["pins"]),
+                                "knobs": copy.deepcopy(child["knobs"]),
+                                "measurements": copy.deepcopy(child["measurements"]),
+                            }
+                        ],
+                    }
+                )
+            from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+            expected = sorted(
+                ((kernel["key"], canonical_row_key(kernel["knobs"])) for kernel in plan["lowering"]["kernels"]),
+                key=repr,
+            )
+            actual = sorted(((kernel["key"], canonical_row_key(kernel["knobs"])) for kernel in promoted_children), key=repr)
+            if actual != expected:
+                raise ValueError("promoted child rows do not reconstruct the replay_plan CUDA terminal")
+        config["realizations"] = kept
+    promoted["configs"] = [config for config in promoted["configs"] if config["realizations"]]
+    promoted["configs"].extend(additions)
+    return promoted

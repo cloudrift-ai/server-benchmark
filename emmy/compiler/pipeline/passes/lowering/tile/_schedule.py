@@ -84,7 +84,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, Write
 from emmy.compiler.ir.stmt.algebra import M
-from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
+from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction, operand_body
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled, stream_pair
@@ -114,8 +114,8 @@ from emmy.compiler.structural import digest
 logger = logging.getLogger(__name__)
 
 #: The per-site schedule families this enumeration decides, IN THE ORDER their keys lead the fork
-#: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the seam
-#: family — resolved from routing goldens / pins, never enumerated here.
+#: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the separate
+#: structural seam fork, enumerated before each resulting kernel reaches this schedule enumerator.
 #:
 #: Not a copy of ``path.SLICE_FAMILIES`` even though the members match: that one answers "which
 #: families key a slice" (a set) and this one "in what order do their levels nest" (a sequence).
@@ -462,10 +462,10 @@ class _Term:
         atoms = _warp_atoms(self, node)
         warp = [p for p in warp_tile_moves(atoms) if _tile_ok(self, node, p)] if atoms else []
         self.warp_eligible = self.warp_eligible or bool(warp)
-        # A COMPUTED ``a`` edge is warp-ONLY: the fill that evaluates a producer cone is the mma
-        # tier's compute fill, and a per-cell / scalar expansion would re-run the cone on every K
-        # step. The reduce tiers stay reachable — through the COLLAPSE reading, whose spliced fold
-        # computes the whole body per cell (:func:`_readings`).
+        # A COMPUTED operand is warp-ONLY: the fill evaluates its producer cone, while a scalar
+        # expansion would re-run that cone on every K step. Fully materialized product channels
+        # remain ordinary algebra: scalar, direct MMA, and every legal stage transport can carry
+        # all channels through the generalized backend.
         scalar = scalar_tile_moves() if not _has_computed_operand(node) else []
         grouped: dict[str, list[TilePlan]] = {}
         for plan in scalar + warp:
@@ -614,7 +614,12 @@ def _promoted(node, inputs, ctx):
         return None
     # ``a`` is a DERIVED reading, so the rewrite REBUILDS the bilinear fold over the new edge — the
     # one-``Load`` cone keeps the edge's bound name, so the regenerated lift is the same program.
-    return Fold.contraction(k_axis=node.axis, a=make_cone([node.a], node.axis.name), channels=node.channels)
+    return Fold.contraction(
+        k_axis=node.axis,
+        a=make_cone([node.a], node.axis.name),
+        channels=node.channels,
+        product_dtype=node.product_dtype,
+    )
 
 
 def _readings(tile: TileOp, ctx) -> list[_Term]:
@@ -989,9 +994,10 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
 
 
 def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
-    """The RESOLVED compute-fill stages a COMPUTED operand offers — its depths, and nothing else:
-    the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no copy transport can
-    evaluate a cone), so a ``STAGE`` pin can only choose the depth. ``d1`` and the asynchronous-peer
+    """The resolved compute-fill stages a COMPUTED operand offers — its depths and nothing else.
+
+    The stage is MANDATORY because no copy transport can evaluate a producer cone, so a ``STAGE``
+    pin can only choose the depth. ``d1`` and the asynchronous-peer
     prefetch ring ``d2`` are fork siblings — the ring is measured per shape (see
     :func:`_legality.resolve_sync_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row."""
@@ -1030,7 +1036,7 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         wanted = Stage.parse(pinned)
         # SM70 pins are strict: do not silently turn a newer copy instruction or an unsupported
         # Volta fragment drain into the gmem-direct sibling.
-        if term.ctx.compute_capability < (8, 0):
+        if not term.ctx.has_cp_async:
             legal.enforce(legal.stage_target(wanted, term.ctx), pinned=True)
             if plan.is_warp:
                 legal.enforce(legal.warp_atom_stage(plan.atom, wanted), pinned=True)
@@ -1048,6 +1054,8 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if pin is not None:
         pinned = ReducePlan.parse(pin, Workers.parse(WORK.raw()))
         if pinned.needs_split:
+            if pinned.finalize == "atomic":
+                legal.enforce(legal.atomic_projection(node, tuple(projection_tail(term.tile))), pinned=True)
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
@@ -1081,9 +1089,8 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if splittable and _free_cells(term.place) // _tile_area(plan) <= _SPLITK_MAX_CTAS:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
-        atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
         for sp in splitk_moves():
-            if sp.finalize == "atomic" and not atomic_ok:
+            if sp.finalize == "atomic" and not legal.enforce(legal.atomic_projection(node, tail), pinned=False):
                 continue  # a non-distributive projection would raise at 030_split_reduce
             if k % sp.cta == 0 and (k // sp.cta) % step == 0:
                 out.append(sp)
@@ -1091,9 +1098,12 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
 
 
 def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
-    """The contraction's values at ``work``: the tile × stage × reduce legal product, over EITHER
-    inhabitant of the ``a`` edge — a materialized ``Load`` (both tiers, every transport) or a
-    COMPUTED cone (the warp tier alone, over the mandatory compute fill)."""
+    """The contraction's legal tile × stage × reduce product at ``work``.
+
+    Materialized forms of every arity reach direct and copy transports. A computed operand is
+    warp-only under mandatory ``sync`` staging; its demoted reading keeps the general reduce path
+    available independently.
+    """
     pin = term.pin("TILE", node)
     if pin is not None:
         try:
@@ -1604,11 +1614,25 @@ def _term_rows(term: _Term, work: Workers | None, rasters: list[str], spelled: s
     reconcile through the same :meth:`_Row.union` a site uses for its children: one rule, whichever
     level of the tree assembles the row."""
     out: list[tuple[dict, _Row]] = []
+    # The fusion-time ``S_ext_*`` histogram deliberately excludes symbolic extents so structural
+    # identity stays hint-independent.  Enumeration, however, already sizes its legal tile pool
+    # from the same axes' ``Dim.hint`` / ``DEFAULT_SEQ_HINT``.  Carry that effective FREE geometry
+    # as scheduler facts on symbolic rows so a cold deploy can rank the legal pool it actually
+    # received.  Static rows gain no keys, preserving their persisted evidence signature exactly.
+    free_axes = term.place.free
+    hint_facts = {}
+    if any(not ax.extent.is_static for ax in free_axes):
+        free_extents = [_hint_extent(ax) for ax in free_axes]
+        hint_facts = {
+            "S_hint_n_free_axis": float(len(free_extents)),
+            "S_hint_free_prod": float(prod(free_extents)) if free_extents else 1.0,
+            "S_hint_free_max": float(max(free_extents)) if free_extents else 0.0,
+        }
     for combo in product(*(_rows_at(term, node, work) for node in term.tree)):
         row = _Row.union(combo)
         if row is None or not _work_holds(row, work):
             continue
-        out.extend(({**row.knobs, WORK.name: spelled, RASTER.name: raster}, row) for raster in rasters)
+        out.extend(({**row.knobs, **hint_facts, WORK.name: spelled, RASTER.name: raster}, row) for raster in rasters)
     return out
 
 
@@ -1883,6 +1907,7 @@ def _splitk_option(
         k_axis=kslice,
         a=_sliced_a(node.a, sigma),
         channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in node.channels),
+        product_dtype=node.product_dtype,
     )
     placed = plan.placed_on(term.place)
     # Resolved against the SLICED node, whose K is K/w. A computed-A partial's compute fill is

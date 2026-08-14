@@ -55,6 +55,11 @@ class Op:
     via ``_STRUCTURAL_SKIP_FIELDS`` — pure attribution metadata, not
     part of dataflow identity.
 
+    ``decision_knobs`` carries kernel-set decisions separately from ``knobs``. A structural fork
+    must remain replayable after its pieces are scheduled, but its placement choice is not a
+    per-kernel schedule realization. The rewrite engine propagates this metadata through the
+    source chain without folding it into cache keys or schedule evidence.
+
     ``inputs`` / ``outputs`` are per-op-instance buffer maps populated by
     the matcher (``_match_at``) just after a match is built — the matcher
     calls :meth:`populate_io` on every matched node, snapping in real
@@ -74,6 +79,7 @@ class Op:
     # autotune knob picked along the chain. Excluded from structural
     # identity and equality — pure attribution metadata.
     knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
+    decision_knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     inputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     outputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
 

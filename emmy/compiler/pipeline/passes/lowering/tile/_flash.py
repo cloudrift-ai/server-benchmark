@@ -84,7 +84,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
@@ -221,6 +221,8 @@ def build_flash_frag(
     out_index: tuple | None = None,
     scale: float | None = None,
     operand_edges: tuple[Load | Fold | None, Load | Fold | None] = (None, None),
+    score_dtypes: tuple[DataType, ...] = (),
+    normalizer_dtypes: tuple[DataType, ...] = (),
     input_tensors: dict[str, Tensor] | None = None,
     materialized_v: Fold | None = None,
 ) -> Graph | None:
@@ -249,6 +251,10 @@ def build_flash_frag(
     ``operand_edges`` optionally supplies already-canonical Q/K operand nodes recovered
     from inlined producers. A plain edge is a ``Load``; a computed edge is the existing
     structural ``Fold`` spelling (for example an RMSNorm statistic + per-element projection).
+    ``score_dtypes`` and ``normalizer_dtypes`` preserve explicit typed identity-copy
+    boundaries on the score and softmax denominator reductions. They are algebraic
+    certificates recovered from the source Loop IR, not assumptions about an attention op's
+    nominal tensor dtype.
     ``input_tensors`` declares every original graph buffer those edges read. ``materialized_v``
     is an inlined pure V cone that the fragment factors into a canonical feeder workspace before
     flash, preserving the expectation contraction's materialized/stageable operand."""
@@ -291,6 +297,8 @@ def build_flash_frag(
         layouts=layouts,
         access_indices=access_indices,
         operand_edges=operand_edges,
+        score_dtypes=score_dtypes,
+        normalizer_dtypes=normalizer_dtypes,
         out_store=out_store,
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
@@ -388,6 +396,8 @@ def _flash_op(
     layouts: tuple = (None, None, None),
     access_indices: tuple[tuple, tuple, tuple] | None = None,
     operand_edges: tuple[Load | Fold | None, Load | Fold | None] = (None, None),
+    score_dtypes: tuple[DataType, ...] = (),
+    normalizer_dtypes: tuple[DataType, ...] = (),
     out_store: tuple[str, tuple] | None = None,
 ) -> Fold:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
@@ -427,10 +437,17 @@ def _flash_op(
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a=q_edge if q_edge is not None else Load(name="q_e", input=q_buf, index=q_idx),
         channels=(Channel(b=k_edge if k_edge is not None else Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),
+        product_dtype=F32,
     )
-    score_post = [
+    score_post = []
+    score_input = "sacc"
+    for i, dtype in enumerate(score_dtypes):
+        rounded = f"sacc__copy{i}"
+        score_post.append(Assign(name=rounded, op="copy", args=(score_input,), dtype=dtype))
+        score_input = rounded
+    score_post += [
         Load(name="scale_c", input="_flash_scale", index=()),
-        Assign(name="s", op="multiply", args=("sacc", "scale_c")),
+        Assign(name="s", op="multiply", args=(score_input, "scale_c")),
     ]
     score_name = "s"
     if mask_buf is not None:
@@ -496,7 +513,14 @@ def _flash_op(
     # Reconstituted into the tail it still short-circuits the materializer's bare grid-order
     # ``with_store`` glue (``has_write``). Absent it, the glue
     # writes the bare grid cell (the head-major identity path — isolated fragments, tests).
-    proj: tuple[Stmt, ...] = (Assign(name="O_i__proj", op="divide", args=("O_i", "l_i")),)
+    proj_stmts: list[Stmt] = []
+    normalizer = "l_i"
+    for i, dtype in enumerate(normalizer_dtypes):
+        rounded = f"l_i__copy{i}"
+        proj_stmts.append(Assign(name=rounded, op="copy", args=(normalizer,), dtype=dtype))
+        normalizer = rounded
+    proj_stmts.append(Assign(name="O_i__proj", op="divide", args=("O_i", normalizer)))
+    proj: tuple[Stmt, ...] = tuple(proj_stmts)
     stores: tuple = ()
     if out_store is not None:
         out_buf, out_idx = out_store
@@ -725,13 +749,16 @@ def _extract_packed_qkv(
     if len(out_writes) != 1:
         return None
     out_write = out_writes[0]
+    out_value = _output_reduction_value(root, out_write)
+    if out_value is None:
+        return None
     d_var = _var_at(out_write.index, -1)
     if d_var is None:
         return None
     v_load = None
     kv_var = None
     for lp in _accum_loops(root.op):
-        if not any(isinstance(s, Accum) and s.name == out_write.value and _is_sum(s) for s in lp.body):
+        if not any(isinstance(s, Accum) and s.name == out_value and _is_sum(s) for s in lp.body):
             continue
         v_load = next(
             (
@@ -780,12 +807,19 @@ def _extract_packed_qkv(
     return q_load.input, q_idx, k_idx, v_idx, q_shape, k_shape, v_shape
 
 
-def _extract_scale(graph: Graph, xnode: Node) -> tuple[float | None] | None:
+@dataclass(frozen=True)
+class _ScoreScale:
+    value: float | None
+    dtypes: tuple[DataType, ...] = ()
+
+
+def _extract_scale(graph: Graph, xnode: Node) -> _ScoreScale | None:
     """The score producer's scale value, from its multiply by a scalar-constant Load
     (the SDPA decomposition's ``{name}_scale`` constant — ``qk·scale`` is the only
-    multiply-by-constant a clean producer carries). Returns ``(value,)``, ``(None,)``
-    when the producer has no such multiply (hand-built IR — the builder's
-    ``1/sqrt(d)`` default applies), or ``None`` when ambiguous (two distinct
+    multiply-by-constant a clean producer carries). Returns the value plus any typed
+    identity-copy boundaries between the score accumulator and that multiply. With no such
+    multiply, its value is ``None`` (hand-built IR — the builder's ``1/sqrt(d)`` default
+    applies); the extraction itself returns ``None`` when ambiguous (two distinct
     constant multiplies — decline the fuse rather than guess which is the scale)."""
     const_loads: dict[str, float] = {}
     for s in xnode.op.body.iter():
@@ -794,16 +828,53 @@ def _extract_scale(graph: Graph, xnode: Node) -> tuple[float | None] | None:
             if src is not None and isinstance(src.op, ConstantOp) and src.op.value is not None:
                 for nm in s.names:
                     const_loads[nm] = float(src.op.value)
-    values = {
-        const_loads[a]
+    scale_uses = [
+        (const_loads[a], s, next((other for other in s.args if other != a), None))
         for s in xnode.op.body.iter()
         if isinstance(s, Assign) and s.op.name == "multiply"
         for a in s.args
         if a in const_loads
-    }
+    ]
+    values = {value for value, _stmt, _other in scale_uses}
     if len(values) > 1:
         return None
-    return (values.pop(),) if values else (None,)
+    if not values:
+        return _ScoreScale(None)
+
+    sum_names = {s.name for s in xnode.op.body.iter() if isinstance(s, Accum) and _is_sum(s)}
+    boundaries = set()
+    for _value, _stmt, other in scale_uses:
+        if other is None:
+            continue
+        source, dtypes = _unwrap_identity_copies(xnode.op.body, other)
+        if source in sum_names:
+            boundaries.add(dtypes)
+    if len(boundaries) > 1:
+        return None
+    return _ScoreScale(values.pop(), next(iter(boundaries), ()))
+
+
+def _extract_normalizer_dtypes(*nodes: Node) -> tuple[DataType, ...] | None:
+    """Recover a typed sum boundary used as a reciprocal/division denominator.
+
+    Flash re-synthesis changes the reduction schedule but retains this algebraic seam by
+    narrowing the final online-softmax denominator before ``O / l``. Distinct boundary chains
+    are ambiguous and decline rather than silently selecting one.
+    """
+    boundaries: set[tuple[DataType, ...]] = set()
+    for node in nodes:
+        if not isinstance(node.op, LoopOp):
+            continue
+        sum_names = {s.name for s in node.op.body.iter() if isinstance(s, Accum) and _is_sum(s)}
+        for stmt in node.op.body.iter():
+            if not isinstance(stmt, Assign):
+                continue
+            candidates = stmt.args if stmt.op.name == "reciprocal" else stmt.args[1:] if stmt.op.name == "divide" else ()
+            for arg in candidates:
+                source, dtypes = _unwrap_identity_copies(node.op.body, arg)
+                if dtypes and source in sum_names:
+                    boundaries.add(dtypes)
+    return next(iter(boundaries), ()) if len(boundaries) <= 1 else None
 
 
 def _def(stmts: tuple[Stmt, ...], name: str) -> Stmt | None:
@@ -814,6 +885,39 @@ def _def(stmts: tuple[Stmt, ...], name: str) -> Stmt | None:
         if isinstance(s, (Assign, Select)) and s.name == name:
             return s
     return None
+
+
+def _unwrap_identity_copies(body: Body, name: str) -> tuple[str, tuple[DataType, ...]]:
+    """Return the value before a chain of unary ``copy`` Assigns and its typed boundaries.
+
+    ``copy`` is algebraically the identity, but an explicit dtype is a numerical rounding
+    boundary. Recognition may look through the identity only when construction carries the
+    returned dtype sequence at the same semantic seam. The sequence is in execution order
+    (innermost copy first).
+    """
+    defs = {defined: stmt for stmt in body.iter() for defined in stmt.defines() if isinstance(stmt, (Assign, Accum, Load, Select))}
+    dtypes: list[DataType] = []
+    seen: set[str] = set()
+    while name not in seen:
+        seen.add(name)
+        stmt = defs.get(name)
+        if not (isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1):
+            break
+        if stmt.dtype is not None:
+            dtypes.append(stmt.dtype)
+        name = stmt.args[0]
+    return name, tuple(reversed(dtypes))
+
+
+def _output_reduction_value(node: Node, write: Write) -> str | None:
+    """Look through a terminal identity copy when the output store reproduces its type.
+
+    This makes ``reduce -> typed copy -> Write`` recognizable without erasing a cast: a
+    materialized node's output store already performs the same final conversion. A copy to an
+    intermediate type different from the node output is not transparent and therefore declines.
+    """
+    source, dtypes = _unwrap_identity_copies(node.op.body, write.value)
+    return source if all(dtype == node.output.dtype for dtype in dtypes) else None
 
 
 def _is_loopop(graph: Graph, buf: str) -> bool:
@@ -931,12 +1035,15 @@ def _pv_loads(graph: Graph, node: Node) -> tuple[Load, Load, Loop, tuple[Stmt, .
     writes = [s for s in node.op.body.iter() if isinstance(s, Write)]
     if len(writes) != 1:
         return None
+    out_value = _output_reduction_value(node, writes[0])
+    if out_value is None:
+        return None
     d_var = _var_at(writes[0].index, -1)
     if d_var is None:
         return None
     for lp in _accum_loops(node.op):
         acc = next(
-            (s for s in lp.body if isinstance(s, Accum) and s.name == writes[0].value and _is_sum(s)),
+            (s for s in lp.body if isinstance(s, Accum) and s.name == out_value and _is_sum(s)),
             None,
         )
         if acc is None:
@@ -1007,7 +1114,13 @@ def _classify_inline_rowmax(lp: Loop, m_var: str) -> tuple[bool, int | None, str
         cur = nxt
 
     sum_names = {s.name for s in lp.body.iter() if isinstance(s, Accum) and _is_sum(s)}
-    if not (isinstance(cur, Assign) and cur.op.name == "multiply" and len(cur.args) == 2 and sum(a in sum_names for a in cur.args) == 1):
+    sum_args = []
+    if isinstance(cur, Assign) and cur.op.name == "multiply" and len(cur.args) == 2:
+        for arg in cur.args:
+            source, _dtypes = _unwrap_identity_copies(lp.body, arg)
+            if source in sum_names:
+                sum_args.append(arg)
+    if len(sum_args) != 1:
         return None
     for select in coord_selects:
         kind = _coord_select_kind(select, lp.axis.name, m_var)
@@ -1015,6 +1128,69 @@ def _classify_inline_rowmax(lp: Loop, m_var: str) -> tuple[bool, int | None, str
             return None
         if kind[0]:
             causal = True
+        else:
+            window = kind[1]
+    return causal, window, mask_buf
+
+
+def _classify_materialized_score_masks(graph: Graph, node: Node) -> tuple[bool, int | None, str | None] | None:
+    """Certify masks applied by a standalone materialized score producer.
+
+    Frontend decomposition may place causal/window ``Select`` values and an additive bias on the
+    QK producer *before* softmax. The consumer's rowmax then reads a bare score buffer, so
+    :func:`_classify_rowmax` has no mask chain to report. Walk the producer's output value backward
+    through exactly the same additive grammar and require it to bottom out at the score sum (or
+    its scalar-scale multiply). The returned facts are sufficient for ``_flash_op`` to re-synthesize
+    every accepted statement; any other add/select spelling declines instead of being dropped.
+    """
+    if not isinstance(node.op, LoopOp):
+        return None
+    writes = [stmt for stmt in node.op.body.iter() if isinstance(stmt, Write)]
+    if len(writes) != 1:
+        return None
+    m_var, kv_var = _var_at(writes[0].index, -2), _var_at(writes[0].index, -1)
+    if m_var is None or kv_var is None:
+        return None
+    defs = {name: stmt for stmt in node.op.body.iter() for name in stmt.defines()}
+    cur, _dtypes = _unwrap_identity_copies(node.op.body, writes[0].value)
+    causal, window, mask_buf = False, None, None
+    coord_selects: list[Select] = []
+    while isinstance(defs.get(cur), Assign) and defs[cur].op.name == "add" and len(defs[cur].args) == 2:
+        add = defs[cur]
+        nxt = None
+        for score_name, mask_name in ((add.args[0], add.args[1]), (add.args[1], add.args[0])):
+            mask_def = defs.get(mask_name)
+            if isinstance(mask_def, Select):
+                coord_selects.append(mask_def)
+                nxt = score_name
+                break
+            if isinstance(mask_def, Load) and not _is_loopop(graph, mask_def.input):
+                if mask_buf is not None and mask_buf != mask_def.input:
+                    return None
+                mask_buf = mask_def.input
+                nxt = score_name
+                break
+        if nxt is None:
+            return None
+        cur, _dtypes = _unwrap_identity_copies(node.op.body, nxt)
+
+    terminal = defs.get(cur)
+    if isinstance(terminal, Assign) and terminal.op.name == "multiply":
+        sources = [_unwrap_identity_copies(node.op.body, arg)[0] for arg in terminal.args]
+        sums = [defs.get(source) for source in sources]
+        if sum(isinstance(stmt, Accum) and _is_sum(stmt) for stmt in sums) != 1:
+            return None
+    elif not (isinstance(terminal, Accum) and _is_sum(terminal)):
+        return None
+
+    for select in coord_selects:
+        kind = _coord_select_kind(select, kv_var, m_var)
+        if kind is None:
+            return None
+        if kind[0]:
+            causal = True
+        elif window is not None and window != kind[1]:
+            return None
         else:
             window = kind[1]
     return causal, window, mask_buf
@@ -1038,6 +1214,9 @@ def _recognize(graph: Graph, node: Node) -> _FlashMatch | None:
     if len(writes) != 1:
         return None
     out_write = writes[0]
+    out_value = _output_reduction_value(node, out_write)
+    if out_value is None:
+        return None
     if any(isinstance(s, Assign) and s.op.name == "exp" for s in body.iter()):
         x_buf: str | None = None
         causal, window = False, None
@@ -1050,7 +1229,7 @@ def _recognize(graph: Graph, node: Node) -> _FlashMatch | None:
         if x_buf is not None:
             v_buf: str | None = None
             for lp in _accum_loops(op):
-                if not any(isinstance(s, Accum) and s.name == out_write.value and _is_sum(s) for s in lp.body):
+                if not any(isinstance(s, Accum) and s.name == out_value and _is_sum(s) for s in lp.body):
                     continue
                 others = {s.input for s in lp.body if isinstance(s, Load)} - {x_buf, mask_buf}
                 if len(others) == 1:
@@ -1067,7 +1246,7 @@ def _recognize(graph: Graph, node: Node) -> _FlashMatch | None:
             inline_pv: list[tuple[str, Loop]] = []
             for lp in _accum_loops(op):
                 acc = next(
-                    (s for s in lp.body if isinstance(s, Accum) and s.name == out_write.value and _is_sum(s)),
+                    (s for s in lp.body if isinstance(s, Accum) and s.name == out_value and _is_sum(s)),
                     None,
                 )
                 if acc is None:
@@ -1358,11 +1537,14 @@ def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:
     writes = [s for s in op.body.iter() if isinstance(s, Write)]
     if len(writes) != 1:
         return None
+    out_value = _output_reduction_value(root, writes[0])
+    if out_value is None:
+        return None
     d_var = _var_at(writes[0].index, -1)
     if d_var is None:
         return None
     for lp in _accum_loops(op):
-        if not any(isinstance(s, Accum) and s.name == writes[0].value and _is_sum(s) for s in lp.body):
+        if not any(isinstance(s, Accum) and s.name == out_value and _is_sum(s) for s in lp.body):
             continue
         for ld in lp.body:
             if isinstance(ld, Load) and ld.input == v_buf:
@@ -1399,14 +1581,26 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if qk is None and inline_qk is None and packed is None:
         _fuse_degraded(root, "score producer's Q/K are not certifiable operand edges")
         return None
-    # A mask stranded on the standalone score producer (a coord Select / an additive bias add)
-    # would be silently DROPPED by the canonical re-synthesis below. Decline the fuse rather
-    # than mis-attend. Inline score masks have already been classified above.
+    # A standalone score producer can carry the mask chain itself. Certify and merge those facts
+    # with any masks the consumer rowmax carried; construction then re-synthesizes the complete
+    # chain once. Inline score masks were already classified directly on the rowmax above.
     if found.inline is None and any(
         isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in score_producer.op.body.iter()
     ):
-        _fuse_degraded(root, "score producer carries mask stmts the flash re-synthesis cannot keep")
-        return None
+        score_masks = _classify_materialized_score_masks(graph, score_producer)
+        if score_masks is None:
+            _fuse_degraded(root, "score producer carries uncertifiable mask stmts")
+            return None
+        score_causal, score_window, score_mask_buf = score_masks
+        causal = causal or score_causal
+        if window is not None and score_window is not None and window != score_window:
+            _fuse_degraded(root, "score producer and consumer disagree on the window mask")
+            return None
+        window = window if window is not None else score_window
+        if mask_buf is not None and score_mask_buf is not None and mask_buf != score_mask_buf:
+            _fuse_degraded(root, "score producer and consumer carry distinct additive masks")
+            return None
+        mask_buf = mask_buf if mask_buf is not None else score_mask_buf
     access_indices = None
     q_edge = k_edge = None
     materialized_v = None
@@ -1428,6 +1622,10 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     scale = _extract_scale(graph, score_producer)
     if scale is None:
         _fuse_degraded(root, "score producer's scale constant is ambiguous")
+        return None
+    normalizer_dtypes = _extract_normalizer_dtypes(score_producer, root)
+    if normalizer_dtypes is None:
+        _fuse_degraded(root, "softmax denominator has ambiguous typed copy boundaries")
         return None
     if packed is None:
         if found.v_inline is not None:
@@ -1484,8 +1682,10 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
             tuple(v_shape) if materialized_v is not None else tuple(graph.buffer(v_id).shape),
         ),
         out_index=out_index,
-        scale=scale[0],
+        scale=scale.value,
         operand_edges=(q_edge, k_edge),
+        score_dtypes=scale.dtypes,
+        normalizer_dtypes=normalizer_dtypes,
         input_tensors={
             nid: tensor
             for nid in (*score_producer.inputs, *root.inputs, q_id, k_id, v_id, *((mask_buf,) if mask_buf is not None else ()))

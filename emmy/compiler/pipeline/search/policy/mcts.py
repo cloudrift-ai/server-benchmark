@@ -219,7 +219,9 @@ class TuningSearch(Search):
         # not just its fork-prefix — so knobs stamped at deterministic lowering
         # steps (FK / BK / STAGE / …) reach the prior. Falls back to the
         # fork-prefix when no candidate is supplied.
-        token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
+        token.realized_knobs = (
+            {**self._node_knobs(token), **self._realized_knobs(candidate)} if candidate is not None else self._node_knobs(token)
+        )
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
         token.bench_stats = stats
         token.bench_status = status
@@ -330,6 +332,28 @@ class TuningSearch(Search):
             if best is None or (candidate[1], canonical_row_key(candidate[0])) < (best[1], canonical_row_key(best[0])):
                 best = candidate
         return best
+
+    @staticmethod
+    def decision_trace(token: object | None) -> list[dict]:
+        """Ordered exact fork transcript from the root to one terminal token."""
+        if not isinstance(token, SearchNode):
+            raise TypeError(f"decision_trace needs a SearchNode token, got {type(token).__name__}")
+        lineage: list[SearchNode] = []
+        current: SearchNode | None = token
+        while current is not None:
+            lineage.append(current)
+            current = current.parent
+        trace = []
+        for node in reversed(lineage):
+            decision = getattr(node.candidate, "resolved_decision", None) if node.candidate is not None else None
+            if decision is not None:
+                trace.append(
+                    {
+                        **decision,
+                        "knobs": dict(decision["knobs"]),
+                    }
+                )
+        return trace
 
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;

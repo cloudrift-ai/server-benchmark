@@ -12,7 +12,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_canon
 from emmy.compiler.ir.expr import Expr, Literal, Var
-from emmy.compiler.ir.loop import Accum, Axis, Load, Loop, LoopOp, Write
+from emmy.compiler.ir.loop import Accum, Assign, Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -58,16 +58,26 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     # via ACCUM_IDENTITY, the init value.
     reduce_axis = next(a for a in axes if a.name == reduce_axis_name)
     free_axes = [a for a in axes if a.name != reduce_axis_name]
-    inner: Body = (
-        Loop(
-            axis=reduce_axis,
-            body=(
-                Load(name="in0", input=src_id, index=load_index),
-                Accum(name="acc", value="in0", op=combine, axes=(reduce_axis_name,)),
-            ),
+    reduce = Loop(
+        axis=reduce_axis,
+        body=(
+            Load(name="in0", input=src_id, index=load_index),
+            Accum(name="acc", value="in0", op=combine, axes=(reduce_axis_name,)),
         ),
-        Write(output=f"lift_{root.id}", index=write_index, value="acc"),
     )
+    # An accumulating reduction uses a wide carrier (the kernel type stamper promotes sums /
+    # products to f32) but its tensor result still observes ``root.output.dtype``.  Keep that
+    # numerical boundary explicit in the loop IR so fusion cannot turn ``f16(sum(x)) + residual``
+    # into ``f32(sum(x)) + residual`` and postpone the only rounding until the final store.  A
+    # selecting reduction already carries its input dtype and needs no extra boundary.
+    if not combine.selecting and root.output.dtype.nbytes < 4:
+        inner = (
+            reduce,
+            Assign(name="out", op="copy", args=("acc",), dtype=root.output.dtype),
+            Write(output=f"lift_{root.id}", index=write_index, value="out"),
+        )
+    else:
+        inner = (reduce, Write(output=f"lift_{root.id}", index=write_index, value="acc"))
     body: Body = inner
     for a in reversed(free_axes):
         body = (Loop(axis=a, body=body),)

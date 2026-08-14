@@ -1,29 +1,29 @@
-"""Two-level autotuning: an outer fusion MCTS whose terminal reward comes from
+"""Two-level autotuning: an outer kernel-placement MCTS whose terminal reward comes from
 an inner, separable, per-op search.
 
 ``emmy tune`` used to run one SP-MCTS tree over the whole graph. Because
 the pipeline applies rules sequentially, op-variant forks (tile / pad / stage
-choices for one kernel) and fusion forks (how ops group into kernels) **nest**
-and cross-product under one global patience — so the bottleneck op starves the
-deep ops (see ``project_mcts_exploration_limit``). The two kinds of decision
-have opposite structure:
+choices for one kernel) and placement forks (which closed seams become kernel
+boundaries) **nest** and cross-product under one global patience — so the
+bottleneck op starves the deep ops (see ``project_mcts_exploration_limit``).
+The two kinds of decision have opposite structure:
 
 - **op-variant forks are separable** — every multi-option fork today is an
   in-place ``Op`` rebind that leaves the graph unchanged, so the whole-graph
   time is ``Σ_k t_k`` with each ``t_k`` depending only on op ``k``'s variant;
-- **fusion forks are NOT separable** — they change *which ops exist*.
+- **placement forks are NOT separable** — they change *which kernels exist*.
 
 So we split the search in two, drawing the boundary on the fork's *effect*
 (the ``Op``-rebind / ``Graph``-splice classification stamped at the engine's
 spawn site), not on a fixed
 pass index:
 
-- **Outer** (:func:`run_two_level_tune`) drives the graph-changing passes —
-  ``frontend`` + ``loop`` plus the pre-partition head of ``lowering/tile``
-  (:func:`outer_pipeline`), where any structural fork emitters live. A terminal is the state where
-  the cursor reaches ``partition_loops`` with every structural fork resolved —
-  every op post-fusion and structurally final, split producers/consumers
-  included as real ``LoopOp`` nodes. Each terminal is a candidate fused graph;
+- **Outer** (:func:`run_two_level_tune`) drives ``frontend`` + ``loop`` and the
+  recognition half of ``lowering/tile`` (:func:`outer_pipeline`). Fusion stays
+  deterministic and maximal; recognition offers ``PLACE`` choices that either
+  keep that region or materialize one closed seam. A terminal has every
+  placement decision resolved and every kernel represented by an unmapped
+  ``TileOp``. Each terminal is a candidate kernel set;
   its reward is ``1 / Σ best-per-op time`` from the inner search,
   backpropagated by the reused :class:`TuningSearch` — so keep-vs-split is an
   outer-terminal comparison, the natural cost model for a kernel-set decision.
@@ -31,9 +31,8 @@ pass index:
   replays the decision read off the trajectory's own graph via the
   ``Op.source`` decomposition links and the stamped decision knobs
   (``pipeline._replay_structural_decision``) — keeping the tree linear in
-  *unique* kernels. Fusion itself is still
-  deterministic (no multi-option fusion forks); this remains the clean
-  insertion point for fusion search when those forks exist.
+  *unique* kernels. Fusion itself remains deterministic and maximal: it does
+  not consult placement, schedule, hardware, or search evidence.
 - **Inner** (:func:`_inner_reward_async`) tunes each finalized kernel *independently*
   in its own single-node slice (:func:`single_node_graph`) with a plain
   :class:`TuningSearch` over :data:`LOWERING_PASSES` only. Results key
@@ -72,42 +71,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The structural / op-variant boundary is the ``split`` phase: the keep-vs-cut
-# ``CUT`` offer is the only kernel-set-changing decision, so the outer search owns
-# ``frontend`` + ``loop`` + ``split`` and the inner tunes everything from
-# ``enumeration`` (tiling) on — see :func:`outer_pipeline`.
+# The structural / op-variant boundary lies between tile recognition and tile
+# scheduling. Recognition owns the PLACE fork because it changes the kernel set;
+# scheduling and every later lowering fork remain separable per kernel.
 
-# Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner
-# per-op search runs these on a single-node slice so the finalized LoopOp body
-# — and thus its ``Op.cache_key`` — is never re-touched by ``loop/fusion``,
-# which is what keeps inner-tuned ``perf`` / ``lowering`` rows transferable to
-# the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks
-# pass-list edits automatically. The pre-partition tile rules (005's split
-# offer) run here too, but every outer-terminal op already carries their
-# decision knob, so the rules' idempotence guards skip — the inner never
-# re-opens an outer-owned structural decision.
+# Lowering-only passes after loop fusion: ``recognize → schedule → kernel → cuda``.
+# The inner per-op search receives an already-recognized ``TileOp`` slice, so
+# ``010_recognize`` cannot re-open its outer-owned placement decision. The
+# recognized algebra — and thus its ``Op.cache_key`` — is never re-touched by
+# ``loop/fusion``; inner ``perf`` / ``lowering`` rows therefore transfer to the
+# assembled graph. Slicing this as the tail of ``CUDA_PASSES`` keeps it aligned
+# with pass-list edits and retains the LoopOp guardrail for unrecognized algebra.
 LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 
 def outer_pipeline() -> Pipeline:
-    """The graph-changing passes the outer search drives: ``frontend`` + ``loop``
-    (any fusion forks) **plus the ``split`` phase** — where a structural fork, the
-    only move that changes *which kernels exist*, would be offered.
-    An outer terminal is a graph whose kernel set is final:
-    the keep(SMEM) side is one fused ``TileGraphOp`` (``seed_fused``), the cut side
-    its producer + consumer; :func:`_inner_reward_async` picks each up as its own
-    slice (own patience, own progress leaf, deduped by ``Op.cache_key``) and tunes
-    its tiling via :data:`LOWERING_PASSES`.
+    """Drive maximal fusion, algebra recognition, and structural placement only.
 
-    Tiling (``enumeration``/partition) is **inner**, deliberately NOT driven here:
-    a tile-knob fork (``MMA`` / ``BN`` / …) does not change the kernel set, so
-    branching the OUTER tree on it would explode the tree (every tile combination ×
-    every structural choice) with no kernel-set distinction. The split boundary is
-    exactly where the kernel set is fixed but tiling is not — the right outer/inner
-    seam. Sub-partition splices
-    (``150_cross_cta_finalize``'s combine) likewise stay inner — their trigger knob
-    (``SPLITK``) doesn't exist until partition runs."""
+    ``010_recognize`` lifts each fused ``LoopOp`` to an unmapped ``TileOp`` and
+    offers the fused-vs-materialized ``PLACE`` fork. A cut's new ``LoopOp`` pieces
+    re-enter that same rule until the complete kernel set is recognized. The outer
+    pipeline stops before ``020_schedule``: tile/reduce/stage choices are inner,
+    per-kernel decisions, including graph splices caused by a selected reduce plan.
+    """
     passes = [Pass.load(name, i) for i, name in enumerate(LOOP_PASSES)]
+    passes.append(Pass.load("lowering/tile", len(passes), {"010_recognize"}))
     return Pipeline(passes=passes)
 
 
@@ -121,8 +109,8 @@ _FAIL_US = 1e12
 class OpResult:
     """One unique kernel's inner-search outcome, for the per-op summary.
 
-    ``multiplicity`` is the number of structurally-identical ``LoopOp`` nodes
-    in the fused graph that share this ``op_key`` — 24 for a 24-layer
+    ``multiplicity`` is the number of structurally-identical recognized kernels
+    in the outer terminal that share this ``op_key`` — 24 for a 24-layer
     RMSNorm, 1 for a singleton. The outer reward's ``total_us`` weights
     ``best_us`` by ``multiplicity`` so the Σ across ``per_op`` equals the
     whole-graph latency (every node position counts, even though dedup
@@ -154,8 +142,8 @@ class InnerReward:
     def searched_winner(self) -> tuple[dict[str, str], float] | None:
         """The actual searched winner when it maps to exactly one CUDA kernel.
 
-        A target can contain repeated/heterogeneous post-fusion kernels, and one
-        post-fusion kernel can lower to several CudaOps. In either case there is
+        A target can contain repeated or heterogeneous recognized kernels, and
+        one recognized kernel can lower to several CudaOps. In either case there is
         no single golden-format knob row whose latency represents the target, so
         callers must omit a winner annotation instead of inventing one.
         """
@@ -171,10 +159,11 @@ class InnerReward:
 class TwoLevelResult:
     """Outcome of :func:`run_two_level_tune`."""
 
-    best_fused: Graph | None  # winning fused graph (finalized LoopOps)
+    best_fused: Graph | None  # winning kernel set (unmapped TileOps)
     best_reward: InnerReward | None  # its Σ-per-op breakdown
-    n_terminals: int  # outer terminals evaluated (1 today)
+    n_terminals: int  # kernel-set alternatives evaluated by the outer search
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
+    replay_plan: dict | None = None  # exact outer splice + independent child schedule transcript
     prior_summaries: list[str] = field(default_factory=list)  # online-prior stats
 
 
@@ -194,16 +183,14 @@ def _mint_run_id() -> str:
 
 
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
-    """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
-
-    An outer terminal sits at the ``split`` boundary (:func:`outer_pipeline`): the
-    keep(SMEM) side is a fused ``TileGraphOp`` (``seed_fused``), the cut side its
-    producer + consumer ``LoopOp``s (un-built — the inner tiles them). Count both
-    ``LoopOp`` and ``TileGraphOp`` so every kernel of either side gets its own inner
-    slice."""
+    """Outer-terminal kernels — one ``(node_id, TileOp)`` per recognized kernel."""
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
+    # ``LoopOp`` is retained as a guardrail for algebra that recognition cannot
+    # lift (for example a symbolic loop). Its inner slice retries the complete
+    # tile pass and follows the same lowering failure contract as before.
+    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, (LoopOp, TileOp))]
 
 
 async def _inner_reward_async(
@@ -223,7 +210,7 @@ async def _inner_reward_async(
     backend_slots=None,
     close_backends: bool = True,
 ) -> InnerReward:
-    """Tune every post-fusion kernel of ``fused_graph`` in its own single-node slice
+    """Tune every kernel in the outer terminal in its own single-node slice
     and return ``Σ best-per-op time`` — the outer terminal reward.
 
     One coroutine per unique kernel over a slot queue of ``len(pool)`` device-pinned
@@ -269,17 +256,15 @@ async def _inner_reward_async(
     # the two keys would coincide).
     o3_ctx_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key() if "-O3" not in ctx.compile_flags else None
     backend_name = getattr(pool[0], "name", "cuda")
-    # Fold-aware slicing: a flash fold offer site's slice must CARRY the score producer its
-    # fusion consumes (``absorbed[producer] = consumer``) — a single-node slice turns the
-    # producer into a synthetic input, ``try_flash`` can never re-fuse, and every tune
-    # trajectory silently degrades to the cut (benching fragment kernels that greedy deploy
-    # never picks). The absorbed producer loses its own slice — the offer site's slice benches
-    # the whole attention (fused: one kernel; a cut trajectory: both), so the Σ stays honest.
+    # Fold-aware LoopOp guardrail: if recognition could not lift a flash offer in the outer
+    # pipeline, its inner slice must carry the score producer that recognition may consume.
+    # Normal outer terminals already contain the recognized TileOp and take this path with no
+    # absorbed producer.
     absorbed: dict[str, str] = {}
     for nid, _op in _kernel_nodes(fused_graph):
         for pid in fused_producer_ids(fused_graph, fused_graph.nodes[nid]):
             absorbed[pid] = nid
-    # Group structurally-identical LoopOps under one ``Op.cache_key`` —
+    # Group structurally-identical recognized kernels under one ``Op.cache_key`` —
     # insertion order = first occurrence (drives the progress tail name).
     # Ops with no cache key are unreachable through the bench path so they
     # don't enter the dedup map at all (matches the previous filter).
@@ -313,7 +298,7 @@ async def _inner_reward_async(
             if progress is not None:
                 progress.op_start(name, slot=op_idx)
             sub = single_node_graph(fused_graph, nid, absorb=frozenset(p for p, c in absorbed.items() if c == nid))
-            # Base knobs the prior sees on every row: the LoopOp's ``S_*``
+            # Base knobs the prior sees on every row: the kernel's ``S_*``
             # structural identity (op-aware rows) + the ``H_*`` host/hardware
             # regime (GPU + nvcc opt level), so one global prior spans ops and
             # regimes from the feature vector alone.
@@ -450,9 +435,8 @@ async def run_two_level_tune(
     backend_slots=None,
     close_backends: bool = True,
 ) -> TwoLevelResult:
-    """Drive the outer structural search, scoring each terminal by
-    :func:`_inner_reward_async`, then greedy-assemble the DB-best kernels and bench
-    the whole graph once for the separability check.
+    """Drive outer placement search, score each kernel set with
+    :func:`_inner_reward_async`, then lower the winning set with its DB-best schedules.
 
     ``backends`` (a list of device-pinned :class:`CudaBackend`s) fans the inner
     per-kernel search out across GPUs; the default single ``backend`` is the
@@ -463,9 +447,9 @@ async def run_two_level_tune(
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
     ``_bench_terminal_async``. The outer pipeline (:func:`outer_pipeline`) runs
-    through the pre-partition tile rules, so each structural fork
-    branches the outer tree —
-    one terminal per kernel-set, compared by Σ-per-op cost. A graph with no
+    through algebra recognition and stops before scheduling, so each ``PLACE``
+    fork branches the outer tree — one terminal per kernel set, compared by
+    Σ-per-op cost. A graph with no
     structural offers yields a single terminal and this reduces to "tune each
     op once, sum, assemble". Identical offer sites within one trajectory
     replay the first decision (read off the graph —
@@ -474,6 +458,10 @@ async def run_two_level_tune(
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
+    # ``Run.drive`` owns and mutates its seed candidate. Keep the pristine target
+    # for the post-search exact transcript capture: replay must begin from the same
+    # stable working-golden program, not from a partially driven candidate.
+    source_graph = graph.copy()
     provenance.seed(graph)
     # One session id for every node row this run writes — minted by the caller
     # (``handle_tune``: one id per CLI invocation) or here as a fallback.
@@ -488,14 +476,15 @@ async def run_two_level_tune(
 
         prior = load_prior(seed=prior_seed)
     outer = TuningSearch(patience=patience, ucb_c=ucb_c, prior_model=prior, base_knobs=ctx.features())
-    # The outer drives only the graph-changing passes (through the
-    # pre-partition tile head) — no dump on this Run; the winning config's
+    # The outer drives fusion, recognition, and placement, stopping before the
+    # per-kernel schedule — no dump on this Run; the winning config's
     # full stage artifacts and in-memory frontend provenance slices come
     # from the final assembled CUDA_PASSES run below.
     outer_run = Run(pipeline=outer_pipeline(), ctx=ctx, search=outer, db=db)
 
     best_fused: Graph | None = None
     best_reward: InnerReward | None = None
+    best_outer_trace: list[dict] | None = None
     n_terminals = 0
     prior_summaries: list[str] = []
     pool = list(backends) if backends else [backend]
@@ -521,7 +510,7 @@ async def run_two_level_tune(
         outer.observe(token, stats, "ok" if reward.ok else "bench_fail")
         positions = sum(r.multiplicity for r in reward.per_op)
         logger.info(
-            "[tune] fused terminal #%d: Σ per-op = %.2f us (%d unique kernels, %d positions)",
+            "[tune] placement terminal #%d: Σ per-op = %.2f us (%d unique kernels, %d positions)",
             n_terminals,
             reward.total_us,
             len(reward.per_op),
@@ -529,6 +518,14 @@ async def run_two_level_tune(
         )
         if best_reward is None or (reward.ok and reward.total_us < best_reward.total_us):
             best_fused, best_reward = fused.graph, reward
+            best_outer_trace = outer.decision_trace(token)
+
+    # Placement rows are whole-kernel-set observations: each outer fork prefix is
+    # labeled by the best Σ of its descendants. Feed them to the same online prior
+    # after the outer walk; inner per-kernel rows deliberately contain no PLACE
+    # metadata, so schedule evidence stays transferable between kernel sets.
+    if prior is not None:
+        prior.add_rows(outer._collect_rows())
 
     # One global end-of-run sanity block (the prior spans every kernel now).
     if manage_prior and (prior.fitted or prior.trajectory):
@@ -540,18 +537,52 @@ async def run_two_level_tune(
         prior.checkpoint()
 
     assembled: Graph | None = None
+    replay_plan: dict | None = None
     if best_fused is not None:
-        # Greedy replay over the *original* graph re-derives the same fused
-        # LoopOps and lowers each via the DB-best forks the inner search
-        # recorded. No backend → ``_bench_terminal`` persists nothing (so the
-        # 1.0us stub never clobbers a tuned row). The dump (if any) rides here
+        # Lower the winning outer terminal directly. This preserves the measured
+        # placement choice independent of a not-yet-refitted prior while each
+        # kernel's schedule replays from its DB evidence. No backend means the
+        # stub bench persists nothing, so the 1.0us stub never clobbers a tuned
+        # row. The dump (if any) rides here
         # so it captures the winning config's full stage artifacts. The
         # whole-graph separability bench used to run here too; dropped — its
         # only output was a small advisory gap line that nobody read, and at
         # the tight tune compile budget it could (and did) abort whole-model
         # tunes when a slow-compiling kernel raised. ``--bench`` re-benches
         # the assembled graph at -O3 anyway, which is the deployable number.
-        assembled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=db, dump=dump)
+        from emmy.compiler.pipeline.search.replay_plan import (  # noqa: PLC0415
+            capture_replay_plan,
+            replay_child_tuning_plan,
+            replay_outer_tuning_plan,
+        )
+
+        assert best_reward is not None
+        assert best_outer_trace is not None
+        assembled, replay_plan = capture_replay_plan(
+            source_graph,
+            best_fused,
+            outer_trace=best_outer_trace,
+            ctx=ctx,
+            db=db,
+            dump=dump,
+        )
+        # Persist the cost of THIS transcript, never the outer Σ estimate: DB
+        # evidence or a golden floor can make post-search greedy assembly pick a
+        # different child row from the one that produced ``best_reward``.
+        exact = await pool[0].benchmark_async(assembled)
+        e2e_ms = getattr(exact, "e2e_min_ms", None)
+        replay_plan["total_us"] = float(e2e_ms if e2e_ms is not None else exact.time_ms) * 1000.0
+        replayed_outer = replay_outer_tuning_plan(source_graph, replay_plan, ctx=ctx)
+        for child in replay_plan["lowering"]["children"]:
+            child_graph = replay_child_tuning_plan(replayed_outer, child, ctx=ctx)
+            child_bench = await pool[0].benchmark_async(child_graph)
+            child_e2e_ms = getattr(child_bench, "e2e_min_ms", None)
+            child["latency_us"] = float(child_e2e_ms if child_e2e_ms is not None else child_bench.time_ms) * 1000.0
     return TwoLevelResult(
-        best_fused=best_fused, best_reward=best_reward, n_terminals=n_terminals, assembled=assembled, prior_summaries=prior_summaries
+        best_fused=best_fused,
+        best_reward=best_reward,
+        n_terminals=n_terminals,
+        assembled=assembled,
+        replay_plan=replay_plan,
+        prior_summaries=prior_summaries,
     )

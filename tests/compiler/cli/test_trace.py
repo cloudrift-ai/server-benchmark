@@ -9,8 +9,8 @@ from emmy.commands.trace import handle_trace, register_trace_command, trace_inli
 from emmy.compiler import provenance
 from emmy.compiler.backend import torch_ref
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
@@ -315,6 +315,47 @@ def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
 
     assert record.origins == ()
     assert record.loop_wire is not None
+
+
+def test_trace_inventory_keeps_product_reduction_placement_context(tmp_path) -> None:
+    """An MxKxN residue travels with its reduction; placement decides its boundary."""
+    graph = Graph()
+    M, H, K, N = 512, 16, 32, 16
+    graph.add_node(InputOp(), [], Tensor("x", (M, H), "f16"), node_id="x")
+    for name, shape in (("wn", (H,)), ("wg", (K, H)), ("wu", (K, H)), ("wd", (N, K))):
+        graph.add_node(
+            ConstantOp(name=name, source_path=name, source_shape=shape, source_dtype="f16"),
+            [],
+            Tensor(name, shape, "f16"),
+            node_id=name,
+        )
+    graph.add_node(RmsNormOp(), ["x", "wn"], Tensor("xn", (M, H), "f16"), node_id="xn")
+    graph.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (M, K), "f16"), node_id="gate")
+    graph.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (M, K), "f16"), node_id="up")
+    graph.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (M, K), "f16"), node_id="sg")
+    graph.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("act", (M, K), "f16"), node_id="act")
+    graph.add_node(LinearOp(), ["act", "wd"], Tensor("down", (M, N), "f16"), node_id="down")
+    graph.add_node(ElementwiseOp("add"), ["x", "down"], Tensor("out", (M, N), "f16"), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path, force_loop_targets=True)
+    records = load_golden_records(load_golden_file(path))
+    target_output_shapes = [
+        tuple(dim.as_static() for dim in record.target_program.buffer(output).shape)
+        for record in records
+        for output in record.target_program.outputs
+    ]
+    internal_loop_shapes = [
+        tuple(dim.as_static() for dim in node.output.shape)
+        for record in records
+        for node in record.target_program.nodes.values()
+        if isinstance(node.op, LoopOp)
+    ]
+
+    assert (M, K, N) not in target_output_shapes, "the expanded residue must not be a standalone tune ABI"
+    assert (M, K, N) in internal_loop_shapes, "the outer placement fork still needs the split alternative"
+    assert (M, N) in target_output_shapes
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:

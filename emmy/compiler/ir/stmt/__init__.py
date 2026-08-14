@@ -62,7 +62,7 @@ from emmy.compiler.ir.stmt.base import (
     _pad as _pad,  # re-export for ir.kernel.ir
 )
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, Lambda
+from emmy.compiler.ir.stmt.body import Body, Lambda, lexical_free_values
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
@@ -124,6 +124,7 @@ __all__ = [
     "eval_lambda",
     "foldmap_eval",
     "hoist_loop_invariants",
+    "lexical_free_values",
     "normalize_body",
     "op_to_expr",
     "pretty_body",

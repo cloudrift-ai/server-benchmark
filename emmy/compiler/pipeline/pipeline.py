@@ -780,7 +780,9 @@ class Run:
             # own graph — see :func:`_replay_structural_decision` — so no
             # side-table state is threaded through resolves.
             if structural and (chosen := _replay_structural_decision(cand.graph, match.root.op, options)) is not None:
-                cand.apply(match, chosen)
+                option = _concrete_option(chosen)
+                assert option is not None
+                cand.apply(_configure_option_match(chosen, match), option)
                 continue
             return match, options, structural
         return None
@@ -827,7 +829,7 @@ class Run:
             if option is None:
                 raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
             knob_delta = _choice_knobs(choice, option, root_op)
-            cand.apply(match, option)
+            cand.apply(_configure_option_match(choice, match), option)
             trace.append(
                 Decision(
                     rule_name=match.rule.name,
@@ -919,15 +921,24 @@ class Run:
                 search.push(cand.lazy(), parent=token)
                 continue
             match, options, structural = step
-            forks = [LazyCandidate.from_option(inner=cand, cursor=replace(cand.cursor), match=match, option=opt) for opt in options]
+            forks = [
+                LazyCandidate.from_option(
+                    inner=cand,
+                    cursor=replace(cand.cursor),
+                    match=match,
+                    option=opt,
+                    offered_options=len(options),
+                )
+                for opt in options
+            ]
             search.push(*forks, parent=token, structural=structural)
 
 
 def _is_structural_option(option: object) -> bool:
     """Classify one raw rewrite option by its effect: a ``Graph`` splice
     changes which ops exist — **structural**; an ``Op`` rebind is in-place —
-    **op-variant**. The Op/Graph return type IS the classification; rules wrap
-    a Graph option in a leaf :class:`OptionFork` (no production rule emits one today),
+    **op-variant**. The Op/Graph return type IS the classification; rules may wrap
+    a Graph option in a leaf :class:`OptionFork` (placement does this to carry its decision row),
     whose ``option`` is readable without firing any thunk. A *branch* ``Fork``
     reads op-variant: the sole branch-Fork emitter today is the partition
     planner (all ``TileOp`` leaves), and typing it would require ``expand()`` —
@@ -946,7 +957,12 @@ def _concrete_option(option: object) -> object | None:
     return option
 
 
-def _option_decision(option: object, root_knobs: dict) -> dict | None:
+def _configure_option_match(choice: object, match: Match) -> Match:
+    """Apply a leaf's splice metadata only to the Match choosing that leaf."""
+    return choice.configure_match(match) if isinstance(choice, OptionFork) else match
+
+
+def _option_decision(option: object, root_metadata: dict) -> dict | None:
     """The decision-knob delta one raw structural-fork option would stamp vs
     the offer op: non-``S_*`` knob keys the option's op / fork knobs **add or
     change** vs the offer (a ``Graph`` option reads the union over its nodes'
@@ -959,9 +975,10 @@ def _option_decision(option: object, root_knobs: dict) -> dict | None:
         knobs: dict = {}
         for node in option.nodes.values():
             knobs.update(getattr(node.op, "knobs", None) or {})
+            knobs.update(getattr(node.op, "decision_knobs", None) or {})
     else:
-        knobs = getattr(option, "knobs", None) or {}
-    delta = {k: v for k, v in knobs.items() if root_knobs.get(k) != v and not k.startswith("S_")}
+        knobs = {**(getattr(option, "knobs", None) or {}), **(getattr(option, "decision_knobs", None) or {})}
+    delta = {k: v for k, v in knobs.items() if root_metadata.get(k) != v and not k.startswith("S_")}
     return delta or None
 
 
@@ -974,7 +991,8 @@ def _choice_knobs(choice: object, option: object, root_op) -> dict:
     if isinstance(choice, Fork) and choice.knobs:
         return dict(choice.knobs)
     if isinstance(option, Graph):
-        return _option_decision(option, root_op.knobs) or {}
+        root_metadata = {**root_op.knobs, **root_op.decision_knobs}
+        return _option_decision(option, root_metadata) or {}
     return dict(getattr(option, "knobs", None) or {})
 
 
@@ -989,7 +1007,8 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     (the ``CUT`` considered-vs-declined idiom), and those ops chain to
     the pre-decision offer op via the engine-owned ``Op.source`` (stamped
     unconditionally on rebinds, stamped across loop-dialect splices,
-    preserved by ``_rename_buf_in_op``). So: find any op carrying every
+    preserved by ``_rename_buf_in_op``). Structural rows live in ``Op.decision_knobs`` so they
+    do not become per-kernel schedule evidence. So: find any op carrying every
     decision knob whose source chain contains an op structurally identical
     to this offer (same ``Op.cache_key``), and replay the option whose delta
     matches its stamped values. Matching by decision-knob agreement (not a
@@ -997,12 +1016,13 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     key = root_op.cache_key()
     if key is None:
         return None
-    deltas = [(opt, _option_decision(opt, root_op.knobs)) for opt in options]
+    root_metadata = {**root_op.knobs, **root_op.decision_knobs}
+    deltas = [(opt, _option_decision(opt, root_metadata)) for opt in options]
     decision_keys = {k for _, d in deltas if d for k in d}
     if not decision_keys:
         return None
     for node in graph.nodes.values():
-        knobs = getattr(node.op, "knobs", None)
+        knobs = {**(getattr(node.op, "knobs", None) or {}), **(getattr(node.op, "decision_knobs", None) or {})}
         if not knobs or not decision_keys <= set(knobs):
             continue  # undecided or unrelated op — the cheap pre-filter
         chain = node.op.source_chain()
@@ -1012,7 +1032,7 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
         found = {k: knobs[k] for k in decision_keys}
         for opt, delta in deltas:
             if delta == found:
-                return _concrete_option(opt)
+                return opt
         return None  # decided, but no option matches (emission drift) — fork normally
     return None
 

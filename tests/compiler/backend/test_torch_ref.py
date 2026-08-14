@@ -56,6 +56,22 @@ def test_linear_and_elementwise():
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
 
 
+def test_multiple_graph_outputs_are_returned_in_declared_order():
+    """The eager reference must preserve every graph output, not only the first one."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 4)), node_id="x")
+    g.add_node(ElementwiseOp(op="multiply"), ["x", "x"], Tensor("square", (2, 4)), node_id="square")
+    g.add_node(ElementwiseOp(op="add"), ["square", "x"], Tensor("shifted", (2, 4)), node_id="shifted")
+    g.inputs, g.outputs = ["x"], ["shifted", "square"]
+
+    x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    fn, inputs = torch_ref.build_callable(g, {"x": x})
+
+    shifted, square = fn(*inputs)
+    torch.testing.assert_close(shifted, x * x + x)
+    torch.testing.assert_close(square, x * x)
+
+
 def test_declared_dtype_cast_is_enforced():
     """The trace folds HF's explicit casts (e.g. the fp32 RMSNorm body casting
     back to fp16) into each node's declared output dtype; ``build_callable``

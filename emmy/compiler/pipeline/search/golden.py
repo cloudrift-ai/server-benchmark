@@ -173,13 +173,17 @@ def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
 
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
+    has_plan = "replay_plan" in entry
     has_measurements = "measurements" in entry
-    if not has_knobs and not has_measurements:
+    if has_knobs and has_plan:
+        raise ValueError("a realization cannot contain both knobs and replay_plan")
+    has_realization = has_knobs or has_plan
+    if not has_realization and not has_measurements:
         return GoldenEntryState.INVENTORY
-    if has_knobs and not has_measurements:
+    if has_realization and not has_measurements:
         return GoldenEntryState.PROPOSAL
-    if has_measurements and not has_knobs:
-        raise ValueError("measurements require knobs")
+    if has_measurements and not has_realization:
+        raise ValueError("measurements require knobs or replay_plan")
     measurements = entry["measurements"]
     if not isinstance(measurements, Mapping):
         raise ValueError("measurements must be a mapping")
@@ -204,6 +208,7 @@ class GoldenRecord:
     knobs: dict
     measurements: dict | None
     ranking: dict | None
+    replay_plan: dict | None = None
     loop_index: int | None = None
     loop_wire: dict | None = None
 
@@ -336,6 +341,112 @@ def _positive_number(value, where: str) -> None:
         raise ValueError(f"{where} must be a positive number")
 
 
+def _validate_replay_plan(plan: object, where: str) -> None:
+    """Validate the working-only exact two-level transcript schema."""
+    if not isinstance(plan, Mapping):
+        raise ValueError(f"{where} must be a mapping")
+    _require_keys(plan, {"version", "total_us", "outer", "lowering"}, where)
+    if plan.get("version") != 1:
+        raise ValueError(f"{where}.version must be 1")
+    _positive_number(plan.get("total_us"), f"{where}.total_us")
+
+    def decisions(value, path: str) -> None:
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be a list")
+        for index, decision in enumerate(value):
+            item = f"{path}[{index}]"
+            if not isinstance(decision, Mapping):
+                raise ValueError(f"{item} must be a mapping")
+            _require_keys(decision, {"rule", "node", "kind", "knobs", "options"}, item)
+            if not isinstance(decision.get("rule"), str) or not decision["rule"]:
+                raise ValueError(f"{item}.rule must be a non-empty string")
+            if not isinstance(decision.get("node"), str) or not decision["node"]:
+                raise ValueError(f"{item}.node must be a non-empty string")
+            if decision.get("kind") not in {"op", "graph"}:
+                raise ValueError(f"{item}.kind must be op or graph")
+            if not isinstance(decision.get("knobs"), Mapping):
+                raise ValueError(f"{item}.knobs must be a mapping")
+            if type(decision.get("options")) is not int or decision["options"] <= 0:
+                raise ValueError(f"{item}.options must be a positive integer")
+
+    outer = plan.get("outer")
+    if not isinstance(outer, Mapping):
+        raise ValueError(f"{where}.outer must be a mapping")
+    _require_keys(outer, {"placement", "decisions", "terminal_key", "recognized"}, f"{where}.outer")
+    placement = outer.get("placement")
+    if not isinstance(placement, Mapping) or any(str(key).split("@", 1)[0] != "PLACE" for key in placement):
+        raise ValueError(f"{where}.outer.placement must be a PLACE-only mapping")
+    decisions(outer.get("decisions"), f"{where}.outer.decisions")
+    if not isinstance(outer.get("terminal_key"), str) or not outer["terminal_key"]:
+        raise ValueError(f"{where}.outer.terminal_key must be a non-empty string")
+    recognized = outer.get("recognized")
+    if not isinstance(recognized, list) or not recognized:
+        raise ValueError(f"{where}.outer.recognized must be a non-empty list")
+    for index, child in enumerate(recognized):
+        item = f"{where}.outer.recognized[{index}]"
+        if not isinstance(child, Mapping):
+            raise ValueError(f"{item} must be a mapping")
+        _require_keys(child, {"key", "multiplicity"}, item)
+        if not isinstance(child.get("key"), str) or not child["key"]:
+            raise ValueError(f"{item}.key must be a non-empty string")
+        if type(child.get("multiplicity")) is not int or child["multiplicity"] <= 0:
+            raise ValueError(f"{item}.multiplicity must be a positive integer")
+
+    lowering = plan.get("lowering")
+    if not isinstance(lowering, Mapping):
+        raise ValueError(f"{where}.lowering must be a mapping")
+    _require_keys(lowering, {"decisions", "terminal_key", "kernels", "children"}, f"{where}.lowering")
+    decisions(lowering.get("decisions"), f"{where}.lowering.decisions")
+    if not isinstance(lowering.get("terminal_key"), str) or not lowering["terminal_key"]:
+        raise ValueError(f"{where}.lowering.terminal_key must be a non-empty string")
+    kernels = lowering.get("kernels")
+    if not isinstance(kernels, list) or not kernels:
+        raise ValueError(f"{where}.lowering.kernels must be a non-empty list")
+    for index, kernel in enumerate(kernels):
+        item = f"{where}.lowering.kernels[{index}]"
+        if not isinstance(kernel, Mapping):
+            raise ValueError(f"{item} must be a mapping")
+        _require_keys(kernel, {"key", "knobs"}, item)
+        if not isinstance(kernel.get("key"), str) or not kernel["key"]:
+            raise ValueError(f"{item}.key must be a non-empty string")
+        if not isinstance(kernel.get("knobs"), Mapping):
+            raise ValueError(f"{item}.knobs must be a mapping")
+    children = lowering.get("children")
+    if not isinstance(children, list) or not children:
+        raise ValueError(f"{where}.lowering.children must be a non-empty list")
+    for index, child in enumerate(children):
+        item = f"{where}.lowering.children[{index}]"
+        if not isinstance(child, Mapping):
+            raise ValueError(f"{item} must be a mapping")
+        _require_keys(
+            child,
+            {"key", "multiplicity", "latency_us", "decisions", "terminal_key", "knobs", "kernels", "measurements"},
+            item,
+        )
+        if not isinstance(child.get("key"), str) or not child["key"]:
+            raise ValueError(f"{item}.key must be a non-empty string")
+        if type(child.get("multiplicity")) is not int or child["multiplicity"] <= 0:
+            raise ValueError(f"{item}.multiplicity must be a positive integer")
+        _positive_number(child.get("latency_us"), f"{item}.latency_us")
+        decisions(child.get("decisions"), f"{item}.decisions")
+        if not isinstance(child.get("terminal_key"), str) or not child["terminal_key"]:
+            raise ValueError(f"{item}.terminal_key must be a non-empty string")
+        if not isinstance(child.get("knobs"), Mapping):
+            raise ValueError(f"{item}.knobs must be a mapping")
+        child_kernels = child.get("kernels")
+        if not isinstance(child_kernels, list) or not child_kernels:
+            raise ValueError(f"{item}.kernels must be a non-empty list")
+        if "measurements" in child:
+            measurements = child["measurements"]
+            if not isinstance(measurements, Mapping):
+                raise ValueError(f"{item}.measurements must be a mapping")
+            _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{item}.measurements")
+            _positive_number(measurements.get("emmy_us"), f"{item}.measurements.emmy_us")
+            _positive_number(measurements.get("reference_us"), f"{item}.measurements.reference_us")
+            if not isinstance(measurements.get("reference_backend"), str) or not measurements["reference_backend"]:
+                raise ValueError(f"{item}.measurements.reference_backend must be a non-empty string")
+
+
 def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
     where = f"configs[{index}].target"
     if not isinstance(target, Mapping):
@@ -417,7 +528,11 @@ def validate_golden_file(
             realization_where = f"{where}.realizations[{realization_index}]"
             if not isinstance(realization, Mapping):
                 raise ValueError(f"{realization_where} must be a mapping")
-            _require_keys(realization, {"name", "bindings", "pins", "knobs", "measurements", "ranking"}, realization_where)
+            _require_keys(
+                realization,
+                {"name", "bindings", "pins", "knobs", "replay_plan", "measurements", "ranking"},
+                realization_where,
+            )
             if not isinstance(realization.get("name"), str) or not realization["name"]:
                 raise ValueError(f"{realization_where}.name must be a non-empty string")
             bindings = realization.get("bindings")
@@ -445,6 +560,10 @@ def validate_golden_file(
                     raise ValueError(f"{realization_where}.pins.{name} must be a {descriptor.type.value} value, got {value!r}")
             if "knobs" in realization and not isinstance(realization["knobs"], Mapping):
                 raise ValueError(f"{realization_where}.knobs must be a mapping")
+            if "replay_plan" in realization:
+                _validate_replay_plan(realization["replay_plan"], f"{realization_where}.replay_plan")
+                if strict:
+                    raise ValueError(f"{realization_where} working replay_plan must be split before promotion")
             if "knobs" in realization:
                 from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
 
@@ -519,6 +638,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         knobs=dict(realization.get("knobs") or {}),
         measurements=dict(realization["measurements"]) if realization.get("measurements") is not None else None,
         ranking=dict(realization["ranking"]) if realization.get("ranking") is not None else None,
+        replay_plan=dict(realization["replay_plan"]) if realization.get("replay_plan") is not None else None,
     )
 
 
@@ -625,6 +745,10 @@ def dump_golden_file(
     validation: GoldenFileValidation = GoldenFileValidation.WORKING,
     overwrite: bool = False,
 ) -> Path:
+    if validation == GoldenFileValidation.PROMOTION:
+        from emmy.compiler.pipeline.search.working_golden import promote_replay_plans  # noqa: PLC0415
+
+        document = promote_replay_plans(dict(document))
     validate_golden_file(document, validation=validation)
     destination = Path(path)
     if destination.exists() and not overwrite:

@@ -14,6 +14,8 @@ freeing the device and leaving the parent clean, instead of the ~109-minute in-p
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import sys
 import textwrap
 import time
@@ -184,6 +186,192 @@ def test_worker_chatty_stderr_does_not_block_the_job() -> None:
     resp = asyncio.run(_job_then_close(worker, {"torch_spec": None, "kwargs": {}}, wall_timeout_s=60.0))
     assert resp["result"] == "R"
     assert len(worker._stderr_tail) <= worker._STDERR_TAIL_CHARS
+
+
+def test_concurrent_jobs_are_serialized_on_one_framed_transport() -> None:
+    """Direct replay measurements and slot-leased tune measurements may reach the
+    same backend concurrently.  The worker transport, not every caller, owns the
+    single-flight invariant: frames and response reads must never interleave."""
+    child = textwrap.dedent(
+        """
+        import asyncio
+        import emmy.compiler.backend.cuda._bench_worker as w
+        async def _echo(req):
+            await asyncio.sleep(0.05)
+            return {"job": req["job"]}
+        w._run_job = _echo
+        w.main()
+        """
+    )
+    worker = _scripted_worker(child)
+
+    async def _two_jobs():
+        try:
+            return await asyncio.gather(
+                worker.run_job({"job": 1}, wall_timeout_s=5.0),
+                worker.run_job({"job": 2}, wall_timeout_s=5.0),
+            )
+        finally:
+            await worker.aclose()
+
+    assert asyncio.run(_two_jobs()) == [{"ok": True, "job": 1}, {"ok": True, "job": 2}]
+
+
+def test_cancelled_job_retires_its_partially_used_stream() -> None:
+    """Cancellation after a frame is sent must not expose its pending response to
+    the next request.  Retire the child, then prove a clean respawn serves the next
+    job normally."""
+    child = textwrap.dedent(
+        """
+        import asyncio
+        import emmy.compiler.backend.cuda._bench_worker as w
+        async def _echo(req):
+            await asyncio.sleep(0.5 if req["job"] == 1 else 0.0)
+            return {"job": req["job"]}
+        w._run_job = _echo
+        w.main()
+        """
+    )
+    worker = _scripted_worker(child)
+
+    async def _cancel_then_retry():
+        first = asyncio.create_task(worker.run_job({"job": 1}, wall_timeout_s=5.0))
+        await asyncio.sleep(0.05)  # frame sent; child is computing its response
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+        assert worker._proc is None
+        try:
+            return await worker.run_job({"job": 2}, wall_timeout_s=5.0)
+        finally:
+            await worker.aclose()
+
+    assert asyncio.run(_cancel_then_retry()) == {"ok": True, "job": 2}
+
+
+def test_aclose_bounds_a_subprocess_wait_that_never_completes(monkeypatch) -> None:
+    """A killed worker's ``Process.wait`` can await inherited pipe EOF forever.
+    Teardown must detach the transport and return within its own bounded budget."""
+    from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
+
+    class _Stdin:
+        def close(self) -> None:
+            pass
+
+    class _Transport:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _NeverReaped:
+        pid = 987654321
+        returncode = None
+        stdin = _Stdin()
+
+        def __init__(self) -> None:
+            self._transport = _Transport()
+            self.killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            await asyncio.Future()
+
+    proc = _NeverReaped()
+    worker = _AsyncBenchWorker()
+    worker._proc = proc
+    worker._REAP_TIMEOUT_S = 0.01
+    killed_groups: list[tuple[int, int]] = []
+    if os.name == "posix":
+        worker._owns_process_group = True
+        monkeypatch.setattr(os, "killpg", lambda pid, sig: killed_groups.append((pid, sig)))
+
+    async def _close():
+        await asyncio.wait_for(worker.aclose(), timeout=0.5)
+
+    asyncio.run(_close())
+    if os.name == "posix":
+        assert killed_groups and killed_groups[0][0] == proc.pid
+    else:
+        assert proc.killed
+    assert proc._transport.closed
+    assert worker._proc is None
+
+
+def test_real_worker_spawn_owns_a_private_process_group() -> None:
+    """POSIX timeout teardown can kill nvcc descendants only when the real worker
+    is the leader of a private process group."""
+    if os.name != "posix":
+        return
+
+    from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
+
+    async def _spawn_and_close() -> None:
+        worker = _AsyncBenchWorker()
+        await worker._spawn()
+        assert worker._proc is not None
+        assert os.getpgid(worker._proc.pid) == worker._proc.pid
+        await worker.aclose()
+
+    asyncio.run(_spawn_and_close())
+
+
+def test_wall_timeout_kills_and_reaps_compiler_descendant() -> None:
+    """Fault-inject the nvcc lifecycle shape: the worker blocks while a compiler
+    descendant is alive.  Timeout teardown must remove both, even when the test
+    runner itself is container PID 1 and adopts the grandchild."""
+    if os.name != "posix":
+        return
+
+    import re
+
+    import pytest
+
+    from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
+
+    child = textwrap.dedent(
+        """
+        import subprocess, sys, time
+        compiler = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        sys.stderr.write(f"COMPILER_PID={compiler.pid}\\n")
+        sys.stderr.flush()
+        time.sleep(60)
+        """
+    )
+    worker = _AsyncBenchWorker()
+
+    async def _spawn_compiling_worker() -> None:
+        worker._proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            child,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        worker._owns_process_group = True
+        worker._stderr_tail = ""
+        worker._stderr_task = asyncio.create_task(worker._drain_stderr(worker._proc))
+
+    worker._spawn = _spawn_compiling_worker  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="wall budget") as caught:
+        asyncio.run(worker.run_job({"job": 1}, wall_timeout_s=0.3))
+    match = re.search(r"COMPILER_PID=(\d+)", str(caught.value))
+    assert match is not None
+    compiler_pid = int(match.group(1))
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(compiler_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail(f"compiler descendant {compiler_pid} survived or remained a zombie after worker timeout")
 
 
 def test_preserved_reference_retires_worker_before_next_job() -> None:

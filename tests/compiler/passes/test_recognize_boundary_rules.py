@@ -211,8 +211,11 @@ def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict
     rows: list[dict] = []
 
     def decide(fp):
+        from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
+
         leaves = flatten_leaves(fp.options)
-        rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
+        offered = [dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves]
+        rows.extend(row for row in offered if any(family_of(key) in SCHEDULE_FAMILIES for key in row))
         if pick is not None:
             for leaf in leaves:
                 if pick(dict(getattr(leaf, "knobs", {}) or {})):
@@ -414,6 +417,9 @@ def test_normed_gqa_sdpa_certifies_flash():
     first = src.step_stmts()[0]
     assert getattr(first, "role", None) is AxisRole.CONTRACTION, "flash did not absorb the score contraction (fold stayed cut)"
     assert not isinstance(first.a, Load) and not isinstance(first.b, Load), "normalized Q/K cones were reduced to raw loads"
+    score_rounds = [s for s in src.lift.body if isinstance(s, Assign) and s.op.name == "copy" and s.args == ("sacc",) and s.dtype == F16]
+    denom_rounds = [s for s in flash[0].op.body if isinstance(s, Assign) and s.op.name == "copy" and s.args == ("l_i",) and s.dtype == F16]
+    assert len(score_rounds) == len(denom_rounds) == 1, "flash erased a typed reduction boundary while looking through identity copies"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():
@@ -443,6 +449,84 @@ def test_bind_contraction_declined_cone_raises_not_positional():
     )
     loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
     with pytest.raises(LoweringError, match="computed cone"):
+        bind_contraction(loop, "m", "n", Body(()))
+
+
+def test_bind_contraction_declines_a_that_depends_on_both_output_axes():
+    """A contraction tile reuses A across its N cells, so a direct ``A[m, k, n]`` load is not a
+    legal A edge even though it contains the expected M and K axes. This is the broadcast-shaped
+    Llama FP16 prefill loop that previously reached ``TILE=f2x26`` and emitted undefined
+    ``n__ar0`` ... ``n__ar25`` variables instead of staying on the PLANAR reduction path."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+    from emmy.compiler.pipeline.pipeline import LoweringError
+
+    m, n, k = Var("m"), Var("n"), Var("k")
+    loop = Loop(
+        axis=Axis(name="k", extent=Dim(4096)),
+        body=Body(
+            (
+                Load(name="b", input="B", index=(n, k)),
+                Load(name="a", input="A", index=(m, k, n)),
+                Assign(name="v", op=ElementwiseImpl("multiply"), args=("b", "a")),
+                Accum(name="acc", op=ElementwiseImpl("add"), value="v"),
+            )
+        ),
+        role=AxisRole.CONTRACTION,
+    )
+
+    with pytest.raises(LoweringError, match="computed cone"):
+        bind_contraction(loop, "m", "n", Body(()))
+
+
+def test_channel_binding_shares_structurally_equal_a_and_preserves_product_dtype():
+    """Fresh SSA copies of one A cone group without losing the matmul product dtype."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction_channels
+
+    k = Axis("k", Dim(32))
+    body = []
+    for i in range(2):
+        body.extend(
+            (
+                Load(name=f"a{i}", input="a_buf", index=(Var("m"), Var("k"))),
+                Assign(name=f"a{i}_neg", op="negative", args=(f"a{i}",)),
+                Load(name=f"b{i}", input=f"b{i}_buf", index=(Var("n"), Var("k"))),
+                Assign(name=f"prod{i}", op="multiply", args=(f"a{i}_neg", f"b{i}"), dtype=F32),
+                Accum(name=f"acc{i}", value=f"prod{i}", op="add", axes=("k",)),
+            )
+        )
+    loop = Loop(axis=k, role=AxisRole.CONTRACTION, body=Body(tuple(body)))
+
+    a, channels, product_dtype, epilogue = bind_contraction_channels(loop, "m", "n", Body())
+
+    assert isinstance(a, list) and len(channels) == 2
+    assert all(isinstance(channel.b, Load) for channel in channels)
+    assert product_dtype == F32
+    assert epilogue == Body()
+
+
+def test_bind_contraction_rejects_operand_that_varies_across_both_output_axes():
+    """An mma B fragment is stationary across M; crossed (m, n, k) algebra stays PLANAR."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+    from emmy.compiler.pipeline.pipeline import LoweringError
+
+    loop = Loop(
+        axis=Axis("k", Dim(32)),
+        role=AxisRole.CONTRACTION,
+        body=Body(
+            (
+                Load(name="a", input="a_buf", index=(Var("k"),)),
+                Load(name="b", input="b_buf", index=(Var("m"), Var("k"), Var("n"))),
+                Assign(name="prod", op="multiply", args=("a", "b")),
+                Accum(name="acc", value="prod", op="add", axes=("k",)),
+            )
+        ),
+    )
+
+    with pytest.raises(LoweringError, match="could not bind A/B operands"):
         bind_contraction(loop, "m", "n", Body(()))
 
 

@@ -402,7 +402,7 @@ class SyncCopyTransport:
     rather than a promised latency-hiding mechanism.
     """
 
-    operands: tuple[Operand, Operand]
+    operands: tuple[Operand, ...]
     slab_dtype: str
     elem_bytes: int
     cta: CtaTile
@@ -639,11 +639,12 @@ class SyncTransport:
 @dataclass(frozen=True)
 class CpAsyncTransport:
     """The cp.async producer: cooperative gmem→smem fills committed into groups, drained by
-    ``CpAsyncWait(group=in_flight)``. ``operands`` is the ``(A, B)`` :class:`Operand` pair; each
+    ``CpAsyncWait(group=in_flight)``. ``operands`` is the ``(A, B₀, B₁, …)``
+    :class:`Operand` tuple; each
     ``operand.index(k0)`` is the per-cell ``(row, col) → gmem-index`` closure (its tier bakes in the
     masked-axis clamp)."""
 
-    operands: tuple[Operand, Operand]
+    operands: tuple[Operand, ...]
     slab_dtype: str
     elem_bytes: int
     cta: CtaTile
@@ -699,7 +700,7 @@ class TmaTransport:
     parity. The multi-slot mbarrier is what makes ``depth`` a free knob for TMA — ``wait(slot, phase)``
     gates the ring slot the same way ``CpAsyncWait(in_flight)`` gates a commit group."""
 
-    operands: tuple[Operand, Operand]
+    operands: tuple[Operand, ...]
     slab_dtype: str
     elem_bytes: int
     cta: CtaTile

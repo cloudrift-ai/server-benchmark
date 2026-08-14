@@ -410,13 +410,13 @@ def _stmt_eval_scope() -> dict:
 # don't carry a ``Body``. ``name`` is an instance label; ``source`` is the
 # rewrite-chain predecessor on the base ``Op`` (attribution metadata only,
 # stamped automatically by the engine — see ``Op.source``).
-_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
+_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "decision_knobs", "meta"})
 
 # Op dataclass fields excluded from JSON serialization in :meth:`Graph.to_dict`:
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
 # ``outputs`` snapped by the matcher) — none of it belongs in the persisted
 # IR.
-_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta"})
+_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "decision_knobs", "inputs", "outputs", "meta"})
 
 
 class Graph:
@@ -1255,7 +1255,7 @@ def _rename_buf_in_op(op, old: str, new: str):
     """Rewrite ``Load.source`` / ``Write.output`` references inside a
     ``LoopOp`` body from ``old`` to ``new`` (recursively into nested Loops).
     Pass-through for op types without internal buf refs. Preserves the op's
-    ``name`` / ``knobs`` / ``source`` identity — a rename after
+    ``name`` / ``knobs`` / ``decision_knobs`` / ``source`` identity — a rename after
     ``991_stamp_loop_names`` / ``992_stamp_structural_features`` (e.g. the
     splice id-promotion of a lowering-phase fragment like the demoted-matmul
     split) must not strip the stamped kernel name, the ``S_*`` features, or
@@ -1277,6 +1277,7 @@ def _rename_buf_in_op(op, old: str, new: str):
     renamed = LoopOp(body=op.body.map(fn))
     renamed.name = op.name
     renamed.knobs = dict(op.knobs)
+    renamed.decision_knobs = dict(op.decision_knobs)
     renamed.source = op.source
     return renamed
 

@@ -418,8 +418,11 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     ``(f32, ())`` stubs (``Match.is_alive`` snapshots node identity and cannot see an op swap), so
     the warp atom gate refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
     own measured mma rows on the gemma-4-12B layer. ``Candidate.try_rewrite``'s apply-time
-    ``populate_io`` refresh restores the graph-true dtypes; this pins it."""
+    ``populate_io`` refresh restores the graph-true dtypes. The compact broadcast seam is an
+    explicit scheduler choice: pin it here so the attention result materializes as ``[M, H·D]``
+    before the projection instead of selecting the maximally-fused default fork."""
     _pin_warp(monkeypatch)
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@broadcast=cut")
     B, H, S, D = 1, 4, 64, 64
     NO = 96  # projection out-features
     Sd = Dim("seq_len", hint=S)

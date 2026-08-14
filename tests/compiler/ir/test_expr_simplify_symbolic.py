@@ -126,3 +126,36 @@ def test_static_axis_unchanged_behavior():
     assert ctx.ranges["a"] == Interval(0, 31)
     # i % 32 with i in [0,32) folds to i (literal path).
     assert BinaryExpr("%", Var("a"), Literal(32, "int")).simplify(ctx) == Var("a")
+
+
+def test_rejoined_mixed_radix_coordinate_drops_outer_flattened_axis():
+    """``reshape(flatten(...))`` joins quotient/remainder digits back to the inner axis.
+
+    This is the exact index family emitted when a ``[M,N]`` projection is reshaped to
+    ``[M,H,D]`` and flattened again: leaving ``m`` in the expression makes the weight's N
+    coordinate look M-dependent and prevents a valid tensor-core contraction binding.
+    """
+    m, n = Var("m"), Var("n")
+    flat = m * Literal(4096, "int") + n
+    rejoined = ((flat / Literal(128, "int")) % Literal(32, "int")) * Literal(128, "int") + flat % Literal(128, "int")
+    ctx = SimplifyCtx({"m": Interval(0, 511), "n": Interval(0, 4095)})
+    assert rejoined.simplify(ctx) == n
+
+
+def test_rejoined_mixed_radix_coordinate_is_numerically_equivalent():
+    m, n = Var("m"), Var("n")
+    flat = m * Literal(24, "int") + n
+    rejoined = ((flat / Literal(6, "int")) % Literal(4, "int")) * Literal(6, "int") + flat % Literal(6, "int")
+    ctx = SimplifyCtx({"m": Interval(0, 7), "n": Interval(0, 23)})
+    folded = rejoined.simplify(ctx)
+    assert folded == n
+    for mv in range(8):
+        for nv in range(24):
+            assert rejoined.eval({"m": mv, "n": nv}) == folded.eval({"m": mv, "n": nv})
+
+
+def test_rejoined_mixed_radix_requires_nonnegative_source():
+    x = Var("x")
+    rejoined = ((x / Literal(4, "int")) % Literal(3, "int")) * Literal(4, "int") + x % Literal(4, "int")
+    ctx = SimplifyCtx({"x": Interval(-4, 11)})
+    assert rejoined.simplify(ctx) == rejoined

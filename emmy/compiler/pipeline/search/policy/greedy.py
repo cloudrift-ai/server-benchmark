@@ -31,6 +31,7 @@ emitted sibling (option-0).
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
@@ -39,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves
+from emmy.compiler.pipeline.search.policy._cold_reduce import cold_grid_reduction_lead
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,130 @@ def _tile_blocked(fork_knobs: dict, blocked: set[frozenset]) -> bool:
     fork carries every identity knob, so a partial (branch) fork — whose identity
     is a strict subset — never equals a full-row entry and is never skipped."""
     return tile_identity(fork_knobs) in blocked
+
+
+def _cold_materialized_mma_lead(rows: list[dict], ctx: Context) -> int | None:
+    """A capability- and geometry-derived cold lead for tensor-core atom families whose
+    direct operand gather is known to be a poor large-GEMM baseline.
+
+    Some atoms declare both ``materialized_edges_only`` and ``sync_copy_staging``: their direct
+    fragment loader gathers each operand cell from global memory, while their target-supported
+    synchronous copy coalesces the same bytes into a shared slab.  On a large, two-free-axis O3
+    contraction, prefer a legal single-buffer sync row with a balanced CTA and enough output CTAs
+    to occupy the card.  The choice is made from resolved :class:`TilePlan` / :class:`Stage`
+    properties, never an atom name, model name, or product shape.
+
+    This is deliberately only a *cold* lead (the caller owns that gate).  Golden, measured DB,
+    and calibrated-online evidence remain above it; small-M/decode, O1 tuning, atoms with native
+    global/async fragment transport, and any shape with no qualifying row retain the prior pick.
+    """
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, Workers  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key, family_value  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import _tile_plan  # noqa: PLC0415
+
+    if not rows:
+        return None
+
+    ranked: list[tuple[tuple, int]] = []
+    for i, row in enumerate(rows):
+        # Structural alternatives can reach one policy decision with different finalized
+        # geometries (for example, a kernel-finalized split has one extra synthetic free axis).
+        # Derive every candidate's logical tile target from that row itself; consulting rows[0]
+        # made catalog order decide whether a later unsplit staged contraction was even eligible.
+        if float(row.get("H_opt", 3.0) or 3.0) != 3.0:
+            continue
+        n_free = float(row.get("S_hint_n_free_axis", row.get("S_ext_n_free_axis", 0.0)) or 0.0)
+        if int(n_free) != 2:
+            continue
+        free_prod = float(row.get("S_hint_free_prod", row.get("S_ext_free_prod", 0.0)) or 0.0)
+        free_max = float(row.get("S_hint_free_max", row.get("S_ext_free_max", 0.0)) or 0.0)
+        reduce_k = float(row.get("S_ext_reduce_max", 0.0) or 0.0)
+        sm_count = float(row.get("H_sm_count", 0.0) or 0.0)
+        if free_prod <= 0 or free_max <= 0 or sm_count <= 0:
+            continue
+        # The smaller free dimension is the useful discriminator between serving/decode rows and
+        # a real matrix tile. Deriving it from structural facts keeps the rule axis-name-free.
+        free_min = free_prod / free_max
+        if free_min < 32:
+            continue
+
+        # Largest power-of-two CTA dimensions that still supply at least one CTA per SM, capped at
+        # the high-reuse 128-wide regime. The short output dimension caps the narrow tile edge.
+        edge_budget = math.sqrt(free_prod / sm_count)
+        if edge_budget < 16:
+            continue
+        target_wide = min(128, max(32, 2 ** int(math.floor(math.log2(edge_budget)))))
+        target_narrow = min(target_wide, max(32, 2 ** int(math.floor(math.log2(free_min)))))
+        target_area = target_narrow * target_wide
+        target_threads = min(256, max(128, target_area // 64))
+
+        plan = _tile_plan(row)
+        if plan is None or not plan.is_warp:
+            continue
+        atom = plan.atom
+        if not (atom.available_on(ctx) and atom.materialized_edges_only and atom.sync_copy_staging):
+            continue
+        # "Large K" scales with the instruction atom rather than a model constant: at least 256
+        # atom steps are needed before the slab setup is a sensible cold default.
+        if reduce_k < 256 * atom.atom_k:
+            continue
+        stage_spec = family_value(row, "STAGE")
+        reduce_spec = family_value(row, "REDUCE")
+        raster_spec = family_value(row, "RASTER")
+        try:
+            stage = Stage.parse(str(stage_spec)) if stage_spec else None
+            work = Workers.parse(str(row.get("WORK") or ""))
+            reduce = ReducePlan.parse(str(reduce_spec or ""), work)
+        except ValueError:
+            continue
+        if stage is None or stage.transport != "sync" or stage.depth != 1 or stage.reg_depth != 1:
+            continue
+        if reduce.coop > 1 or reduce.reg > 1 or raster_spec:
+            continue
+
+        area = plan.tile_m * plan.tile_n
+        threads = plan.units_m * plan.units_n * atom.lanes
+        ctas = free_prod / max(area, 1)
+        medium_geometry = target_narrow <= 32
+        # Medium output tiles need K parallelism as well as output occupancy.  The target split is
+        # derived from reduction atom-steps per free CTA and clamped to the scheduler's generic
+        # split catalog; large tiles retain the unsplit high-reuse lead.
+        free_ctas_at_target = free_prod / target_area
+        split_need = reduce_k / max(free_ctas_at_target * atom.atom_k, 1.0)
+        target_split = min(8, max(1, 2 ** int(round(math.log2(max(split_need, 1.0)))))) if medium_geometry else 1
+        split = reduce.cta
+        if (split > 1 and reduce.finalize != "atomic") or (not medium_geometry and split > 1):
+            continue
+        launch_ctas = ctas * split
+
+        # A compact slab quantum is derived from the atom's physical fragment width.  Wider K
+        # chunks are preferred only when a medium row splits K deeply enough to shorten each slice.
+        fragment_bytes = atom.fragment_register_count("a") * 4
+        target_chunk_bytes = (8 if target_split >= 4 else 4) * fragment_bytes
+        chunk_bytes = plan.bk * atom.atom_k * atom.operand_dtype("a").nbytes
+
+        def l2_ratio(a: float, b: float) -> float:
+            return abs(math.log2(max(a, 1.0) / max(b, 1.0)))
+
+        rank = (
+            0 if launch_ctas >= sm_count else 1,
+            l2_ratio(area, target_area),
+            l2_ratio(min(plan.tile_m, plan.tile_n), target_narrow) + l2_ratio(max(plan.tile_m, plan.tile_n), target_wide),
+            l2_ratio(split, target_split),
+            l2_ratio(threads, target_threads),
+            l2_ratio(plan.units_m, plan.units_n) + l2_ratio(plan.reg_m, plan.reg_n),
+            l2_ratio(chunk_bytes, target_chunk_bytes),
+            canonical_row_key(row),
+        )
+        ranked.append((rank, i))
+    return min(ranked)[1] if ranked else None
+
+
+def _uses_cold_offline_prior(prior: object) -> bool:
+    """Whether deploy ranking is currently owned by the fixed offline cold-start model."""
+    from emmy.compiler.pipeline.search.prior import FallbackPrior, OfflinePrior  # noqa: PLC0415
+
+    return isinstance(prior, OfflinePrior) or (isinstance(prior, FallbackPrior) and not prior.trustworthy)
 
 
 # ---------------------------------------------------------------------------
@@ -760,9 +886,10 @@ def greedy_decide(
     Structural (``Graph``-splicing) options are priced with the trained prior
     grounded in measured DB evidence — :func:`_pick_structural` — so an
     unpinned ``compile`` / ``run`` can deploy the kernel sets ``tune`` measured
-    best (the demoted-matmul split); cold, the structural leaf is filtered and
-    kernel sets stay unchanged.
-    ``price_structural=False`` keeps the filter behavior — used by
+    best (for example, a placement cut). Cold or unpriceable structural forks
+    take option 0, which placement guarantees is the maximal form; this is based
+    on the fork contract rather than the option's ``Op``/``Graph`` representation.
+    ``price_structural=False`` filters graph-splicing leaves — used by
     ``Pipeline.run``'s retry after a structural pick failed to lower, and by
     the nested pricing probes themselves (no recursive splitting inside a
     price probe). The price memo is per-factory-call (one compile attempt),
@@ -877,8 +1004,10 @@ def greedy_decide(
         # loaded, :func:`_pick_structural` prices the option properly — Σ of
         # nested per-kernel predicted-bests vs the keep-fused side — and
         # returns the split when it predicts faster. Cold (offline / no
-        # prior), or when an option can't be priced, the structural leaf is
-        # filtered so a cold compile never changes kernel sets. ``tune``
+        # prior), or when an option can't be priced, the structural fork takes
+        # option 0, whose rule contract is the maximal form. It may itself be a
+        # Graph splice (product/reduction recomposition), so Graph-vs-Op cannot
+        # identify the default. ``tune``
         # explores them regardless (MCTS walks every sibling); an env pin
         # makes the Graph the rule's only option, which applies inline and
         # never reaches a decide.
@@ -886,6 +1015,8 @@ def greedy_decide(
             pick = _pick_structural(fp, leaves, the_prior, memo, price_structural, db)
             if pick is not None:
                 return pick
+            if price_structural:
+                return leaves[0]
             op_leaves = [o for o in leaves if not _is_structural_option(o)]
             if op_leaves:
                 leaves = op_leaves
@@ -926,6 +1057,25 @@ def greedy_decide(
                 got = _db_measured_pick(db_index(), rows)
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
+            if got is None and _uses_cold_offline_prior(the_prior):
+                lead = _cold_materialized_mma_lead(rows, fp.ctx)
+                lead_kind = "materialized-MMA"
+                if lead is None:
+                    lead = cold_grid_reduction_lead(rows, fp.ctx)
+                    lead_kind = "grid-reduction"
+                if lead is not None:
+                    # Keep ``fp.score`` in the active prior's own units even though geometry owns
+                    # the cold choice.  Calibrated online / golden / measured evidence never
+                    # reaches this branch and therefore remains authoritative.
+                    price = the_prior.mean_score(rows[lead])
+                    got = (lead, price)
+                    logger.info(
+                        "deploy: node %r has no measured evidence; capability-derived %s lead selects "
+                        "%s over the offline cold-start argmin",
+                        fp.node_id,
+                        lead_kind,
+                        {k: v for k, v in rows[lead].items() if not k.startswith(("S_", "H_"))},
+                    )
             best_i, price = got if got is not None else picker(rows)
         elif got is not None:  # golden decides even for bare-mean_scores priors
             best_i, price = got

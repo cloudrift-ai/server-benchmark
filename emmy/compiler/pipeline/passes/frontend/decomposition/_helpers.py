@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
@@ -87,10 +88,17 @@ def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_s
 def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dtype: str | None = None) -> Node:
     """Decompose a matmul into unsqueeze → broadcast → multiply → reduce_sum → squeeze.
 
+    Low-precision floating operands use an f32 virtual product and accumulator, matching the
+    numeric contract of MMA/cuBLAS: the full input product enters the wide accumulator and the
+    tensor result rounds once at ``dtype``. This is semantically distinct from a materialized
+    pointwise f16 multiply followed by sum, which carries its own f16 tensor boundary.
+
     Returns the squeezed output node.
     """
     a, b = _node(frag, a), _node(frag, b)
     dtype = dtype or a.output.dtype
+    lowp_float = {"f16", "bf16", "f8e4m3", "f8e5m2"}
+    product_dtype = F32 if a.output.dtype.name in lowp_float and b.output.dtype.name in lowp_float else dtype
     a_unsq, b_unsq, mul_shape, k_axis = matmul_unsqueeze(a.output.shape, b.output.shape)
     # Layout nodes (unsqueeze, and ``broadcast_to`` below) inherit their own
     # operand's dtype — branch-local propagation; only the computing nodes
@@ -102,7 +110,7 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
     ew = frag.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[a_bc, b_bc],
-        output=Tensor(f"{name}_ew", mul_shape, dtype),
+        output=Tensor(f"{name}_ew", mul_shape, product_dtype),
     )
     red_shape = reduction_shape(mul_shape, k_axis)
     red = frag.add_node(

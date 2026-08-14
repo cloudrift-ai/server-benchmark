@@ -40,7 +40,7 @@ from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -149,7 +149,10 @@ def _warp_epilogue(
                 )
             )
         elif isinstance(s, Assign):
-            ops.append((s.name, s.op.name, tuple(s.args)))
+            # An explicit dtype is a semantic round boundary, not just a final store hint.  The
+            # reduce lifter uses ``copy(..., dtype=f16)`` to preserve a materialized reduction's
+            # tensor dtype when its consumer fuses into this register epilogue.
+            ops.append((s.name, s.op.name, tuple(s.args), None if s.dtype is None else s.dtype.name))
         elif isinstance(s, Select):
             selects.append((s.name, tuple((br.select.substitute(ph), br.value) for br in s.branches)))
         elif isinstance(s, Write):
@@ -164,7 +167,7 @@ def _warp_epilogue(
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
     bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
-    for name, _op, args in ops:
+    for name, _op, args, _dtype in ops:
         unbound = [a for a in args if a not in bound]
         if unbound:
             raise RuleSkipped(f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)")
@@ -283,56 +286,101 @@ def _staged_inner_atom_loop(
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
     # row, K the col, like A); the slot offset always lands on the ROW. All share ONE emission loop.
-    specs = [(lambda x: f"_a{x}", "a", a_slab, bk_elems + pads[0], True, m.reg, m.unit, atom_m, offs[0], swizzles[0], byte_slabs[0])]
+    specs = [
+        (
+            lambda x: f"_a{x}",
+            "a",
+            a_slab,
+            bk_elems + pads[0],
+            True,
+            m.reg,
+            m.unit,
+            atom_m,
+            offs[0],
+            swizzles[0],
+            byte_slabs[0],
+        )
+    ]
     for f, bs in enumerate(b_slabs):
         frag_of = (lambda ff: lambda x: _fold_frag(f"_b{x}", ff))(f)
         tr = trans[1 + f]
         ldm_b = (bk_elems if tr else n.tile) + pads[1 + f]
-        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f]))
+        specs.append(
+            (
+                frag_of,
+                "b",
+                bs,
+                ldm_b,
+                tr,
+                n.reg,
+                n.unit,
+                atom_n,
+                offs[1 + f],
+                swizzles[1 + f],
+                byte_slabs[1 + f],
+            )
+        )
+
+    def ldm(spec, x, kexpr, suffix):
+        """One operand fragment read at K position ``kexpr``. Kept factored so the single-
+        buffered schedule can place each read immediately before its last-use group instead of
+        making the whole A+B register tile live at once."""
+        frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8 = spec
+        assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
+        prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
+        row, col = (prim, kexpr) if is_row else (kexpr, prim)
+        if off is not None:
+            row = BinaryExpr("+", off, row)
+        return LdmatrixLoad(
+            frag=f"{frag_of(x)}{suffix}",
+            src_buffer=slab,
+            src_index=(row, col),
+            role=role,
+            staged=True,
+            ldm=ldm,
+            swizzle=swz,
+            b_trans=role == "b" and is_row,
+            byte_slab=b8,
+            fragment_layout=atom.fragment_layout,
+        )
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
-        reads: list[Stmt] = []
-        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8 in specs:
-            assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
-            for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
-                prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
-                row, col = (prim, kexpr) if is_row else (kexpr, prim)
-                if off is not None:
-                    row = BinaryExpr("+", off, row)
-                frag = f"{frag_of(x)}{suffix}"
-                reads.append(
-                    LdmatrixLoad(
-                        frag=frag,
-                        src_buffer=slab,
-                        src_index=(row, col),
-                        role=role,
-                        staged=True,
-                        ldm=ldm,
-                        swizzle=swz,
-                        b_trans=role == "b" and is_row,
-                        byte_slab=b8,
-                        fragment_layout=atom.fragment_layout,
-                    )
-                )
-        return reads
+        return [ldm(spec, x, kexpr, suffix) for spec in specs for x in range(spec[5])]
+
+    def mma(f, i, j, suffix):
+        return MmaSyncPtx(
+            c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
+            a_frag=f"_a{i}{suffix}",
+            b_frag=f"{_fold_frag(f'_b{j}', f)}{suffix}",
+            shape=atom.ptx_shape,
+            ab_dtype=atom.ab_dtype,
+            c_dtype=atom.operand_dtype("c").name,
+        )
 
     def mmas(suffix):  # every fold channel × (i, j) cell's mma.sync over the `suffix`-slotted operand fragments
-        return [
-            MmaSyncPtx(
-                c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
-                a_frag=f"_a{i}{suffix}",
-                b_frag=f"{_fold_frag(f'_b{j}', f)}{suffix}",
-                shape=atom.ptx_shape,
-                ab_dtype=atom.ab_dtype,
-                c_dtype=atom.operand_dtype("c").name,
-            )
-            for f in range(len(b_slabs))
-            for i in range(m.reg)
-            for j in range(n.reg)
-        ]
+        return [mma(f, i, j, suffix) for f in range(len(b_slabs)) for i in range(m.reg) for j in range(n.reg)]
 
     if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
-        body = ldms(Var(ki), "") + mmas("")
+        # Keep the cheaper fragment bank resident and stream the more expensive bank through it.
+        # This retains each fragment's full register-tile reuse while avoiding the old all-loads-
+        # then-all-MMAs schedule's sum(A+B) live range. The choice is geometry driven from fragment
+        # register counts and fold arity; it is independent of architecture, model, and operation.
+        kexpr = Var(ki)
+        a_spec, *b_specs = specs
+        a_regs = m.reg * atom.fragment_register_count("a")
+        b_regs = len(b_specs) * n.reg * atom.fragment_register_count("b")
+        body: list[Stmt] = []
+        if a_regs <= b_regs:
+            body += [ldm(a_spec, i, kexpr, "") for i in range(m.reg)]
+            for f, b_spec in enumerate(b_specs):
+                for j in range(n.reg):
+                    body.append(ldm(b_spec, j, kexpr, ""))
+                    body += [mma(f, i, j, "") for i in range(m.reg)]
+        else:
+            body += [ldm(b_spec, j, kexpr, "") for b_spec in b_specs for j in range(n.reg)]
+            for i in range(m.reg):
+                body.append(ldm(a_spec, i, kexpr, ""))
+                body += [mma(f, i, j, "") for f in range(len(b_specs)) for j in range(n.reg)]
         return [
             StridedLoop(
                 axis=Axis(name=ki, extent=bk_elems),
@@ -417,8 +465,9 @@ def _slab_operands(
     b_trans: bool = False,
     pads: tuple[int, int] = (0, 0),
 ):
-    """The staged ``(A, B)`` :class:`Operand` pair — the one operand-geometry factory both tiers build,
-    looped over the two operands. A is ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); B is
+    """The staged ``(A, B₀, B₁, …)`` :class:`Operand` tuple — the one operand-geometry factory
+    both tiers build, looped over one A followed by every product channel's B. A is
+    ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); each B is
     ``(bk × tile_n)`` by the N tile axis (the slab COL) — ``is_row`` flips the slot shape + the TMA box
     origin. A transposed B (``b_trans``, the serving ``F.linear`` layout — K gmem-contiguous) takes
     A's geometry instead: an N-MAJOR ``(tile_n × bk)`` slab whose inner dim maps stride-1 to gmem K,
@@ -431,9 +480,13 @@ def _slab_operands(
     and fill by its OWN element width. ``pads`` are the per-operand slab row pads in elements
     (:data:`~emmy.compiler.pipeline.passes.lowering._addr.BYTE_SLAB_PAD` on a
     cp.async-staged byte slab; 0 everywhere else)."""
+    assert len(index_srcs) == len(bufs) == len(elems) and len(index_srcs) >= 2
     ops: list[Operand] = []
-    for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
-        tile, tile_base = mn[i], base[i]
+    for i in range(len(index_srcs)):
+        role = 0 if i == 0 else 1
+        tag = "a" if i == 0 else ("b" if i == 1 else f"b_x{i - 1}")
+        is_row = True if i == 0 else b_trans
+        tile, tile_base = mn[role], base[role]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
@@ -449,11 +502,11 @@ def _slab_operands(
                 box=box,
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis),
                 index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row),
-                swizzle=swizzles[i],
+                swizzle=swizzles[role],
                 dtype=cuda_name(elem) if elem is not None else None,
                 elem_bytes=elem.nbytes if elem is not None else None,
-                trans=i == 1 and b_trans,
-                pad_cols=pads[i],
+                trans=i > 0 and b_trans,
+                pad_cols=pads[role],
             )
         )
     return tuple(ops)
@@ -606,12 +659,13 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     if stage.transport == "sync" and tile.atom.sync_copy_staging:
-        assert isinstance(c.a, Load) and isinstance(c.b, Load), "sync-copy staging requires materialized A and B edges"
-        assert len(ops.channels) == 1, "sync-copy staging is single-fold"
+        assert isinstance(c.a, Load) and all(isinstance(b, Load) for b, _acc in ops.channels), (
+            "sync-copy staging requires materialized A and B edges"
+        )
         elems = ops.slab_elems()
         operands = _slab_operands(
-            index_srcs=(c.a.index, c.b.index),
-            bufs=(c.a.input, c.b.input),
+            index_srcs=(c.a.index, *(b.index for b, _acc in ops.channels)),
+            bufs=(c.a.input, *(b.input for b, _acc in ops.channels)),
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -630,7 +684,13 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # Generic computed-operand fill: every inline edge is evaluated into its canonical slab;
         # every materialized counterpart is copied asynchronously underneath that work.
         operands, sync_ops, async_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
+            c,
+            stage.bk_elems,
+            mn,
+            cta,
+            ops.slab_swizzles(mn, elem.nbytes),
+            ops.channels,
+            ops.cone,
         )
         transport = SyncTransport(
             operands=sync_ops,
@@ -641,15 +701,17 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             prologue_stmts=tuple(stat_pro),
         )
     else:
-        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
-        pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "cp.async" else 0 for e in elems)
+        role_pads = tuple(
+            BYTE_SLAB_PAD if any(e.nbytes == 1 for e in (elems[:1] if role == 0 else elems[1:])) and stage.transport == "cp.async" else 0
+            for role in range(2)
+        )
         operands = _slab_operands(
-            index_srcs=(c.a.index, c.b.index),
-            bufs=(c.a.input, c.b.input),
+            index_srcs=(c.a.index, *(b.index for b, _acc in ops.channels)),
+            bufs=(c.a.input, *(b.input for b, _acc in ops.channels)),
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -657,7 +719,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=elems,
             b_trans=c.b_trans,
-            pads=pads,
+            pads=role_pads,
         )
         common = dict(
             operands=operands,
@@ -898,7 +960,7 @@ class _MmaOps(_AtomOps):
         legality (``_legality.resolve_warp_stage``), so a mismatch that staged would already
         have declined there."""
         out = []
-        for edge, role in ((self.c.a, "a"), (self.c.b, "b")):
+        for edge, role in ((self.c.a, "a"), *((b, "b") for b, _acc in self.channels)):
             dt = self.tile.atom.operand_dtype(role)
             t = self.inputs.get(edge.input) if self.inputs and isinstance(edge, Load) else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
@@ -949,9 +1011,11 @@ class _MmaOps(_AtomOps):
         if self.tile.atom.fragment_layout == "m8n8k4":
             return ("NONE", "NONE")
         b_inner = self.stage.bk_elems if self.c.b_trans else mn[1].tile
+        elems = self.slab_elems()
+        assert all(e.nbytes == elems[1].nbytes for e in elems[1:]), "product channels must share one B slab layout"
         return tuple(
             "NONE" if e.nbytes == 1 else pick_swizzle_atom(inner, e.nbytes)[1]
-            for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True)
+            for e, inner in zip((elems[0], elems[1]), (self.stage.bk_elems, b_inner), strict=True)
         )
 
     def state(self, cells):
@@ -1023,10 +1087,17 @@ class _MmaOps(_AtomOps):
         assert isinstance(c.a, Load), (
             "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
         )
-        assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
-        a_load, b_load, b_trans = c.a, c.b, c.b_trans
+        a_load, b_trans = c.a, c.b_trans
+        channels = self.channels
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
+        # Fragment helpers advance from the caller's base pointer across several logical rows.
+        # Their leading dimension therefore belongs to the *indexed view*, not necessarily the
+        # source buffer's declared trailing extent: reshape/index-map absorption can re-stride a
+        # view while keeping its source allocation unchanged.  Derive both strides from the load
+        # address algebra; ``0`` retains the canonical render-time fallback when the derivation is
+        # intentionally unavailable (for example a symbolic declared row width).
+        a_ldm = gmem_row_stride(a_load, m.axis.name, self.inputs) or 0
 
         def read_row(i):
             cell = offset[0].base(i)
@@ -1037,6 +1108,7 @@ class _MmaOps(_AtomOps):
                     src_buffer=a_load.input,
                     src_index=idx,
                     role="a",
+                    ldm=a_ldm,
                     staged=False,
                     gmem_guard=_guard(m, cell),
                     k_zero=k_zero,
@@ -1046,31 +1118,39 @@ class _MmaOps(_AtomOps):
 
         def read_col(j):
             cell = offset[1].base(j)
-            idx = tuple(Sigma({n.axis.name: cell}).apply(e) for e in b_load.index)
-            return [
-                LdmatrixLoad(
-                    frag=f"_b{j}",
-                    src_buffer=b_load.input,
-                    src_index=idx,
-                    role="b",
-                    staged=False,
-                    b_trans=b_trans,
-                    gmem_guard=_guard(n, cell),
-                    k_zero=k_zero,
-                    fragment_layout=atom.fragment_layout,
+            out: list[Stmt] = []
+            for f, (b_load, _acc) in enumerate(channels):
+                assert isinstance(b_load, Load), "gmem-direct mma requires materialized B edges"
+                idx = tuple(Sigma({n.axis.name: cell}).apply(e) for e in b_load.index)
+                b_row = n.axis.name if b_trans else k_axis.name
+                b_ldm = gmem_row_stride(b_load, b_row, self.inputs) or 0
+                out.append(
+                    LdmatrixLoad(
+                        frag=_fold_frag(f"_b{j}", f),
+                        src_buffer=b_load.input,
+                        src_index=idx,
+                        role="b",
+                        ldm=b_ldm,
+                        staged=False,
+                        b_trans=b_trans,
+                        gmem_guard=_guard(n, cell),
+                        k_zero=k_zero,
+                        fragment_layout=atom.fragment_layout,
+                    )
                 )
-            ]
+            return out
 
         def contract(i, j):
             return [
                 MmaSyncPtx(
-                    c_frag=_mma_c_base(atom, i, j),
+                    c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
                     a_frag=f"_a{i}",
-                    b_frag=f"_b{j}",
+                    b_frag=_fold_frag(f"_b{j}", f),
                     shape=atom.ptx_shape,
                     ab_dtype=atom.ab_dtype,
                     c_dtype=atom.operand_dtype("c").name,
                 )
+                for f in range(len(channels))
             ]
 
         def wrap(body):
@@ -1080,7 +1160,7 @@ class _MmaOps(_AtomOps):
                 # Promote every _F16ACC_STEPS atom-K steps (a compile-time-foldable modulo when
                 # the loop unrolls), plus the unconditional final fold after the loop — it also
                 # covers a symbolic / non-multiple K's partial last chunk.
-                promotes = _f16acc_promotes(m.reg, n.reg, 1)
+                promotes = _f16acc_promotes(m.reg, n.reg, len(channels))
                 period = atom.atom_k * _F16ACC_STEPS
                 fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
@@ -1180,14 +1260,16 @@ class _ScalarOps(_AtomOps):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
         gmem ``Load`` — or the computed register-resident body, e.g. flash PV's ``P``), each COL its
         B ``Load`` once, each ``(i, j)`` cell folds ``acc__c{i}_{j} += b·a``, and the K-loop is a unit
-        ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
-        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
+        ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A product-monoid
+        node reads every B channel at the column once and folds every ``b_f·a`` into its own
+        accumulator while retaining the shared A row load. A masked axis wraps its read in-bounds
+        (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
         c = self.c
-        assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.axis
         m, n = mn
         prot = _scalar_protected(c, self.tile, self.lead)
-        b_name, a_name = operand_name(c.b), operand_name(c.a)
+        a_name = operand_name(c.a)
+        channels = self.channels
 
         def read_row(i):
             if m is None:
@@ -1195,14 +1277,18 @@ class _ScalarOps(_AtomOps):
             return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            sigma = Sigma({n.name: _wrap(n, offset[1].base(j))})
+            return [stmt for b, _acc in channels for stmt in copy_cell(operand_body(b), sigma, f"__bc{j}", prot)]
 
         def contract(i, j):
-            v = f"{c.acc}__v__c{i}_{j}"
-            return [
-                Assign(name=v, op=_MUL, args=(f"{b_name}__bc{j}", f"{a_name}__ar{i}")),
-                Accum(name=f"{c.acc}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
-            ]
+            out: list[Stmt] = []
+            for b, acc in channels:
+                v = f"{acc}__v__c{i}_{j}"
+                out += [
+                    Assign(name=v, op=_MUL, args=(f"{operand_name(b)}__bc{j}", f"{a_name}__ar{i}")),
+                    Accum(name=f"{acc}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
+                ]
+            return out
 
         def wrap(body):
             return [Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]

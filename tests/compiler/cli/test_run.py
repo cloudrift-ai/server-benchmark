@@ -373,6 +373,28 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     assert "exceeds" in failed["error"]
 
 
+def test_eager_outputs_use_declared_graph_order_not_backend_dict_order():
+    import numpy as np
+
+    from emmy.commands.run import _eager_outputs_by_name, _strict_correctness_proof
+
+    outputs = {
+        "k": np.zeros((1, 2), dtype=np.float16),
+        "v": np.zeros((1, 2), dtype=np.float16),
+        "q": np.zeros((1, 4), dtype=np.float16),
+    }
+    eager = (
+        np.zeros((1, 4), dtype=np.float16),
+        np.zeros((1, 2), dtype=np.float16),
+        np.zeros((1, 2), dtype=np.float16),
+    )
+
+    named = _eager_outputs_by_name(outputs, eager, declared_names=["q", "k", "v"])
+
+    assert list(named) == ["q", "k", "v"]
+    assert _strict_correctness_proof(outputs, named)["status"] == "pass"
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags

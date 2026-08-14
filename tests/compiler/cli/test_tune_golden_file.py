@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from emmy.commands import tune
+from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
@@ -20,6 +26,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     persist_tune_winner,
     realized_tuning_knobs,
     validate_working_gpu,
+    verify_and_persist_replay_plans,
 )
 from emmy.compiler.torch_wire import intern_program
 
@@ -69,6 +76,101 @@ def _document(*entries):
         "realizations": [dict(entry) for entry in entries],
     }
     return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
+
+
+def _replay_plan():
+    kernel = {"key": "cuda-key", "knobs": {"TILE": "f2x2", "WORK": "w1x1"}}
+    return {
+        "version": 1,
+        "total_us": 7.0,
+        "outer": {
+            "placement": {"PLACE@a": "cut", "PLACE@product": "fuse"},
+            "decisions": [],
+            "terminal_key": "outer-key",
+            "recognized": [{"key": "child-key", "multiplicity": 1}],
+        },
+        "lowering": {
+            "decisions": [],
+            "terminal_key": "cuda-terminal",
+            "kernels": [kernel],
+            "children": [
+                {
+                    "key": "child-key",
+                    "multiplicity": 1,
+                    "latency_us": 7.0,
+                    "decisions": [],
+                    "terminal_key": "cuda-terminal",
+                    "knobs": dict(kernel["knobs"]),
+                    "kernels": [kernel],
+                }
+            ],
+        },
+    }
+
+
+class _ReplayVerifyBackend:
+    """Deterministic isolated-bench stand-in; every exact/greedy pair agrees."""
+
+    def __init__(
+        self,
+        *,
+        wrong_call: int | None = None,
+        captured: bool = True,
+        num_launches: int = 1,
+        e2e_min_ms: float | None = None,
+    ):
+        self.calls: list[dict] = []
+        self.wrong_call = wrong_call
+        self.captured = captured
+        self.num_launches = num_launches
+        self.e2e_min_ms = e2e_min_ms
+
+    async def bench_pinned_async(self, graph, *, run_inputs, run_inputs_key, warmup, num_iters):
+        call = len(self.calls)
+        self.calls.append(
+            {
+                "inputs": run_inputs,
+                "key": run_inputs_key,
+                "warmup": warmup,
+                "iters": num_iters,
+            }
+        )
+        value = 9.0 if call == self.wrong_call else float(call // 2 + 1)
+        outputs = {name: np.asarray([value], dtype=np.float32) for name in graph.outputs}
+        bench = SimpleNamespace(
+            captured=self.captured,
+            num_launches=self.num_launches,
+            per_launch=None,
+            e2e_min_ms=self.e2e_min_ms,
+            min_ms=(call + 1) / 1000.0,
+            time_ms=(call + 1) / 1000.0,
+        )
+        return bench, outputs
+
+
+def _stub_replay_lowering(monkeypatch):
+    """Make the schema fixture executable while retaining independent greedy builds."""
+    from emmy.compiler.pipeline.search import replay_plan as replay_mod
+
+    greedy_calls = []
+
+    def replay(graph, *_args, **_kwargs):
+        return graph.copy()
+
+    monkeypatch.setattr(replay_mod, "replay_tuning_plan", replay)
+    monkeypatch.setattr(replay_mod, "replay_outer_tuning_plan", replay)
+    monkeypatch.setattr(replay_mod, "replay_child_tuning_plan", lambda outer, _child, **_kwargs: outer.copy())
+    monkeypatch.setattr(replay_mod, "replay_child_source", lambda outer, _child: outer.copy())
+
+    def build(passes):
+        def run(graph, *, ctx):
+            greedy_calls.append((tuple(passes), ctx))
+            return graph.copy()
+
+        return SimpleNamespace(run=run)
+
+    monkeypatch.setattr(Pipeline, "build", staticmethod(build))
+    return greedy_calls
 
 
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
@@ -193,6 +295,137 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     assert len(got["configs"]) == 1
     assert got["configs"][0]["realizations"][0]["name"] == "mm"
     assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+
+
+def test_multi_kernel_tune_winner_persists_full_scoped_replay_plan(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    document, targets = load_working_targets(path)
+    plan = _replay_plan()
+
+    persist_tune_winner(path, document, targets[0], None, compile_flags="-O1", replay_plan=plan)
+
+    got = load_golden_file(path)
+    winner = got["configs"][0]["realizations"][1]
+    assert winner["replay_plan"] == plan
+    assert list(winner["replay_plan"]["outer"]["placement"]) == ["PLACE@a", "PLACE@product"]
+    assert winner["replay_plan"]["lowering"]["kernels"][0]["knobs"] == {"TILE": "f2x2", "WORK": "w1x1"}
+    assert winner["ranking"]["measured_plan_key"] == "cuda-terminal"
+    _, reloaded_targets = load_working_targets(path)
+    assert reloaded_targets[0].proposals == [((0, 1), {"replay_plan": plan})]
+
+
+def test_verify_replay_plan_records_fresh_whole_and_child_references(tmp_path, monkeypatch):
+    plan = _replay_plan()
+    document = _document({**_matmul("mm"), "replay_plan": plan})
+    original = copy.deepcopy(document)
+    path = tmp_path / "working.yaml"
+    dump_golden_file(document, path)
+    greedy_calls = _stub_replay_lowering(monkeypatch)
+    backend = _ReplayVerifyBackend()
+
+    reports = asyncio.run(
+        verify_and_persist_replay_plans(
+            path,
+            document,
+            backend=backend,
+            ctx=replace(Context.from_target((8, 9)), compile_flags=""),
+            warmup=10,
+            iters=50,
+            seed=0,
+        )
+    )
+
+    assert document == original, "verification must operate on a copy until every pair passes"
+    verified = load_golden_file(path)
+    realization = verified["configs"][0]["realizations"][0]
+    assert realization["measurements"] == {
+        "emmy_us": 1.0,
+        "reference_us": 2.0,
+        "reference_backend": "emmy-greedy",
+    }
+    child = realization["replay_plan"]["lowering"]["children"][0]
+    assert child["measurements"] == {
+        "emmy_us": 3.0,
+        "reference_us": 4.0,
+        "reference_backend": "emmy-greedy",
+    }
+    assert realization["replay_plan"]["total_us"] == 7.0
+    assert child["latency_us"] == 7.0
+    assert [report["scope"] for report in reports] == ["whole", "child"]
+    audit = json.loads(path.with_suffix(".yaml.replay-verify.json").read_text())
+    assert audit["warmup"] == 10
+    assert audit["iters"] == 50
+    assert audit["seed"] == 0
+    assert audit["reference_backend"] == "emmy-greedy"
+    assert [record["scope"] for record in audit["records"]] == ["whole", "child"]
+    assert audit["records"][0]["outer_terminal_key"] == "outer-key"
+    assert audit["records"][0]["terminal_key"] == "cuda-terminal"
+    assert audit["records"][1]["terminal_key"] == "cuda-terminal"
+    assert all(record["correctness"]["status"] == "pass" for record in audit["records"])
+    assert all(record["captured"] is True for record in audit["records"])
+    assert len(greedy_calls) == 2, "whole and child references must each lower independently"
+    assert len(backend.calls) == 4
+    for exact, greedy in zip(backend.calls[::2], backend.calls[1::2], strict=True):
+        assert exact["warmup"] == greedy["warmup"] == 10
+        assert exact["iters"] == greedy["iters"] == 50
+        assert exact["key"] != greedy["key"]
+        assert set(exact["inputs"]) == set(greedy["inputs"])
+        for name in exact["inputs"]:
+            np.testing.assert_array_equal(exact["inputs"][name], greedy["inputs"][name])
+
+
+def test_verify_replay_plan_failure_does_not_replace_working_file(tmp_path, monkeypatch):
+    document = _document({**_matmul("mm"), "replay_plan": _replay_plan()})
+    path = tmp_path / "working.yaml"
+    dump_golden_file(document, path)
+    before = path.read_bytes()
+    _stub_replay_lowering(monkeypatch)
+
+    with pytest.raises(ValueError, match="wrong-answer"):
+        asyncio.run(
+            verify_and_persist_replay_plans(
+                path,
+                document,
+                backend=_ReplayVerifyBackend(wrong_call=1),
+                ctx=replace(Context.from_target((8, 9)), compile_flags=""),
+                warmup=10,
+                iters=50,
+                seed=0,
+            )
+        )
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".yaml.replay-verify.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("backend", "message"),
+    [
+        (_ReplayVerifyBackend(captured=False), "CUDA-graph-captured"),
+        (_ReplayVerifyBackend(num_launches=2), "whole-program e2e_min_ms"),
+    ],
+)
+def test_verify_replay_plan_rejects_untrusted_timing(tmp_path, monkeypatch, backend, message):
+    document = _document({**_matmul("mm"), "replay_plan": _replay_plan()})
+    path = tmp_path / "working.yaml"
+    dump_golden_file(document, path)
+    before = path.read_bytes()
+    _stub_replay_lowering(monkeypatch)
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(
+            verify_and_persist_replay_plans(
+                path,
+                document,
+                backend=backend,
+                ctx=replace(Context.from_target((8, 9)), compile_flags=""),
+                warmup=10,
+                iters=50,
+                seed=0,
+            )
+        )
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".yaml.replay-verify.json").exists()
 
 
 def test_working_file_rejects_canonical_path_and_symlink(tmp_path):

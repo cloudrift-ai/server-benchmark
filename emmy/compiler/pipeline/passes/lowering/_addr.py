@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, affine_form, axis_step
 from emmy.compiler.ir.stmt import Load
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
@@ -76,11 +76,11 @@ def gmem_axis_step(load: Load, axis_name: str, inputs) -> tuple[int, int] | None
         if axis_name not in e.free_vars():
             continue
         seen = True
-        step = _axis_step(e, axis_name)
+        step = axis_step(e, axis_name)
         if step is None:
             gave_up = True
             break
-        run = _run_gcd(run, step[1])
+        run = step[1] if run == 0 else run if step[1] == 0 else math.gcd(run, step[1])
         if not step[0]:
             continue  # the component holds still on the axis — its stride never enters the sum
         stride = 1
@@ -94,7 +94,7 @@ def gmem_axis_step(load: Load, axis_name: str, inputs) -> tuple[int, int] | None
     if not gave_up:
         return delta, run
     flat = _delinearized(load.index, dims)
-    return None if flat is None else _axis_step(flat, axis_name)
+    return None if flat is None else axis_step(flat, axis_name)
 
 
 def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
@@ -124,73 +124,9 @@ def reads_declared_rows(load: Load, axis_name: str) -> bool:
     return not any(axis_name in e.free_vars() for i, e in enumerate(load.index) if i != len(load.index) - 2)
 
 
-def _run_gcd(a: int, b: int) -> int:
-    """Combine two run lengths — ``0`` (unbounded) is the identity, else the gcd: a ``g``-aligned
-    window of ``g = gcd(a, b)`` sits inside both a ``a``-aligned ``a``-window and a ``b``-aligned
-    ``b``-window, so the joint delta holds there."""
-    return b if a == 0 else a if b == 0 else math.gcd(a, b)
-
-
 def _int_lit(e: Expr) -> int | None:
     """``e``'s value when it is an integer :class:`Literal`, else ``None``."""
     return e.value if isinstance(e, Literal) and isinstance(e.value, int) and not isinstance(e.value, bool) else None
-
-
-def _divisible(expr: Expr, n: int) -> bool:
-    """Whether ``expr`` is PROVABLY a multiple of ``n`` — every additive term literal-``n``-divisible
-    or carrying a literal factor that is. Conservative: an opaque var answers no."""
-    if (v := _int_lit(expr)) is not None:
-        return v % n == 0
-    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
-        return _divisible(expr.left, n) and _divisible(expr.right, n)
-    if isinstance(expr, BinaryExpr) and expr.op == "*":
-        return _divisible(expr.left, n) or _divisible(expr.right, n)
-    return False
-
-
-def _axis_step(expr: Expr, axis: str) -> tuple[int, int] | None:
-    """``(delta, run)`` for ONE index component — see :func:`gmem_axis_step`. ``None`` when the
-    component's dependence on ``axis`` is not a step at all (a clamp, a gather, ``axis·axis``).
-
-    ``/`` and ``%`` by a positive literal ``n`` are where a layout op shows up, and they resolve
-    two ways. When ``n`` divides the axis's coefficient the operand's axis-motion is a whole number
-    of blocks, so ``E / n`` steps by ``coef / n`` and ``E % n`` does not move at all — the BLOCK
-    coordinate of a blocked read. When the coefficient is 1 and the rest of the operand is provably
-    ``n``-divisible, the axis IS the within-block offset: ``E / n`` holds still and ``E % n`` steps
-    by one, each over an ``n``-aligned ``n``-window.
-
-    Both readings take the operand NON-NEGATIVE, which a buffer coordinate is (the same assumption
-    ``expr._div_mod_decompose`` states as a range check); C truncation toward zero would break the
-    window argument below zero."""
-    if axis not in expr.free_vars():
-        return 0, 0
-    if isinstance(expr, Var):
-        return 1, 0
-    if not isinstance(expr, BinaryExpr):
-        return None
-    if expr.op in ("+", "-"):
-        left, right = _axis_step(expr.left, axis), _axis_step(expr.right, axis)
-        if left is None or right is None:
-            return None
-        return left[0] + (right[0] if expr.op == "+" else -right[0]), _run_gcd(left[1], right[1])
-    if expr.op == "*":
-        for side, other in ((expr.left, expr.right), (expr.right, expr.left)):
-            if axis in other.free_vars():
-                continue
-            mult = _int_lit(other)
-            step = _axis_step(side, axis) if mult is not None else None
-            return None if step is None else (step[0] * mult, step[1])
-        return None  # axis · axis — not a step
-    if expr.op in ("/", "%") and (n := _int_lit(expr.right)) is not None and n > 0:
-        step = _axis_step(expr.left, axis)
-        if step is None:
-            return None
-        delta, run = step
-        if delta % n == 0:  # whole blocks: the block index steps, the offset holds still
-            return (delta // n, run) if expr.op == "/" else (0, run)
-        if delta == 1 and run == 0 and _divisible(expr.left.substitute({axis: Literal(0, "int")}), n):
-            return (0, _run_gcd(run, n)) if expr.op == "/" else (1, _run_gcd(run, n))
-    return None
 
 
 def _delinearized(index: tuple, shape: tuple) -> Expr | None:

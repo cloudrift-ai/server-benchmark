@@ -1,0 +1,100 @@
+# Megakernel comparison lane: four single-stream decode arms on one A100 80GB box, one task, five
+# fresh-process repeats per arm. MPK (Mirage Persistent Kernel) compiles a tensor program into one
+# persistent kernel that schedules all operators inside a single launch; Emmy generates one kernel
+# per fused operator and pays a launch per kernel. This lane measures how much of the decode step
+# that per-launch structure costs, not per-kernel code quality — see the README section.
+#
+# Arms (all on the same box, same checkpoint Qwen/Qwen3-8B):
+#   mpk_base  — MPK's own kernel-per-operator harness: demo/qwen3/demo.py (Triton/FlashInfer)
+#   mpk_mega  — the same harness compiled to a megakernel: demo/qwen3/demo.py --use-mirage
+#   stock     — vLLM serve (pip vllm==0.23.0) driven by `vllm bench serve`, 128 in / 512 out, c=1
+#   emmy      — the same vLLM boot through the emmy plugin (EmmyGenModel), same client point
+#
+# Interpretation rule: ratios are paired WITHIN a harness (mpk_mega/mpk_base; emmy/stock). Across
+# harnesses only the per-output-token decode latency is comparable (MPK's self-reported per-step
+# latency vs the vLLM lanes' TPOT), and the vLLM lanes carry serving-stack overhead the MPK demo
+# does not; intelligent review states that caveat next to any cross-harness number.
+#
+# The emmy arm deploys COLD on isolated evidence state (fresh tune DB, online checkpoint, cubin
+# cache): A100 Qwen3-8B serving has no golden tier yet, so this is the deploy-evidence-hierarchy
+# result, not a tuned arm. The first emmy boot compiles per-program artifacts; later repeats hit
+# the cubin cache. The health wait is sized for that first boot.
+#
+# Repro on a pre-allocated A100 (no cloud provisioning):
+#   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm==0.23.0
+
+    MODEL=Qwen/Qwen3-8B
+    REV=b968826d9c46dd6066d109eabc6255188de91218
+    MIRAGE_REV=5c28cc68dc621cc9448c5c9882ef9e21fdc85884
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+
+    # --- MPK arms: the pinned mpk-branch demo pair in its own environment ---
+    MPK=$task_dir/mirage
+    if [ ! -d "$$MPK" ]; then
+      git clone --recursive https://github.com/mirage-project/mirage $$MPK
+      git -C $$MPK checkout --recurse-submodules $$MIRAGE_REV
+    fi
+    [ -d $task_dir/venv-mpk ] || python3 -m venv $task_dir/venv-mpk
+    $task_dir/venv-mpk/bin/pip install -q -e $$MPK > $task_dir/mpk_install.log 2>&1
+    for repeat in 0 1 2 3 4; do
+      (cd $$MPK && $task_dir/venv-mpk/bin/python demo/qwen3/demo.py) \
+        > $task_dir/mpk_base_r$$repeat.txt 2>&1
+      (cd $$MPK && $task_dir/venv-mpk/bin/python demo/qwen3/demo.py --use-mirage) \
+        > $task_dir/mpk_mega_r$$repeat.txt 2>&1
+    done
+
+    # --- vLLM arms: stock and emmy-plugin boots of the same checkpoint, fresh server per repeat ---
+    stop() { pkill -f "[v]llm serve" 2>/dev/null || true; pkill -f "[e]mmy serve" 2>/dev/null || true; sleep 5; }
+    wait_health() { # log
+      for i in $$(seq 1 360); do curl -sf localhost:8010/health >/dev/null && return 0; sleep 15; done
+      echo "server never became healthy"; tail -30 $$1; return 1
+    }
+    bench() { # out_file
+      ./venv/bin/vllm bench serve --model $$MODEL --tokenizer $$MODEL --dataset-name random \
+        --random-input-len 128 --random-output-len 512 --max-concurrency 1 --num-prompts 8 \
+        --ignore-eos --temperature 0 --seed 0 --percentile-metrics ttft,tpot,itl,e2el \
+        --base-url http://localhost:8010 > $task_dir/$$1 2>&1
+      grep -E "Median TPOT|Median TTFT|Output token throughput|Successful" $task_dir/$$1
+    }
+    for repeat in 0 1 2 3 4; do
+      stop
+      ./venv/bin/vllm serve $$MODEL --revision $$REV --dtype bfloat16 --max-model-len 4096 \
+        --no-enable-prefix-caching --port 8010 > $task_dir/stock_serve_r$$repeat.log 2>&1 &
+      wait_health $task_dir/stock_serve_r$$repeat.log
+      bench stock_r$$repeat.txt
+      stop
+      EMMY_GEN_DECODE_BUCKET=32 ./venv/bin/emmy serve $$MODEL --generate --revision $$REV \
+        --dtype bfloat16 --max-model-len 4096 --no-enable-prefix-caching --port 8010 \
+        > $task_dir/emmy_serve_r$$repeat.log 2>&1 &
+      wait_health $task_dir/emmy_serve_r$$repeat.log
+      bench emmy_r$$repeat.txt
+    done
+    stop
+
+    ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt
+    $task_dir/venv-mpk/bin/pip freeze --all > $task_dir/mpk.freeze.txt
+    ls ~/.cache/huggingface/hub > $task_dir/hf_snapshots.txt 2>/dev/null || true
+    echo MPK_LANE_DONE
+  result_files:
+    - "*.txt"
+    - "*.log"
+  timeout: 86400
+
+matrices:
+  - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1

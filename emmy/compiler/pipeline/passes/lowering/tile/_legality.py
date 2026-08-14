@@ -514,8 +514,6 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
     return None
 
 
-
-
 def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
     """The mandatory ``sync`` :class:`Stage` for a computed-operand contraction.
 

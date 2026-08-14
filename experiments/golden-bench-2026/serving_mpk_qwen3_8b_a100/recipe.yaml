@@ -61,7 +61,16 @@ command:
     done
 
     # --- vLLM arms: stock and emmy-plugin boots of the same checkpoint, fresh server per repeat ---
-    stop() { pkill -f "[v]llm serve" 2>/dev/null || true; pkill -f "[e]mmy serve" 2>/dev/null || true; sleep 5; }
+    server_pid=
+    stop() {
+      if [ -n "$$server_pid" ]; then
+        kill -- "-$$server_pid" 2>/dev/null || true
+        wait "$$server_pid" 2>/dev/null || true
+        server_pid=
+        sleep 5
+      fi
+    }
+    trap stop EXIT
     wait_health() { # log
       for i in $$(seq 1 360); do curl -sf localhost:8010/health >/dev/null && return 0; sleep 15; done
       echo "server never became healthy"; tail -30 $$1; return 1
@@ -75,18 +84,21 @@ command:
     }
     for repeat in 0 1 2 3 4; do
       stop
-      ./venv/bin/vllm serve $$MODEL --revision $$REV --dtype bfloat16 --max-model-len 4096 \
+      setsid ./venv/bin/vllm serve $$MODEL --revision $$REV --dtype bfloat16 --max-model-len 4096 \
         --no-enable-prefix-caching --port 8010 > $task_dir/stock_serve_r$$repeat.log 2>&1 &
+      server_pid=$$!
       wait_health $task_dir/stock_serve_r$$repeat.log
       bench stock_r$$repeat.txt
       stop
-      EMMY_GEN_DECODE_BUCKET=32 ./venv/bin/emmy serve $$MODEL --generate --revision $$REV \
+      EMMY_GEN_DECODE_BUCKET=32 setsid ./venv/bin/emmy serve $$MODEL --generate --revision $$REV \
         --dtype bfloat16 --max-model-len 4096 --no-enable-prefix-caching --port 8010 \
         > $task_dir/emmy_serve_r$$repeat.log 2>&1 &
+      server_pid=$$!
       wait_health $task_dir/emmy_serve_r$$repeat.log
       bench emmy_r$$repeat.txt
     done
     stop
+    trap - EXIT
 
     ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt
     $task_dir/venv-mpk/bin/pip freeze --all > $task_dir/mpk.freeze.txt

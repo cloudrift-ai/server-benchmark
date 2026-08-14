@@ -45,6 +45,8 @@ tests/compiler/passes/
 ├── test_launch_geometry_rules.py   # launch-geometry pass
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_stage_inputs_classify.py   # Stage-input classifier
+├── test_schedule_site_ownership.py # nested-only schedule rows do not invent root slices
+├── test_sync_transport.py          # computed-operand slab fills keep nested SSA hygienic
 ├── test_lowering_accuracy.py       # 040 / 060 / 070 + TMA end-to-end CUDA accuracy
 ├── test_knob_pinning.py            # EMMY_KNOBS-pinned regression configs (article-reproduction tile/transport sweep)
 ├── test_warp_specialize_deadlock.py # WS=1 stranded-TMA deadlock (Qwen3 k_linear_mean_reduce) regressions

@@ -1245,11 +1245,11 @@ class _TerminalBench:
             c_dialect = child_op.dialect
             if p_dialect is None or c_dialect is None:
                 continue
-            if p_dialect == c_dialect == "loop":
-                # loop→loop source hops are structural/decision hops, not
-                # lowering rewrites: the splice attribution stamped by
-                # ``Candidate.apply`` (a decomposition's kernels → the
-                # pre-split op), 005's keep-vs-split rebind, name stamps.
+            if child_op.source_is_graph_splice or p_dialect == c_dialect == "loop":
+                # Graph-splice attribution and loop→loop source hops are structural/decision
+                # provenance, not lowering rewrites. The former covers both PLACE fragments and
+                # schedule-realized split reductions; the latter covers 005's keep-vs-split
+                # rebind and name stamps.
                 # A ``lowering`` row holds ONE best child per parent, so
                 # recording a multi-kernel decomposition's hops would let
                 # ``best_per_op_time``'s chain walk resolve the pre-split

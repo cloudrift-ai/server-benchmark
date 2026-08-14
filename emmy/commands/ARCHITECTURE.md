@@ -173,9 +173,12 @@ is a per-tuned-kernel budget: every supplied proposal reserves one slot, while a
 remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize
 several CudaOps; conflicting multi-CudaOp knob rows are reported as ambiguous instead of being assigned an invented
 winner. Proposal feedback is written immediately after measurement, before MCTS, so an interruption preserves it.
-The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
-the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
-flags and never writes the trusted
+The final winner annotation is emitted only from directly searched observations that supply both exact replay data
+and cost; the later greedy deploy replay cannot be paired with the search reward. A scalar target retains the flat
+knob wire.
+A target with several kernels uses `ranking.kernel_set`: exact placement plus each operation cache key's multiplicity,
+direct schedule pins, direct latency, and ordered realized CudaOp knob rows. The ranking pass stays at tune's fast
+compile flags and never writes the trusted
 `emmy_us` / `cublas_us` fields. With multiple homogeneous `--devices`, independent working-file targets share one
 event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
@@ -184,6 +187,9 @@ rejects any `--golden-file` inside the canonical repository `search/goldens/` tr
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
+If tuning produced no exact scalar or kernel-set winner, tune writes one target-scoped `no_exact_pin` marker, retires
+any stale unverified winner, and leaves no automatic pin. A later strict run expects that missing exact row and fails
+rather than treating an unchanged inventory as publication evidence.
 
 `emmy compile --golden-file PATH --golden NAME` and `emmy run --golden PATH [--target NAME]` are the verification
 counterparts. They resolve targets only in the explicit working YAML and compile its exact provenance or Loop IR,
@@ -204,6 +210,8 @@ Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
+For a working target, strict mode checks automatic golden rows and explicit shape-less `--ab` rows as separate
+obligations and validates every returned row; satisfying one set can never hide a missing or failed row in the other.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

@@ -30,7 +30,9 @@ from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.two_level import (
     LOWERING_PASSES,
     InnerReward,
+    KernelSetWinner,
     OpResult,
+    TwoLevelResult,
 )
 from tests.compiler.helpers import drain_tune, run_inner_reward, run_two_level
 
@@ -55,6 +57,55 @@ def test_searched_winner_requires_one_post_fusion_and_one_cuda_kernel() -> None:
     multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
     assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
     assert InnerReward(total_us=8.0, ok=True, per_op=[one, one]).searched_winner() is None
+
+
+def test_two_level_result_keeps_exact_multi_kernel_winner() -> None:
+    fused = Graph()
+    fused.add_node(
+        InputOp(decision_knobs={"PLACE@root": "cut"}),
+        [],
+        Tensor("x", (1,)),
+        node_id="x",
+    )
+    fused.inputs = fused.outputs = ["x"]
+    first = OpResult(
+        name="first",
+        op_key="op-a",
+        best_us=3.0,
+        multiplicity=2,
+        searched_knobs={"TILE": "f2x2"},
+        searched_us=4.0,
+        searched_cuda_ops=1,
+        searched_pins={"TILE": "f2x2", "REDUCE": ""},
+        searched_cuda_record_knobs=({"TILE": "f2x2", "REDUCE": ""},),
+    )
+    second = OpResult(
+        name="second",
+        op_key="op-b",
+        best_us=5.0,
+        searched_knobs={"REDUCE": "g2k"},
+        searched_us=6.0,
+        searched_cuda_ops=2,
+        searched_pins={"REDUCE": "g2k", "TILE": "f4x1"},
+        searched_cuda_record_knobs=(
+            {"REDUCE": "g2k", "TILE": "f4x1"},
+            {"REDUCE": "", "TILE": "f8x1"},
+        ),
+    )
+    result = TwoLevelResult(
+        best_fused=fused,
+        best_reward=InnerReward(total_us=11.0, ok=True, per_op=[first, second]),
+        n_terminals=1,
+        assembled=None,
+    )
+
+    winner = result.searched_winner()
+
+    assert isinstance(winner, KernelSetWinner)
+    assert winner.placement == {"PLACE@root": "cut"}
+    assert winner.latency_us == 14.0
+    assert [(kernel.op_key, kernel.multiplicity) for kernel in winner.kernels] == [("op-a", 2), ("op-b", 1)]
+    assert winner.kernels[1].cuda_record_knobs[1] == {"REDUCE": "", "TILE": "f8x1"}
 
 
 @pytest.fixture(autouse=True)

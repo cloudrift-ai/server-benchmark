@@ -14,6 +14,17 @@ ALGEBRA_RECOGNITION = {PASS_ROOT / "lowering" / "tile" / name for name in ("010_
 FUSION_FILES = tuple(sorted((PASS_ROOT / "loop" / "fusion").glob("*.py")))
 
 
+def test_structural_placement_reaches_a_pass_fixpoint_before_scheduling() -> None:
+    """The canonical pipeline cannot enumerate a schedule while a new cut piece is still placeable."""
+    from emmy.compiler.pipeline import TILE_PASSES
+
+    assert TILE_PASSES.index("lowering/tile") < TILE_PASSES.index("lowering/schedule")
+    structural_rules = {path.name for path in (PASS_ROOT / "lowering" / "tile").glob("[0-9]*.py")}
+    schedule_rules = {path.name for path in (PASS_ROOT / "lowering" / "schedule").glob("[0-9]*.py")}
+    assert structural_rules == {"010_recognize.py", "015_place.py"}
+    assert schedule_rules == {"020_schedule.py", "030_split_reduce.py"}
+
+
 @pytest.mark.parametrize("path", PASS_FILES, ids=lambda path: str(path.relative_to(PASS_ROOT)))
 def test_passes_do_not_probe_process_global_target(path: Path):
     """A pass receives target facts through ``Context``; it never probes global device state."""

@@ -99,6 +99,77 @@ def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch
     assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
 
 
+def test_exact_kernel_set_schedule_decider_requires_one_matching_component() -> None:
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.pipeline.fork import OptionFork
+    from emmy.compiler.pipeline.knob import stamp_schedule_families
+    from emmy.compiler.pipeline.search.pins import KernelSetReplayError, _exact_schedule_decide
+    from emmy.compiler.pipeline.search.policy.greedy import PARTITION_RULE
+
+    matching = OptionFork(InputOp(), knobs={"TILE": "f2x2"})
+    other = OptionFork(InputOp(), knobs={"TILE": "f4x1"})
+    pins = stamp_schedule_families(matching.knobs)
+    root_op = SimpleNamespace(cache_key=lambda: "op-a", knobs={})
+    fp = SimpleNamespace(
+        structural=False,
+        match=SimpleNamespace(rule=SimpleNamespace(name=PARTITION_RULE)),
+        node_id="root",
+        root_op=root_op,
+        options=[matching, other],
+    )
+    decide = _exact_schedule_decide(
+        {
+            "kernels": [
+                {
+                    "op_key": "op-a",
+                    "multiplicity": 1,
+                    "pins": pins,
+                    "latency_us": 1.0,
+                    "cuda_record_knobs": [pins],
+                }
+            ]
+        }
+    )
+
+    assert decide(fp) is matching
+    root_op.cache_key = lambda: "unexpected"
+    with pytest.raises(KernelSetReplayError, match="unknown op_key"):
+        decide(fp)
+    root_op.cache_key = lambda: "op-a"
+    fp.options = [other]
+    with pytest.raises(KernelSetReplayError, match="got 0"):
+        decide(fp)
+
+
+def test_exact_kernel_set_cuda_integrity_preserves_component_order_only() -> None:
+    from emmy.compiler.pipeline.search.pins import (
+        KernelSetReplayError,
+        _validate_component_cuda_rows,
+        _validate_cuda_inventory,
+    )
+
+    first = [{"TILE": "f2x2", "REDUCE": "g2k"}, {"TILE": "f8x1", "REDUCE": ""}]
+    second = [{"TILE": "f4x1", "REDUCE": ""}]
+    kernel_set = {
+        "kernels": [
+            {"op_key": "op-a", "multiplicity": 1, "cuda_record_knobs": first},
+            {"op_key": "op-b", "multiplicity": 2, "cuda_record_knobs": second},
+        ]
+    }
+
+    _validate_component_cuda_rows("op-a", list(first), first)
+    with pytest.raises(KernelSetReplayError, match="op-a.*mismatch"):
+        _validate_component_cuda_rows("op-a", list(reversed(first)), first)
+
+    # Whole-graph topological order may put another component before op-a. The
+    # inventory gate checks exact multiplicity/content without imposing that order.
+    _validate_cuda_inventory([*second, *first, *second], kernel_set)
+    with pytest.raises(KernelSetReplayError, match="inventory mismatch"):
+        _validate_cuda_inventory([*second, *first], kernel_set)
+
+
 def _symbolic_input_graph():
     """Frontend-ish graph with one symbolic input (``x``, seq axis 1) and one
     static input (``w``) — enough for ``_hint_sized_inputs``' input pairing."""
@@ -385,16 +456,16 @@ def test_unreproducible_pin_flag(monkeypatch):
     A synthetic registry (mirroring space.py's TILE/STAGE/FAST_EXP declarations)
     keeps the test independent of module-load order."""
     from emmy.compiler.pipeline import knob as knob_mod
-    from emmy.compiler.pipeline.knob import Knob, KnobType
+    from emmy.compiler.pipeline.search import space
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     monkeypatch.setattr(
         knob_mod,
         "_REGISTRY",
         {
-            "TILE": Knob("TILE", KnobType.STR, off=""),
-            "STAGE": Knob("STAGE", KnobType.STR, off=""),
-            "FAST_EXP": Knob("FAST_EXP", KnobType.BOOL, off=False),
+            "TILE": space.TILE,
+            "STAGE": space.STAGE,
+            "FAST_EXP": space.FAST_EXP,
         },
     )
 
@@ -469,6 +540,38 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
     assert any("unreproducible pin" in f and "NOT benched" in f for f in benches[0].flags)
     assert len(benched) == 1  # only the honored row spent GPU time
     assert benches[1].status == "ok" and benches[1].flags == [] and benches[1].bench is not None
+
+
+def test_bench_kernel_set_mismatch_fails_row_without_benching(monkeypatch):
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.pipeline.search import pins as pins_mod
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def reject(_graph, _kernel_set):
+        raise pins_mod.KernelSetReplayError("kernel inventory mismatch: missing op-a")
+
+    monkeypatch.setattr(pins_mod, "lower_exact_kernel_set", reject)
+    backend = SimpleNamespace(
+        compile=lambda _graph: (_ for _ in ()).throw(AssertionError("exact kernel sets bypass scalar compile")),
+        bench_pinned_async=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("mismatched rows are not benched")),
+    )
+    sample = SimpleNamespace(
+        name="working.multi",
+        knobs={},
+        pins={"FAST_MATH": False},
+        shape=object(),
+        dynamic=None,
+        kernel_set={"placement": {}, "kernels": []},
+    )
+
+    (row,) = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", [sample], warmup=1, iters=1))
+
+    assert row.status == "pin_unmatched" and row.bench is None
+    assert any("kernel inventory mismatch" in flag and "NOT benched" in flag for flag in row.flags)
 
 
 @pytest.mark.parametrize(
@@ -667,6 +770,46 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     # The filter a sweep applies: only same-lane rows are comparable to the greedy.
     same_lane = [p for p in rec["pinned"] if p["lane"] == rec["greedy"]["lane"]]
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"
+
+
+def test_ab_json_keeps_exact_kernel_set_manifest(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.pipeline.search.data import Sample
+
+    monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda _graph: [])
+    kernel_set = {
+        "placement": {"PLACE@root": "cut"},
+        "kernels": [
+            {
+                "op_key": "op-a",
+                "multiplicity": 2,
+                "pins": {"TILE": "f2x2", "FAST_EXP": True},
+                "latency_us": 3.0,
+                "cuda_record_knobs": [{"TILE": "f2x2", "FAST_EXP": True}],
+            }
+        ],
+    }
+    sample = Sample(
+        knobs={},
+        pins={"FAST_MATH": True},
+        latency_us=6.0,
+        name="working.multi",
+        shape=object(),
+        kernel_set=kernel_set,
+    )
+    row = run_mod._GoldenBench(sample, object(), None, (), "ok")
+    out = tmp_path / "ab.json"
+    args = SimpleNamespace(code=None, input=None, ir=None, golden="working.multi", dynamic=None, warmup=1, iters=1, json=str(out))
+
+    run_mod._write_ab_json(args, {}, object(), None, [row])
+
+    pinned = json.loads(out.read_text())["pinned"][0]
+    assert pinned["winner_kind"] == "kernel_set"
+    assert pinned["lane"] == "fm"
+    assert pinned["pinned_kernel_set"] == kernel_set
 
 
 @requires_cuda
@@ -1242,6 +1385,43 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers():
     assert not verdicts(noisy.astype(np.float16)), "outliers with a near-zero mean must pass (escape hatch)"
     # Correct low-noise: must PASS.
     assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))
+
+
+def test_accuracy_check_rejects_missing_or_misordered_output_shape():
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    outputs = {
+        "small": np.zeros(4, dtype=np.float32),
+        "large": np.zeros(8, dtype=np.float32),
+    }
+    eager = (torch.zeros(8), torch.zeros(4))
+
+    error = _check_accuracy(outputs, eager)
+
+    assert error is not None
+    assert "size 4 does not match eager 8" in error
+
+
+def test_accuracy_check_pairs_named_outputs_independent_of_mapping_order():
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy, _strict_correctness_proof
+
+    outputs = {
+        "small": np.zeros(4, dtype=np.float32),
+        "large": np.ones(8, dtype=np.float32),
+    }
+    eager = {
+        "large": torch.ones(8),
+        "small": torch.zeros(4),
+    }
+
+    assert _check_accuracy(outputs, eager) is None
+    assert _strict_correctness_proof(outputs, eager)["status"] == "pass"
 
 
 def test_accuracy_check_gaussian_fp16_budget_not_free():

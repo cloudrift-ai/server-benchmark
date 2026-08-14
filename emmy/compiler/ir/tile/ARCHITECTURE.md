@@ -55,9 +55,10 @@ Loops carry NO algebra — `Loop` / `StridedLoop` hold only their `AxisRole`. Th
 
 There is no `step` sequence. The composed evaluations DERIVE:
 
-- flash's kv stream λ-spells with its QK score a HOISTED operand edge and its PV synthesized and memoized inside the
-  derived blocked evaluation — `Fold.step_stmts()` is the one consumer read, and `ops.stream_pair` the one reading of
-  the `(score, expectation)` pair that walk produces;
+- flash's kv stream λ-spells with its score as a HOISTED operand edge (a QK `Fold`, or the `Load` left when PLACE
+  materializes that edge) and its PV synthesized and memoized inside the derived blocked evaluation —
+  `Fold.step_stmts()` is the one consumer read, and `ops.stream_pair` the one reading of the `(score, expectation)`
+  pair that walk produces;
 - split-K's outer reduce is the identity-lift composition — `Fold.composed` is the one read.
 
 `Fold.from_loop` reconstructs the algebra from the loop BODY alone (degenerate facts off its `Accum`s; a twisted merge
@@ -116,7 +117,7 @@ lift through the one `_loop_ir_fn` arm.
 | softmax / RMSNorm | `Fold.projection(body=<per-cell normalize>, operands=(<the stat fold>,))` + a sweep `Store` |
 | fused norm→linear / gate⊗up | a zero-axis fold over the product contraction (a fork sibling of its coop-reduce form) |
 | a pure pointwise cell | `Fold.projection(body=…)` with no operands + its root `Store`s |
-| flash | the `TWISTED` fold on the streaming schedule — QK a hoisted operand edge, PV the derived evaluation's synthesized node |
+| flash | the `TWISTED` fold on the streaming schedule — the score is a hoisted QK edge or its materialized `Load`; PV is the derived evaluation's synthesized node |
 
 A twisted monoid is a monoid, selected structurally rather than as a distinct kind.
 
@@ -130,6 +131,8 @@ ONE walker plus one resolver, short-path-canonical: bare for the primary node, `
 and written through `ops.Sched`, which is also the one home of the `(m, n)` binding rule (`Sched.placed` /
 `Sched.tile_of`). The path codec spells `map` / `fold` / `a` / `b` segments off the derived readings — `PLACE@a`'s
 golden rows depend on it. A sliced axis's window is the one `Axis.window`.
+When PLACE materializes flash's score edge, the stream becomes the primary score site and spells bare `TILE` beside
+the surviving P@V site's `TILE@pj`; the algebraic fold and codec rules are otherwise unchanged.
 
 Since step 7 the wire forms are SITE-LOCAL: the worker inventory is spelled once in `WORK`
 (`w<M>x<N>[+p<np>]` / `t<N>[x<M>]`, the producer band riding `+p`), and `TILE` / `REDUCE` values shed their worker

@@ -40,6 +40,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile.ir import Fold, is_contraction
 
 #: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
@@ -195,6 +196,12 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
             continue
         if s.node.axis is not None and is_contraction(s.node):
             out.append(s)
+        elif s.node.axis is not None:
+            from emmy.compiler.ir.tile.ops import stream_pair  # noqa: PLC0415 — ops imports this walker lazily
+
+            score, pv = stream_pair(s.node)
+            if isinstance(score, Load) and pv is not None:
+                out.append(s)  # the materialized score's fragment geometry lives on its stream
         elif s.node.axis is None and not s.node.operands and s.depth == 1 and not _is_escape(s.node):
             out.append(s)
     return tuple(out)

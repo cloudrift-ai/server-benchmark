@@ -1,14 +1,13 @@
 """The post-recognition placement fork and cut realizer.
 
 ``PLACE@<child-path> = cut`` on an in-tree parent↔child seam splits the kernel: the child
-subtree becomes its own graph node (a plain un-mapped ``LoopOp``, re-entering recognition as a
-fresh tree), the seam value materializes to a workspace buffer, and the parent consumes a plain
+subtree becomes its own graph node (an un-mapped ``TileOp`` retaining its recognized algebra), the
+seam value materializes to a workspace buffer, and the parent consumes a plain
 ``Load`` where the child was. With no authoritative pin or routing entry, every structurally legal
 seam is offered beside the maximal form as a structural ``PLACE`` fork. Outer search measures those choices;
 a cold deploy keeps the first, fused option, while trusted evidence can price the fragment as the sum
 of its independently scheduled kernels. This happens before ``020_schedule``. Resolution is recursive:
-every cut piece re-enters recognition
-and may offer its own placement fork.
+every cut piece may offer its own placement fork without re-recognizing structure.
 
 The realizer is seam-agnostic by design: the two seam shapes (a zero-axis ``Fold`` projection seam, a fold
 operand edge) fall out of the node kinds — the child's index space is DERIVED (the enclosing
@@ -31,12 +30,14 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write, lexical_free_values
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.ir import (
     Fold,
+    Placement,
+    Store,
+    TileOp,
     _operand_result_names,
     effect_tail,
     is_contraction,
@@ -46,7 +47,7 @@ from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.fork import OptionFork
 from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of, parse_knob_spec
-from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
+from emmy.compiler.pipeline.passes.loop.stamp._stamp import structure_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
 logger = logging.getLogger(__name__)
@@ -252,10 +253,10 @@ def _placement_decision(ctx, knobs: dict, root, stores: tuple = (), free: tuple 
         site = resolve(root, cuts[0], all_sites=all_sites)
     except ValueError as e:
         logger.warning("routing golden %r: %s — the recorded cut no longer names a seam; deploying the recognized form", entry.name, e)
-        return _PlacementDecision(True, None, seams, dict(entry.knobs))
+        return _PlacementDecision(True, None, seams, {})
     if site not in seams:
         logger.warning("routing golden %r: %s names an uncuttable seam — deploying the recognized form", entry.name, cuts[0])
-        return _PlacementDecision(True, None, seams, dict(entry.knobs))
+        return _PlacementDecision(True, None, seams, {})
     return _PlacementDecision(True, site, seams, dict(entry.knobs))
 
 
@@ -298,7 +299,7 @@ def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, st
     for cut, selected in realized:
         row = {key: (_CUT if key == selected else _FUSE) for key in labeled}
         for node in cut.nodes.values():
-            if isinstance(node.op, LoopOp):
+            if isinstance(node.op, TileOp):
                 node.op.decision_knobs.update(row)
         options.append(OptionFork(option=cut, knobs={**structural, **row}))
     return options
@@ -403,12 +404,11 @@ def _replace_edge(node, child, load: Load):
 def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site, *, decision_knobs: dict | None = None) -> Graph:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
-    the same tree with the seam edge replaced by a plain workspace ``Load``. Both pieces are
-    plain un-mapped ``LoopOp``\\ s — the pass-scan restart hands them back to ``010_recognize``,
-    so each re-recognizes as a fresh root, resolves its OWN routing/schedule entries, and the
-    recursion terminates because trees strictly shrink. Structural features are re-stamped per
-    piece (a cut consumer is a plain matmul that must join the matmul evidence, not the fused
-    kind)."""
+    the same tree with the seam edge replaced by a plain workspace ``Load``. Both pieces remain
+    recognized, un-mapped ``TileOp``\\ s, so each resolves its OWN placement and schedule entries
+    without a lossy round trip through loop IR. Recursion terminates because trees strictly shrink.
+    Structural features are re-stamped per piece (a cut consumer is a plain matmul that must join
+    the matmul evidence, not the fused kind)."""
     out = root.output
     child = site.node
     child_name = operand_name(child)
@@ -425,20 +425,34 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
     child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
     child_body = _nest(child_stmts, axes)
-    child_op = LoopOp(body=Body(tuple(child_body)), decision_knobs=dict(decision_knobs or {}))
+    child_loop = Body(tuple(child_body))
+    child_op = TileOp(
+        op=child,
+        name=ws,
+        place=Placement(free=tuple(axes)),
+        stores=(Store(write=Write(output=ws, index=ws_index, value=child_name)),),
+        decision_knobs=dict(decision_knobs or {}),
+    )
 
     # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
     load = Load(name=child_name, input=ws, index=ws_index)
     parent_tree = _replace_edge(tile_op, child, load)
     parent_cell = effect_tail(parent_tree.lower(), stores)
     parent_body = _nest(list(parent_cell), list(free))
-    parent_op = LoopOp(body=Body(tuple(parent_body)), decision_knobs=dict(decision_knobs or {}))
+    parent_loop = Body(tuple(parent_body))
+    parent_op = TileOp(
+        op=parent_tree,
+        name=getattr(root.op, "name", "") or out.name,
+        place=Placement(free=tuple(free)),
+        stores=tuple(stores),
+        decision_knobs=dict(decision_knobs or {}),
+    )
 
     frag = Graph()
     for inp in root.inputs:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
-    child_reads = {ld.input for ld in child_op.body.loads if ld.input != ws}
-    parent_reads = {ld.input for ld in parent_op.body.loads if ld.input != ws}
+    child_reads = {ld.input for ld in child_loop.loads if ld.input != ws}
+    parent_reads = {ld.input for ld in parent_loop.loads if ld.input != ws}
     frag.add_node(
         op=child_op,
         inputs=[i for i in root.inputs if i in child_reads],
@@ -452,8 +466,8 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
         node_id=out.name,
     )
     frag.outputs = [out.name]
-    for nid in (ws, out.name):
-        restamp_structural_features(frag.nodes[nid].op, frag)
+    child_op.knobs.update(structure_features(child_loop, frag))
+    parent_op.knobs.update(structure_features(parent_loop, frag))
     return frag
 
 

@@ -489,7 +489,8 @@ class _Stream:
     statistics, so it has no precision to trade. Only the PV gains the f16-accumulate sibling
     (``pv_atoms``), whose partials promote per streaming block in the realizer."""
 
-    qk: Fold  # the hoisted score edge — the head of the derived step
+    score: Fold | Load  # the hoisted score edge — computed or a PLACE materialization terminal
+    qk: Fold | None  # the computed score contraction, absent when ``score`` is materialized
     pv: Fold  # the synthesized P@V contraction — combine material, below the seam
     atom: object  # the score's mma atom
     pv_atoms: tuple  # the P@V atom, plus its f16-accumulate sibling when the gate offers it
@@ -497,6 +498,10 @@ class _Stream:
     tma: bool  # whether a TMA box can encode this trace's K/V operands
     stageable: bool  # the K/V slabs byte-copy at the atom's operand width
     q_stageable: bool  # ... and so does Q, which the ``split`` groups additionally stage
+
+    @property
+    def materialized_score(self) -> bool:
+        return isinstance(self.score, Load)
 
 
 def _kv_penultimate(load: Load, kv_name: str) -> bool:
@@ -520,55 +525,74 @@ def _stream_of(term: _Term, node) -> _Stream | None:
     stride, derived from the index + shape) and a fragment-unrealizable projection. Each is a
     property of the TERM, so it belongs in the choice layer — what a CANDIDATE must satisfy is
     :mod:`._legality`."""
-    qk, pv = stream_pair(node)
+    score, pv = stream_pair(node)
     inputs = term.tile.inputs
-    if qk is None or pv is None or not inputs or legal.fragment_epilogue(term.proj) is not None:
+    if score is None or pv is None or not inputs or legal.fragment_epilogue(term.proj) is not None:
         return None
-    if not (isinstance(qk.a, Load) and isinstance(qk.b, Load) and isinstance(pv.b, Load)):
-        return None
-    if not qk.axis.extent.is_static:
-        return None  # the score's fragment K-steps are unrolled — a symbolic head dim has no tier
-    atoms = tuple(name for name in atoms_for(_a_dtype(qk, inputs), ctx=term.ctx) if ATOM_REGISTRY[name].c_to_a_repack)
-    if not atoms:
-        return None
-    atom = ATOM_REGISTRY[atoms[0]]
-    # The two sites' PLACED readings — the ``(m, n)`` pair is a function of the SITE, so it is
-    # taken off the one rule (``Sched._mn_for``, through a bare probe plan) rather than restated.
-    qk_mn, pv_mn = term.sched.placed(qk, TilePlan()).axes, term.sched.placed(pv, TilePlan()).axes
-    if qk_mn is None or pv_mn is None or not pv_mn[1].extent.is_static:
-        return None
-    d_v, kv_name, m_name = pv_mn[1].extent.as_static(), node.axis.name, qk_mn[0].name
-    for s in node.lift.body:
-        if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
-            return None  # a score bias indexed beyond (m, kv) — the fragment realizer cannot load it
-    strides = (
-        gmem_row_stride(qk.a, m_name, inputs),
-        gmem_row_stride(qk.b, (qk_mn[1] if qk.b_trans else qk.axis).name, inputs),
-        gmem_row_stride(pv.b, (pv_mn[1] if pv.b_trans else node.axis).name, inputs),
-    )
-    if any(s is None for s in strides):
+    qk = score if isinstance(score, Fold) and is_contraction(score) else None
+    if not isinstance(pv.b, Load):
         return None
 
     def dtype_of(load: Load):
         t = inputs.get(load.input)
         return getattr(t, "dtype", None)
 
+    if qk is not None:
+        if not (isinstance(qk.a, Load) and isinstance(qk.b, Load)) or not qk.axis.extent.is_static:
+            return None  # the score's fragment K-steps are unrolled — a symbolic head dim has no tier
+        channel_dtype = _a_dtype(qk, inputs)
+    else:
+        if not isinstance(score, Load) or getattr(dtype_of(score), "name", None) not in ("f16", "bf16", "f32"):
+            return None
+        channel_dtype = dtype_of(pv.b)  # P is repacked to the atom width consumed beside V
+    atoms = tuple(name for name in atoms_for(channel_dtype, ctx=term.ctx) if ATOM_REGISTRY[name].c_to_a_repack)
+    if not atoms:
+        return None
+    atom = ATOM_REGISTRY[atoms[0]]
+    # The two sites' PLACED readings — the ``(m, n)`` pair is a function of the SITE, so it is
+    # taken off the one rule (``Sched._mn_for``, through a bare probe plan) rather than restated.
+    qk_mn, pv_mn = term.sched.placed(qk if qk is not None else node, TilePlan()).axes, term.sched.placed(pv, TilePlan()).axes
+    if qk_mn is None or pv_mn is None or not pv_mn[1].extent.is_static:
+        return None
+    d_v, kv_name, m_name = pv_mn[1].extent.as_static(), node.axis.name, qk_mn[0].name
+    for s in node.lift.body:
+        if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
+            return None  # a score bias indexed beyond (m, kv) — the fragment realizer cannot load it
+    if qk is None:
+        allowed = {a.name for a in term.place.free if a.name != pv_mn[1].name} | {kv_name}
+        if not {v for e in score.index for v in e.free_vars()} <= allowed:
+            return None  # a score varying over the output value axis cannot be one score fragment
+    strides = (
+        *(
+            (
+                gmem_row_stride(qk.a, m_name, inputs),
+                gmem_row_stride(qk.b, (qk_mn[1] if qk.b_trans else qk.axis).name, inputs),
+            )
+            if qk is not None
+            else ()
+        ),
+        gmem_row_stride(pv.b, (pv_mn[1] if pv.b_trans else node.axis).name, inputs),
+    )
+    if any(s is None for s in strides):
+        return None
+
     b_dt, a_dt = atom.operand_dtype("b"), atom.operand_dtype("a")
     # Which atoms EXIST for this operand dtype is a term fact; whether the precision-trading sibling
     # is OFFERED is the choice layer's gate (:func:`_twisted_values`), which a pin bypasses.
-    sibling = atoms_for(_a_dtype(qk, inputs), acc=_a_dtype(qk, inputs), ctx=term.ctx)
+    sibling = atoms_for(channel_dtype, acc=channel_dtype, ctx=term.ctx)
     return _Stream(
+        score=score,
         qk=qk,
         pv=pv,
         atom=atom,
         pv_atoms=(atom, *(ATOM_REGISTRY[n] for n in sibling)),
         d_v=d_v,
-        tma=term.ctx.has_tma and _kv_penultimate(qk.b, kv_name) and _kv_penultimate(pv.b, kv_name),
+        tma=qk is not None and term.ctx.has_tma and _kv_penultimate(qk.b, kv_name) and _kv_penultimate(pv.b, kv_name),
         # Staging byte-COPIES the operands into slabs typed at the atom's operand width, so an
         # operand traced at another dtype would deposit wrong-sized elements; gmem-direct fragment
         # loads convert per element, which is why a mismatch keeps the tier and drops its stage rows.
-        stageable=dtype_of(qk.b) == b_dt and dtype_of(pv.b) == b_dt and qk.axis.extent.as_static() % atom.atom_k == 0,
-        q_stageable=dtype_of(qk.a) == a_dt,
+        stageable=qk is not None and dtype_of(qk.b) == b_dt and dtype_of(pv.b) == b_dt and qk.axis.extent.as_static() % atom.atom_k == 0,
+        q_stageable=qk is not None and dtype_of(qk.a) == a_dt,
     )
 
 
@@ -1149,6 +1173,8 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
         plans = grouped.get(base.spell() if base is not None else "", []) + (grouped.get("", []) if base is not None else [])
     out = []
     for plan in plans:
+        if plan.is_tiled and plan.placed_on(term.place).axes is None:
+            continue  # output tiling needs an (m, n) grid pair; the unmapped scalar path remains
         for red in _contraction_reduces(term, node, plan):
             for stage in _stage_values(term, node, plan):
                 if work is not None and work.producer and not legal.enforce(legal.producer_transport(stage, red), pinned=False):
@@ -1218,7 +1244,6 @@ def _twisted_values(term: _Term, site: Site, work: Workers | None, parent: _Node
         atom = ctx.atom
         if legal.enforce(legal.twisted_atom(atom, ctx.d_v), pinned=False):
             um = work.units[0]
-            bk = -(-ctx.qk.axis.extent.as_static() // atom.atom_k)  # ceil: an overhanging final atom gmem-zero-fills
             # The grid's ``warps_m`` is the INVENTORY, already fixed above, so what a site
             # enumerates is the free half — the key-atom / query-tile pair, once each.
             for nt, fm in dict.fromkeys((nt, fm) for _, nt, fm in twisted_warp_moves()):
@@ -1232,6 +1257,8 @@ def _twisted_values(term: _Term, site: Site, work: Workers | None, parent: _Node
                         for pv in ctx.pv_atoms
                     )
                 else:
+                    assert ctx.qk is not None
+                    bk = -(-ctx.qk.axis.extent.as_static() // atom.atom_k)  # overhanging final atom gmem-zero-fills
                     out.append(TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk))
     plans, selected = _narrowed(term, node, out)
     if not selected and not _f16acc_allowed(term.ctx):
@@ -1265,6 +1292,8 @@ def _stream_stages(term: _Term, node, ctx: _Stream, qk: TilePlan, pv: TilePlan) 
     fallback — only this tier stages, so a staging pin that fell through to the chain / reduce
     siblings would let the prior bury the (necessarily lower-occupancy) staged row under a
     higher-occupancy scalar one."""
+    if ctx.materialized_score:
+        return [None]  # first tier: score + V read gmem-direct; no K/Q slabs exist to stage
     budget = term.ctx.max_dynamic_smem
 
     def resolve(st: Stage) -> Stage | None:
@@ -1295,12 +1324,27 @@ def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list
 
     The QK / PV SIBLING EQUALITY is enforced here, because this is where the pair is visible: a
     mismatched pair yields NO values, so the combination is never built."""
+    ctx = term.stream(node)
+    materialized = isinstance(stream_pair(node)[0], Load)
     qk, pv = _stream_tiles(kids)
+    if materialized and pv is not None and pv.is_warp:
+        if ctx is None or pv.atom.atom_k % ctx.atom.atom_n:
+            return []
+        nt = pv.bk * pv.atom.atom_k // ctx.atom.atom_n
+        qk = TilePlan(atom=ctx.atom, units=pv.units, regs=(pv.reg_m, nt), bk=1)
+        kept, _ = _narrowed(term, node, [qk])
+        if not kept:
+            return []
+        (qk,) = kept
     if qk is None and pv is None:
-        return _reduce_values(term, node)
+        rows = _reduce_values(term, node)
+        if materialized and not _narrowed(term, node, [TilePlan()])[0]:
+            return []
+        return [{"TILE": TilePlan(), **row} for row in rows] if materialized else rows
     if not legal.enforce(legal.twisted_sites_agree(qk or TilePlan(), pv or TilePlan()), pinned=False):
         return []
-    ctx = term.stream(node)
+    if materialized and qk is not None and not legal.enforce(legal.twisted_block(node, term.sched.placed(node, qk)), pinned=False):
+        return []
     # A pin the SCHEDULED form cannot honor drops these rows rather than ignoring the pin: the
     # reduce tiers do realize a partition, so the term still maps — through them.
     red_pin = term.pin("REDUCE", node)
@@ -1309,10 +1353,14 @@ def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list
             return []
         if ctx is not None and term.pin("STAGE", node):
             return []  # only the fragment tier stages; a staging pin must not fall through to the chain
-        return [{"REDUCE": ReducePlan(), "STAGE": None}]  # the chain: one thread per query row, kv serial
+        row = {"REDUCE": ReducePlan(), "STAGE": None}
+        if materialized and not _narrowed(term, node, [TilePlan()])[0]:
+            return []
+        return [{"TILE": TilePlan(), **row}] if materialized else [row]  # chain: one thread per row, kv serial
     if ctx is None:
         return []
-    placed_qk, placed_pv = term.sched.placed(ctx.qk, qk), term.sched.placed(ctx.pv, pv)
+    placed_qk = term.sched.placed(node if materialized else ctx.qk, qk)
+    placed_pv = term.sched.placed(ctx.pv, pv)
     if red_pin is not None:
         want = ReducePlan.parse(red_pin, work)
         # The pin names the PARTITION; which streaming geometry can carry it is the GEOMETRY's
@@ -1331,7 +1379,7 @@ def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list
             reduces += [p for p in splitk_moves() if legal.enforce(legal.splitkv_slice(node, placed_qk, p), pinned=False)]
     stages = _stream_stages(term, node, ctx, placed_qk, placed_pv)
     return [
-        {"REDUCE": red, "STAGE": stage}
+        {**({"TILE": qk} if materialized else {}), "REDUCE": red, "STAGE": stage}
         for red in reduces
         for stage in stages
         if not (work is not None and work.producer and not legal.enforce(legal.producer_transport(stage, red), pinned=False))
@@ -1833,19 +1881,28 @@ def _stream_option(
     and its ``STAGE`` is the K/V transport re-resolved against the same geometry."""
     qk, pv = _row_stream_tiles(root, row, work)
     ctx = term.stream(node)
+    materialized = ctx is not None and ctx.materialized_score
+    if materialized:
+        tile_spec = row.get(root.keys.get("TILE"), "") or ""
+        qk = resolve_site_tile(tile_spec, work) if tile_spec else None
+        qk = qk if qk is not None and qk.is_tiled else None
     spec = row.get(root.keys.get("STAGE"), "") or ""
     stage = None
     if qk is not None and qk.is_warp and ctx is not None:
-        placed_qk, placed_pv = term.sched.placed(ctx.qk, qk), term.sched.placed(ctx.pv, pv)
+        placed_qk = term.sched.placed(node if materialized else ctx.qk, qk)
+        placed_pv = term.sched.placed(ctx.pv, pv)
         place = _warp_stream_place(term, placed_qk, placed_pv)
-        if spec:
+        if spec and not materialized:
             stage = legal.resolve_twisted_stage(node, ctx.qk, placed_qk, placed_pv, Stage.parse(spec), term.ctx.max_dynamic_smem)
     else:
         # The chain: one thread per query row, the value axis off the grid and into the register
         # vector the P@V slice names.
         place = Placement(free=term.place.free, grid=tuple(term.place.grid[:-1]))
     workers = WarpSpec(work.producer) if work is not None and work.producer else None
-    own = [("REDUCE", node, rplan if rplan.stages else None), ("STAGE", node, stage)]
+    own = ([("TILE", node, qk)] if materialized else []) + [
+        ("REDUCE", node, rplan if rplan.stages else None),
+        ("STAGE", node, stage),
+    ]
     return _stamp(term, term.tile.op, name, knobs, [*own, *nested], workers=workers, place=place)
 
 

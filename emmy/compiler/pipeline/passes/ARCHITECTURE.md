@@ -163,12 +163,13 @@ enumeration cannot schedule yields NO rows and stays unmapped: the guardrail con
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.
 
 **The streaming pair, site by site.** A fold whose DERIVED evaluation contracts (`_schedule._streams` — structural,
-never the `TWISTED` role) keeps its children as sites: the hoisted QK score edge and the synthesized P@V. Each
-enumerates its own half of `twisted_warp_moves`' free geometry — the key-atom / query-tile pair, since `warps_m` is
-the inventory and lives once in `WORK` — and the pair is reconciled at the STREAM (`_legality.twisted_sites_agree`:
-the P@V rows are the score's rows, its K-chunk is the streamed key block). That reconciliation is the whole reason
-the enumeration recurses: two sites that must agree cannot be a product over one node's families. The stream itself
-then decides what only it can see — the K/V transport, sized against the geometry its children chose
+never the `TWISTED` role) keeps its score and synthesized P@V as sites. The score is normally the hoisted QK edge; if
+PLACE materialized that edge, the stream itself is the score site and reads its `(m, kv)` `Load`. Each enumerates its
+own half of `twisted_warp_moves`' free geometry — the key-atom / query-tile pair, since `warps_m` is the inventory and
+lives once in `WORK` — and the pair is reconciled at the STREAM (`_legality.twisted_sites_agree`: the P@V rows are
+the score's rows, its K-chunk is the streamed key block). That reconciliation is the whole reason the enumeration
+recurses: two sites that must agree cannot be a product over one node's families. The stream itself then decides
+what only it can see — the K/V transport, sized against the geometry its children chose
 (`_legality.resolve_twisted_stage`, including the `split` per-edge groups that also stage Q), and the cross-CTA
 split-KV `030_split_reduce` realizes as partial + LSE finalize. The **chain** is the same P@V site under the `""`
 inventory (the value axis leaves the grid for a per-thread register vector); the **per-cell / cooperative** forms are
@@ -251,8 +252,9 @@ Fusion and placement have separate ownership. Loop fusion forms the largest reas
 semantic preservation and its general work-duplication brakes; it never asks which GPU will run it, which schedule is
 available, or whether one kernel will be faster than two. Once recognition has built that region's term, the
 `PLACE@<path>` structural fork may keep it fused or materialize a closed subtree. Every resulting kernel then enters
-the same recognition and schedule paths independently. A scheduling gap is therefore repaired by extending the
-schedule domain or its placement choices, never by adding a profitability exception to fusion.
+the same placement and schedule paths independently while retaining its recognized algebra. A scheduling gap is
+therefore repaired by extending the schedule domain or its placement choices, never by adding a profitability
+exception to fusion.
 
 Recognition is total over the algebra it accepts: a product contraction binds every additive channel sharing its A
 edge, and a root projection must bind every value it reads. If an optimized reading cannot preserve that complete
@@ -261,14 +263,20 @@ it cannot make a partial or open term legal. These are target-independent format
 consulted only when schedule and lowering choose a realizable primitive.
 
 This ownership boundary is executable: the pass contract test rejects context, hardware, search, schedule, and
-placement dependencies from `loop/fusion`. A new fusion condition must be justified only by algebraic correctness or
-bounded work duplication. Product names, workload provenance, schedule families, and placement keys belong later.
+placement dependencies from `loop/fusion`, and rejects hardware capabilities from recognition. A new fusion
+condition must be justified only by algebraic correctness or bounded work duplication. Product names, workload
+provenance, schedule families, placement keys, and GPU identities belong later. Recognition may describe primitive
+requirements structurally, but only schedule/lowering may ask `Context` whether the target supplies them. Those
+checks use named capabilities and atom metadata, never a product name or an isolated SM-number branch; measured
+GPU-specific goldens may select among generic paths but may not define one.
 
-The two-level tuner enforces the same boundary operationally. Its outer pipeline ends after `010_recognize`, where
-`PLACE` changes the kernel set; each terminal is a set of unmapped `TileOp`s priced by the sum of independently tuned
-kernels. The inner pipeline begins at `020_schedule`. Placement rows train the outer prior only, while schedule rows,
-node-store keys, O3 signatures, and kernel cache keys contain no `PLACE` metadata. Assembly lowers the measured outer
-winner directly rather than asking a later greedy schedule replay to reconstruct the kernel set.
+The two-level tuner enforces the same boundary operationally. Its outer pipeline runs `010_recognize` and then
+`015_place` to a graph-level fixpoint; each terminal is a resolved set of unmapped `TileOp`s priced by the sum of
+independently tuned kernels. This derived sum selects placement during search; it is not an assembled whole-program
+latency. The inner pipeline begins at `lowering/schedule/020_schedule`. Placement rows train the outer prior only,
+while schedule rows, node-store keys, O3 signatures, and kernel cache keys contain no `PLACE` metadata. Assembly
+lowers the selected outer terminal directly rather than asking a later greedy schedule replay to reconstruct the
+kernel set.
 
 Loop fusion first keeps a contraction producer materialized when it fans out into the statistic and value paths of a
 downstream normalization. The N-way splicer shares repeated equal-coordinate demands, but this fan-out would duplicate
@@ -516,16 +524,17 @@ grammar it read).
 
 ## The divide rule: `split` an iteration axis
 
-`lowering/tile` carries one one-kernel→graph-fragment rule:
+`lowering/schedule` carries one schedule-realization one-kernel→graph-fragment rule:
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
   `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
 
-The fragment idiom's re-entry semantics are the rule's own: `030` opts its halves OUT of recognition, while a rule
-that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
-is what lets such rules compose without knowing about each other.
+The fragment idiom's re-entry semantics are the rule's own: `030` emits already mapped halves, so neither placement
+nor scheduling revisits the selected split. Placement emits unmapped recognized pieces instead; the structural pass
+reaches its graph-level fixpoint before `lowering/schedule` begins. A schedule therefore cannot race ahead of a newly
+created placement piece.
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
@@ -534,18 +543,22 @@ after algebra recognition and before schedule enumeration. With no authoritative
 structural fork containing the fused form first and one option for every realizable single-seam cut; all options spell
 the same seam-key set, with exactly one `cut` on each fragment choice. A cold deploy therefore preserves the maximal
 fused region, tuning measures both kernel sets, and a trusted deploy prior prices a cut as the sum of its kernels.
+Recognition rules that return a graph fragment obey the same boundary: its output `TileOp` is matched in the full
+graph by `015_place`, while constants and other internal producers remain intact around either result.
 
 A ROUTING golden (a `PLACE`-only record) or an authoritative pin collapses that fork before search. Routing records
 remain separate from schedule goldens: the loader rejects mixed records and the schedule tier skips routing entries.
 The structural choice persists in `Op.decision_knobs`, not `Op.knobs`, so it can replay across the source chain without
 polluting any resulting kernel's cache identity or schedule evidence.
 
-The realizer splits the selected child into a plain un-mapped `LoopOp` writing a `…__cut_…` workspace and a parent
-`LoopOp` consuming a workspace `Load`. The workspace index space is derived from enclosing axes; a fold-axis child
-bridges carrier state as f32, while a zero-axis value child keeps its leaf operand dtype. Both pieces re-recognize and
-schedule as fresh roots, recursively offering their own placement choices. Cut legality is structural: the child is
-single-component and closed, the parent is closed after substitution, the pure-copy non-terminating seam is refused,
-and a materialized fragment that fails Loop-IR SSA validation is not offered. Fusion never revisits this decision.
+The realizer splits the selected child into an unmapped `TileOp` writing a `…__cut_…` workspace and a parent `TileOp`
+consuming a workspace `Load`. The workspace index space is derived from enclosing axes; a fold-axis child bridges
+carrier state as f32, while a zero-axis value child keeps its leaf operand dtype. Both pieces preserve their existing
+`Fold` trees, recursively offer their own placement choices, and then schedule as independent roots. Placement never
+lowers a term to Loop IR and asks recognition to rediscover it: doing so can erase a contraction with computed
+operands and turn a schedulable tensor-core term into a scalar fold. Cut legality is structural: the child is
+single-component and closed, the parent is closed after substitution, and the pure-copy non-terminating seam is
+refused. Fusion never revisits this decision.
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
@@ -607,12 +620,13 @@ conservative one-warp / `2·atom_n` block / one tile; the third dimension is the
 each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragments, FA-2's in-flight ILP; the Q@K /
 P@V mma `TilePlan`s are the two sites' own values, reconciled at the stream), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
-leaf row spelling the same `TILE@dd` / `TILE@pj` key pair plus the BARE `REDUCE` / `STAGE` the stream is primary for,
+leaf row spelling the same `TILE@dd` / `TILE@pj` key pair plus the BARE `REDUCE` / `STAGE` the stream is primary for
+(`TILE` / `TILE@pj` after PLACE materializes the score and makes the stream the primary score site),
 and its ONE `WORK` inventory (decided-empty where a form doesn't tile). The **flash split-KV** rows are fork siblings
 of the un-split warp rows on an under-occupied grid (the occupancy read is the warp row's OWN launch grid — the
 shrunk query axis, the value axis gone), and a cross-CTA `REDUCE=g<n>k` pin selects them: the plan stamps
-onto each row's `Fold` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
-the CTA's slice, its absolute base/bound on the sliced axis's `Axis.window`; raw `(m, l, O)` state to an f32
+onto each row's `Fold` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed
+to the CTA's slice, its absolute base/bound on the sliced axis's `Axis.window`; raw `(m, l, O)` state to an f32
 `__partial` workspace) plus
 an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic). A static kv must be
 block-divisible; a **symbolic kv splits too**: the slice width is the bn-aligned runtime `ceil(S/(cta·bn))·bn` (a

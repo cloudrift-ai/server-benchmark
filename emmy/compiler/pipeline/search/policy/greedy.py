@@ -11,7 +11,7 @@ is :meth:`Run.resolve`'s returned trace, never accumulated policy attributes.
 It can only *use* a prior trained earlier by ``tune``, never train one.
 Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 
-**Flatten, don't descend.** The lazy fork tree (``lowering/tile`` planner) is an
+**Flatten, don't descend.** The lazy fork tree (``lowering/schedule`` planner) is an
 MCTS data structure — it stages knob choices across levels (``BR`` → ``BM/BN`` →
 ``FM/FN``) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level:
 a branch carries only a *partial* tile, and ``features.knob_features`` can't compute
@@ -49,11 +49,11 @@ if TYPE_CHECKING:
 
 @lru_cache(maxsize=1)
 def _tile_pipeline():
-    """The ``lowering/tile``-only pipeline the structural price probes drive —
+    """The ``lowering/schedule``-only pipeline the structural price probes drive —
     frozen and shareable, so one load serves every nested descent."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
 
-    return Pipeline.build(["lowering/tile"])
+    return Pipeline.build(["lowering/schedule"])
 
 
 # The rule whose fork prices a kernel: the prior's predicted µs for the chosen
@@ -229,7 +229,7 @@ def _leaf_graph(leaf: object) -> Graph:
 
 def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, float | None], db: object | None = None) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
-    single-node slice through ``lowering/tile`` only (the partition fork is
+    single-node slice through ``lowering/schedule`` only (the partition fork is
     where the prior prices a complete tile row; the kernel/cuda passes add
     nothing and cost real CPU), reading the chosen leaf's µs off the
     slice-resolve's trace entry at the partition fork. ``db`` rides into the
@@ -290,7 +290,7 @@ def _pick_structural(
 
     Both sides are priced the same way: the best µs at each kernel's partition
     fork, obtained by a nested deterministic resolution of the kernel's
-    single-node slice (``lowering/tile`` only, no backend, CPU-only —
+    single-node slice (``lowering/schedule`` only, no backend, CPU-only —
     :func:`_price_kernel`); a structural option's price is the Σ over its
     fragment's kernels. The nested pick follows the deploy evidence hierarchy
     (``db`` threads the tune DB down), so each side's price is a *measurement*

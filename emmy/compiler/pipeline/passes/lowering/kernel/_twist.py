@@ -1,15 +1,16 @@
 """The fragment realizer — a TWISTED carrier realized at WARP-FRAGMENT residence.
 
 The one ``_bind`` pipeline calls :func:`realize_warp_twist` when the reduce arm's tree carries a
-warp tile (:func:`warp_source` — the stream's head contraction stamped with an mma
+warp tile (:func:`warp_source` — the stream's score site stamped with an mma
 :class:`TilePlan` by the schedule): the streaming reduce keeps its per-step values in mma
 C-fragments instead of scalars, so every piece of the scalar lowering is *realized* at the new
 residence — the fragment row of the placement-keyed fold (a within-warp ``FragmentRowReduce``
 ``__shfl`` move where the scalar tier folds in-thread):
 
-- the head contraction (Q@K) emits ``ldmatrix`` + ``mma.sync`` into score C-fragments off its node
-  geometry (:func:`_frag_contraction` — operands / ``b_trans`` / guards from the node, the atom
-  counts from its stamped ``TilePlan``);
+- a computed head contraction (Q@K) emits ``ldmatrix`` + ``mma.sync`` into score C-fragments off
+  its node geometry (:func:`_frag_contraction` — operands / ``b_trans`` / guards from the node,
+  the atom counts from its stamped ``TilePlan``); a PLACE-materialized score loads the workspace
+  into the identical C-fragment lane map with :class:`FragmentLoad`;
 - the score prologue (the scale ``Assign``, the causal ``Select``, the explicit additive mask) is
   realized stmt-by-stmt (:func:`_realize_prologue`): a pointwise ``Assign`` → :class:`FragmentApply`,
   a coordinate-predicated ``Select`` → :class:`FragmentMask` (the keep-predicate negated), an
@@ -27,7 +28,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   no smem round-trip, no sync; gated at schedule time);
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
-- a resolved K/V ``Stage`` on the streaming ``Fold`` node (resolved schedule-side,
+- a resolved K/V ``Stage`` on a computed-score streaming ``Fold`` node (resolved schedule-side,
   cp.async or TMA over a block-divisible-or-symbolic kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
@@ -57,6 +58,7 @@ from emmy.compiler.ir.kernel.ir import (
     UNIFORM,
     FragmentApply,
     FragmentBiasAdd,
+    FragmentLoad,
     FragmentMask,
     FragmentPromote,
     FragmentRepack,
@@ -70,7 +72,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Fold, is_contraction
+from emmy.compiler.ir.tile.ir import Fold, is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import head, stream_pair
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
@@ -114,21 +116,20 @@ _NEGATE = {"<=": ">", "<": ">=", ">=": "<", ">": "<=", "==": "!="}
 
 
 def warp_source(op, sched):
-    """The warp-tiled stream-head fold of a ``TWISTED`` :class:`Fold` tree
-    (``op`` bare or under a projecting :class:`Fold`), or ``None`` — the structural schedule read
-    the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling).
-    Returns the STORED ``role=CONTRACTION`` fold — its warp tile is a schedule slice
-    (``sched`` — the ``TileOp.schedule`` view, 1r), never a node field;
-    :func:`realize_warp_twist` derives the full views itself."""
+    """The schedule site carrying a warp-tiled score of a streaming :class:`Fold`, or ``None``.
+
+    A computed score carries the slice on its contraction edge; after PLACE materializes that
+    edge, the stream carries the same score-fragment geometry. Both are schedule slices, never
+    node fields, and :func:`realize_warp_twist` derives the full views itself."""
     red = head(op)  # the compute node through the projection wrapper — ONE accessor, not a ternary
     if red is None:
         return None
-    stmts = red.step_stmts()
-    first = stmts[0] if stmts else None
-    if first is not None and is_contraction(first):
-        htile = sched.tile_of(first)
+    score, pv = stream_pair(red)
+    site = red if isinstance(score, Load) else score
+    if site is not None and pv is not None:
+        htile = sched.tile_of(site)
         if htile is not None and htile.is_warp:
-            return first
+            return site
     return None
 
 
@@ -301,19 +302,17 @@ def _frag_contraction(
     return out
 
 
-def _realize_prologue(stmts, qk: Fold, tile: TilePlan, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
+def _realize_prologue(stmts, score: str, tile: TilePlan, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
     """Realize the score prologue (the plain stmts between the head contraction and the carrier's
     streaming merge) at fragment residence, stmt kind by stmt kind. Returns ``(hoisted, stream)`` —
     the loop-invariant scalar ``Load``\\ s (hoisted above the stream when a realized stmt reads
     them) and the in-stream fragment stmts. Stops at the first stmt touching a carrier state name —
     from there the merge is REGENERATED from the channel spec, not walked.
 
-    Node and slice travel as a PAIR, like everywhere else in this layer: the value name the walk
-    threads is the score's own accumulator (algebra — the node's), while the coordinates it
-    substitutes are the placed geometry's (the slice's)."""
+    ``score`` is the algebraic score edge's bound value name — a computed contraction accumulator
+    or a materialized Load result. The coordinates come from the placed score slice."""
     hoisted: list[Load] = []
     stream: list[Stmt] = []
-    score = qk.acc
     m_name, n_name = tile.axes[0].name, tile.axes[1].name
     # An additive score bias (the explicit SDPA ``attn_mask``): a per-``(m, kv)`` tensor ``Load``
     # awaiting its ``add`` — realized as a :class:`FragmentBiasAdd` per score fragment when the add
@@ -420,13 +419,16 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     output fragments + hoisted scalars; fold = the streaming :class:`StridedLoop`; close = the
     realized projection + the fragment output store). See the module docstring for the walk."""
     red: Fold = head(op)
-    partial = list(red.step_stmts())
-    # The stored steps are contraction folds; the realizer works on their DERIVED views. Both
+    prologue = list(red.lift.body)
+    # The realizer works on the stream's score edge and derived P@V view. Both
     # slices arrive ALREADY PLACED from ``Sched.tile_of`` — the query / value axes off the
     # placement's free axes, the score's stream axis off its parent fold read through a slice
     # partial's window PARENT — so this reader states no placement rule of its own.
-    qk, pv = stream_pair(red)
-    qk_t: TilePlan = ctx.sched.tile_of(qk)
+    score, pv = stream_pair(red)
+    materialized_score = isinstance(score, Load)
+    qk = score if isinstance(score, Fold) else None
+    score_name = operand_name(score)
+    qk_t: TilePlan = ctx.sched.tile_of(red if materialized_score else qk)
     pv_t: TilePlan = ctx.sched.tile_of(pv)
     atom = qk_t.atom
     shape = atom.shape
@@ -486,7 +488,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # subtracted; an above-the-diagonal slice goes negative and the loop runs zero steps).
     kv_end: Expr | None = local_kv_end  # a symbolic slice stops at its own end even un-causal
     cta_rows = Literal(um * fm * shape[0], "int")
-    if _causal_stream(partial[1:], qk_t):
+    if _causal_stream(prologue, qk_t):
         causal_rows = BinaryExpr("*", BinaryExpr("+", Var(grid[-1].name), Literal(1, "int")), cta_rows)
         if kv_off is not None:
             causal_rows = BinaryExpr("-", causal_rows, kv_off)
@@ -501,7 +503,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # start is slice-local (base subtracted; a below-the-band slice floors past its own end and the
     # loop runs zero steps). Truncating '/' on a negative pre-max value is dodged by the ternary.
     kv_start: Expr | None = None
-    window = _banded_stream(partial[1:], qk_t)
+    window = _banded_stream(prologue, qk_t)
     if window is not None:
         start_rows: Expr = BinaryExpr("-", BinaryExpr("*", Var(grid[-1].name), cta_rows), Literal(window - 1, "int"))
         if kv_off is not None:
@@ -539,11 +541,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 row_base=_row_base(i),
                 pivot=f"{pivot_name}{sfx}",
                 denom=f"{denom_name}{sfx}",
-                sfrags=tuple(f"{qk.acc}{sfx}_f{t}" for t in range(nt)),
+                sfrags=tuple(f"{score_name}{sfx}_f{t}" for t in range(nt)),
                 pfrags=tuple(f"_p{sfx}_f{t}" for t in range(nt)),
                 ofrags=tuple(f"{expect_name}{sfx}_f{j}" for j in range(nd)),
                 ohfrags=tuple(f"{expect_name}{sfx}_h{j}" for j in range(nd)) if pv_f16acc else (),
-                qa=tuple(f"_{qk.acc}{sfx}_a{s}" for s in range(qk_t.bk)),
+                qa=tuple(f"_{score_name}{sfx}_a{s}" for s in range(qk_t.bk)) if qk is not None else (),
                 pa=tuple(f"_pa{sfx}{s}" for s in range(pv_bk)) if pv_bk > 1 else (f"_pa{sfx}",),
             )
         )
@@ -555,23 +557,26 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # once, its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident
     # registers are what make the wide (64-key) block fit.
     stage = ctx.sched.get("STAGE", red)
+    assert not materialized_score or stage is None, "materialized-score warp streams are gmem-direct"
     split = stage is not None and stage.split
     is_tma = stage is not None and stage.transport == "tma"
     elem_bytes = atom.operand_dtype("b").nbytes
     kv_pad = 0 if is_tma else _PAD
-    k_swz = pick_swizzle_atom(qk.axis.extent.as_static(), elem_bytes)[1] if is_tma else "NONE"
+    k_swz = pick_swizzle_atom(qk.axis.extent.as_static(), elem_bytes)[1] if is_tma and qk is not None else "NONE"
     v_swz = pick_swizzle_atom(d_v, elem_bytes)[1] if is_tma else "NONE"
-    head_dim_s = qk.axis.extent.as_static()
+    head_dim_s = qk.axis.extent.as_static() if qk is not None else 0
     q_ldm = head_dim_s + _PAD  # the staged-Q slab row stride (padded, like the cp.async K/V rows)
     # Gmem-direct fragment ROW strides, derived from each operand's load index + buffer shape
     # (``gmem_row_stride``) — NOT the trailing-axis extent: an un-transposed ``(B, S, H, D)``
     # trace strides its rows by ``H·D``, and the old ``head_dim`` assumption read the wrong rows
     # (the gemma layer-0 NaN). Canonical ``(batch…, row, dd)`` layouts derive the same values as
     # before (bit-identical). The schedule gate guarantees derivability.
-    q_gmem_ldm = gmem_row_stride(qk.a, qk_t.axes[0].name, ctx.inputs)
-    k_gmem_ldm = gmem_row_stride(qk.b, qk_t.axes[1].name if qk.b_trans else qk.axis.name, ctx.inputs)
+    q_gmem_ldm = gmem_row_stride(qk.a, qk_t.axes[0].name, ctx.inputs) if qk is not None else None
+    k_gmem_ldm = gmem_row_stride(qk.b, qk_t.axes[1].name if qk.b_trans else qk.axis.name, ctx.inputs) if qk is not None else None
     v_gmem_ldm = gmem_row_stride(pv.b, pv_t.axes[1].name if pv.b_trans else kv_axis.name, ctx.inputs)
-    assert q_gmem_ldm and k_gmem_ldm and v_gmem_ldm, "warp twist: underivable gmem row stride (schedule-gate breach)"
+    assert v_gmem_ldm and (materialized_score or (q_gmem_ldm and k_gmem_ldm)), (
+        "warp twist: underivable gmem row stride (schedule-gate breach)"
+    )
 
     def _q_frag_stmts(qt, i: int) -> list[Stmt]:
         """The query tile's ``bk`` A-fragment declarations + loads. Resident form (default): gmem
@@ -579,6 +584,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         from the staged Q slab (slab-local rows — the tile's offset within the CTA's query block),
         block-scoped so the registers die each step. Same values either way: bit-identical."""
         stmts: list[Stmt] = []
+        assert qk is not None, "a materialized score has no resident query fragments"
         if split:
             rel = Literal(i * shape[0], "int")
             if um > 1:
@@ -622,7 +628,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             state.append(Init(name=f"{qt.denom}{c}", identity=0.0, dtype=F32))
         for f in qt.ofrags:
             state.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
-        if not split:
+        if not split and qk is not None:
             state.extend(_q_frag_stmts(qt, i))
 
     # ---- the streaming step (a builder — the staged path re-parents it under the ring drain; the
@@ -641,35 +647,52 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 # The per-block packed f16 P@V targets — zero-inited per step (block-scoped, like
                 # the score fragments); the promote below folds them into the f32 ``ofrags`` shadows.
                 stream.append(RegFragment(name=f, role="c", shape=shape, dtype=pv_t.atom.operand_dtype("c")))
-        qk_mask: dict[str, tuple] = {}
-        if symbolic_k:
-            # The guard bound is ABSOLUTE — ``_frag_contraction``'s gmem guards compare the
-            # operand's own (absolute) coordinates (``col_bases`` / ``_abs_kv(kv0)``), so a slice
-            # partial bounds at its absolute end, not the window-local one.
-            qk_mask[qk_t.axes[1].name] = (kv0_var, abs_kv_end)
-        if qk.axis.extent.as_static() % atom.atom_k:
-            qk_mask[qk.axis.name] = (Literal(0, "int"), _ext(qk.axis))
-        stream += _frag_contraction(
-            qk,
-            qk_t,
-            [(qt.sfrags, qt.qa) for qt in qtiles],
-            # Staged: the K slab is slot-local (its rows are this block's keys), so the score
-            # column origin is the in-block offset; the absolute ``col_bases`` still name the
-            # score columns for the masks below.
-            n_sub=(lambda t: Literal(t * atom_n, "int")) if staged else (lambda t: col_bases[t]),
-            k_sub=Literal(0, "int"),
-            mask=qk_mask,
-            b_slab="_k_smem" if staged else None,
-            b_slot=k_slot,
-            b_ldm=qk.axis.extent.as_static() + kv_pad if staged else 0,
-            b_gmem_ldm=k_gmem_ldm,
-            b_swizzle=k_swz if staged else "NONE",
-            reg_depth=stage.reg_depth if staged else 1,
-        )
+        if materialized_score:
+            assert isinstance(score, Load)
+            m_name, kv_name = qk_t.axes[0].name, qk_t.axes[1].name
+            row_coord: Expr = Var(FRAG_ROW) if not symbolic_q else _clamp_last(Var(FRAG_ROW), _ext(qk_t.axes[0]))
+            col_coord: Expr = Var(FRAG_COL) if not symbolic_k else _clamp_last(Var(FRAG_COL), abs_kv_end)
+            index = tuple(e.substitute({m_name: row_coord, kv_name: col_coord}) for e in score.index)
+            for qt in qtiles:
+                for t, frag in enumerate(qt.sfrags):
+                    stream.append(
+                        FragmentLoad(
+                            frag=frag,
+                            buf=score.input,
+                            index=index,
+                            col_base=col_bases[t],
+                            row_base=qt.row_base,
+                        )
+                    )
+        else:
+            assert qk is not None
+            qk_mask: dict[str, tuple] = {}
+            if symbolic_k:
+                # The guard bound is ABSOLUTE — ``_frag_contraction``'s gmem guards compare the
+                # operand's own (absolute) coordinates (``col_bases`` / ``_abs_kv(kv0)``), so a
+                # slice partial bounds at its absolute end, not the window-local one.
+                qk_mask[qk_t.axes[1].name] = (kv0_var, abs_kv_end)
+            if qk.axis.extent.as_static() % atom.atom_k:
+                qk_mask[qk.axis.name] = (Literal(0, "int"), _ext(qk.axis))
+            stream += _frag_contraction(
+                qk,
+                qk_t,
+                [(qt.sfrags, qt.qa) for qt in qtiles],
+                # Staged: K is slot-local, while ``col_bases`` remains absolute for masks.
+                n_sub=(lambda t: Literal(t * atom_n, "int")) if staged else (lambda t: col_bases[t]),
+                k_sub=Literal(0, "int"),
+                mask=qk_mask,
+                b_slab="_k_smem" if staged else None,
+                b_slot=k_slot,
+                b_ldm=qk.axis.extent.as_static() + kv_pad if staged else 0,
+                b_gmem_ldm=k_gmem_ldm,
+                b_swizzle=k_swz if staged else "NONE",
+                reg_depth=stage.reg_depth if staged else 1,
+            )
         qk_seg, stream = stream, []
 
         for qi, qt in enumerate(qtiles):
-            hoisted, pro = _realize_prologue(partial[1:], qk, qk_t, qt.sfrags, col_bases, qt.row_base, set(names))
+            hoisted, pro = _realize_prologue(prologue, score_name, qk_t, qt.sfrags, col_bases, qt.row_base, set(names))
             if qi == 0:  # the hoisted scalar constants (the 1/√d scale) are tile-invariant
                 state.extend(hoisted)
             stream += pro
@@ -750,6 +773,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         return [s for stmts, _reads in _stream_segments(k_slot, v_slot, staged) for s in stmts]
 
     if stage is not None:
+        assert qk is not None, "only computed-score streams have a staged tier"
         # The staged K/V stream: the resolved ``Stage`` (resolved schedule-side —
         # block-divisible or symbolic kv) rides the SAME ``staged_kloop`` skeleton the matmul tier
         # runs, the streaming step as its drain. The K slab keeps K's own N-major layout (``bn`` key
@@ -949,7 +973,10 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None
     proj_tail = tail[:-1] if store_tmpl is not None else tail
     close: list[Stmt] = []
-    batch_idx = tuple(qk.a.index[:-2])  # (batch…, head) — passthrough grid vars (fallback)
+    # Preserve the computed-score fallback's original Q index exactly (including affine GQA head
+    # maps). A materialized score has no Q operand, so its placement passthrough axes are the only
+    # structural batch/head coordinates available.
+    batch_idx = tuple(qk.a.index[:-2]) if qk is not None else tuple(Var(a.name) for a in ctx.free[:-2])
     for qt in qtiles:
         for s in proj_tail:
             if isinstance(s, Assign) and expect_name in s.args:

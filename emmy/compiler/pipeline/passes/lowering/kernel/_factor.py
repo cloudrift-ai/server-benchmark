@@ -235,6 +235,11 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tupl
     P@V contractions and its streaming reduce factorize through this one walk (scalar block=1
     today; a nested warp-tiled contraction routes through the ``_emit`` contraction seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
+    if (isinstance(op, Fold) and op.axis is None) and op.operands and all(isinstance(edge, Load) for edge in op.operands):
+        # A placement cut may terminate every projection edge at a workspace Load. The stored
+        # zero-axis Fold explicitly permits that edge, so flatten those loads into the cell before
+        # binding instead of recursing as though the edge were another structural node.
+        op = Fold.projection(body=Body((*op.operands, *op.body)))
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
         proj = _emit_body(op.body, ctx)
         if stores:

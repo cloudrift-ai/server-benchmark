@@ -178,19 +178,17 @@ class Candidate:
         own ancestor into ``source``, and honoring that copy would
         skip the replaced op in the chain (and silently disable the
         knob merge, which is idempotent for rules that already merged
-        manually). A
-        lowering-tier ``Graph`` splice of a loop-dialect kernel (a
-        structural decomposition — the placement realizer's cut)
-        stamps the consumed root op as each fragment kernel's
-        ``source``, so the chain also records *which op a decomposition
-        came from*. Knobs are NOT merged
-        forward on this path — fragment kernels carry their own
-        restamped structural features."""
+        manually). A lowering-tier ``Graph`` splice stamps the consumed root op as every same-dialect fragment
+        kernel's ``source``, so the chain also records *which op the fragment came from*. It marks that source edge as
+        a graph splice: structural-decision replay can follow the predecessor, while DB persistence does not mistake
+        one fragment's launch time for the parent op's aggregate cost. Knobs are NOT merged forward on this path —
+        fragment kernels carry their own restamped structural features."""
         self._log_apply(match, option)
         if isinstance(option, Op):
             old_op = self.graph.nodes[match.root_node_id].op
             if option is not old_op:
                 option.source = old_op
+                option.source_is_graph_splice = False
                 option.knobs = {**old_op.knobs, **option.knobs}
                 option.decision_knobs = {**old_op.decision_knobs, **option.decision_knobs}
             self.graph.nodes[match.root_node_id].op = option
@@ -211,10 +209,11 @@ class Candidate:
             mint_pieces = pass_ is not None and pass_.name.startswith("frontend/decomposition")
             if pass_ is not None and pass_.name.startswith("lowering/"):
                 root_op = self.graph.nodes[match.root_node_id].op
-                if root_op.dialect == "loop":
+                if root_op.dialect is not None:
                     for frag_node in option.nodes.values():
-                        if frag_node.op.source is None and frag_node.op.dialect == "loop":
+                        if frag_node.op.source is None and frag_node.op.dialect == root_op.dialect:
                             frag_node.op.source = root_op
+                            frag_node.op.source_is_graph_splice = True
             self.graph.splice(
                 option,
                 consumed=match.consumed,

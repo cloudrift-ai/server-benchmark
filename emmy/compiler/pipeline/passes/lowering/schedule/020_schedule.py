@@ -8,7 +8,7 @@ THIS rule picks that up and decides the schedule — the free-axis → grid mapp
 helper's ONE recursive row enumerator over the term's own site tree.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by three
-routes — the ordinary lift, flash's graph rewrite, and a placement cut's re-recognized pieces — and
+routes — the ordinary lift, flash's graph rewrite, and a placement cut's recognized pieces — and
 all three converge here. The engine restarts its rule scan after every functional rewrite, so a
 ``TileOp`` this pass's ``010`` just emitted is matched here on the next sweep, exactly as
 ``030_split_reduce`` already matches the ``TileOp``\\ s this rule produces.

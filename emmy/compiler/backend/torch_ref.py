@@ -361,7 +361,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
     """Build a torch callable for ``graph`` plus its positional input list.
 
     The returned ``fn(*tensors)`` runs the frontend ops in topological order and
-    returns the graph's first output; the input list is the ``tensors`` to call
+    returns every graph output (one tensor for a single-output graph, otherwise an
+    output-name mapping); the input list is the ``tensors`` to call
     it with (drawn from ``input_tensors`` in boundary topo order). Scalar
     constants are read inline from the graph (so ``fn`` is a pure function of
     its tensor inputs and ``torch.compile`` can trace it).
@@ -410,7 +411,7 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         else:
             op_callable = (lambda n: lambda ins: _eval(n, ins, sym_env))(node)
         compute_steps.append((nid, op_callable, list(node.inputs), torch_dtype(node.output.dtype)))
-    out_id = graph.outputs[0]
+    out_ids = tuple(graph.outputs)
 
     def fn(*tensors):
         env = dict(scalars)
@@ -418,6 +419,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         for nid, op_callable, in_ids, out_dtype in compute_steps:
             v = op_callable([env[i] for i in in_ids])
             env[nid] = v if out_dtype is None else v.to(out_dtype)
-        return env[out_id]
+        if len(out_ids) == 1:
+            return env[out_ids[0]]
+        return {out_id: env[out_id] for out_id in out_ids}
 
     return fn, [input_tensors[i] for i in tensor_ids]

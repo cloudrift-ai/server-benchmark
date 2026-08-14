@@ -65,7 +65,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   `CudaOp` carrying rendered source.
 
 `Op.source` is the rewrite-chain predecessor — the engine's
-`_apply_one` stamps it on every 1:1 in-place rebind, so a fully
+`Candidate.apply` stamps it on every 1:1 in-place rebind, so a fully
 lowered `CudaOp` carries the full chain back to its originating
 `LoopOp` (`cuda.source.source.source`) without any rule needing to
 pass it explicitly. The base-class field is keyword-only and
@@ -73,12 +73,22 @@ pass it explicitly. The base-class field is keyword-only and
 keep working unchanged. `source` is excluded from
 `Graph.structural_key` and from `Op.cache_key` — kernels rendered
 along different lowering paths still dedup in the tuning cache.
+`Op.source_is_graph_splice` classifies the source edge created when one same-dialect op becomes a multi-op `Graph`
+fragment. The fragments retain the predecessor for structural-decision replay, but persistence excludes each
+fragment's individual launch time from ordinary per-kernel lowering evidence for that predecessor. Like `source`,
+the flag is excluded from structural identity and serialization.
 
 `Op.knobs` and `Op.decision_knobs` have distinct ownership. `knobs` is the realized configuration of this kernel and
 participates in its tuning/cache identity. `decision_knobs` records a structural fork that changed which kernels
 exist, such as `PLACE@a=cut`; the engine propagates it for decision replay, but graph serialization, structural keys,
 kernel cache keys, and per-kernel schedule evidence exclude it. Search still carries the structural row on the fork
-lineage, so an end-to-end measurement remains attributable to the placement decision.
+lineage, so the outer search's derived sum of independently measured kernel times remains attributable to the
+placement decision. That sum is search evidence, not an assembled whole-program measurement.
+
+`Op.meta` is ephemeral rule state, excluded from equality, structural identity, cache keys, and serialization. A pass
+may use it to mark an in-memory phase fact such as “this recognized root has resolved placement”; it must never carry
+algebra, a user-visible decision, or evidence. The canonical pass sequence reaches placement fixpoint before schedule,
+so cut pieces retain their `Fold` trees and receive their own marker rather than inheriting a schedule shortcut.
 
 **Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
 / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
@@ -322,7 +332,8 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 `backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
-`lowering/tile/030_split_reduce`) — eligibility judgments stay in the rules, per `pipeline/passes/ARCHITECTURE.md`. The
+`lowering/schedule/030_split_reduce`) — eligibility judgments stay in the rules, per
+`pipeline/passes/ARCHITECTURE.md`. The
 scope-sensitive companion `lexical_free_values` preserves statement order, nested value scope, and accumulator
 exports; placement and recognition use it when a global `reads - definitions` difference would incorrectly close an
 open term. The
@@ -597,6 +608,7 @@ directly (no separate AST class).
 | `TreeHalve`        | Cross-thread tree reduction over a smem buffer.                   |
 | `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit 2/2/8 counts because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
 | `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. |
+| `FragmentLoad`     | Load a materialized tensor directly into the absolute row/column lane map of an mma C fragment. The materialized-score flash path uses it before the ordinary fragment softmax and C→A repack; f16/bf16 inputs promote to f32 on assignment. |
 | `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. |
 | `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps, or the flash streaming KV block) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. Stores f32 directly or downconverts to f16. Optional `RegEpilogue` loads and pointwise chains are evaluated at each element's own coordinates; guarded tails predicate every load and store. |

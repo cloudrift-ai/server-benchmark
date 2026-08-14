@@ -10,10 +10,10 @@ That op IS the rewrite's result. The schedule picks it up on the next rule sweep
 axes onto the grid and offers the scheduling forks; materialization back to loop IR happens in
 ``lowering/kernel``.
 
-Algebra recognition reads no hardware or profitability signal. After the recognized tree exists,
-step 3.5 offers placement as a separate structural ``PLACE`` fork: keep the maximal region fused or
-cut one closed seam into un-mapped ``LoopOp`` pieces. A routing golden or pin may collapse that fork.
-Placement must run before ``020`` because every piece needs its own schedule enumeration.
+Algebra recognition reads no hardware, placement, schedule, or profitability signal. The next rule,
+``015_place``, owns the structural ``PLACE`` fork over the recognized tree. Keeping that boundary
+separate ensures fusion and recognition remain maximal while a cut preserves the algebra already
+certified here.
 
 All recognition lives in THIS one rule (no separate flash / softmax pass), in order (each
 step unconditional — no knobs):
@@ -77,11 +77,9 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import (
     bind_contraction_channels,
-    bind_prologue_contraction,
     make_cone,
     map_cone,
 )
-from emmy.compiler.pipeline.passes.lowering.tile._cut import placement_options
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
@@ -412,7 +410,7 @@ def _order_free_by_output(node: Fold, free: list, stores: tuple = ()) -> tuple:
     return tuple(sorted(free, key=lambda ax: pos[ax.name]))
 
 
-def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
+def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The fusion is unconditional:
@@ -446,20 +444,6 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
     map_tile = TileOp(op=node, name=loop.name, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
-    pro = bind_prologue_contraction(node, free)
-    # (3.5) PLACEMENT (phase 4) — a structural PLACE fork is offered before the schedule fork:
-    # the fused form plus every structurally legal single-seam cut. Each cut piece re-recognizes
-    # and schedules independently, so recursive cuts remain possible. An authoritative pin or
-    # routing golden collapses the fork to its recorded side; a cold deploy keeps fused option 0.
-    # The computed-A reading is the reference tree when it binds, because its `a` cone edge is a
-    # placement seam even though schedule may later choose the ordinary map reading.
-    route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
-    placed = placement_options(ctx, dict(loop.knobs or {}), match, root, route_tree, route_free, route_stores, map_tile)
-    if isinstance(placed, list):
-        return placed
-    if isinstance(placed, Graph):
-        return placed
-    map_tile = placed
     # Recognition ends here: the UNMAPPED tile is the fused rewrite's result. The MONOID-producer
     # composition (``pro``) is re-derived by the schedule — it is a decision about the SCHEDULE
     # (which of the two readings of this one loop each fork row realizes), not about the structure,

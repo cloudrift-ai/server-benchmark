@@ -70,6 +70,9 @@ class Sample:
     source: str = "db"
     s_full: dict | None = None  # full compiled/derived S_* histogram when known
     error: str | None = None  # bench_fail failure text (db rows only; None on ok rows)
+    # Exact working-only placement + per-op schedule replay. Canonical and DB/prior
+    # samples stay on the scalar ``knobs`` representation.
+    kernel_set: dict | None = None
     # Optional exact work count. The intensity-floor gate reads THIS, not a ShapeKey reconstruction: the join key
     # excludes symbolic axes on the matmul side but includes them on the reduce-tier side, so no
     # one hint-multiplier formula over it can be right for both.
@@ -106,9 +109,16 @@ class Sample:
         from emmy.compiler.context import Context  # noqa: PLC0415
 
         tunable, _ctx, _s = _split_by_prefix(cfg.knobs)
+        kernel_set = None
+        latency_us = cfg.emmy_us
+        if cfg.ranking is not None and "kernel_set" in cfg.ranking:
+            from emmy.compiler.pipeline.search.working_golden import parse_kernel_set_ranking  # noqa: PLC0415
+
+            kernel_set = parse_kernel_set_ranking(cfg.ranking)
+            latency_us = float(cfg.ranking["latency_us"])
         return cls(
             knobs=tunable,
-            latency_us=cfg.emmy_us,
+            latency_us=latency_us,
             shape=cfg.shape_key,
             name=cfg.name,
             dtype=cfg.dtype,
@@ -120,6 +130,7 @@ class Sample:
             context=Context.from_target(cfg.compute_cap, gpu_name=cfg.gpu_name).features(),
             source="golden",
             s_full=dict(cfg.structural_features),
+            kernel_set=kernel_set,
         )
 
     @classmethod

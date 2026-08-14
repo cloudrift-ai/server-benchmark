@@ -410,13 +410,13 @@ def _stmt_eval_scope() -> dict:
 # don't carry a ``Body``. ``name`` is an instance label; ``source`` is the
 # rewrite-chain predecessor on the base ``Op`` (attribution metadata only,
 # stamped automatically by the engine — see ``Op.source``).
-_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "decision_knobs", "meta"})
+_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "source_is_graph_splice", "decision_knobs", "meta"})
 
 # Op dataclass fields excluded from JSON serialization in :meth:`Graph.to_dict`:
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
 # ``outputs`` snapped by the matcher) — none of it belongs in the persisted
 # IR.
-_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "decision_knobs", "inputs", "outputs", "meta"})
+_SERIALIZE_SKIP_FIELDS = frozenset({"source", "source_is_graph_splice", "knobs", "decision_knobs", "inputs", "outputs", "meta"})
 
 
 class Graph:

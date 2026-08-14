@@ -291,10 +291,11 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
     projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
     only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
     (red,) = op.operands
-    score, _ = stream_pair(red)  # the score fold (the hoisted operand edge) — its tile is the schedule read
+    score, _ = stream_pair(red)
     cta = plan.cta
     src_sched = sched_of(tile)
-    head_tile = src_sched.tile_of(score)
+    score_site = red if isinstance(score, Load) else score
+    head_tile = src_sched.tile_of(score_site)
     atom_n = head_tile.atom.shape[1]
     bn = head_tile.regs[1] * atom_n
     # What a split-KV partition demands is stated ONCE, in ``_legality.splitkv_slice`` — the
@@ -349,7 +350,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: 
     p_sched = Sched(partial_map, {})
     sliced_head, sliced_pv = stream_pair(sliced)
     _, orig_pv = stream_pair(red)
-    p_sched.put("TILE", sliced_head, head_tile)
+    p_sched.put("TILE", sliced if isinstance(sliced_head, Load) else sliced_head, head_tile)
     p_sched.put("TILE", sliced_pv, src_sched.tile_of(orig_pv))
     p_sched.put("STAGE", sliced, src_sched.get("STAGE", red))
     stripped = _strip_grid(plan)
@@ -429,9 +430,10 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         and isinstance(op.operands[0], Fold)
         and op.operands[0].role is AxisRole.TWISTED
     ):
-        red_stmts = op.operands[0].step_stmts()
-        score = red_stmts[0] if len(red_stmts) else None
-        head_tile = sched_of(tile).tile_of(score) if isinstance(score, Fold) else None
+        red = op.operands[0]
+        score, _ = stream_pair(red)
+        score_site = red if isinstance(score, Load) else score
+        head_tile = sched_of(tile).tile_of(score_site)
         if head_tile is not None and head_tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
             # width and the absolute ``bound`` the realizer stops/masks against.

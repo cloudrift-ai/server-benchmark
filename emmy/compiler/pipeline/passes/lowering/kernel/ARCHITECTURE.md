@@ -23,7 +23,7 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
   (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the
   degenerate arm here. (This build was a separate `005_contract` pass, then folded into materialize, and now lives
   recognize-side so the node exists before scheduling; the schedule only PLACES it, and declines with
-  `LoweringError` when there is no `(m, n)` grid pair to place onto.)
+  no output-tile row when there is no `(m, n)` grid pair to place onto.)
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
@@ -34,8 +34,10 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 
 ### The recursive node walk (`_emit`) — one hierarchical emitter
 
-Two recursions cooperate. The **root** recursion `_factorize(op, ctx, tail, out_val)` binds a node to the grid: a `Map`
-with a `source` recurses (projection → `tail`), the leaf binds via the one `_bind` pipeline. The **body**
+Two recursions cooperate. The **root** recursion `_factorize(op, ctx, tail, out_val)` binds a node to the grid: a
+zero-axis projection over a structural node recurses (projection → `tail`), while one whose placement edge terminates
+at a materialized `Load` flattens that load into the per-cell projection body; the leaf binds via the one `_bind`
+pipeline. The **body**
 recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map` / `Fold` tree,
 through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient cell environment: the grid axes, operand
 `inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
@@ -349,14 +351,16 @@ is the placement-keyed fold's **fragment row**: where the scalar tier folds in-t
 fold is a `FragmentRowReduce` `__shfl` butterfly over the C-fragment lanes. The fold MOVE itself is never re-decided
 per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE placement-keyed selector — within-warp → `SHFL`,
 within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL` — and every emitter consumes its output
-(`emit_combine` at scalar residence, this realizer at fragment residence, `030_split_reduce` as the graph rewrite); only the
-residence-specific realization differs. Everything realizes from structure — the
-head contraction's `ldmatrix`/`mma.sync` off its node geometry (`_frag_contraction`); the score prologue stmt-by-stmt
+(`emit_combine` at scalar residence, this realizer at fragment residence, `030_split_reduce` as the graph rewrite);
+only the residence-specific realization differs. Everything realizes from structure — the head contraction's
+`ldmatrix`/`mma.sync` off its node geometry (`_frag_contraction`), or a PLACE-materialized score's gmem `Load` into
+the identical C-fragment lane map (`FragmentLoad`, with staging decided empty); the score prologue stmt-by-stmt
 (`Assign` → `FragmentApply`, a coordinate `Select` → `FragmentMask` with the keep-predicate negated, an
 `(m, kv)`-indexed additive bias `Load` + `add` — SDPA's explicit `attn_mask`, the HF precomputed causal /
 sliding-window band — → a per-fragment `FragmentBiasAdd` reading the mask at each element's absolute coordinates
 (previously the whole kernel demoted to the scalar tier — every real-model gemma attention layer at seq > window),
-loop-invariant constant `Load`s hoisted); the streaming merge REGENERATED from the carrier's channel spec (pivot → rowmax + running
+loop-invariant constant `Load`s hoisted); the streaming merge REGENERATED from the carrier's channel spec (pivot →
+rowmax + running
 stats + α-rescale; denom → rowsum; the expect channel's ⊗ `lift` IS the P@V node, the register-resident P converted
 straight into its A-operand fragments by the **C→A register repack** (`FragmentRepack` — the `AtomKind.c_to_a_repack`
 lane-map compatibility: the m16n8 C fragment is elementwise lane-aligned with the m16k16 A fragment's k-halves, so

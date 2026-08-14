@@ -33,8 +33,11 @@ FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 an
 `from_f8*` performs the inverse reinterpretation before widening. `is_runnable(graph)` is `True` only when every
 compute op and every elementwise operation name has a mapping. Data-dependent `GatherOp` / `ScatterOp` remain
 unsupported, so `run --ir` falls back to emmy-only benchmarking for those graphs. `build_callable(graph,
-input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. Symbolic
-graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
+input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. The
+callable returns every graph output, using a tensor for the common single-output case and an output-name mapping
+otherwise; the accuracy gate pairs names exactly and treats a missing output or output-size mismatch as a
+failure. Symbolic graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the
+supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
 shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
 gets the same vs-torch comparison as a static one (benched at the `Dim` hint by

@@ -56,6 +56,22 @@ def test_linear_and_elementwise():
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
 
 
+def test_multi_output_callable_preserves_graph_output_order():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4,)), node_id="x")
+    g.add_node(ElementwiseOp(op="relu"), ["x"], Tensor("positive", (4,)), node_id="positive")
+    g.add_node(ElementwiseOp(op="negative"), ["x"], Tensor("negative", (4,)), node_id="negative")
+    g.inputs, g.outputs = ["x"], ["negative", "positive"]
+    x = torch.tensor([-2.0, -1.0, 1.0, 2.0])
+
+    fn, inputs = torch_ref.build_callable(g, {"x": x})
+    outputs = fn(*inputs)
+
+    assert list(outputs) == ["negative", "positive"]
+    torch.testing.assert_close(outputs["negative"], -x)
+    torch.testing.assert_close(outputs["positive"], torch.relu(x))
+
+
 def test_declared_dtype_cast_is_enforced():
     """The trace folds HF's explicit casts (e.g. the fp32 RMSNorm body casting
     back to fp16) into each node's declared output dtype; ``build_callable``

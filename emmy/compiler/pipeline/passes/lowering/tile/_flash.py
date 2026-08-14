@@ -917,6 +917,22 @@ class _FlashMatch:
     v_inline: tuple[Loop, tuple[Stmt, ...], str, Load] | None = None
 
 
+@dataclass(frozen=True)
+class _InlineQk:
+    """Canonical computed Q/K edges recovered from one inlined score cell.
+
+    ``q_id`` / ``k_id`` are declaration anchors only; the edges retain every exact external
+    load. Their logical shapes come from the SDPA iteration space rather than either anchor's
+    physical storage shape, which may be one packed projection buffer.
+    """
+
+    q_id: str
+    k_id: str
+    q_edge: Load | Fold
+    k_edge: Load | Fold
+    head_dim: Dim
+
+
 def _pv_loads(graph: Graph, node: Node) -> tuple[Load, Load, Loop, tuple[Stmt, ...], str] | None:
     """Return the probability load and V cone for a bare P×V root.
 
@@ -1139,12 +1155,14 @@ def _qk_cell(rowmax: Loop, m_var: str, kv_var: str) -> tuple[Loop, list[Stmt], s
     """Recover one Q×K contraction cell nested under ``rowmax``.
 
     Returns the contraction loop plus each product argument's pure backward cone, value name,
-    and sequence-bearing leaf load. A K-normalization statistic is not mistaken for Q×K because
-    it has no query-indexed side.
+    and one declaration anchor. Classification uses each WHOLE cone's axis dependence: a packed
+    affine view, coordinate ``Select``, normalization weight, and rotary inputs may contribute
+    several sequence-bearing loads while still defining one closed scalar Q or K value. A
+    K-normalization statistic is not mistaken for Q×K because it has no query-indexed side.
     """
 
-    def index_vars(stmts: list[Stmt]) -> set[str]:
-        return {v for st in stmts if isinstance(st, Load) for expr in st.index for v in expr.free_vars()}
+    def expr_vars(stmts: list[Stmt]) -> set[str]:
+        return {v for st in stmts for expr in st.exprs() for v in expr.free_vars()}
 
     found = []
     for lp in rowmax.body.iter_of_type(Loop):
@@ -1159,13 +1177,15 @@ def _qk_cell(rowmax: Loop, m_var: str, kv_var: str) -> tuple[Loop, list[Stmt], s
             cone = map_cone(list(lp.body), value)
             if not cone:
                 break
-            vars_ = index_vars(cone)
+            vars_ = expr_vars(cone)
             leaves = [
                 s
                 for s in cone
-                if isinstance(s, Load) and _slot_of(s.index, lp.axis.name) is not None and ((m_var in vars_) or (kv_var in vars_))
+                if isinstance(s, Load)
+                and lp.axis.name in {v for expr in s.index for v in expr.free_vars()}
+                and ({m_var, kv_var} & {v for expr in s.index for v in expr.free_vars()})
             ]
-            if len(leaves) != 1:
+            if not leaves or lp.axis.name not in vars_:
                 break
             sides.append((cone, value, leaves[0], m_var in vars_, kv_var in vars_))
         if len(sides) != 2:
@@ -1234,7 +1254,7 @@ def _inline_operand_edge(
         return None
     members = [stmt for group in reversed(groups) for stmt in group]
     loops = [stmt for stmt in members if isinstance(stmt, Loop)]
-    if any(not isinstance(stmt, (Load, Assign, Loop)) for stmt in members):
+    if any(not (stmt.pure or isinstance(stmt, Loop)) for stmt in members):
         return None
     if len(loops) > 1:
         return None
@@ -1270,29 +1290,29 @@ def _inline_operand_edge(
 
 def _extract_inline_qk(
     score: Node,
+    root: Node,
     m_var: str,
     kv_var: str,
     rowmax: Loop,
-) -> tuple[tuple[str, tuple[int, int], Load | Fold], tuple[str, tuple[int, int], Load | Fold]] | None:
-    """Recover canonical Q/K operand edges from an inlined softmax producer."""
+) -> _InlineQk | None:
+    """Recover canonical Q/K operand edges from an inlined softmax producer.
+
+    Logical attention axes come from the consumer's iteration space. A physical declaration
+    anchor cannot supply them when Q and K are affine views of one packed projection buffer.
+    """
     found = _qk_cell(rowmax, m_var, kv_var)
     if found is None:
         return None
     qk_loop, q_cone, q_value, q_load, k_cone, k_value, k_load = found
-    q_layout = (_slot_of(q_load.index, m_var), _slot_of(q_load.index, qk_loop.axis.name))
-    k_layout = (_slot_of(k_load.index, kv_var), _slot_of(k_load.index, qk_loop.axis.name))
-    if None in (*q_layout, *k_layout):
+    writes = [stmt for stmt in root.op.body.iter() if isinstance(stmt, Write)]
+    if len(writes) != 1 or len(writes[0].index) != len(root.output.shape) or _var_at(writes[0].index, -2) != m_var:
         return None
-    q_layout = (q_layout[0], q_layout[1])
-    k_layout = (k_layout[0], k_layout[1])
 
-    # Canonical batch variables are learned from Q's non-(seq,last) slots. K may carry the
-    # same head variable through an affine GQA ``head // group`` access, which substitution
-    # then preserves exactly on its computed edge.
+    # The root write spells canonical ``(batch…, m, d)``. Its batch/head variables bind Q's
+    # logical batch axes; K may carry the same head variable through affine GQA ``head/group``.
     outer_sigma: dict[str, Var] = {m_var: Var("m"), kv_var: Var("kv")}
-    batch_pos = [i for i in range(len(q_load.index)) if i not in q_layout]
-    for i, pos in enumerate(batch_pos):
-        expr = q_load.index[pos]
+    batch_rank = len(root.output.shape) - 2
+    for i, expr in enumerate(writes[0].index[:-2]):
         if isinstance(expr, Var):
             outer_sigma[expr.name] = Var(f"b{i}")
         elif expr.free_vars():
@@ -1305,12 +1325,12 @@ def _extract_inline_qk(
     k_edge = _inline_operand_edge(score.op, qk_loop, path, k_cone, k_value, prefix="flash_k", outer_sigma=outer_sigma)
     if q_edge is None or k_edge is None:
         return None
-    allowed = {*(f"b{i}" for i in range(len(batch_pos))), "m", "kv", "dd"}
+    allowed = {*(f"b{i}" for i in range(batch_rank)), "m", "kv", "dd", "flash_q_stat", "flash_k_stat"}
     for edge in (q_edge, k_edge):
         for stmt in Body(tuple(edge.lower() if isinstance(edge, Fold) else (edge,))).iter():
-            if isinstance(stmt, Load) and any(expr.free_vars() - allowed - {"flash_q_stat", "flash_k_stat"} for expr in stmt.index):
+            if any(expr.free_vars() - allowed for expr in stmt.exprs()):
                 return None
-    return (q_load.input, q_layout, q_edge), (k_load.input, k_layout, k_edge)
+    return _InlineQk(q_load.input, k_load.input, q_edge, k_edge, qk_loop.axis.extent)
 
 
 def _extract_inline_v(root: Node, found: tuple[Loop, tuple[Stmt, ...], str, Load]) -> tuple[tuple[int, int], Fold] | None:
@@ -1391,7 +1411,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     inline_qk = None
     if found.inline is not None:
         m_var, kv_var, rowmax = found.inline
-        inline_qk = _extract_inline_qk(score_producer, m_var, kv_var, rowmax)
+        inline_qk = _extract_inline_qk(score_producer, root, m_var, kv_var, rowmax)
         qk = None
     else:
         qk = _extract_qk(score_producer)
@@ -1416,7 +1436,9 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         q_layout = k_layout = v_layout = None
         access_indices = (q_idx, k_idx, v_idx)
     elif inline_qk is not None:
-        (q_id, q_layout, q_edge), (k_id, k_layout, k_edge) = inline_qk
+        q_id, k_id = inline_qk.q_id, inline_qk.k_id
+        q_edge, k_edge = inline_qk.q_edge, inline_qk.k_edge
+        q_layout = k_layout = None  # computed edges already carry exact canonicalized accesses
         if graph.buffer(q_id) is None or graph.buffer(k_id) is None:
             return None
     else:
@@ -1444,9 +1466,16 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
         # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
         # indices permute back to each operand's own slot order (``_permute_idx``).
-        q_shape = _canon_shape(graph.buffer(q_id).shape, q_layout)
-        k_shape = _canon_shape(graph.buffer(k_id).shape, k_layout)
         v_shape = _canon_shape(graph.buffer(v_id).shape, v_layout)
+        if inline_qk is not None:
+            # Q's batch/head + query axes are the consumer output's leading dimensions; K
+            # shares V's batch/kv-head + sequence axes. Replace only the value dimension with
+            # the score contraction's D. Physical q_id/k_id storage may be one packed buffer.
+            q_shape = (*root.output.shape[:-1], inline_qk.head_dim)
+            k_shape = (*v_shape[:-1], inline_qk.head_dim)
+        else:
+            q_shape = _canon_shape(graph.buffer(q_id).shape, q_layout)
+            k_shape = _canon_shape(graph.buffer(k_id).shape, k_layout)
         if materialized_v is not None:
             v_id = f"{root.output.name}__flash_v"
             v_layout = None  # the recognizer-minted workspace is canonical by construction

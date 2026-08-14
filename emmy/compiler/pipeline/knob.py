@@ -87,11 +87,12 @@ class Knob:
     hints: tuple = ()
     help: str = ""
     # Optional custom featurizer for the online-prior feature vector: maps this
-    # knob's value to a ``dict[str, float]`` of sub-features. Declared at the
+    # knob's concrete key and value to a ``dict[str, float]`` of sub-features. The key lets a
+    # scoped family preserve the structural site selected by ``FAMILY@path``. Declared at the
     # knob (e.g. ``MMA`` expands an atom kind into physical cell/dtype props) so
     # ``knob_features`` needs no per-knob special-casing. ``None`` → encode by
     # ``type`` (INT → float, BOOL → 0/1, BINMASK → popcount/width/frac).
-    features: Callable[[Any], dict[str, float]] | None = None
+    features: Callable[[str, Any], dict[str, float]] | None = None
     # The "unused / declined" OFF value. When a knob doesn't apply to a variant
     # (a tier-foreign knob like ``WM`` on a scalar kernel) or its owning pass
     # declines / is skipped, :func:`apply_off_defaults` stamps this value so the

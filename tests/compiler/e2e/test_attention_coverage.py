@@ -418,6 +418,94 @@ def test_flash_form_fork_offers_geometry_grid():
         assert len(chain) == 1 and len(serial) >= 1, f"{dtype}: chain/serial siblings missing ({len(chain)}/{len(serial)})"
 
 
+def test_materialized_score_flash_offers_warp_row_on_capable_targets(monkeypatch):
+    """Cutting the QK score edge leaves the same algebraic TWISTED carrier, whose schedule owns
+    the tensor-core P@V choice. Every target that advertises the fp16 mma primitive must offer the
+    same materialized-score warp row; staging stays disabled because the score is already in gmem."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@dd=cut")
+    args = tuple(torch.randn(1, 1, 16, 16, dtype=torch.float16) for _ in range(3))
+    rows_by_target = []
+    for target in ((8, 0), (9, 0), (12, 0)):
+        graph = trace_module(_Sdpa(), args)
+        rows = [
+            row
+            for row in enumerate_graph(graph, Context.from_target(target))
+            if row.get("TILE") and "TILE@pj" in row and str(row.get("WORK", "")).startswith("w")
+        ]
+        rows_by_target.append(rows)
+
+    assert all(rows for rows in rows_by_target)
+    assert all(not row["STAGE"] for rows in rows_by_target for row in rows)
+    assert rows_by_target[0][0] == rows_by_target[1][0] == rows_by_target[2][0]
+
+
+def test_materialized_score_flash_lowers_workspace_to_pv_mma(monkeypatch):
+    """A pinned PLACE cut plus the generic warp schedule loads the materialized scores straight
+    into C fragments, runs online softmax, repacks P to A, and tensor-core schedules P@V."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@dd=cut")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x2")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x2")
+    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    args = tuple(torch.randn(1, 1, 16, 16, dtype=torch.float16) for _ in range(3))
+    graph = trace_module(_Sdpa(), args)
+    output = graph.outputs[0]
+    compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((9, 0))).resolve(
+        graph, lambda fp: flatten_leaves(fp.options)[0]
+    )
+    kernels = [node for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None)]
+    assert len(kernels) == 2, "the PLACE cut must launch one score producer and one residue"
+    residue = compiled.nodes[output]
+    src = residue.op.kernel_source
+    assert any("__cut_sacc" in name for name in residue.inputs)
+    assert "sacc_f0[0] =" in src and "__cut_sacc[" in src, "the score workspace must load into C fragments"
+    assert "emmy_c_to_a_f16" in src, "online-softmax probabilities must repack from C to A fragments"
+    assert "emmy_mma_m16n8k16_f16_f32" in src, "P@V must run on the target's advertised mma primitive"
+
+
+def test_materialized_score_splitkv_keeps_fragment_partial(monkeypatch):
+    """A schedule-selected cross-CTA KV partition preserves the materialized-score warp form in
+    the partial kernel instead of silently falling back to scalar P@V."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@dd=cut")
+    args = tuple(torch.randn(1, 1, 32, 16, dtype=torch.float16) for _ in range(3))
+    graph = trace_module(_Sdpa(), args)
+    picked = False
+
+    def choose_split(fp):
+        nonlocal picked
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            row = getattr(leaf, "knobs", {}) or {}
+            if row.get("TILE") and "TILE@pj" in row and row.get("REDUCE") == "g2k" and str(row.get("WORK", "")).startswith("w"):
+                picked = True
+                return leaf
+        return leaves[0]
+
+    compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((9, 0))).resolve(graph, choose_split)
+    partial = next(node.op for nid, node in compiled.nodes.items() if nid.endswith("__partial"))
+    assert picked
+    assert "__cut_sacc[" in partial.kernel_source
+    assert "emmy_c_to_a_f16" in partial.kernel_source
+    assert "emmy_mma_m16n8k16_f16_f32" in partial.kernel_source
+
+
 @requires_cuda
 @pytest.mark.parametrize(("um", "nt"), [(2, 4), (4, 8)])
 def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):

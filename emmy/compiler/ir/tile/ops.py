@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
-from emmy.compiler.ir.stmt import Loop, StridedLoop
+from emmy.compiler.ir.stmt import Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, is_contraction, stmt_axis_names
+from emmy.compiler.ir.tile.ir import Fold, _operand_result_names, deep_defines, deep_reads, effect_tail, is_contraction, stmt_axis_names
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -132,6 +132,12 @@ class Sched:
         site = next((s for s in self._all_sites() if s.node is node), None)
         if site is None:
             return None
+        score, pv = stream_pair(node)
+        if isinstance(score, Load) and pv is not None:
+            if len(free) < 2:
+                return None
+            ax = node.axis.window.parent if node.axis.window is not None else node.axis
+            return (free[-2], ax)
         if site.depth == 1:
             return self.place.root_mn
         if len(free) < 2:
@@ -248,13 +254,14 @@ def head(op):
 
 
 def stream_pair(node) -> tuple:
-    """The ``(score, expectation)`` contractions a STREAMING fold schedules through — flash's
-    hoisted ``Σ Q·K`` edge at the head of its derived evaluation and the synthesized ``Σ_j P·V``
-    below the merge — or ``(None, None)`` for any other node.
+    """The ``(score edge, expectation contraction)`` a STREAMING fold schedules through — the
+    hoisted score operand (COMPUTED ``Σ Q·K`` or its MATERIALIZED ``Load`` cut terminal) and the
+    synthesized ``Σ_j P·V`` below the merge — or ``(None, None)`` for any other node.
 
-    Found by POSITION, because position is what tells them apart: the score is a hoisted operand
-    edge, so it leads the step; the expectation is synthesized under the merge stmts that produce
-    the softmax weight it reads, which is exactly why it cannot be hoisted above them.
+    Found from the injection algebra rather than a name: string-valued non-pivot lift components
+    bind the expectation operand edges, leaving the score as the one other operand. The expectation
+    contraction is the derived contraction distinct from that score edge. This remains true when
+    PLACE materializes the score and replaces its ``Fold`` edge with a ``Load``.
 
     ONE reading for a question five readers were asking on their own — and asking two different
     ways, ``is_contraction`` in the tile and kernel layers against ``role is AxisRole.CONTRACTION``
@@ -262,9 +269,17 @@ def stream_pair(node) -> tuple:
     spellings of one rule stay equal only until one of them is edited."""
     if not isinstance(node, Fold) or node.axis is None:
         return None, None  # a zero-axis fold has no monoid, so no derived step to read
-    steps = list(node.step_stmts())
-    score = steps[0] if steps and is_contraction(steps[0]) else None
-    return score, next((s for s in steps[1:] if is_contraction(s)), None)
+    bindings = {}
+    for edge in node.operands:
+        for name in _operand_result_names(edge):
+            bindings[name] = edge
+    expectation = {id(bindings[term]) for term in node.lift.results[1:] if isinstance(term, str) and term in bindings}
+    scores = [edge for edge in node.operands if id(edge) not in expectation and isinstance(edge, (Fold, Load))]
+    if len(scores) != 1:
+        return None, None
+    score = scores[0]
+    pv = next((s for s in node.step_stmts() if is_contraction(s) and s is not score), None)
+    return (score, pv) if pv is not None else (None, None)
 
 
 def reduce_loop(op):

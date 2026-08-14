@@ -4,7 +4,7 @@ dtypes)``. This is a LOWERING helper, not IR vocabulary: the stored term keeps e
 program (the flat ``combine``), and everything here — the state⊕state re-emission, the one-shot
 :class:`~emmy.compiler.ir.stmt.algebra.StateMerge`, the per-component seeds, the twist facts —
 is derived on demand at the two consumers, the kernel materializer (``lowering/kernel/_factor``
-and friends) and the cross-CTA split (``lowering/tile/030_split_reduce``). Nothing else reads it.
+and friends) and the cross-CTA split (``lowering/schedule/030_split_reduce``). Nothing else reads it.
 
 Leading ``_`` so the pass loader skips this module."""
 

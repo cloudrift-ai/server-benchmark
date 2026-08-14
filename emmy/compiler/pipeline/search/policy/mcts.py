@@ -61,6 +61,16 @@ O3_REBENCH_TOL = 2.0
 O3_NVCC_FLAGS = "-Xcicc -O3"
 
 
+@dataclass(frozen=True)
+class DirectTerminal:
+    """One directly observed successful terminal, kept exact across CudaOps."""
+
+    realized_knobs: dict[str, object]
+    pins: dict[str, str]
+    latency_us: float
+    cuda_record_knobs: tuple[dict[str, str], ...]
+
+
 @dataclass
 class SearchNode:
     candidate: LazyCandidate | None  # None for the root sentinel
@@ -85,6 +95,9 @@ class SearchNode:
     # CUDA kernels (for example a split reduction + combine). A candidate-file
     # annotation is only unambiguous in the one-CudaOp case.
     realized_cuda_ops: int | None = field(default=None, repr=False)
+    # Ordered canonical knob rows for every CudaOp in the directly-benched
+    # terminal. Unlike ``realized_knobs`` this never merges conflicting rows.
+    realized_cuda_record_knobs: tuple[dict[str, str], ...] | None = field(default=None, repr=False)
     # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
     # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
     # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
@@ -223,6 +236,7 @@ class TuningSearch(Search):
             {**self._node_knobs(token), **self._realized_knobs(candidate)} if candidate is not None else self._node_knobs(token)
         )
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
+        token.realized_cuda_record_knobs = self._realized_cuda_rows(candidate)
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -309,6 +323,44 @@ class TuningSearch(Search):
 
         return sum(isinstance(node.op, CudaOp) for node in graph.nodes.values())
 
+    @staticmethod
+    def _realized_cuda_rows(candidate: object | None) -> tuple[dict[str, str], ...] | None:
+        """Ordered, conflict-preserving CudaOp rows from one observed terminal."""
+        graph = getattr(candidate, "graph", None)
+        if graph is None:
+            return None
+        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import stamp_schedule_families  # noqa: PLC0415
+
+        return tuple(
+            stamp_schedule_families(graph.nodes[nid].op.knobs or {})
+            for nid in graph.topological_order()
+            if isinstance(graph.nodes[nid].op, CudaOp)
+        )
+
+    def _best_realized_node(self) -> SearchNode | None:
+        """The fastest directly observed successful leaf, with stable tie-breaking."""
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+        best: SearchNode | None = None
+        stack = list(self.tree.root.children)
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children)
+            stats = node.bench_stats
+            if node.bench_status != "ok" or node.realized_knobs is None or stats is None or stats.median <= 0:
+                continue
+            if best is None:
+                best = node
+                continue
+            assert best.bench_stats is not None and best.realized_knobs is not None
+            if (stats.median, canonical_row_key(node.realized_knobs)) < (
+                best.bench_stats.median,
+                canonical_row_key(best.realized_knobs),
+            ):
+                best = node
+        return best
+
     def best_realized(self) -> tuple[dict, float, int | None] | None:
         """Return the fastest directly observed successful terminal.
 
@@ -318,20 +370,26 @@ class TuningSearch(Search):
         different configuration. Equal medians break deterministically by the
         canonical knob row.
         """
-        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+        node = self._best_realized_node()
+        if node is None:
+            return None
+        assert node.realized_knobs is not None and node.bench_stats is not None
+        return dict(node.realized_knobs), float(node.bench_stats.median), node.realized_cuda_ops
 
-        best: tuple[dict, float, int | None] | None = None
-        stack = list(self.tree.root.children)
-        while stack:
-            node = stack.pop()
-            stack.extend(node.children)
-            stats = node.bench_stats
-            if node.bench_status != "ok" or node.realized_knobs is None or stats is None or stats.median <= 0:
-                continue
-            candidate = (dict(node.realized_knobs), float(stats.median), node.realized_cuda_ops)
-            if best is None or (candidate[1], canonical_row_key(candidate[0])) < (best[1], canonical_row_key(best[0])):
-                best = candidate
-        return best
+    def best_direct_terminal(self) -> DirectTerminal | None:
+        """Return the winning direct leaf without merging its CudaOp rows."""
+        node = self._best_realized_node()
+        if node is None or not node.realized_cuda_record_knobs:
+            return None
+        from emmy.compiler.pipeline.knob import stamp_schedule_families  # noqa: PLC0415
+
+        assert node.realized_knobs is not None and node.bench_stats is not None
+        return DirectTerminal(
+            realized_knobs=dict(node.realized_knobs),
+            pins=stamp_schedule_families(self._node_knobs(node)),
+            latency_us=float(node.bench_stats.median),
+            cuda_record_knobs=tuple(dict(row) for row in node.realized_cuda_record_knobs),
+        )
 
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;

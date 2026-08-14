@@ -72,7 +72,8 @@ autotuning cache doesn't bust on cosmetic edits.
 | `ir/`                 | Op-type definitions per dialect         | `ir/ARCHITECTURE.md`         |
 | `trace/`              | PyTorch/HuggingFace → Graph IR          | `trace/ARCHITECTURE.md`      |
 | `pipeline/`           | Rewrite engine, passes, dump hooks      | `pipeline/ARCHITECTURE.md`   |
-| `pipeline/passes/lowering/tile/` | LoopOp → TileOp; **purely algebraic moveset, no specializations** (dispatch on fold algebra) | `pipeline/passes/ARCHITECTURE.md` |
+| `pipeline/passes/lowering/tile/` | maximal algebra recognition + structural placement; no target or shape specializations | `pipeline/passes/ARCHITECTURE.md` |
+| `pipeline/passes/lowering/schedule/` | capability-compatible schedule enumeration and graph-level schedule realization | `pipeline/passes/ARCHITECTURE.md` |
 | `backend/`            | Execution (numpy / loop / cuda)         | `backend/ARCHITECTURE.md`    |
 | `loader/`             | Bind constants (safetensors / `nn.Module` → `input_data`) | —              |
 | `pipeline/search/`    | Autotune DB + MCTS tree (see below)     | `pipeline/ARCHITECTURE.md`   |
@@ -87,11 +88,15 @@ autotuning cache doesn't bust on cosmetic edits.
 - **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp`'s
   `__post_init__` canonicalizes (`ir/stmt/normalize.py`) and simplifies
   (`ir/stmt/passes.py`) its body. Fusion forms the maximal reasonable algebraic region without consulting hardware,
-  schedules, or profitability; kernel partitioning is the later `PLACE` structural fork.
+  schedules, or profitability; recognition certifies that algebra without `Context`; kernel partitioning is the
+  later `PLACE` structural fork. Placement retains the certified Tile-IR terms on both sides of a cut and reaches a
+  graph-level fixpoint before schedule enumeration begins.
 - **Layer 3** — hardware instruction spelling and launch mechanics live in Kernel IR and backends. Compiler passes
   remain target-portable: they receive hardware facts through `Context`, recognize only structure, and gate schedule
-  or lowering choices on named primitive capabilities rather than GPU names or repeated SM-number thresholds. The
-  pass-authoring contract and its executable guardrail live in `pipeline/passes/ARCHITECTURE.md`.
+  or lowering choices on named primitive capabilities and atom requirements rather than GPU names or repeated
+  SM-number thresholds. A measured GPU-specific golden can select a generic choice; it cannot create a recognition,
+  schedule, or lowering path. The pass-authoring contract and its executable guardrail live in
+  `pipeline/passes/ARCHITECTURE.md`.
 
 ## Shared invariants
 

@@ -155,13 +155,15 @@ def _tree(build, pick=None, *, target=(12, 0)):
 def _routing_tree(record):
     """Rebuild the pre-schedule tree that placement routing resolves against."""
     recognize = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
     graph = record.target_program.copy()
     roots = [n for n in graph.nodes.values() if isinstance(n.op, LoopOp)]
     assert len(roots) == 1, f"{record.name}: expected one persisted LoopOp, got {len(roots)}"
     root = roots[0]
     fused, _ = recognize._fuse(root.op.body)
     node, free, stores = recognize._lift(list(fused), root.output.name)
-    prologue = recognize.bind_prologue_contraction(node, free)
+    prologue = bind_prologue_contraction(node, free)
     return prologue[0] if prologue is not None else node
 
 

@@ -393,6 +393,26 @@ def _normed_sdpa_graph():
     return graph
 
 
+def _packed_rope_sdpa_graph():
+    """A closed packed Q/K map cone with RMS statistics and half-rotation selects."""
+    from emmy.commands.trace import graph_from_code
+
+    code = """(lambda p,v,c,s: torch.nn.functional.scaled_dot_product_attention(
+        (lambda x: (x*c)+(torch.cat((-x[...,4:],x[...,:4]),dim=-1)*s))(
+            (lambda x: x*torch.rsqrt((x.float()*x.float()).mean(-1,keepdim=True)+1e-6).to(x.dtype))(
+                p[...,:32].view(1,8,4,8).transpose(1,2))),
+        (lambda x: (x*c)+(torch.cat((-x[...,4:],x[...,:4]),dim=-1)*s))(
+            (lambda x: x*torch.rsqrt((x.float()*x.float()).mean(-1,keepdim=True)+1e-6).to(x.dtype))(
+                p[...,32:48].view(1,8,2,8).transpose(1,2))),
+        v, is_causal=True, enable_gqa=True))(
+            torch.randn(1,8,48,dtype=torch.float16),
+            torch.randn(1,2,8,8,dtype=torch.float16),
+            torch.randn(1,1,8,8,dtype=torch.float16),
+            torch.randn(1,1,8,8,dtype=torch.float16))"""
+    graph, _, _ = graph_from_code(code)
+    return graph
+
+
 def test_normed_gqa_sdpa_certifies_flash():
     """The fused flash form must certify when gate-free loop fusion moves RMSNorm'd Q/K
     cones into the repeated score contractions. The existing flash recognizer recovers those
@@ -417,6 +437,37 @@ def test_normed_gqa_sdpa_certifies_flash():
     first = src.step_stmts()[0]
     assert getattr(first, "role", None) is AxisRole.CONTRACTION, "flash did not absorb the score contraction (fold stayed cut)"
     assert not isinstance(first.a, Load) and not isinstance(first.b, Load), "normalized Q/K cones were reduced to raw loads"
+
+
+def test_packed_rope_qk_cones_certify_flash_without_dropping_loads():
+    """Closed Q/K operand edges may have several sequence-bearing loads.
+
+    Packed affine views, RMS statistics, and a half-rotation ``Select`` are still one pure map per
+    Q/K cell. Recognition must preserve the packed data and both rotary inputs on each computed
+    edge instead of requiring one physical load to stand in for the logical attention operand.
+    """
+    pytest.importorskip("torch")
+    from emmy.compiler.ir.tile.ir import operand_body
+
+    def decide(fp):
+        return flatten_leaves(fp.options)[0]
+
+    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((9, 0))).resolve(_packed_rope_sdpa_graph(), decide)
+    flashes = [
+        n.op
+        for n in terminal.nodes.values()
+        if isinstance(n.op, TileOp)
+        and isinstance(n.op.op, Fold)
+        and n.op.op.axis is None
+        and n.op.op.operands
+        and n.op.op.operands[0].role is AxisRole.TWISTED
+    ]
+    assert len(flashes) == 1
+    qk = flashes[0].op.operands[0].step_stmts()[0]
+    assert qk.role is AxisRole.CONTRACTION and not isinstance(qk.a, Load) and not isinstance(qk.b, Load)
+    for edge in (qk.a, qk.b):
+        reads = {stmt.input for stmt in operand_body(edge) if isinstance(stmt, Load)}
+        assert {"x0", "x2", "x3"} <= reads, "the computed edge must retain packed data plus both rotary inputs"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():

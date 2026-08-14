@@ -334,7 +334,7 @@ def knob_features(knobs: dict) -> dict[str, float]:
         if knob is not None and knob.unfeatured:
             continue  # unfeatured knob (cosmetic re-spell / umbrella gate): never a ranking feature
         if knob is not None and knob.features is not None:
-            for feature, contribution in knob.features(val).items():
+            for feature, contribution in knob.features(name, val).items():
                 feats[feature] = feats.get(feature, 0.0) + contribution
             continue
         if knob is None:

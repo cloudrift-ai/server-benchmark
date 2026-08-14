@@ -19,8 +19,8 @@ spawn site), not on a fixed
 pass index:
 
 - **Outer** (:func:`run_two_level_tune`) drives ``frontend`` + ``loop`` and the
-  recognition half of ``lowering/tile`` (:func:`outer_pipeline`). Fusion stays
-  deterministic and maximal; recognition offers ``PLACE`` choices that either
+  recognition and placement steps of ``lowering/tile`` (:func:`outer_pipeline`). Fusion stays
+  deterministic and maximal; placement offers ``PLACE`` choices that either
   keep that region or materialize one closed seam. A terminal has every
   placement decision resolved and every kernel represented by an unmapped
   ``TileOp``. Each terminal is a candidate kernel set;
@@ -71,13 +71,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The structural / op-variant boundary lies between tile recognition and tile
-# scheduling. Recognition owns the PLACE fork because it changes the kernel set;
-# scheduling and every later lowering fork remain separable per kernel.
+# The structural / op-variant boundary lies between tile placement and tile
+# scheduling. Recognition certifies maximal algebra, placement owns the PLACE fork
+# because it changes the kernel set, and every later fork is separable per kernel.
 
 # Lowering-only passes after loop fusion: ``recognize → schedule → kernel → cuda``.
 # The inner per-op search receives an already-recognized ``TileOp`` slice, so
-# ``010_recognize`` cannot re-open its outer-owned placement decision. The
+# ``010_recognize`` / ``015_place`` cannot re-open the outer-owned placement decision. The
 # recognized algebra — and thus its ``Op.cache_key`` — is never re-touched by
 # ``loop/fusion``; inner ``perf`` / ``lowering`` rows therefore transfer to the
 # assembled graph. Slicing this as the tail of ``CUDA_PASSES`` keeps it aligned
@@ -89,13 +89,13 @@ def outer_pipeline() -> Pipeline:
     """Drive maximal fusion, algebra recognition, and structural placement only.
 
     ``010_recognize`` lifts each fused ``LoopOp`` to an unmapped ``TileOp`` and
-    offers the fused-vs-materialized ``PLACE`` fork. A cut's new ``LoopOp`` pieces
-    re-enter that same rule until the complete kernel set is recognized. The outer
+    ``015_place`` offers the fused-vs-materialized ``PLACE`` fork. A cut's recognized
+    pieces re-enter placement until the complete kernel set is resolved. The outer
     pipeline stops before ``020_schedule``: tile/reduce/stage choices are inner,
     per-kernel decisions, including graph splices caused by a selected reduce plan.
     """
     passes = [Pass.load(name, i) for i, name in enumerate(LOOP_PASSES)]
-    passes.append(Pass.load("lowering/tile", len(passes), {"010_recognize"}))
+    passes.append(Pass.load("lowering/tile", len(passes)))
     return Pipeline(passes=passes)
 
 
@@ -126,6 +126,28 @@ class OpResult:
     searched_knobs: dict[str, str] | None = None
     searched_us: float | None = None
     searched_cuda_ops: int | None = None
+    searched_pins: dict[str, str] | None = None
+    searched_cuda_record_knobs: tuple[dict[str, str], ...] | None = None
+
+
+@dataclass(frozen=True)
+class KernelSetOpWinner:
+    """Exact direct result for one deduplicated recognized kernel."""
+
+    op_key: str
+    multiplicity: int
+    pins: dict[str, str]
+    latency_us: float
+    cuda_record_knobs: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class KernelSetWinner:
+    """One exact searched placement plus its independently tuned kernels."""
+
+    placement: dict[str, str]
+    kernels: tuple[KernelSetOpWinner, ...]
+    latency_us: float
 
 
 @dataclass
@@ -164,6 +186,47 @@ class TwoLevelResult:
     n_terminals: int  # kernel-set alternatives evaluated by the outer search
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
     prior_summaries: list[str] = field(default_factory=list)  # online-prior stats
+
+    def searched_winner(self) -> tuple[dict[str, str], float] | KernelSetWinner | None:
+        """Return the scalar wire when possible, otherwise the exact kernel set."""
+        if self.best_reward is None:
+            return None
+        scalar = self.best_reward.searched_winner()
+        if scalar is not None:
+            return scalar
+        if self.best_fused is None or not self.best_reward.per_op:
+            return None
+
+        placement: dict[str, str] = {}
+        for node in self.best_fused.nodes.values():
+            for key, value in node.op.decision_knobs.items():
+                if key.split("@", 1)[0] != "PLACE":
+                    continue
+                if key in placement and str(placement[key]) != str(value):
+                    return None
+                placement[key] = str(value)
+
+        kernels: list[KernelSetOpWinner] = []
+        for op in self.best_reward.per_op:
+            if (
+                op.multiplicity < 1
+                or op.searched_pins is None
+                or op.searched_us is None
+                or op.searched_us <= 0
+                or not op.searched_cuda_record_knobs
+            ):
+                return None
+            kernels.append(
+                KernelSetOpWinner(
+                    op_key=op.op_key,
+                    multiplicity=op.multiplicity,
+                    pins=dict(op.searched_pins),
+                    latency_us=float(op.searched_us),
+                    cuda_record_knobs=tuple(dict(row) for row in op.searched_cuda_record_knobs),
+                )
+            )
+        latency_us = sum(kernel.latency_us * kernel.multiplicity for kernel in kernels)
+        return KernelSetWinner(placement=placement, kernels=tuple(kernels), latency_us=latency_us)
 
 
 def _point_stats(us: float) -> PerfStats:
@@ -332,7 +395,7 @@ async def _inner_reward_async(
             # main + combine both count). Record that total under the LoopOp
             # key so ``best_per_op_time`` reads the true per-op cost.
             best_total = 1.0 / inner.tree.best_reward if inner.tree.best_reward > 0 else None
-            searched = inner.best_realized()
+            searched = inner.best_direct_terminal()
             if best_total is not None:
                 # captured=True: the sweep benches under graph capture by default, so
                 # this Σ-best bookkeeping row derives from captured measurements (a
@@ -363,13 +426,15 @@ async def _inner_reward_async(
                 inner._collect_node_records(context_key=ctx_key, op_sig=op_sig, gpu=gpu, run_id=run_id, o3_context_key=o3_ctx_key)
             )
             best = db.best_per_op_time(ctx_key, key, backend=backend_name)
-            searched_knobs = searched_us = searched_cuda_ops = None
+            searched_knobs = searched_us = searched_cuda_ops = searched_pins = searched_cuda_record_knobs = None
             if searched is not None:
                 from emmy.compiler.pipeline.knob import stamp_schedule_families  # noqa: PLC0415
 
-                searched_knobs = stamp_schedule_families(searched[0])
-                searched_us = searched[1]
-                searched_cuda_ops = searched[2]
+                searched_knobs = stamp_schedule_families(searched.realized_knobs)
+                searched_us = searched.latency_us
+                searched_cuda_ops = len(searched.cuda_record_knobs)
+                searched_pins = dict(searched.pins)
+                searched_cuda_record_knobs = tuple(dict(row) for row in searched.cuda_record_knobs)
             results[op_idx] = OpResult(
                 name=name,
                 op_key=key,
@@ -378,6 +443,8 @@ async def _inner_reward_async(
                 searched_knobs=searched_knobs,
                 searched_us=searched_us,
                 searched_cuda_ops=searched_cuda_ops,
+                searched_pins=searched_pins,
+                searched_cuda_record_knobs=searched_cuda_record_knobs,
             )
             if progress is not None:
                 progress.op_done(name, slot=op_idx)
@@ -446,7 +513,7 @@ async def run_two_level_tune(
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
     ``_bench_terminal_async``. The outer pipeline (:func:`outer_pipeline`) runs
-    through algebra recognition and stops before scheduling, so each ``PLACE``
+    through algebra recognition and placement and stops before scheduling, so each ``PLACE``
     fork branches the outer tree — one terminal per kernel set, compared by
     Σ-per-op cost. A graph with no
     structural offers yields a single terminal and this reduces to "tune each

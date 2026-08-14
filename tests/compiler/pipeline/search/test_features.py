@@ -22,6 +22,14 @@ def test_scoped_place_rows_encode_kernel_set_choice() -> None:
     assert cut["PLACE_cut"] == 1.0
 
 
+def test_scoped_place_rows_preserve_the_selected_seam() -> None:
+    cut_a = knob_features({"PLACE@a": "cut", "PLACE@map": "fuse"})
+    cut_map = knob_features({"PLACE@a": "fuse", "PLACE@map": "cut"})
+    assert cut_a != cut_map
+    assert cut_a["PLACE_cut_site_a"] == 1.0
+    assert cut_map["PLACE_cut_site_map"] == 1.0
+
+
 def _feats(reduce_codec: str, work: str = "", **extra):
     """A tileless reduce row: the site-local ``REDUCE`` value plus the ``WORK`` inventory its
     cooperative width lives in."""

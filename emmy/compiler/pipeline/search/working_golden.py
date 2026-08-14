@@ -8,7 +8,9 @@ persistence. CLI commands only validate argument combinations and report errors.
 from __future__ import annotations
 
 import copy
+import math
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -422,19 +424,177 @@ def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingG
     dump_golden_file(document, path, overwrite=True)
 
 
+def _kernel_set_knobs(value: object, *, where: str, placement: bool) -> dict:
+    """Validate and copy one canonical string-valued knob map from a working tune result."""
+    from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{where} must be a mapping")
+    out = {}
+    for name, item in value.items():
+        family = family_of(name) if isinstance(name, str) and name else ""
+        descriptor = get(family)
+        if descriptor is None:
+            raise ValueError(f"{where} names unknown knob {name!r}")
+        if (family == "PLACE") != placement:
+            expected = "PLACE" if placement else "schedule"
+            raise ValueError(f"{where} must contain only {expected} knobs")
+        if not isinstance(item, str):
+            raise ValueError(f"{where}.{name} must be a canonical string value, got {item!r}")
+        if descriptor.type in {KnobType.BOOL, KnobType.INT}:
+            try:
+                descriptor.parse(item)
+            except ValueError as exc:
+                raise ValueError(f"{where}.{name} has invalid {descriptor.type.value} spelling {item!r}") from exc
+        out[name] = item
+    return out
+
+
+def parse_kernel_set_ranking(ranking: object) -> dict:
+    """Validate and normalize one exact working-only ``ranking.kernel_set``."""
+    if not isinstance(ranking, Mapping):
+        raise ValueError("ranking must be a mapping")
+    if ranking.get("source") != "tune" or ranking.get("status") != "ok" or ranking.get("tune_winner") is not True:
+        raise ValueError("kernel-set winner requires source=tune, status=ok, and tune_winner=true")
+    if not isinstance(ranking.get("compile_flags"), str):
+        raise ValueError("kernel-set winner compile_flags must be a string")
+    if "measured_knobs" in ranking:
+        raise ValueError("kernel-set winner cannot carry scalar measured_knobs")
+    latency = ranking.get("latency_us")
+    if isinstance(latency, bool) or not isinstance(latency, int | float) or not math.isfinite(latency) or latency <= 0:
+        raise ValueError("kernel-set winner latency_us must be finite and positive")
+    raw = ranking.get("kernel_set")
+    if not isinstance(raw, Mapping):
+        raise ValueError("ranking.kernel_set must be a mapping")
+    unknown = set(raw) - {"placement", "kernels"}
+    if unknown:
+        raise ValueError(f"ranking.kernel_set has unknown field(s): {', '.join(sorted(unknown))}")
+    placement = _kernel_set_knobs(raw.get("placement"), where="ranking.kernel_set.placement", placement=True)
+    rows = raw.get("kernels")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("ranking.kernel_set.kernels must be a non-empty list")
+
+    kernels = []
+    seen = set()
+    weighted = 0.0
+    allowed = {"op_key", "multiplicity", "pins", "latency_us", "cuda_record_knobs"}
+    for index, row in enumerate(rows):
+        where = f"ranking.kernel_set.kernels[{index}]"
+        if not isinstance(row, Mapping):
+            raise ValueError(f"{where} must be a mapping")
+        unknown = set(row) - allowed
+        if unknown:
+            raise ValueError(f"{where} has unknown field(s): {', '.join(sorted(unknown))}")
+        op_key = row.get("op_key")
+        if not isinstance(op_key, str) or not op_key:
+            raise ValueError(f"{where}.op_key must be a non-empty string")
+        if op_key in seen:
+            raise ValueError(f"{where}.op_key duplicates {op_key!r}")
+        seen.add(op_key)
+        multiplicity = row.get("multiplicity")
+        if type(multiplicity) is not int or multiplicity <= 0:
+            raise ValueError(f"{where}.multiplicity must be a positive integer")
+        component_us = row.get("latency_us")
+        if (
+            isinstance(component_us, bool)
+            or not isinstance(component_us, int | float)
+            or not math.isfinite(component_us)
+            or component_us <= 0
+        ):
+            raise ValueError(f"{where}.latency_us must be finite and positive")
+        pins = _kernel_set_knobs(row.get("pins"), where=f"{where}.pins", placement=False)
+        cuda_rows = row.get("cuda_record_knobs")
+        if not isinstance(cuda_rows, list) or not cuda_rows:
+            raise ValueError(f"{where}.cuda_record_knobs must be a non-empty list")
+        normalized_cuda = [
+            _kernel_set_knobs(item, where=f"{where}.cuda_record_knobs[{cuda_index}]", placement=False)
+            for cuda_index, item in enumerate(cuda_rows)
+        ]
+        weighted += float(component_us) * multiplicity
+        kernels.append(
+            {
+                "op_key": op_key,
+                "multiplicity": multiplicity,
+                "pins": pins,
+                "latency_us": float(component_us),
+                "cuda_record_knobs": normalized_cuda,
+            }
+        )
+    if not math.isclose(float(latency), weighted, rel_tol=1e-12, abs_tol=1e-9):
+        raise ValueError(f"kernel-set winner latency_us {latency} does not equal weighted direct latency {weighted}")
+    return {"placement": placement, "kernels": kernels}
+
+
 def persist_tune_winner(
     path: str | Path,
     document: dict,
     target: WorkingGoldenTarget,
-    winner: tuple[dict[str, str], float] | None,
+    winner: object | None,
     *,
     compile_flags: str,
 ) -> None:
-    """Atomically persist one unambiguous directly searched winner."""
+    """Atomically persist one unambiguous directly searched winner, or fail closed.
+
+    Scalar winners retain their legacy flat wire. A multi-kernel winner records exact placement and
+    per-operation schedules. Only a tune with neither representation receives a target-scoped marker,
+    so a strict publication run cannot mistake an older winner or unchanged inventory for success.
+    """
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.two_level import KernelSetWinner  # noqa: PLC0415
 
     configs = document["configs"]
-    if winner is not None:
+    marker_path = kernel_set_path = None
+    for entry_path in target.entry_indexes:
+        realization = configs[entry_path[0]]["realizations"][entry_path[1]]
+        if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
+            continue
+        ranking = realization.get("ranking")
+        if not isinstance(ranking, dict) or ranking.get("source") != "tune":
+            continue
+        if winner is None and ranking.get("status") == "no_exact_pin" and marker_path is None:
+            marker_path = entry_path
+            continue
+        if isinstance(winner, KernelSetWinner) and "kernel_set" in ranking and kernel_set_path is None:
+            kernel_set_path = entry_path
+            continue
+        if ranking.get("tune_winner") is True or ranking.get("status") == "no_exact_pin":
+            realization["ranking"] = {**ranking, "status": "superseded"}
+            realization["ranking"].pop("tune_winner", None)
+
+    if isinstance(winner, KernelSetWinner):
+        winner_ranking = {
+            "source": "tune",
+            "status": "ok",
+            "tune_winner": True,
+            "compile_flags": compile_flags,
+            "latency_us": winner.latency_us,
+            "kernel_set": {
+                "placement": dict(winner.placement),
+                "kernels": [
+                    {
+                        "op_key": kernel.op_key,
+                        "multiplicity": kernel.multiplicity,
+                        "pins": dict(kernel.pins),
+                        "latency_us": kernel.latency_us,
+                        "cuda_record_knobs": [dict(row) for row in kernel.cuda_record_knobs],
+                    }
+                    for kernel in winner.kernels
+                ],
+            },
+        }
+        parse_kernel_set_ranking(winner_ranking)
+        if kernel_set_path is None:
+            config_index, realization_index = target.entry_indexes[0]
+            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
+            for key in ("knobs", "measurements", "ranking"):
+                seed.pop(key, None)
+            seed["ranking"] = winner_ranking
+            configs[config_index]["realizations"].append(seed)
+            kernel_set_path = (config_index, len(configs[config_index]["realizations"]) - 1)
+            target.entry_indexes.append(kernel_set_path)
+        else:
+            configs[kernel_set_path[0]]["realizations"][kernel_set_path[1]]["ranking"] = winner_ranking
+    elif winner is not None:
         winner_knobs, winner_us = winner
         winner_ranking = {
             "status": "ok",
@@ -456,10 +616,8 @@ def persist_tune_winner(
         )
         if writable is not None:
             realization = configs[writable[0]]["realizations"][writable[1]]
-            previous = dict(realization.get("ranking") or {})
             realization["ranking"] = {
                 **winner_ranking,
-                "source": previous.get("source", "tune"),
                 "tune_winner": True,
             }
         elif not matching:
@@ -471,4 +629,24 @@ def persist_tune_winner(
             seed["ranking"] = {**winner_ranking, "tune_winner": True}
             configs[config_index]["realizations"].append(seed)
             target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
+    else:
+        marker = {
+            "source": "tune",
+            "status": "no_exact_pin",
+            "compile_flags": compile_flags,
+            "latency_us": None,
+            "measured_knobs": None,
+            "error": "tune produced no exact replayable winner",
+        }
+        if marker_path is None:
+            config_index, realization_index = target.entry_indexes[0]
+            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
+            for key in ("knobs", "measurements", "ranking"):
+                seed.pop(key, None)
+            seed["ranking"] = marker
+            configs[config_index]["realizations"].append(seed)
+            marker_path = (config_index, len(configs[config_index]["realizations"]) - 1)
+            target.entry_indexes.append(marker_path)
+        else:
+            configs[marker_path[0]]["realizations"][marker_path[1]]["ranking"] = marker
     dump_golden_file(document, path, overwrite=True)

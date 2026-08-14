@@ -2,9 +2,9 @@
 
 Placement offers the maximal fused region plus every realizable single-seam cut before schedule
 enumeration. ROUTING entries (PLACE-only golden knobs) and authoritative ``PLACE`` pins collapse
-that fork; otherwise option-0 is fused and search may measure the fragments. Cut pieces re-recognize
-and schedule as fresh roots, recursively. These tests run off-GPU through the full CUDA pass list,
-asserting fork identity, kernel sets, and buffer wiring.
+that fork; otherwise option-0 is fused and search may measure the fragments. Cut pieces retain
+recognized algebra and place/schedule as fresh roots, recursively. These tests run off-GPU through
+the full CUDA pass list, asserting fork identity, kernel sets, and buffer wiring.
 """
 
 from __future__ import annotations
@@ -214,8 +214,60 @@ def test_placement_space_is_capability_independent(monkeypatch) -> None:
     assert rows and all(row == rows[0] for row in rows[1:])
 
 
+def test_recognized_flash_fragment_offers_and_replays_score_cut(monkeypatch) -> None:
+    """Graph-producing recognition still reaches the shared placement and schedule paths."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from test_recognize_boundary_rules import _packed_rope_sdpa_graph
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    rows = [_placement_rows(_packed_rope_sdpa_graph(), Context.from_target(target)) for target in ((8, 0), (9, 0), (12, 0))]
+    assert rows and all(row == rows[0] for row in rows[1:])
+    assert any(row.get("PLACE@dd") == "cut" for row in rows[0])
+
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.tile.ops import head
+    from emmy.compiler.pipeline.search.two_level import outer_pipeline
+
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@dd=cut")
+    placed, _ = Run(pipeline=outer_pipeline(), ctx=Context.from_target((9, 0))).resolve(
+        _packed_rope_sdpa_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    score = next(node.op for node in placed.nodes.values() if "__cut_" in node.id and isinstance(node.op, TileOp))
+    assert is_contraction(head(score.op)), "placement must preserve the recognized score contraction"
+
+    out = _compile(_packed_rope_sdpa_graph(), "PLACE@dd=cut", monkeypatch, Context.from_target((9, 0)))
+    kernels = [node.op for node in out.nodes.values() if getattr(node.op, "kernel_source", None)]
+    assert len(kernels) == 2
+    assert all(kernel.decision_knobs == {"PLACE@dd": "cut"} for kernel in kernels)
+    assert all(any(key in kernel.knobs for key in ("TILE", "TILE@dd", "REDUCE", "REDUCE@dd")) for kernel in kernels)
+
+
+def test_drifted_routing_cut_does_not_stamp_a_cut_that_did_not_happen(monkeypatch) -> None:
+    """A stale routing entry falls back to the recognized form with truthful lineage."""
+    from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES
+    from emmy.compiler.pipeline.passes.lowering.tile import _cut
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from test_recognize_boundary_rules import _prologue_shape
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    for family in SCHEDULE_FAMILIES:
+        monkeypatch.delenv(f"EMMY_{family}", raising=False)
+    entry = SimpleNamespace(name="drifted.routing", knobs={"PLACE@missing": "cut"})
+    monkeypatch.setattr(_cut, "_routing_entry", lambda *_args, **_kwargs: entry)
+    node, free = _prologue_shape(b_layouts=(False, False))
+    tree, n_axis, stores = bind_prologue_contraction(node, free)
+    decision = _cut._placement_decision(Context.from_target((9, 0)), {}, tree, stores, (*free, n_axis))
+    assert decision.decided and decision.seam is None
+    assert decision.knobs == {}
+
+
 def test_selecting_place_cut_schedules_each_resulting_kernel(monkeypatch) -> None:
-    """A cut is followed by independent recognition and schedule enumeration for both pieces."""
+    """A cut is followed by independent placement and schedule enumeration for both pieces."""
     from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
 
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
@@ -248,7 +300,7 @@ def test_selecting_place_cut_schedules_each_resulting_kernel(monkeypatch) -> Non
 
 
 def test_shared_a_product_cut_retains_every_contraction_channel(monkeypatch) -> None:
-    """A cut materializes the shared A edge; recursive recognition must preserve the whole product."""
+    """A cut materializes the shared A edge while preserving the whole recognized product."""
     from emmy.compiler.ir.tile import Fold, TileOp
     from emmy.compiler.ir.tile.ir import is_contraction
     from emmy.compiler.ir.tile.ops import axis_names
@@ -302,8 +354,8 @@ def test_rms_norm_place_cut_splits_stat_and_scale(monkeypatch) -> None:
 
 def test_norm_linear_cone_cut_recurses_to_the_full_cascade(monkeypatch) -> None:
     """Bare ``PLACE=cut`` cuts the cone edge (the fold seam is the pure-copy degenerate and is
-    not cuttable), the cone piece re-recognizes as the rms_norm shape and cuts again — the
-    plan's worked cascade: statistic + scale + plain matmul, all from EXISTING kinds."""
+    not cuttable), then recursively cuts the cone's recognized statistic edge: statistic + scale
+    + plain matmul, all from existing algebraic readings."""
     out = _compile(_norm_linear_graph(), "PLACE=cut", monkeypatch)
     kernels = _kernel_ids(out)
     cuts = [k for k in kernels if "__cut_" in k]

@@ -16,6 +16,7 @@ from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_f
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
     load_working_targets,
+    parse_kernel_set_ranking,
     persist_proposal_rankings,
     persist_tune_winner,
     realized_tuning_knobs,
@@ -181,7 +182,7 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert "measurements" not in winner
 
 
-def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
+def test_ambiguous_multi_cuda_winner_is_recorded_as_unreplayable(tmp_path):
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm")), path)
     document, targets = load_working_targets(path)
@@ -191,8 +192,138 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
 
     got = load_golden_file(path)
     assert len(got["configs"]) == 1
-    assert got["configs"][0]["realizations"][0]["name"] == "mm"
+    realizations = got["configs"][0]["realizations"]
+    assert realizations[0]["name"] == "mm"
+    markers = [realization for realization in realizations if (realization.get("ranking") or {}).get("status") == "no_exact_pin"]
+    assert len(markers) == 1
+    assert "knobs" not in markers[0]
+    assert markers[0]["ranking"]["source"] == "tune"
+    assert "tune_winner" not in markers[0]["ranking"]
     assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+
+    persist_tune_winner(path, document, targets[0], None, compile_flags="-O1")
+    again = load_golden_file(path)["configs"][0]["realizations"]
+    assert sum((realization.get("ranking") or {}).get("status") == "no_exact_pin" for realization in again) == 1
+
+
+def test_exact_multi_kernel_winner_persists_without_flattening(tmp_path):
+    from emmy.compiler.pipeline.search.two_level import KernelSetOpWinner, KernelSetWinner
+
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    document, targets = load_working_targets(path)
+    winner = KernelSetWinner(
+        placement={"PLACE@root": "cut"},
+        kernels=(
+            KernelSetOpWinner(
+                op_key="op-a",
+                multiplicity=2,
+                pins={"TILE": "f2x2", "REDUCE": "", "LOOPIFY": "0"},
+                latency_us=4.0,
+                cuda_record_knobs=({"TILE": "f2x2", "REDUCE": "", "LOOPIFY": "0"},),
+            ),
+            KernelSetOpWinner(
+                op_key="op-b",
+                multiplicity=1,
+                pins={"TILE": "f4x1", "REDUCE": "g2k"},
+                latency_us=6.0,
+                cuda_record_knobs=(
+                    {"TILE": "f4x1", "REDUCE": "g2k"},
+                    {"TILE": "f8x1", "REDUCE": ""},
+                ),
+            ),
+        ),
+        latency_us=14.0,
+    )
+
+    persist_tune_winner(path, document, targets[0], winner, compile_flags="-Xcicc -O1")
+    persist_tune_winner(path, document, targets[0], winner, compile_flags="-Xcicc -O1")
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    exact = [row for row in realizations if (row.get("ranking") or {}).get("tune_winner") is True]
+    assert len(exact) == 1
+    row = exact[0]
+    assert "knobs" not in row and "measurements" not in row
+    assert "measured_knobs" not in row["ranking"]
+    assert parse_kernel_set_ranking(row["ranking"]) == {
+        "placement": {"PLACE@root": "cut"},
+        "kernels": [
+            {
+                "op_key": "op-a",
+                "multiplicity": 2,
+                "pins": {"TILE": "f2x2", "REDUCE": "", "LOOPIFY": "0"},
+                "latency_us": 4.0,
+                "cuda_record_knobs": [{"TILE": "f2x2", "REDUCE": "", "LOOPIFY": "0"}],
+            },
+            {
+                "op_key": "op-b",
+                "multiplicity": 1,
+                "pins": {"TILE": "f4x1", "REDUCE": "g2k"},
+                "latency_us": 6.0,
+                "cuda_record_knobs": [
+                    {"TILE": "f4x1", "REDUCE": "g2k"},
+                    {"TILE": "f8x1", "REDUCE": ""},
+                ],
+            },
+        ],
+    }
+
+
+def test_kernel_set_ranking_rejects_inexact_latency_and_multiplicity() -> None:
+    ranking = {
+        "source": "tune",
+        "status": "ok",
+        "tune_winner": True,
+        "compile_flags": "-O1",
+        "latency_us": 8.0,
+        "kernel_set": {
+            "placement": {},
+            "kernels": [
+                {
+                    "op_key": "op-a",
+                    "multiplicity": 2,
+                    "pins": {"TILE": "f2x2"},
+                    "latency_us": 3.0,
+                    "cuda_record_knobs": [{"TILE": "f2x2"}],
+                }
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="weighted direct latency"):
+        parse_kernel_set_ranking(ranking)
+    ranking["kernel_set"]["kernels"][0]["multiplicity"] = 0
+    with pytest.raises(ValueError, match="positive integer"):
+        parse_kernel_set_ranking(ranking)
+    ranking["kernel_set"]["kernels"][0]["multiplicity"] = 2
+    ranking["measured_knobs"] = {"TILE": "f2x2"}
+    with pytest.raises(ValueError, match="scalar measured_knobs"):
+        parse_kernel_set_ranking(ranking)
+
+
+def test_current_tune_result_retires_stale_winner_and_owns_matching_proposal(tmp_path):
+    path = tmp_path / "working.yaml"
+    stale = _matmul("mm", knobs={"TILE": "f2x2"})
+    stale["ranking"] = {
+        "source": "tune",
+        "status": "ok",
+        "tune_winner": True,
+        "latency_us": 9.0,
+        "compile_flags": "-O1",
+        "measured_knobs": {"TILE": "f2x2"},
+    }
+    proposal = _matmul("mm", knobs={"TILE": "f4x2"})
+    proposal["ranking"] = {"source": "proposal", "status": "ok", "latency_us": 8.0}
+    dump_golden_file(_document(stale, proposal), path)
+    document, targets = load_working_targets(path)
+
+    persist_tune_winner(path, document, targets[0], ({"TILE": "f4x2"}, 7.5), compile_flags="-O1")
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert realizations[0]["ranking"]["status"] == "superseded"
+    assert "tune_winner" not in realizations[0]["ranking"]
+    assert realizations[1]["ranking"]["source"] == "tune"
+    assert realizations[1]["ranking"]["tune_winner"] is True
 
 
 def test_working_file_rejects_canonical_path_and_symlink(tmp_path):
@@ -331,7 +462,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         await asyncio.sleep(0.01)
         active -= 1
         kwargs["backend_slots"].put_nowait(backend)
-        return SimpleNamespace(prior_summaries=[], best_reward=None, assembled=None)
+        return SimpleNamespace(prior_summaries=[], best_reward=None, assembled=None, searched_winner=lambda: None)
 
     target_dirs = []
 

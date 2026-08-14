@@ -47,13 +47,17 @@ class Op:
 
     ``source`` is the predecessor op in any rewrite chain — the engine
     stamps it automatically on every 1:1 in-place rebind
-    (``_apply_one`` Op branch), so a fully-lowered ``CudaOp`` keeps the
+    (the ``Candidate.apply`` Op branch), so a fully-lowered ``CudaOp`` keeps the
     full path back through ``KernelOp → TileOp → LoopOp`` (or any other
     chain a future pipeline introduces) via repeated ``.source``
     traversals. Keyword-only so positional construction of subclass
     fields keeps working; excluded from :meth:`Graph.structural_key`
     via ``_STRUCTURAL_SKIP_FIELDS`` — pure attribution metadata, not
     part of dataflow identity.
+
+    ``source_is_graph_splice`` classifies an edge minted by a same-dialect ``Graph`` splice. The fragments retain
+    their shared predecessor for decision replay, but their individual launch times cannot price that predecessor as
+    ordinary per-kernel lowering evidence. Like ``source``, the flag is attribution metadata rather than IR identity.
 
     ``decision_knobs`` carries kernel-set decisions separately from ``knobs``. A structural fork
     must remain replayable after its pieces are scheduled, but its placement choice is not a
@@ -72,14 +76,21 @@ class Op:
     """
 
     source: Op | None = field(default=None, kw_only=True, repr=False, compare=False)
+    # Classifies the edge to ``source``. A Graph splice can mint several same-dialect kernels from
+    # one op; each fragment keeps the predecessor for decision replay, but its individual latency
+    # must not become an ordinary lowering edge for the pre-splice op.
+    source_is_graph_splice: bool = field(default=False, kw_only=True, repr=False, compare=False)
     # Free-form metadata dict for rules to stamp the knobs they used
     # (e.g. ``{"BN": 64, "BM": 64}`` from ``005_blockify_launch``). The
-    # engine's ``_apply_one`` merges the predecessor's knobs forward on
+    # engine's 1:1 rebind path merges the predecessor's knobs forward on
     # every 1:1 rebind, so a fully-lowered ``CudaOp`` carries every
     # autotune knob picked along the chain. Excluded from structural
     # identity and equality — pure attribution metadata.
     knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     decision_knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
+    # Ephemeral rule state. Excluded from structural identity and persistence; a rule may use it
+    # to mark an in-memory phase boundary without turning that marker into compiler IR.
+    meta: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     inputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     outputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
 

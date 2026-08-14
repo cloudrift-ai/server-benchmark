@@ -58,8 +58,10 @@ def _idx_vars_deep(stmts) -> set:
 
 def map_cone(body: list, root: str) -> list | None:
     """The backward cone of SSA ``root`` within ``body`` — the fused producer's compute, in body
-    order. ``None`` unless every cone stmt is a scalar ``Load`` or a pointwise ``Assign`` (a pure
-    MAP cone — a reduce-bearing cone, e.g. an rmsnorm scale, is not compute-fillable per cell)."""
+    order. ``None`` unless every cone stmt is a pure, non-scoped value binding (a MAP cone — a
+    reduce-bearing cone, e.g. an rmsnorm scale, is not compute-fillable per cell). The shared
+    ``Stmt.pure`` trait includes coordinate ``Select`` as well as ``Load`` / ``Assign``; recognizing
+    the trait instead of a class list keeps every algebraic pointwise spelling on the same path."""
     defs: dict[str, Stmt] = {}
     for st in body:
         for d in st.defines():
@@ -71,20 +73,15 @@ def map_cone(body: list, root: str) -> list | None:
         if st is None or id(st) in seen:
             continue
         seen.add(id(st))
-        if isinstance(st, Load):
+        if st.pure and not st.nested():
             cone.append(st)
-            # A data-dependent gather/index load consumes SSA values through its INDEX rather
-            # than through ``Assign.args``. Those definitions are part of the producer cone too;
-            # dropping them leaves an apparently pure map with undefined index temporaries once
-            # the operand is compute-filled. Axis names are harmless here because ``defs.get``
-            # simply ignores names not defined by the body.
+            # Loads consume SSA through their index expressions, Select consumes branch values
+            # and coordinate predicates, and future pure leaves may expose either surface. Axis
+            # names are harmless because ``defs.get`` ignores names not defined by this body.
             need.extend(st.deps())
+            need.extend(v for expr in st.exprs() for v in expr.free_vars())
             continue
-        if isinstance(st, Assign):
-            cone.append(st)
-            need.extend(st.args)
-            continue
-        return None  # an Accum / Loop / Select in the cone — not a pure MAP producer
+        return None  # an Accum / Loop / Write / effect — not a pure MAP producer
     order = {id(st): i for i, st in enumerate(body)}
     return sorted(cone, key=lambda st: order[id(st)])
 

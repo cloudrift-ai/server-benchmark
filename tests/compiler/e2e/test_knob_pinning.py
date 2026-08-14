@@ -11,7 +11,7 @@ env-var mechanism (see ``emmy/compiler/pipeline/knob.py`` —
 ``apply_knobs_env`` splats the aggregate into per-knob
 ``EMMY_<K>=V`` vars at import time, and ``Knob.narrow`` overrides
 the schedule's candidate codecs with the pinned value in
-``lowering/tile/020_schedule`` so only the matching variant is built).
+``lowering/schedule/020_schedule`` so only the matching variant is built).
 
 The shared failure mode is the "single-CTA + F-replicated" codegen
 class: ``BN·FN = full_N AND BM·FM = full_M`` with ``FM·FN > 1`` (so

@@ -120,3 +120,21 @@ def test_strict_result_requires_every_requested_exact_row():
     errors = run_mod._strict_benchmark_errors(args, {"Emmy": 10.0}, bench, True, proof, [])
 
     assert "expected 1 exact --ab row(s), got 0" in errors
+
+
+def test_strict_result_requires_expected_working_golden_row():
+    args = SimpleNamespace(bench_backends="emmy", ab=None, expected_golden_pins=1)
+    proof = {
+        "status": "pass",
+        "reference": "eager",
+        "rtol": 1e-3,
+        "atol": 1e-3,
+        "max_abs_error": 0.0,
+        "mean_abs_error": 0.0,
+        "max_rel_error": 0.0,
+    }
+    bench = SimpleNamespace(captured=True)
+
+    errors = run_mod._strict_benchmark_errors(args, {"Emmy": 10.0}, bench, True, proof, [])
+
+    assert "expected 1 exact working-golden row(s), got 0" in errors

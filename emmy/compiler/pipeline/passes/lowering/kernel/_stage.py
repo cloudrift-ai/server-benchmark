@@ -60,6 +60,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
 )
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.tile.ir import deep_defines
 
 
 def _mul(a: Expr, b: Expr) -> Expr:
@@ -553,7 +554,7 @@ class SyncTransport:
                 plans.append("vector")
             else:
                 plans.append("cell")
-            cell_defs |= set(a.defines())
+            cell_defs |= deep_defines(a)
         return plans
 
     def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:
@@ -606,7 +607,7 @@ class SyncTransport:
             # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
             # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
             # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in st.defines()}
+            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in deep_defines(st)}
             for p in range(len(cell_stmts[0])):
                 if plans[p] == "hoist":
                     body.append(cell_stmts[0][p])

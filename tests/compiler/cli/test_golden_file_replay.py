@@ -191,6 +191,97 @@ def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
 
     assert len(args.golden_configs) == 1
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
+    assert args.expected_golden_pins == 1
+
+
+def test_working_kernel_set_winner_is_automatically_pinned(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path)
+    realization = document["configs"][0]["realizations"][0]
+    realization["ranking"] = {
+        "source": "tune",
+        "status": "ok",
+        "tune_winner": True,
+        "compile_flags": "-O1",
+        "latency_us": 7.0,
+        "kernel_set": {
+            "placement": {},
+            "kernels": [
+                {
+                    "op_key": "working-op",
+                    "multiplicity": 1,
+                    "pins": {"WORK": "w1x1"},
+                    "latency_us": 7.0,
+                    "cuda_record_knobs": [{"WORK": "w1x1"}],
+                }
+            ],
+        },
+    }
+    dump_golden_file(document, path, overwrite=True)
+    args = _args(path)
+
+    resolve_golden_arg(args)
+
+    assert len(args.golden_configs) == 1
+    sample = args.golden_configs[0]
+    assert sample.knobs == {}
+    assert sample.latency_us == 7.0
+    assert sample.kernel_set == realization["ranking"]["kernel_set"]
+    assert args.expected_golden_pins == 1
+
+
+def test_working_kernel_set_winner_rejects_extra_component_field(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path)
+    document["configs"][0]["realizations"][0]["ranking"] = {
+        "source": "tune",
+        "status": "ok",
+        "tune_winner": True,
+        "latency_us": 7.0,
+        "kernel_set": {
+            "placement": {},
+            "kernels": [
+                {
+                    "op_key": "working-op",
+                    "multiplicity": 1,
+                    "pins": {"WORK": "w1x1"},
+                    "latency_us": 7.0,
+                    "cuda_record_knobs": [{"WORK": "w1x1"}],
+                    "node_id": "y",
+                }
+            ],
+        },
+    }
+    dump_golden_file(document, path, overwrite=True)
+
+    with pytest.raises(SystemExit, match="2"):
+        resolve_golden_arg(_args(path))
+
+
+def test_working_unreplayable_tune_result_requires_an_exact_row(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path)
+    document["configs"][0]["realizations"][0]["ranking"] = {
+        "source": "tune",
+        "status": "no_exact_pin",
+        "compile_flags": "-O1",
+        "latency_us": None,
+        "measured_knobs": None,
+        "error": "tune produced no exact replayable winner",
+    }
+    dump_golden_file(document, path, overwrite=True)
+    args = _args(path)
+
+    resolve_golden_arg(args)
+
+    assert args.golden_configs == []
+    assert args.expected_golden_pins == 1
 
 
 def test_working_invalid_direct_tune_winner_is_rejected(tmp_path):

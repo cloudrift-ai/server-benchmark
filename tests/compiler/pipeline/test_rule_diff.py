@@ -66,11 +66,14 @@ def test_display_name_prefixes_known_pass():
 
 
 def test_pass_shorthand_matches_cli_shortcut_inverse():
-    # Single source of truth: commands/compile.py builds its --passes
-    # shortcut expander by inverting PASS_SHORTHAND.
+    # Single source of truth: commands/compile.py groups every pass carrying
+    # one shorthand so a multi-pass stage (tile structure + schedule) stays atomic.
     from emmy.commands.compile import _PASS_SHORTCUTS
 
-    assert _PASS_SHORTCUTS == {short: full for full, short in PASS_SHORTHAND.items()}
+    expected = {}
+    for full, short in PASS_SHORTHAND.items():
+        expected.setdefault(short, []).append(full)
+    assert _PASS_SHORTCUTS == expected
 
 
 def test_should_use_color_modes(monkeypatch):

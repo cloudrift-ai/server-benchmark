@@ -568,7 +568,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                         html_dir=(dump.dir if dump and tmp_dump is None else None),
                         device_id=backends[0].device_id,
                     )
-            winner = result.best_reward.searched_winner() if result.best_reward is not None else None
+            winner = result.searched_winner()
             persist_tune_winner(args.golden_file, document, target, winner, compile_flags=config.nvcc_flags())
         for block in results[0].prior_summaries if results else []:
             sys.stderr.write(block + "\n")
@@ -750,7 +750,7 @@ def handle_tune(args):
                         device_id=backends[0].device_id,
                     )
             if working_document is not None:
-                winner = result.best_reward.searched_winner() if result.best_reward is not None else None
+                winner = result.searched_winner()
                 persist_tune_winner(
                     args.golden_file,
                     working_document,

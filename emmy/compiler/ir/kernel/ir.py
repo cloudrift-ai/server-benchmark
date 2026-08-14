@@ -1183,6 +1183,56 @@ class FragmentMask(Stmt):
 
 
 @dataclass(frozen=True)
+class FragmentLoad(Stmt):
+    """Per-element gmem load into an mma C-fragment at absolute row/column coordinates.
+
+    The index is a template over :data:`FRAG_ROW` / :data:`FRAG_COL`; ``row_base`` and
+    ``col_base`` place each lane-owned element through the C-fragment layout. Source f16/bf16
+    values convert to the f32 fragment algebra on assignment."""
+
+    frag: str
+    buf: str
+    index: tuple[Expr, ...]
+    col_base: Expr
+    row_base: Expr
+    layout: FragLayout = M16N8
+
+    def deps(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.buf,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (*self.index, self.col_base, self.row_base)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        idx = ", ".join(e.pretty() for e in self.index)
+        return [f"{indent}FragmentLoad({self.frag} = {self.buf}[{idx}])"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        pad = _pad(ctx.indent)
+        lay = self.layout
+        conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
+        dt = ctx.buffer_dtypes.get(self.buf, "f32")
+        lines = _lane_preamble(ctx, pad, lay.lane_decl)
+        for i in range(lay.n_elems):
+            sub: dict[str, Expr] = {
+                FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i]),
+                FRAG_ROW: BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]]),
+            }
+            idx = tuple(e.substitute(sub) for e in self.index)
+            flat = render_index(self.buf, idx, ctx)
+            lines.append(f"{pad}{self.frag}[{i}] = {conv.get(dt, '{}').format(f'{self.buf}[{flat}]')};")
+        return lines
+
+
+@dataclass(frozen=True)
 class FragmentBiasAdd(Stmt):
     """Per-element **additive gmem bias** over an mma C-fragment — the fragment-tier realization of
     the explicit additive score mask (SDPA's ``attn_mask`` float bias: the HF precomputed causal /
@@ -2644,5 +2694,20 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         fill=s.fill,
+        layout=s.layout,
+    )
+
+
+@_rewrite.register
+def _(s: FragmentLoad, rename, sigma, axis_fn):
+    # Like the gmem-direct LdmatrixLoad, this assigns an already-declared fragment. Route the
+    # fragment name through SSA replication and the load-index template plus tile origins through
+    # the axis substitution; the backing buffer is an external name and stays unchanged.
+    return FragmentLoad(
+        frag=rename(s.frag),
+        buf=s.buf,
+        index=tuple(sigma.apply(e) for e in s.index),
+        col_base=sigma.apply(s.col_base),
+        row_base=sigma.apply(s.row_base),
         layout=s.layout,
     )

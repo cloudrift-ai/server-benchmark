@@ -37,6 +37,7 @@ PASS_SHORTHAND = {
     "loop/fusion": "f",
     "loop/stamp": "s",
     "lowering/tile": "t",
+    "lowering/schedule": "t",
     "lowering/kernel": "k",
     "lowering/cuda": "c",
 }

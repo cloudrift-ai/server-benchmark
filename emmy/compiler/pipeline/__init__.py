@@ -17,7 +17,7 @@
   dispatch that routes post-pass dumps by pass name.
 - :mod:`.passes` — pass directories grouped by IR level:
   ``frontend/{decomposition,optimization}``, ``loop/{lifting,fusion}``,
-  ``lowering/{tile,kernel,cuda}``. Each leaf contains ``NNN_<name>.py``
+  ``lowering/{tile,schedule,kernel,cuda}``. Each leaf contains ``NNN_<name>.py``
   rule modules picked up by ``Pass.load``.
 """
 
@@ -42,7 +42,7 @@ from emmy.compiler.pipeline.search import (
 # and tests should reference these rather than re-listing pass names.
 TENSOR_PASSES = ["frontend/decomposition", "frontend/optimization"]
 LOOP_PASSES = [*TENSOR_PASSES, "loop/lifting", "loop/fusion", "loop/stamp"]
-TILE_PASSES = [*LOOP_PASSES, "lowering/tile"]
+TILE_PASSES = [*LOOP_PASSES, "lowering/tile", "lowering/schedule"]
 KERNEL_PASSES = [*TILE_PASSES, "lowering/kernel"]
 CUDA_PASSES = [*KERNEL_PASSES, "lowering/cuda"]
 

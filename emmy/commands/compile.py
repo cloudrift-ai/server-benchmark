@@ -47,7 +47,9 @@ _DEFAULT_PASSES = LOOP_PASSES
 # ``>>> t:005_blockify_launch``); the canonical mapping lives in
 # ``compiler/pipeline/rule_diff.PASS_SHORTHAND`` so the engine can build
 # the marker names without depending on the CLI layer.
-_PASS_SHORTCUTS = {short: full for full, short in PASS_SHORTHAND.items()}
+_PASS_SHORTCUTS: dict[str, list[str]] = {}
+for _full_pass, _short_pass in PASS_SHORTHAND.items():
+    _PASS_SHORTCUTS.setdefault(_short_pass, []).append(_full_pass)
 
 
 def resolve_tune_db() -> Path:
@@ -145,7 +147,7 @@ def add_golden_arg(parser) -> None:
         help=(
             "Resolve the required --golden NAME from this explicit working YAML instead of the "
             "canonical live-GPU corpus. Replays the file's exact provenance or Loop IR target; "
-            "only verified rows are automatically A/B-pinned."
+            "verified rows or one valid direct tune winner are automatically A/B-pinned."
         ),
     )
 
@@ -170,6 +172,7 @@ def resolve_golden_arg(args) -> None:
     name = getattr(args, "golden", None)
     golden_file = getattr(args, "golden_file", None)
     args.golden_configs = []
+    args.expected_golden_pins = 0
     if golden_file and not name:
         logger.error("--golden-file requires --golden NAME")
         sys.exit(2)
@@ -237,17 +240,37 @@ def resolve_golden_arg(args) -> None:
     if document is not None:
         verified = [record for record in matches if record.measurements is not None]
         winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
-        valid_winner = (
+        unresolved = [
+            record
+            for record in matches
+            if record.ranking is not None and record.ranking.get("source") == "tune" and record.ranking.get("status") == "no_exact_pin"
+        ]
+        scalar_winner = (
             len(winners) == 1
             and winners[0].ranking.get("source") == "tune"
             and winners[0].ranking.get("status") == "ok"
+            and "kernel_set" not in winners[0].ranking
             and winners[0].ranking.get("measured_knobs") == winners[0].knobs
             and bool(winners[0].knobs)
         )
-        if winners and not valid_winner:
-            logger.error("golden %r must contain one valid direct tune winner with matching measured knobs", name)
+        kernel_set_winner = False
+        if len(winners) == 1 and "kernel_set" in winners[0].ranking:
+            try:
+                from emmy.compiler.pipeline.search.working_golden import parse_kernel_set_ranking  # noqa: PLC0415
+
+                parse_kernel_set_ranking(winners[0].ranking)
+                kernel_set_winner = not winners[0].knobs and "measured_knobs" not in winners[0].ranking
+            except ValueError as exc:
+                logger.error("golden %r has an invalid exact kernel-set winner: %s", name, exc)
+                sys.exit(2)
+        if winners and not (scalar_winner or kernel_set_winner):
+            logger.error("golden %r must contain one valid direct tune winner", name)
+            sys.exit(2)
+        if len(unresolved) > 1 or (unresolved and winners):
+            logger.error("golden %r must contain one current direct tune result", name)
             sys.exit(2)
         pinned = verified or winners
+        args.expected_golden_pins = len(verified) if verified else (1 if winners or unresolved else 0)
     args.golden_configs = [Sample.from_golden(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
@@ -456,7 +479,7 @@ def resolve_passes(args) -> list[str]:
         raw = args.passes.strip()
         # Shorthand: no commas AND every character is a known pass letter.
         if "," not in raw and raw and all(c in _PASS_SHORTCUTS for c in raw):
-            return [_PASS_SHORTCUTS[c] for c in raw]
+            return [name for c in raw for name in _PASS_SHORTCUTS[c]]
         return [p.strip() for p in raw.split(",") if p.strip()]
     if args.ir is not None:
         return _IR_STAGES[args.ir][0]

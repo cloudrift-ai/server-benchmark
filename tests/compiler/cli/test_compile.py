@@ -64,12 +64,19 @@ def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
 
 
 def test_compile_passes_shorthand(run_cli, tmp_path):
-    """'dolft' should expand to decomposition/optimization/lifting/fusion/lowering/tile."""
+    """'dolft' should expand through both structural and schedule halves of Tile lowering."""
     out = tmp_path / "out.txt"
     rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolft", "-o", str(out), "-vv")
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
-    for name in ("frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "lowering/tile"):
+    for name in (
+        "frontend/decomposition",
+        "frontend/optimization",
+        "loop/lifting",
+        "loop/fusion",
+        "lowering/tile",
+        "lowering/schedule",
+    ):
         assert name in log, f"missing pass {name!r} in log"
     assert "lowering/cuda" not in log
 

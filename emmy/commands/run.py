@@ -796,6 +796,10 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
 
 def _eager_outputs_by_name(outputs: dict, eager_out) -> dict:
     """Map positional eager outputs to the lowered graph's stable output names."""
+    if isinstance(eager_out, dict):
+        if set(eager_out) != set(outputs):
+            return {}
+        return {name: ref.detach().float().cpu().numpy() if hasattr(ref, "detach") else ref for name, ref in eager_out.items()}
     refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     if len(refs) != len(outputs):
         return {}
@@ -826,6 +830,15 @@ def _ab_samples(specs, dynamic=None):
 def _sample_replay_knobs(sample) -> dict:
     """All knob pins needed to reproduce a golden winner or explicit A/B row."""
     return {**getattr(sample, "pins", {}), **sample.knobs}
+
+
+def _sample_lane(sample) -> str:
+    """The scalar row's lane, or the union lane of an exact kernel set."""
+    kernel_set = getattr(sample, "kernel_set", None)
+    if kernel_set is None:
+        return _lane(sample.knobs)
+    rows = (row for kernel in kernel_set["kernels"] for row in kernel["cuda_record_knobs"])
+    return "fm" if any(_lane(row) == "fm" for row in rows) else "std"
 
 
 async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None, strict_correctness=False):
@@ -863,6 +876,7 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
     row directly against eager under rtol=atol=1e-3 and records error statistics. Flags
     render as a ``!`` marker in the table and ride the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import KernelSetReplayError, lower_exact_kernel_set  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     out = []
@@ -886,7 +900,13 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
                     graph, _, _ = graph_from_code(source, dynamic_shapes=dynamic_shapes)
                 else:
                     graph = source.copy()
-                g_compiled = backend.compile(graph)
+                kernel_set = getattr(sample, "kernel_set", None)
+                g_compiled = lower_exact_kernel_set(graph, kernel_set) if kernel_set is not None else backend.compile(graph)
+        except KernelSetReplayError as exc:
+            flag = f"kernel-set pin mismatch: {exc} — row NOT benched"
+            logger.error("[golden] %s: %s", sample.name, flag)
+            out.append(_GoldenBench(sample, None, None, [flag], "pin_unmatched"))
+            continue
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
@@ -1079,7 +1099,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         kernels with ``--`` timings (a compile failure has no kernels — one bare
         label row keeps the failure visible)."""
         label = f"golden {gb.sample.name}" if gb.sample.shape is not None else gb.sample.name
-        label = f"{label} [{_lane(gb.sample.knobs)}]"  # so an [fm]-vs-std A/B can't be misread
+        label = f"{label} [{_sample_lane(gb.sample)}]"  # so an [fm]-vs-std A/B can't be misread
         if gb.flags:
             label = f"! {label}"
         if gb.graph is None:
@@ -1252,22 +1272,24 @@ def _write_ab_json(
     pinned = []
     for gb in golden_benches or []:
         sample = gb.sample
-        pinned.append(
-            {
-                "name": sample.name,
-                "kind": "golden" if sample.shape is not None else "ab",
-                "lane": _lane(sample.knobs),
-                "status": gb.status,
-                "pinned_knobs": {k: str(v) for k, v in _sample_replay_knobs(sample).items()},
-                **_timing(gb.bench),
-                "e2e_us": _e2e_us(gb.bench),
-                "kernels": _kernel_rows(gb.graph, gb.bench),
-                "flags": list(gb.flags),
-                "correctness": gb.correctness,
-                "recorded_emmy_us": getattr(sample, "latency_us", None),
-                "recorded_ref_us": getattr(sample, "ref_us", None),
-            }
-        )
+        row = {
+            "name": sample.name,
+            "kind": "golden" if sample.shape is not None else "ab",
+            "lane": _sample_lane(sample),
+            "status": gb.status,
+            "pinned_knobs": {k: str(v) for k, v in _sample_replay_knobs(sample).items()},
+            **_timing(gb.bench),
+            "e2e_us": _e2e_us(gb.bench),
+            "kernels": _kernel_rows(gb.graph, gb.bench),
+            "flags": list(gb.flags),
+            "correctness": gb.correctness,
+            "recorded_emmy_us": getattr(sample, "latency_us", None),
+            "recorded_ref_us": getattr(sample, "ref_us", None),
+        }
+        if getattr(sample, "kernel_set", None) is not None:
+            row["winner_kind"] = "kernel_set"
+            row["pinned_kernel_set"] = sample.kernel_set
+        pinned.append(row)
     greedy = {
         "status": "ok" if greedy_fail is None else "bench_fail",
         "lane": _graph_lane(graph),
@@ -1990,12 +2012,16 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
     if not valid_proof(correctness):
         errors.append("deployed Emmy row lacks direct strict eager correctness")
 
-    ab_rows = [row for row in pinned_rows or [] if getattr(row.sample, "shape", None) is None]
+    pinned_rows = list(pinned_rows or [])
+    ab_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is None]
+    automatic_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is not None]
+    expected_automatic_rows = int(getattr(args, "expected_golden_pins", 0) or 0)
+    if len(automatic_rows) != expected_automatic_rows:
+        errors.append(f"expected {expected_automatic_rows} exact working-golden row(s), got {len(automatic_rows)}")
     expected_ab_rows = len(args.ab or [])
     if len(ab_rows) != expected_ab_rows:
         errors.append(f"expected {expected_ab_rows} exact --ab row(s), got {len(ab_rows)}")
-    exact_rows = ab_rows if expected_ab_rows else list(pinned_rows or [])
-    for row in exact_rows:
+    for row in pinned_rows:
         label = row.sample.name
         if row.status != "ok" or row.flags:
             errors.append(f"{label} failed exact-pin integrity: status={row.status}, flags={list(row.flags)}")
@@ -2521,7 +2547,12 @@ def _check_accuracy(outputs, eager_out) -> str | None:
     # output against its positional eager counterpart (graph-output order).
     # Historic single-output behavior (every output vs THE eager tensor) is the
     # degenerate case of the fallback-to-first pairing below.
-    eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
+    if isinstance(eager_out, dict):
+        if set(eager_out) != set(outputs):
+            return f"CORRECTNESS FAIL: output names differ: Emmy={list(outputs)}, eager={list(eager_out)}"
+        eager_refs = [eager_out[name] for name in outputs]
+    else:
+        eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     eager_flats = [t.detach().cpu().flatten().tolist() for t in eager_refs]
     if any(e != e for flat in eager_flats for e in flat):
         return "eager reference contains NaN (reproducer inputs out of domain)"
@@ -2661,7 +2692,7 @@ def _check_accuracy(outputs, eager_out) -> str | None:
                     budget,
                 )
         else:
-            logger.warning("Output size %d does not match eager %d; skipping accuracy", len(values), len(eager_flat))
+            failures.append(f"output {buf_name}: size {len(values)} does not match eager {len(eager_flat)}")
     return f"accuracy check failed vs eager: {'; '.join(failures)}" if failures else None
 
 

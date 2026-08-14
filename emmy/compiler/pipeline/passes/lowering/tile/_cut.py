@@ -523,20 +523,6 @@ def _placement_decision(
     return _PlacementDecision(True, selected, alternatives, row)
 
 
-def route_cut(
-    ctx,
-    knobs: dict,
-    root,
-    stores: tuple = (),
-    free: tuple = (),
-    graph: Graph | None = None,
-    graph_root: Node | None = None,
-) -> _PlacementSite | None:
-    """Compatibility view of authoritative placement: the selected realization, if any."""
-    decision = _placement_decision(ctx, knobs, root, stores, free, graph, graph_root)
-    return decision.selected.site if decision.selected is not None else None
-
-
 def _stamp_decision(graph: Graph, row: dict) -> None:
     for node in graph.nodes.values():
         if isinstance(node.op, LoopOp):
@@ -1068,4 +1054,4 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: _P
     return frag
 
 
-__all__ = ["placement_options", "realize_cut", "route_cut"]
+__all__ = ["placement_options", "realize_cut"]

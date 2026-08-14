@@ -155,8 +155,12 @@ protection (the down projection sum-contracts the exp-bearing SwiGLU activation,
 softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
-NVFP4 groundwork lives in the dtype layer: `f4e2m1x2` (a uint8 element carrying a packed pair of e2m1 codes) with
-its LUT decode `decode_f4x2` and a raw-byte CUDA spelling; no loader family or kernel consumes it yet.
+**NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
+pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes
+both checkpoint dialects (modelopt, compressed-tensors `nvfp4-pack-quantized`; MXFP4's 32-element blocks stay
+excluded) and dequantizes the packed trio `<key>` + `<key>_scale` (e4m3, read as raw bits) + `<key>_scale_2` (f32)
+for the accuracy twin via `dequantize_nvfp4` — `fuse_nvfp4_scales` collapses the two scale levels into one f16
+tensor, the format's single rounding point. No graph speller and no kernel consume the type yet.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.

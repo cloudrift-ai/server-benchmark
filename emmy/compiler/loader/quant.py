@@ -48,7 +48,7 @@ from pathlib import Path
 
 import numpy as np
 
-from emmy.compiler.dtype import decode_f8  # noqa: F401 — re-exported; the LUT's home is the dtype layer
+from emmy.compiler.dtype import F8E4M3, decode_f4x2, decode_f8  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.loader.exl3 import HAD_BLOCK, decode_trellis, fold_hadamard
@@ -91,6 +91,33 @@ def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) 
     return out.reshape(w.shape)
 
 
+def fuse_nvfp4_scales(scale_bits: np.ndarray, scale_2: np.ndarray) -> np.ndarray:
+    """The NVFP4 two-level scale collapsed to ONE f16 tensor ("fused scale"):
+    ``e4m3-decode(scale_bits) * scale_2``.
+
+    e4m3 values are exact in f16 (3 mantissa bits, range ±448), so the only rounding
+    anywhere is the single f32→f16 round of the product. Kernels and the numpy oracle
+    both consume this one tensor, sharing one rounding story.
+    """
+    assert scale_bits.dtype == np.uint8, f"fuse_nvfp4_scales expects the uint8 e4m3 bits carrier, got {scale_bits.dtype}"
+    assert scale_2.dtype == np.float32 and scale_2.size == 1, (
+        f"weight_scale_2 is one f32 per tensor, got {scale_2.dtype} shape {scale_2.shape}"
+    )
+    return (decode_f8(scale_bits, F8E4M3.name) * scale_2.reshape(())).astype(np.float16)
+
+
+def dequantize_nvfp4(packed: np.ndarray, scale_bits: np.ndarray, scale_2: np.ndarray) -> np.ndarray:
+    """f32 values of an NVFP4 weight: decode the packed e2m1 pairs (last axis doubles to K)
+    and apply the fused f16 block scale, one per 16 elements along K.
+
+    These are EXACTLY the numbers the kernel path computes, not an approximation: an
+    e2m1 value carries ≤3 significand bits and the fused f16 scale ≤11, so every product
+    fits f32's 24 — the oracle admits bitwise comparison, no tolerance windows.
+    """
+    assert packed.dtype == np.uint8, f"dequantize_nvfp4 expects the uint8 packed carrier, got {packed.dtype}"
+    return dequantize(decode_f4x2(packed), fuse_nvfp4_scales(scale_bits, scale_2).astype(np.float32))
+
+
 def _fp8_quant_config(model_dir: Path) -> dict | None:
     """The checkpoint's ``quantization_config`` when it declares an FP8 weight scheme.
 
@@ -112,6 +139,38 @@ def _fp8_quant_config(model_dir: Path) -> dict | None:
         for group in (qc.get("config_groups") or {}).values():
             weights = group.get("weights") if isinstance(group, dict) else None
             if isinstance(weights, dict) and weights.get("type") == "float" and int(weights.get("num_bits") or 0) == 8:
+                return qc
+    return None
+
+
+def _fp4_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's ``quantization_config`` when it declares the NVFP4 weight scheme.
+
+    Two dialects in the wild: ``quant_method: "modelopt"`` with ``quant_algo: "NVFP4"``
+    (TensorRT Model Optimizer — the nvidia/* checkpoints) and ``quant_method:
+    "compressed-tensors"`` (llm-compressor) whose ``config_groups`` quantize weights as
+    4-bit float over 16-element groups (the ``nvfp4-pack-quantized`` format). The
+    group-size condition keeps 32-element-block 4-bit families (MXFP4) out — same e2m1
+    values, different scale dtype and block. Anything else → ``None``.
+    """
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.exists():
+        return None
+    qc = json.loads(cfg_path.read_text()).get("quantization_config")
+    if not isinstance(qc, dict):
+        return None
+    method = qc.get("quant_method")
+    if method == "modelopt":
+        return qc if qc.get("quant_algo") == "NVFP4" else None
+    if method == "compressed-tensors":
+        for group in (qc.get("config_groups") or {}).values():
+            weights = group.get("weights") if isinstance(group, dict) else None
+            if (
+                isinstance(weights, dict)
+                and weights.get("type") == "float"
+                and int(weights.get("num_bits") or 0) == 4
+                and int(weights.get("group_size") or 0) == 16
+            ):
                 return qc
     return None
 
@@ -187,6 +246,8 @@ def checkpoint_quant_summary(model_dir) -> str:
     model_dir = Path(model_dir)
     if (qc := _exl3_quant_config(model_dir)) is not None:
         return f"exl3 {qc.get('bits')} bpw (head {qc.get('head_bits')})"
+    if (qc := _fp4_quant_config(model_dir)) is not None:
+        return f"nvfp4 {qc.get('quant_method')}"
     if (qc := _fp8_quant_config(model_dir)) is not None:
         return f"fp8 {qc.get('fmt') or qc.get('quant_method')}"
     return "unquantized"
@@ -258,6 +319,12 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     ``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``). An
     unquantized checkpoint passes through unchanged.
 
+    NVFP4 checkpoints: each packed ``<key>`` with the ``<key>_scale`` (e4m3 block
+    scales, read as raw bits) + ``<key>_scale_2`` (f32) sibling pair dequantizes via
+    :func:`dequantize_nvfp4`; both consumed scales are dropped. Activation-quant
+    metadata (``input_scale``, kv-cache scales) passes through unconsumed — it
+    belongs to the serving path, not the twin.
+
     EXL3 checkpoints: each linear's sibling tensors (``<module>.trellis`` +
     ``suh``/``svh`` + markers) decode to a ``<module>.weight`` value in the
     HF ``(out, in)`` orientation, fp16 (the decode's canonical precision);
@@ -270,8 +337,17 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     model_dir = Path(model_dir)
     index = _build_index(model_dir)
     qc = _fp8_quant_config(model_dir)
+    qc4 = _fp4_quant_config(model_dir)
     exl3 = _exl3_quant_config(model_dir) is not None
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or []) if qc else []
+    patterns4 = list(qc4.get("ignore") or []) if qc4 else []
+    # NVFP4 trio signature: packed <key> + <key>_scale (e4m3) + <key>_scale_2 (f32).
+    # The e4m3 block scales must arrive as raw bits — dequantize_nvfp4 owns the decode.
+    fp4_scale_keys = (
+        frozenset(k for k in index if k.endswith("_scale") and k + "_2" in index and k[: -len("_scale")] in index)
+        if qc4 is not None
+        else frozenset()
+    )
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -279,7 +355,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     sources: dict[str, np.ndarray] = {}
     fp8_keys: dict[str, str] = {}
     for shard_path, keys in by_shard.items():
-        fp8_keys.update(_read_shard(shard_path, keys, sources))
+        fp8_keys.update(_read_shard(shard_path, keys, sources, bits_keys=fp4_scale_keys))
 
     out: dict[str, np.ndarray] = {}
     consumed: set[str] = set()
@@ -296,6 +372,11 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
             continue
         if key in consumed:
             continue
+        if qc4 is not None and key + "_scale" in fp4_scale_keys and not _is_skipped(key, patterns4):
+            if sources[key].dtype == np.uint8:
+                out[key] = dequantize_nvfp4(sources[key], sources[key + "_scale"], sources[key + "_scale_2"])
+                consumed |= {key + "_scale", key + "_scale_2"}
+                continue
         if qc is not None and key in fp8_keys and not _is_skipped(key, patterns):
             scale_key = next((k for k in (key + "_scale", key + "_scale_inv") if k in index), None)
             if scale_key is not None:

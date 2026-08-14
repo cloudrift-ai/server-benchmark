@@ -169,11 +169,13 @@ def _read_shard(
     norms) take the same torch route, read as f32 values (the loader's value
     dtype for bf16). Everything else keeps the numpy path bit-identical.
 
-    ``bits_keys`` names fp8-stored keys whose CONSUMING constant (an in-graph
-    node or a ``source_graph`` record leaf) carries an f8 graph dtype — those
-    bind the RAW uint8 bit pattern, no LUT decode, no scale; the graph's own
-    decode cone owns the value semantics. Every other fp8 key decodes to f32
-    values as before.
+    ``bits_keys`` names fp8-stored keys that must arrive as the RAW uint8 bit
+    pattern — no LUT decode, no scale — because the caller's side owns the value
+    semantics: either the consuming constant (an in-graph node or a
+    ``source_graph`` record leaf) carries an f8 graph dtype and the graph's own
+    decode cone decodes, or the caller runs the decode itself (the NVFP4 twin
+    read fuses the e4m3 block scales with the tensor scale from bits). Every
+    other fp8 key decodes to f32 values as before.
 
     Returns the fp8 keys read, ``{key: canonical fp8 token}`` — how callers
     tell a decoded-fp8 array from a natively-float one after the read.

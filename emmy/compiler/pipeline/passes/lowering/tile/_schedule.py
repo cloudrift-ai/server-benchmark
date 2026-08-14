@@ -1973,7 +1973,10 @@ def _materialize(term: _Term, resolved: _Row, row: dict, name: str, knobs: dict)
     rplan = decided("REDUCE") or ReducePlan.parse(value("REDUCE"), work)
     plan = decided("TILE")
     if plan is None:
-        plan = resolve_site_tile(value("TILE"), work, rplan.coop)
+        # An empty spelling is a unit register tile only when THIS root owns a TILE site. A
+        # nested-only term (flash's dd/pj tiles under a reduce root) has no root TILE key at all;
+        # borrowing its shared thread inventory there invents a slice the codec cannot address.
+        plan = resolve_site_tile(value("TILE"), work, rplan.coop) if "TILE" in keys else TilePlan()
     if is_contraction(node) and rplan.needs_split:
         # The stage is re-resolved INSIDE against the sliced node, so it stays a spelling here.
         return _splitk_option(term, plan, node, rplan, name, op_knobs, value("STAGE"), nested)

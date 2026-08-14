@@ -136,6 +136,7 @@
  "tests/compiler/passes/test_schedule_pool_cache.py::test_pool_rows_are_read_only": 0.59,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_second_resolve_hits_the_pool_and_serves_identical_rows": 0.58,
  "tests/compiler/passes/test_schedule_pool_cache.py::test_two_same_shape_kernels_share_one_enumeration": 0.75,
+ "tests/compiler/passes/test_schedule_site_ownership.py::test_nested_only_thread_work_does_not_invent_root_tile": 10.2,
  "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp": 6.1,
  "tests/compiler/pipeline/search/data/test_dataset.py::test_golden_features_use_own_cards_sm_count": 0.06,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_anchor_walk_treats_freeze_rows_as_treeless": 0.07,

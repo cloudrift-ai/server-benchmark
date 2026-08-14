@@ -301,14 +301,16 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
 
 def bind_contraction_channels(
     loop: Loop, m_name: str, n_name: str, epilogue: Body
-) -> tuple[Load | list, tuple[tuple[Load | list, str], ...], DataType | None, Body]:
-    """Bind every product-monoid channel of one materialized-A contraction loop.
+) -> tuple[Load | list, tuple[Channel, ...], DataType | None, Body]:
+    """Bind every product-monoid channel of one contraction loop.
 
     A placement cut can turn a shared computed-A gate/up contraction into ordinary Loop IR with
     several additive ``Accum`` channels.  Binding only the first channel and treating the second
     accumulator as epilogue state creates an invalid projection.  Bind each accumulator's closed
-    backward cone through the ordinary single-channel legality routine instead, and accept the
-    group only when every channel shares byte-identical A semantics.
+    backward cone through the ordinary single-channel structural routine instead.  Group formation
+    is target-independent: every channel must use additive folding, share the same A value tree and
+    B orientation, and preserve the same declared product dtype.  Hardware capabilities filter the
+    resulting contraction's schedule domain later.
 
     Per-channel mul-hoist can rewrite the epilogue.  Combining several independently rewritten
     tails is not yet defined, so that shape declines as a group and retains the correct PLANAR
@@ -317,10 +319,17 @@ def bind_contraction_channels(
     accums = tuple(stmt for stmt in loop.body if isinstance(stmt, Accum))
     if not accums:
         raise LoweringError("warp tier: contraction loop has no fold accumulator")
+    if any(accum.op.name != "add" for accum in accums):
+        raise LoweringError("warp tier: product contraction channels must use additive folds")
+    defs = {name: stmt for stmt in loop.body if isinstance(stmt, (Load, Assign)) for name in stmt.defines()}
     common_a: Load | list | None = None
-    channels: list[tuple[Load | list, str]] = []
+    common_a_key: tuple | None = None
+    channels: list[Channel] = []
     product_dtypes: list[DataType | None] = []
     for accum in accums:
+        product = defs.get(accum.value)
+        if not isinstance(product, Assign) or product.op.name != "multiply" or len(product.args) != 2:
+            raise LoweringError("warp tier: every product channel must fold one multiply lift")
         cone = loop.body.backward_cone((accum.name,))
         channel_loop = Loop(
             axis=loop.axis,
@@ -332,18 +341,30 @@ def bind_contraction_channels(
         a, b, acc, channel_epi = bind_contraction(channel_loop, m_name, n_name, epilogue)
         if channel_epi != epilogue:
             raise LoweringError("warp tier: multi-channel contraction requires a shared unchanged epilogue")
+        if isinstance(a, Load):
+            a_key = _cone_value_key(a.names[0], defs)
+        else:
+            a_defs = {name for stmt in a for name in stmt.defines()}
+            a_roots = tuple(arg for arg in product.args if arg in a_defs)
+            if len(a_roots) != 1:
+                raise LoweringError("warp tier: product A cone does not have one lift root")
+            a_key = _cone_value_key(a_roots[0], defs)
         if common_a is None:
             common_a = a
-        elif a != common_a:
-            raise LoweringError("warp tier: contraction channels do not share one A operand")
-        channels.append((b, acc))
-        product = next((stmt for stmt in channel_loop.body if isinstance(stmt, Assign) and stmt.name == accum.value), None)
-        if product is None:
-            raise LoweringError("warp tier: contraction channel has no bilinear product")
+            common_a_key = a_key
+        elif a_key != common_a_key:
+            raise LoweringError("warp tier: contraction channels do not share one A value")
+        b_edge = b if isinstance(b, Load) else Fold.projection(body=Body(tuple(b)))
+        channels.append(Channel(b=b_edge, acc=acc))
         product_dtypes.append(product.dtype)
     assert common_a is not None
     if any(dtype != product_dtypes[0] for dtype in product_dtypes[1:]):
         raise LoweringError("warp tier: contraction channels disagree on product dtype")
+    b_layouts = {
+        loop.axis.name in channel.b.index[-1].free_vars() if isinstance(channel.b, Load) else False for channel in channels
+    }
+    if len(b_layouts) != 1:
+        raise LoweringError("warp tier: product B edges disagree on layout")
     return common_a, tuple(channels), product_dtypes[0], epilogue
 
 

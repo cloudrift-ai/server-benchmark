@@ -479,6 +479,32 @@ def test_bind_contraction_declines_a_that_depends_on_both_output_axes():
         bind_contraction(loop, "m", "n", Body(()))
 
 
+def test_channel_binding_shares_structurally_equal_a_and_preserves_product_dtype():
+    """Fresh SSA copies of one A cone group without losing the matmul product dtype."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction_channels
+
+    k = Axis("k", Dim(32))
+    body = []
+    for i in range(2):
+        body.extend(
+            (
+                Load(name=f"a{i}", input="a_buf", index=(Var("m"), Var("k"))),
+                Assign(name=f"a{i}_neg", op="negative", args=(f"a{i}",)),
+                Load(name=f"b{i}", input=f"b{i}_buf", index=(Var("n"), Var("k"))),
+                Assign(name=f"prod{i}", op="multiply", args=(f"a{i}_neg", f"b{i}"), dtype=F32),
+                Accum(name=f"acc{i}", value=f"prod{i}", op="add", axes=("k",)),
+            )
+        )
+    loop = Loop(axis=k, role=AxisRole.CONTRACTION, body=Body(tuple(body)))
+
+    a, channels, product_dtype, epilogue = bind_contraction_channels(loop, "m", "n", Body())
+
+    assert isinstance(a, list) and len(channels) == 2
+    assert all(isinstance(channel.b, Load) for channel in channels)
+    assert product_dtype == F32
+    assert epilogue == Body()
+
+
 # --------------------------------------------------------------------------- #
 # Group formation — the ``b_trans`` gate. Channels whose B operands are stored the
 # other way round were never legally fusable (one shared A fragment, one slab

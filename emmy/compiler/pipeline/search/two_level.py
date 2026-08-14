@@ -1,9 +1,9 @@
-"""Two-level autotuning: an outer fusion MCTS whose terminal reward comes from
+"""Two-level autotuning: an outer kernel-placement MCTS whose terminal reward comes from
 an inner, separable, per-op search.
 
 ``emmy tune`` used to run one SP-MCTS tree over the whole graph. Because
 the pipeline applies rules sequentially, op-variant forks (tile / pad / stage
-choices for one kernel) and fusion forks (how ops group into kernels) **nest**
+choices for one kernel) and placement forks (which closed seams become kernel boundaries) **nest**
 and cross-product under one global patience — so the bottleneck op starves the
 deep ops (see ``project_mcts_exploration_limit``). The two kinds of decision
 have opposite structure:
@@ -11,19 +11,19 @@ have opposite structure:
 - **op-variant forks are separable** — every multi-option fork today is an
   in-place ``Op`` rebind that leaves the graph unchanged, so the whole-graph
   time is ``Σ_k t_k`` with each ``t_k`` depending only on op ``k``'s variant;
-- **fusion forks are NOT separable** — they change *which ops exist*.
+- **placement forks are NOT separable** — they change *which kernels exist*.
 
 So we split the search in two, drawing the boundary on the fork's *effect*
 (the ``Op``-rebind / ``Graph``-splice classification stamped at the engine's
 spawn site), not on a fixed
 pass index:
 
-- **Outer** (:func:`run_two_level_tune`) drives the graph-changing passes —
-  ``frontend`` + ``loop`` plus the pre-partition head of ``lowering/tile``
-  (:func:`outer_pipeline`), where any structural fork emitters live. A terminal is the state where
-  the cursor reaches ``partition_loops`` with every structural fork resolved —
-  every op post-fusion and structurally final, split producers/consumers
-  included as real ``LoopOp`` nodes. Each terminal is a candidate fused graph;
+- **Outer** (:func:`run_two_level_tune`) drives ``frontend`` + ``loop`` and the
+  recognition half of ``lowering/tile`` (:func:`outer_pipeline`). Fusion stays
+  deterministic and maximal; recognition offers ``PLACE`` choices that either
+  keep that region or materialize one closed seam. A terminal has every
+  placement decision resolved and every kernel represented by an unmapped
+  ``TileOp``. Each terminal is a candidate kernel set;
   its reward is ``1 / Σ best-per-op time`` from the inner search,
   backpropagated by the reused :class:`TuningSearch` — so keep-vs-split is an
   outer-terminal comparison, the natural cost model for a kernel-set decision.
@@ -31,9 +31,8 @@ pass index:
   replays the decision read off the trajectory's own graph via the
   ``Op.source`` decomposition links and the stamped decision knobs
   (``pipeline._replay_structural_decision``) — keeping the tree linear in
-  *unique* kernels. Fusion itself is still
-  deterministic (no multi-option fusion forks); this remains the clean
-  insertion point for fusion search when those forks exist.
+  *unique* kernels. Fusion itself remains deterministic and maximal: it does
+  not consult placement, schedule, hardware, or search evidence.
 - **Inner** (:func:`_inner_reward_async`) tunes each finalized kernel *independently*
   in its own single-node slice (:func:`single_node_graph`) with a plain
   :class:`TuningSearch` over :data:`LOWERING_PASSES` only. Results key
@@ -72,42 +71,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The structural / op-variant boundary is the ``split`` phase: the keep-vs-cut
-# ``CUT`` offer is the only kernel-set-changing decision, so the outer search owns
-# ``frontend`` + ``loop`` + ``split`` and the inner tunes everything from
-# ``enumeration`` (tiling) on — see :func:`outer_pipeline`.
+# The structural / op-variant boundary lies between tile recognition and tile
+# scheduling. Recognition owns the PLACE fork because it changes the kernel set;
+# scheduling and every later lowering fork remain separable per kernel.
 
-# Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner
-# per-op search runs these on a single-node slice so the finalized LoopOp body
-# — and thus its ``Op.cache_key`` — is never re-touched by ``loop/fusion``,
-# which is what keeps inner-tuned ``perf`` / ``lowering`` rows transferable to
-# the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks
-# pass-list edits automatically. The pre-partition tile rules (005's split
-# offer) run here too, but every outer-terminal op already carries their
-# decision knob, so the rules' idempotence guards skip — the inner never
-# re-opens an outer-owned structural decision.
+# Lowering-only passes after loop fusion: ``recognize → schedule → kernel → cuda``.
+# The inner per-op search receives an already-recognized ``TileOp`` slice, so
+# ``010_recognize`` cannot re-open its outer-owned placement decision. The
+# recognized algebra — and thus its ``Op.cache_key`` — is never re-touched by
+# ``loop/fusion``; inner ``perf`` / ``lowering`` rows therefore transfer to the
+# assembled graph. Slicing this as the tail of ``CUDA_PASSES`` keeps it aligned
+# with pass-list edits and retains the LoopOp guardrail for unrecognized algebra.
 LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 
 def outer_pipeline() -> Pipeline:
-    """The graph-changing passes the outer search drives: ``frontend`` + ``loop``
-    (any fusion forks) **plus the ``split`` phase** — where a structural fork, the
-    only move that changes *which kernels exist*, would be offered.
-    An outer terminal is a graph whose kernel set is final:
-    the keep(SMEM) side is one fused ``TileGraphOp`` (``seed_fused``), the cut side
-    its producer + consumer; :func:`_inner_reward_async` picks each up as its own
-    slice (own patience, own progress leaf, deduped by ``Op.cache_key``) and tunes
-    its tiling via :data:`LOWERING_PASSES`.
+    """Drive maximal fusion, algebra recognition, and structural placement only.
 
-    Tiling (``enumeration``/partition) is **inner**, deliberately NOT driven here:
-    a tile-knob fork (``MMA`` / ``BN`` / …) does not change the kernel set, so
-    branching the OUTER tree on it would explode the tree (every tile combination ×
-    every structural choice) with no kernel-set distinction. The split boundary is
-    exactly where the kernel set is fixed but tiling is not — the right outer/inner
-    seam. Sub-partition splices
-    (``150_cross_cta_finalize``'s combine) likewise stay inner — their trigger knob
-    (``SPLITK``) doesn't exist until partition runs."""
+    ``010_recognize`` lifts each fused ``LoopOp`` to an unmapped ``TileOp`` and
+    offers the fused-vs-materialized ``PLACE`` fork. A cut's new ``LoopOp`` pieces
+    re-enter that same rule until the complete kernel set is recognized. The outer
+    pipeline stops before ``020_schedule``: tile/reduce/stage choices are inner,
+    per-kernel decisions, including graph splices caused by a selected reduce plan.
+    """
     passes = [Pass.load(name, i) for i, name in enumerate(LOOP_PASSES)]
+    passes.append(Pass.load("lowering/tile", len(passes), {"010_recognize"}))
     return Pipeline(passes=passes)
 
 
@@ -194,16 +182,14 @@ def _mint_run_id() -> str:
 
 
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
-    """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
-
-    An outer terminal sits at the ``split`` boundary (:func:`outer_pipeline`): the
-    keep(SMEM) side is a fused ``TileGraphOp`` (``seed_fused``), the cut side its
-    producer + consumer ``LoopOp``s (un-built — the inner tiles them). Count both
-    ``LoopOp`` and ``TileGraphOp`` so every kernel of either side gets its own inner
-    slice."""
+    """Outer-terminal kernels — one ``(node_id, TileOp)`` per recognized kernel."""
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
+    # ``LoopOp`` is retained as a guardrail for algebra that recognition cannot
+    # lift (for example a symbolic loop). Its inner slice retries the complete
+    # tile pass and follows the same lowering failure contract as before.
+    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, (LoopOp, TileOp))]
 
 
 async def _inner_reward_async(
@@ -530,6 +516,13 @@ async def run_two_level_tune(
         if best_reward is None or (reward.ok and reward.total_us < best_reward.total_us):
             best_fused, best_reward = fused.graph, reward
 
+    # Placement rows are whole-kernel-set observations: each outer fork prefix is
+    # labeled by the best Σ of its descendants. Feed them to the same online prior
+    # after the outer walk; inner per-kernel rows deliberately contain no PLACE
+    # metadata, so schedule evidence stays transferable between kernel sets.
+    if prior is not None:
+        prior.add_rows(outer._collect_rows())
+
     # One global end-of-run sanity block (the prior spans every kernel now).
     if manage_prior and (prior.fitted or prior.trajectory):
         prior_summaries.append(prior.summary("global"))
@@ -541,17 +534,18 @@ async def run_two_level_tune(
 
     assembled: Graph | None = None
     if best_fused is not None:
-        # Greedy replay over the *original* graph re-derives the same fused
-        # LoopOps and lowers each via the DB-best forks the inner search
-        # recorded. No backend → ``_bench_terminal`` persists nothing (so the
-        # 1.0us stub never clobbers a tuned row). The dump (if any) rides here
+        # Lower the winning outer terminal directly. This preserves the measured
+        # placement choice independent of a not-yet-refitted prior while each
+        # kernel's schedule replays from its DB evidence. No backend means the
+        # stub bench persists nothing, so the 1.0us stub never clobbers a tuned
+        # row. The dump (if any) rides here
         # so it captures the winning config's full stage artifacts. The
         # whole-graph separability bench used to run here too; dropped — its
         # only output was a small advisory gap line that nobody read, and at
         # the tight tune compile budget it could (and did) abort whole-model
         # tunes when a slow-compiling kernel raised. ``--bench`` re-benches
         # the assembled graph at -O3 anyway, which is the deployable number.
-        assembled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=db, dump=dump)
+        assembled = Pipeline.build(LOWERING_PASSES).run(best_fused.copy(), ctx=ctx, db=db, dump=dump)
     return TwoLevelResult(
         best_fused=best_fused, best_reward=best_reward, n_terminals=n_terminals, assembled=assembled, prior_summaries=prior_summaries
     )

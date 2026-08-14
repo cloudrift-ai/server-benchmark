@@ -169,7 +169,7 @@ class Candidate:
         ``Op`` rebinds ``root.op`` (id / inputs / hints kept);
         ``Graph`` is a fragment spliced via ``Graph.splice``. On the
         ``Op`` path the chain ``Op.source`` is stamped with the op
-        being replaced and the predecessor's ``knobs`` are merged
+        being replaced and the predecessor's ``knobs`` and ``decision_knobs`` are merged
         forward — so the rewrite chain threads through every in-place
         rebind for free. The stamp is UNCONDITIONAL (engine-owned):
         "the op this op replaced at this node" is a fact about the
@@ -192,12 +192,22 @@ class Candidate:
             if option is not old_op:
                 option.source = old_op
                 option.knobs = {**old_op.knobs, **option.knobs}
+                option.decision_knobs = {**old_op.decision_knobs, **option.decision_knobs}
             self.graph.nodes[match.root_node_id].op = option
         else:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"
             # Decomposition expands one op into many distinct pieces (mint);
             # every other fragment splice aggregates the consumed pieces.
             pass_ = match.rule.pass_
+            decisions: dict = {}
+            for nid in match.consumed:
+                consumed = self.graph.nodes.get(nid)
+                if consumed is not None:
+                    decisions.update(consumed.op.decision_knobs)
+            if decisions:
+                for frag_node in option.nodes.values():
+                    if frag_node.op.dialect is not None:
+                        frag_node.op.decision_knobs = {**decisions, **frag_node.op.decision_knobs}
             mint_pieces = pass_ is not None and pass_.name.startswith("frontend/decomposition")
             if pass_ is not None and pass_.name.startswith("lowering/"):
                 root_op = self.graph.nodes[match.root_node_id].op
@@ -281,8 +291,8 @@ class LazyCandidate:
         ``try_rewrite``'s filter) is lifted into an :class:`OptionFork`
         leaf — an ``Op``'s knob delta rides along as the fork's ``knobs``."""
         if not isinstance(option, Fork):
-            # A ``Graph`` option is a structural decomposition (a multi-kernel rewrite): the
-            # graph itself carries no knobs, so it scores as a knob-less generic row.
+            # A bare ``Graph`` option is a structural decomposition without an explicit decision
+            # row. Placement uses ``OptionFork`` directly so its PLACE row remains rankable.
             knobs = dict(getattr(option, "knobs", None) or {}) if isinstance(option, Op) else {}
             option = OptionFork(option=option, knobs=knobs)
         return cls(inner=inner, cursor=cursor, pending=(match, option))

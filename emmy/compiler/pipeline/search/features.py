@@ -327,11 +327,15 @@ def knob_features(knobs: dict) -> dict[str, float]:
         if name.startswith(STRUCT_PREFIX) or name.startswith(CTX_PREFIX):
             feats[name] = float(val)
             continue
-        knob = get(name)
+        # Scoped families (``TILE@k``, ``PLACE@a``) share their bare family's
+        # descriptor. Schedule codecs get their geometry below; placement uses
+        # its custom pooled features here.
+        knob = get(family_of(name))
         if knob is not None and knob.unfeatured:
             continue  # unfeatured knob (cosmetic re-spell / umbrella gate): never a ranking feature
         if knob is not None and knob.features is not None:
-            feats.update(knob.features(val))
+            for feature, contribution in knob.features(val).items():
+                feats[feature] = feats.get(feature, 0.0) + contribution
             continue
         if knob is None:
             num = _coerce_float(val)

@@ -68,15 +68,15 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write, lexical_free_values
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile import (
-    Channel,
     Fold,
     Placement,
     TileOp,
     split_effects,
 )
+from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import (
@@ -335,22 +335,28 @@ def _nodify_contraction(node, free: tuple):
             con = Fold.contraction(
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
-                # A computed B is a closed zero-axis operand node. Unlike A's norm/activation
-                # cone it has no row-statistic seam to split; its whole generic MAP tree is
-                # evaluated at each (k, n) slab cell by the sync compute-fill.
-                channels=tuple(
-                    Channel(
-                        b=b_load if isinstance(b_load, Load) else Fold.projection(body=Body(tuple(b_load))),
-                        acc=acc,
-                    )
-                    for b_load, acc in bound_channels
-                ),
+                channels=bound_channels,
                 product_dtype=product_dtype,
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
             # STORED form is the contraction itself (1s) — pure algebra; the
             # output axes / tile / stage are caller facts, stamped at the point of use.
-            return _project(con, epi)
+            candidate, stores = _project(con, epi)
+            # A root projection has no enclosing value scope beyond the free grid and boundary
+            # store sweeps. Every other read must be supplied by its operand results. This closure
+            # check is algebraic: an incomplete future channel binder declines to the complete
+            # PLANAR fold rather than leaking an unbound accumulator into code generation.
+            captures = lexical_free_values(
+                candidate.lift.body,
+                bound={
+                    *candidate.lift.params,
+                    *axis_names(candidate),
+                    *(axis.name for axis in free),
+                    *(store.sweep.name for store in stores if store.sweep is not None),
+                },
+            )
+            if not captures:
+                return candidate, stores
     red = fold_from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
     if red is None:  # not λ-representable — the raw-loop-IR escape (the flat zero-axis fold)
         return Fold.projection(body=(rloop, *projection)), ()

@@ -1035,7 +1035,7 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         wanted = Stage.parse(pinned)
         # SM70 pins are strict: do not silently turn a newer copy instruction or an unsupported
         # Volta fragment drain into the gmem-direct sibling.
-        if term.ctx.compute_capability < (8, 0):
+        if not term.ctx.has_cp_async:
             legal.enforce(legal.stage_target(wanted, term.ctx), pinned=True)
             if plan.is_warp:
                 legal.enforce(legal.warp_atom_stage(plan.atom, wanted), pinned=True)

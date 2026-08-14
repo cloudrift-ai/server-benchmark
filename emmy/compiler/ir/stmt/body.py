@@ -99,6 +99,50 @@ def _member_reads(s: Stmt) -> frozenset[str]:
     return frozenset(reads - defs)
 
 
+def lexical_free_values(stmts: Iterable[Stmt], *, bound: Iterable[str] = ()) -> frozenset[str]:
+    """Value and expression names read outside their lexical statement scope.
+
+    Unlike a global ``reads - definitions`` set difference, this respects statement order and
+    nested-body scope. Assignments and loads are local to their body, while accumulator state and
+    explicit initializers cross a block boundary exactly as Loop IR validation specifies. Carried
+    accumulators are visible throughout their body because a twisted fold may read its running
+    state before the statement that updates it.
+
+    ``bound`` supplies names owned by the caller, normally enclosing iteration axes. The result is
+    an analysis, not validation: unresolved names are returned so the caller can decide whether a
+    capture is legal in that context.
+    """
+    from emmy.compiler.ir.stmt.leaves import Accum, Init  # noqa: PLC0415
+
+    def walk(body: Body, visible: set[str]) -> tuple[set[str], set[str]]:
+        local = set(visible)
+        local.update(s.name for s in body if isinstance(s, Accum))
+        free: set[str] = set()
+        exported: set[str] = set()
+        for stmt in body:
+            reads = set(stmt.deps())
+            for expr in stmt.exprs():
+                reads.update(expr.free_vars())
+            free.update(reads - local)
+
+            nested_exports: set[str] = set()
+            child_visible = local | set(stmt.binds_axes())
+            for child in stmt.nested():
+                child_free, child_exported = walk(Body.coerce(child), child_visible)
+                free.update(child_free)
+                nested_exports.update(child_exported)
+            local.update(nested_exports)
+            exported.update(nested_exports)
+
+            local.update(stmt.defines())
+            if isinstance(stmt, (Accum, Init)):
+                exported.update(stmt.defines())
+        return free, exported
+
+    free, _ = walk(Body.coerce(stmts), set(bound))
+    return frozenset(free)
+
+
 class Body(tuple[Stmt, ...]):
     """Immutable Stmt sequence. Tuple-subclass so existing tuple-shaped
     APIs accept Body for free; preserves its own type through

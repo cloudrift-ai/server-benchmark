@@ -82,11 +82,11 @@ experiment-record schema, lifecycle transitions, and atomic YAML serialization).
 shared typed host-information probe used by experiment records and fixed-host GPU detection.
 
 The benchmark library is an experiment-agnostic runner: it retains complete client output, server logs, timing,
-generic system information, and partial raw artifacts after failure. It treats execution and artifact-collection
+generic system information, and partial raw results after failure. It treats execution and result-collection
 failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
 backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
-may opt into the single `command.strict` integrity contract for clean/content-addressed staged inputs, required
-declared artifacts, and source/GPU/compiler provenance. The complete boundary lives in
+may opt into the single `command.strict` integrity contract for a clean Git worktree, required declared results, and
+Git/GPU/NVCC/cuBLAS provenance. The complete boundary lives in
 `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
@@ -228,8 +228,8 @@ Recipe dirs (positional args)
 enumerate_tasks() -> list[BenchmarkTask]
     |
     v
-Prepare per-recipe results directories:
-    +-- replace <recipe_dir>/results for a real run (dry runs do not touch it)
+Prepare per-recipe run directories:
+    +-- create <recipe_dir>/<YYYY-MM-DD_HH-MM-SS> for a real run (dry runs only report it)
     +-- initialize one atomic YAML experiment record per task
     |
     v
@@ -447,8 +447,9 @@ emmy bench recipes/* --local                            # Run on this machine vi
 emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host pool (no provisioning, no teardown)
 ```
 
-Each actual run replaces `{recipe_dir}/results/`. Every expanded row writes one `*.experiment.yaml` plus raw logs or
-declared artifacts; dry runs leave the preceding directory untouched. The runner emits no JSON/TXT wrapper or report.
+Each actual run creates `{recipe_dir}/<YYYY-MM-DD_HH-MM-SS>/`. Every expanded row writes one `*.experiment.yaml` plus
+raw logs or declared command results; dry runs do not create a directory. The runner emits no JSON/TXT wrapper or
+report.
 
 ### `emmy publish`
 
@@ -609,7 +610,8 @@ one durable snapshot of its last run:
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
-  results/
+  <YYYY-MM-DD_HH-MM-SS>/  # ignored local raw output
+  results.tar.gz          # Git LFS archive of the last run
   <row>.experiment.yaml
   RESULTS.md
 ```
@@ -618,9 +620,10 @@ experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
 emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
-Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, assemble
-the system-only records and factual `RESULTS.md` artifact index, and commit the complete last-run snapshot. Neither the
-CLI nor the skill interprets experiment data; the CLI itself performs no Git operation.
+Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, replace
+the raw-results archive, assemble the system-only records and a thoughtful `RESULTS.md` interpretation, and commit the
+complete last-run snapshot. The CLI and experiment code do not interpret measurements; the skill performs the
+intelligent review and the CLI itself performs no Git operation.
 
 ## Adding a New VM Provider
 

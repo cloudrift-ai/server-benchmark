@@ -6,11 +6,11 @@ from emmy.commands.teardown import _load_active_instances
 
 def _write_record(path, *, state, instance_id):
     record = ExperimentRecord(
-        schema_version=1,
+        schema_version=2,
         timestamp="2026-08-14T12:00:00Z",
         status="succeeded",
         experiment=ExperimentRow(task_id="task", row_id="row", directory="experiment", kind="command", variant="v", parameters={}),
-        provenance=Provenance(emmy_code_sha256="hash", git_revision="rev", git_dirty=False),
+        provenance=Provenance(git_revision="rev", git_dirty=False),
         system=None,
         execution=Execution(
             run_id="run",
@@ -31,9 +31,9 @@ def _write_record(path, *, state, instance_id):
     record.write(path)
 
 
-def test_load_active_instances_scans_assembled_and_raw_records(tmp_path):
+def test_load_active_instances_scans_assembled_and_timestamped_records(tmp_path):
     _write_record(tmp_path / "first.experiment.yaml", state="active", instance_id="vm-1")
-    _write_record(tmp_path / "results" / "second.experiment.yaml", state="active", instance_id="vm-1")
+    _write_record(tmp_path / "2026-08-14_12-00-00" / "second.experiment.yaml", state="active", instance_id="vm-1")
     _write_record(tmp_path / "old.experiment.yaml", state="deleted", instance_id="vm-old")
 
     instances = _load_active_instances(tmp_path)

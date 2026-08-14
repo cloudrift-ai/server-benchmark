@@ -108,7 +108,7 @@ async def run_command_workload(
 ) -> tuple[bool, dict]:
     """Run one command-recipe task on the remote VM.
 
-    Returns the execution status and locally pulled artifact paths or transfer errors.
+    Returns the execution status and locally pulled result paths or transfer errors.
     """
     from emmy.provisioning.ssh_transport import scp_from_remote
 

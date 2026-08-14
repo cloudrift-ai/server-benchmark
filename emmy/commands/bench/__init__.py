@@ -147,31 +147,30 @@ def handle_bench(args):
                 root_logger.error(str(e))
                 sys.exit(1)
 
-    # A real invocation replaces each experiment's raw results after local
-    # validation. Dry runs report the same paths without touching prior artifacts.
-    recipe_results_dirs = {}
+    # Each invocation gets a timestamped raw-results directory. Dry runs report
+    # the path without creating it.
+    run_id = ExperimentRecord.new_run_id()
+    recipe_run_dirs = {}
     for recipe_dir in args.recipes:
         resolved = str(Path(recipe_dir).resolve())
-        if resolved not in recipe_results_dirs:
-            recipe_results_dirs[resolved] = BenchmarkTask.prepare_results_dir(resolved, overwrite=not dry_run)
+        if resolved not in recipe_run_dirs:
+            recipe_run_dirs[resolved] = BenchmarkTask.create_run_dir(resolved, run_id, create=not dry_run)
 
-    code_hash = BenchmarkTask.compute_code_hash()
-    run_id = ExperimentRecord.new_run_id(code_hash)
     for task in tasks:
         resolved = str(Path(task.recipe_dir).resolve())
-        task.setup_results_dir(recipe_results_dirs[resolved])
-        task.record = ExperimentRecord.create(task, run_id, code_hash)
+        task.setup_run_dir(recipe_run_dirs[resolved])
+        task.record = ExperimentRecord.create(task, run_id)
         if not dry_run:
             task.record.write(task.record_path())
 
     log_file_paths = []
     if not dry_run:
-        for results_dir in recipe_results_dirs.values():
-            log_file_paths.append(add_file_handler(results_dir))
+        for run_dir in recipe_run_dirs.values():
+            log_file_paths.append(add_file_handler(run_dir))
 
-    for results_dir in recipe_results_dirs.values():
+    for run_dir in recipe_run_dirs.values():
         prefix = "[dry-run] " if dry_run else ""
-        root_logger.info(f"{prefix}Results directory: {results_dir}")
+        root_logger.info(f"{prefix}Run directory: {run_dir}")
     root_logger.info("")
 
     root_logger.info(f"Running {len(tasks)} benchmark task(s) in {len(groups)} execution group(s)")

@@ -23,10 +23,11 @@ validation.
 
 A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because
 `recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
-site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` replaces `results/`
-there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe
-into the current directory and returns that path. An existing directory always takes precedence, so a name that
-matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a timestamped
+run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the
+bundled recipe into the current directory and returns that path. An existing directory always takes precedence, so a
+name that matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never
+clobbered.
 
 ### Recipe Lifecycle Tags
 
@@ -279,7 +280,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
-  strict: true                     # clean source, required artifacts and provenance
+  strict: true                     # clean Git state, required results and system provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -291,10 +292,10 @@ The `run` template uses `string.Template` `$var` syntax. Substitution variables 
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
 
-Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
-paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
-entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
-declared artifacts so partial evidence is not lost.
+Without `strict`, result transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, the Git revision and dirty flag are recorded, every `result_files` entry must be
+retrieved, and GPU, NVCC, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
+declared results so partial evidence is not lost.
 
 ### Result interpretation
 

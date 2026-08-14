@@ -1,48 +1,0 @@
-Input arguments: Namespace(use_mirage=True, max_num_batched_tokens=8, max_num_batched_requests=1, page_size=4096, max_num_pages=16, output_dir=None, trace_name='', profiling=False, spec_decode=None, ngram_size=3, max_seq_length=512, spec_length=3, model_path=None, model='Qwen/Qwen3-8B', use_cutlass_kernel=True, ignore_eos=False, max_new_tokens=None, temperature=0.0, top_p=1.0, do_sample=False, save_tokens=None, prompt='Give me a short introduction to large language model.', split_kv_cache=False)
-world_size(1) rank(0)
-Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.42it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:02,  1.42it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:02<00:01,  1.41it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:02<00:00,  1.49it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  1.97it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  1.69it/s]
-/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(976): warning #177-D: variable "_trace_t" was declared but never referenced
-        bool _trace_t =
-             ^
-
-Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
-
-/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(817): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
-    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
-                                     ^
-
-/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include/mirage/persistent_kernel/tasks/ampere/multitoken_paged_attention_32_64.cuh(219): warning #177-D: variable "s_m_buffer" was declared but never referenced
-    float *s_m_buffer = reinterpret_cast<float *>(smem + S_M_BUFFER_OFFSET);
-           ^
-          detected during instantiation of "void kernel::multitoken_paged_attention_task_impl<T,NUM_QO_HEADS,NUM_KV_HEADS,KV_CACHE_STRIDE,QKV_STRIDE,O_STRIDE,HEAD_DIM,MAX_SEQ_LEN,PAGE_SIZE,MAX_TOKENS>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, __nv_bool, __nv_bool, const void *, const void *, const void *, const void *, float, float) [with T=bfloat16, NUM_QO_HEADS=4, NUM_KV_HEADS=1, KV_CACHE_STRIDE=1024, QKV_STRIDE=6144, O_STRIDE=4096, HEAD_DIM=128, MAX_SEQ_LEN=512, PAGE_SIZE=4096, MAX_TOKENS=8]" at line 1212 of /tmp/tmp7v491u9a/test.cu
-
-/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include/mirage/persistent_kernel/tasks/ampere/multitoken_paged_attention_32_64.cuh(220): warning #177-D: variable "s_d_buffer" was declared but never referenced
-    float *s_d_buffer = reinterpret_cast<float *>(smem + S_D_BUFFER_OFFSET);
-           ^
-          detected during instantiation of "void kernel::multitoken_paged_attention_task_impl<T,NUM_QO_HEADS,NUM_KV_HEADS,KV_CACHE_STRIDE,QKV_STRIDE,O_STRIDE,HEAD_DIM,MAX_SEQ_LEN,PAGE_SIZE,MAX_TOKENS>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, __nv_bool, __nv_bool, const void *, const void *, const void *, const void *, float, float) [with T=bfloat16, NUM_QO_HEADS=4, NUM_KV_HEADS=1, KV_CACHE_STRIDE=1024, QKV_STRIDE=6144, O_STRIDE=4096, HEAD_DIM=128, MAX_SEQ_LEN=512, PAGE_SIZE=4096, MAX_TOKENS=8]" at line 1212 of /tmp/tmp7v491u9a/test.cu
-
-/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include/mirage/persistent_kernel/tasks/ampere/multitoken_paged_attention_32_64.cuh(221): warning #177-D: variable "s_o_buffer" was declared but never referenced
-    float *s_o_buffer = reinterpret_cast<float *>(smem + S_O_BUFFER_OFFSET);
-           ^
-          detected during instantiation of "void kernel::multitoken_paged_attention_task_impl<T,NUM_QO_HEADS,NUM_KV_HEADS,KV_CACHE_STRIDE,QKV_STRIDE,O_STRIDE,HEAD_DIM,MAX_SEQ_LEN,PAGE_SIZE,MAX_TOKENS>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, __nv_bool, __nv_bool, const void *, const void *, const void *, const void *, float, float) [with T=bfloat16, NUM_QO_HEADS=4, NUM_KV_HEADS=1, KV_CACHE_STRIDE=1024, QKV_STRIDE=6144, O_STRIDE=4096, HEAD_DIM=128, MAX_SEQ_LEN=512, PAGE_SIZE=4096, MAX_TOKENS=8]" at line 1212 of /tmp/tmp7v491u9a/test.cu
-
-[MPK INIT] Total tasks: 14316, Total events: 2334
-sm_cnt:  108
-Compiling megakernel using the following command line:
-['/usr/local/cuda/bin/nvcc', '/tmp/tmp7v491u9a/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include', '-I/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../include/mirage/persistent_kernel', '-I/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../deps/cutlass/include', '-I/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../deps/cutlass/tools/util/include', '-I/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=3', '-DMIRAGE_USE_CUTLASS_KERNEL=1', '-arch=native', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmp7v491u9a/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=80', '-DMIRAGE_BACKEND_USE_CUDA', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=1', '-DMPK_MAX_NUM_BATCHED_TOKENS=8', '-DMPK_MAX_NUM_PAGES=16', '-DMPK_PAGE_SIZE=4096', '-DMPK_MAX_SEQ_LENGTH=512']
-Finished megakernel compilation...
-tokens.shape =  torch.Size([1, 512])
-system
-You are Qwen, created by Alibaba Cloud. You are a helpful assistant.
-user
-Give me a short introduction to large language model.
-assistant
-<think>
-Okay, the user asked for a short introduction to large language models. Let me start by defining what they are. They're AI models trained on vast amounts of text data, right? I should mention their ability to understand and generate human-like text. Maybe include examples like GPT, BERT, or others. Also, highlight their applications in areas like answering questions, writing, coding, and more. Keep it concise but cover the key points. Make sure to explain why they're called "large" – probably due to their size in terms of parameters and data. Avoid technical jargon so it's accessible. Check if there's anything else important, like their impact on various industries. Alright, that should cover it without getting too detailed.
-</think>
-
-Large language models (LLMs) are advanced artificial Intelligence systems trained on vast amounts of text data to understand and generate human-like language. They can answer questions, write stories, code, translate languages, and perform tasks requiring comprehension and creativity. Their "large" designation refers to their scale—billions of parameters and extensive data training—enabling them to handle complex tasks with high accuracy. LLMs are revolutionized fields like customer service, education, and content creation by providing efficient, scalable solutions for natural language processing.
-Prompt length 39, generate length 259, per-token latency: 9.791 ms
-worker kernel & scheduler kernel
-smem size: 163840
-Finished Launching Persistent Kernel (Async)

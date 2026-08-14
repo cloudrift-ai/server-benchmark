@@ -1,6 +1,7 @@
 """Dry-run tests for the bench command."""
 
 import os
+import re
 from pathlib import Path
 
 
@@ -144,8 +145,8 @@ def test_bench_no_teardown_dry_run(run_cli, make_bench_config, recipes_dir, tmp_
     assert "Skipping VM deletion (--no-teardown)" in stdout
 
 
-def test_bench_reports_fixed_results_directory(run_cli, make_bench_config, recipes_dir, tmp_path):
-    """Every run targets the recipe's fixed results directory."""
+def test_bench_reports_timestamped_run_directory(run_cli, make_bench_config, recipes_dir, tmp_path):
+    """Every run targets a timestamped directory under the recipe."""
     config_path = make_bench_config(tmp_path)
     recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
     rc, stdout, stderr = run_cli(
@@ -156,7 +157,9 @@ def test_bench_reports_fixed_results_directory(run_cli, make_bench_config, recip
         "--dry-run",
     )
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
-    assert str(Path(recipe).resolve() / "results") in stdout
+    assert str(Path(recipe).resolve()) in stdout
+    assert "Run directory:" in stdout
+    assert re.search(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", stdout)
 
 
 def test_bench_experiment_dry_run(run_cli, make_bench_config, project_root, tmp_path):
@@ -178,11 +181,11 @@ def test_bench_experiment_dry_run(run_cli, make_bench_config, project_root, tmp_
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
     # Should have multiple benchmark tasks from the sweep
     assert stdout.count("bench serve") >= 2
-    assert str(Path(experiment).resolve() / "results") in stdout
+    assert str(Path(experiment).resolve()) in stdout
 
 
-def test_bench_dry_run_preserves_last_results(run_cli, make_bench_config, tmp_path):
-    """A dry run must not replace the durable last-run evidence."""
+def test_bench_dry_run_preserves_prior_run_directory(run_cli, make_bench_config, tmp_path):
+    """A dry run must not change a prior local run directory."""
     import yaml
 
     # Create a minimal recipe in tmp_path so we don't pollute the repo
@@ -210,9 +213,9 @@ def test_bench_dry_run_preserves_last_results(run_cli, make_bench_config, tmp_pa
         ],
     }
     (recipe_dir / "recipe.yaml").write_text(yaml.dump(recipe))
-    results_dir = recipe_dir / "results"
-    results_dir.mkdir()
-    marker = results_dir / "last-run.log"
+    prior_run_dir = recipe_dir / "2026-08-13_12-00-00"
+    prior_run_dir.mkdir()
+    marker = prior_run_dir / "last-run.log"
     marker.write_text("keep\n")
 
     config_path = make_bench_config(tmp_path)
@@ -225,7 +228,7 @@ def test_bench_dry_run_preserves_last_results(run_cli, make_bench_config, tmp_pa
     )
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
     assert marker.read_text() == "keep\n"
-    assert list(results_dir.iterdir()) == [marker]
+    assert list(prior_run_dir.iterdir()) == [marker]
 
 
 def test_bench_command_recipe_dry_run(run_cli, make_bench_config, tmp_path):

@@ -1,4 +1,4 @@
 interface:
   display_name: "Run Experiment"
   short_description: "Run Emmy experiments and retain evidence"
-  default_prompt: "Use $run-experiment to run an Emmy experiment and preserve its system records and raw artifacts."
+  default_prompt: "Use $run-experiment to run an Emmy experiment, preserve its records and compressed raw results, and interpret it."

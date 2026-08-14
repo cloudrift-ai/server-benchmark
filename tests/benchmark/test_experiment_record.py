@@ -1,13 +1,12 @@
 """Tests for the typed, system-only YAML experiment record."""
 
-import os
 import re
 from pathlib import Path
 
 import yaml
 
 from emmy.benchmark.execution import run_execution_group
-from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure
+from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure, Provenance
 from emmy.planner import BenchmarkTask, ExecutionGroup
 from emmy.planner.variant import Variant
 from emmy.recipe.types import Recipe
@@ -41,20 +40,17 @@ MemTotal: 52613349376
 === NVIDIA GPUS ===
 0, NVIDIA GeForce RTX 5090, GPU-1234, 00000000:01:00.0, 32607, 580.65.06, P0, 42, 2, 2400, 1750, 120.0, 575.0
 
-=== NVIDIA DRIVER ===
-| NVIDIA-SMI 580.65.06   Driver Version: 580.65.06   CUDA Version: 13.0 |
-
 === GPU PCI DEVICES ===
 0000:01:00.0,0x10de,0x2b85
 
 === AMD SMI ===
 N/A
 
-=== CUDA COMPILER ===
-Cuda compilation tools, release 13.0, V13.0.88
+=== NVCC VERSION ===
+13.0.88
 
-=== HIP COMPILER ===
-N/A
+=== CUBLAS VERSION ===
+13.1.1.3
 
 === ROOT FILESYSTEM ===
 /dev/sda1 ext4 1000000000 400000000 600000000 40% /
@@ -107,9 +103,9 @@ def test_system_information_extracts_common_hardware():
     assert len(system.gpus) == 1
     assert system.gpus[0].uuid == "GPU-1234"
     assert system.gpus[0].power_limit_w == 575.0
-    assert system.software.cuda_driver_api == "13.0"
-    assert system.software.cuda_compiler.endswith("V13.0.88")
-    assert system.software.hip_compiler is None
+    assert system.gpus[0].driver_version == "580.65.06"
+    assert system.software.nvcc_version == "13.0.88"
+    assert system.software.cublas_version == "13.1.1.3"
     assert system.root_filesystem.available_bytes == 600000000
     assert system.uptime_seconds == 1234.5
 
@@ -142,8 +138,8 @@ async def test_system_information_retrieves_and_parses_host():
 
 def test_record_lifecycle_serialization_and_round_trip(tmp_path):
     task = _task(tmp_path)
-    task.record = ExperimentRecord.create(task, "20260814T120000Z-deadbeef", "deadbeef" * 8)
-    assert task.record.schema_version == 1
+    task.record = ExperimentRecord.create(task, "20260814T120000Z")
+    assert task.record.schema_version == 2
     assert task.record.status == "queued"
     assert task.record.experiment.parameters["benchmark.max_concurrency"] == 8
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", task.record.timestamp)
@@ -158,8 +154,6 @@ def test_record_lifecycle_serialization_and_round_trip(tmp_path):
         ssh_port=22,
     )
     register_secret("secret-value")
-    task.record.provenance.source = {"source_id": "abc", "files": {"secret-value": "hash"}}
-    task.record.artifacts.append(task.record.artifact(task, task.run_dir / "raw.log", "benchmark_output"))
     task.record.finish(success=True, stage="benchmark", timing={"benchmark": 1.5, "total": 1.5})
     task.record.write(task.record_path())
 
@@ -168,7 +162,8 @@ def test_record_lifecycle_serialization_and_round_trip(tmp_path):
     assert loaded.status == "succeeded"
     assert loaded.execution.completed_at.endswith("Z")
     assert loaded.system.gpus[0].uuid == "GPU-1234"
-    assert loaded.artifacts[0].path == "results/raw.log"
+    assert set(loaded_yaml["provenance"]) == {"git_revision", "git_dirty"}
+    assert "artifacts" not in loaded_yaml
     assert "measurement" not in loaded_yaml
     assert "metrics" not in loaded_yaml
     assert "rendered_command" not in loaded_yaml
@@ -178,59 +173,88 @@ def test_record_lifecycle_serialization_and_round_trip(tmp_path):
 
 def test_record_rejects_other_schema_versions(tmp_path):
     path = tmp_path / "old.experiment.yaml"
-    path.write_text("schema_version: 0\n", encoding="utf-8")
+    path.write_text("schema_version: 1\n", encoding="utf-8")
 
     try:
         ExperimentRecord.read(path)
     except ValueError as exc:
-        assert str(exc) == "unsupported experiment record schema version: 0"
+        assert str(exc) == "unsupported experiment record schema version: 1"
     else:
         raise AssertionError("obsolete experiment record schema was accepted")
 
 
+def test_record_rejects_removed_artifact_field(tmp_path):
+    task = _task(tmp_path)
+    record = ExperimentRecord.create(task, "run")
+    value = record.to_mapping()
+    value["artifacts"] = []
+    path = tmp_path / "old.experiment.yaml"
+    path.write_text(yaml.safe_dump(value), encoding="utf-8")
+
+    try:
+        ExperimentRecord.read(path)
+    except ValueError as exc:
+        assert str(exc) == "experiment record fields do not match schema version 2"
+    else:
+        raise AssertionError("removed experiment record field was accepted")
+
+
 def test_strict_command_provenance_uses_typed_system_information(tmp_path):
-    record = ExperimentRecord.create(_task(tmp_path), "run", "deadbeef" * 8)
+    record = ExperimentRecord.create(_task(tmp_path), "run")
+    record.provenance = Provenance(git_revision="revision", git_dirty=False)
     record.system = SystemInformation.from_raw(MACHINE_RAW)
-    record.provenance.source = {"source_id": "abc", "files": {"emmy/a.py": "hash"}}
     assert record.missing_command_provenance() == []
 
     record.system = None
-    record.provenance.source = None
+    record.provenance = Provenance(git_revision=None, git_dirty=None)
     assert record.missing_command_provenance() == [
-        "staged source manifest",
+        "Git provenance",
         "GPU provenance",
-        "GPU compiler provenance",
+        "NVCC provenance",
+        "cuBLAS provenance",
     ]
 
 
-def test_prepare_results_dir_replaces_only_results(tmp_path):
+def test_create_run_dir_uses_run_timestamp_without_replacing_prior_runs(tmp_path):
     recipe = tmp_path / "experiment"
-    results = recipe / "results"
-    results.mkdir(parents=True)
-    (results / "stale.log").write_text("old")
+    prior = recipe / "2026-08-14_11-59-59"
+    prior.mkdir(parents=True)
+    marker = prior / "raw.log"
+    marker.write_text("old")
     recipe_file = recipe / "recipe.yaml"
     recipe_file.write_text("matrices: {}\n")
 
-    prepared = BenchmarkTask.prepare_results_dir(str(recipe), overwrite=True)
+    created = BenchmarkTask.create_run_dir(str(recipe), "20260814T120000Z", create=True)
 
-    assert prepared == results.resolve()
-    assert list(prepared.iterdir()) == []
+    assert created == (recipe / "2026-08-14_12-00-00").resolve()
+    assert list(created.iterdir()) == []
+    assert marker.read_text() == "old"
     assert recipe_file.exists()
 
 
-def test_prepare_results_dir_refuses_symlink(tmp_path):
+def test_create_run_dir_dry_run_does_not_create_directory(tmp_path):
+    recipe = tmp_path / "experiment"
+    recipe.mkdir()
+
+    run_dir = BenchmarkTask.create_run_dir(str(recipe), "20260814T120000Z", create=False)
+
+    assert run_dir == (recipe / "2026-08-14_12-00-00").resolve()
+    assert not run_dir.exists()
+
+
+def test_create_run_dir_refuses_symlink(tmp_path):
     recipe = tmp_path / "experiment"
     target = tmp_path / "elsewhere"
     recipe.mkdir()
     target.mkdir()
-    os.symlink(target, recipe / "results")
+    (recipe / "2026-08-14_12-00-00").symlink_to(target)
 
     try:
-        BenchmarkTask.prepare_results_dir(str(recipe), overwrite=True)
+        BenchmarkTask.create_run_dir(str(recipe), "20260814T120000Z", create=True)
     except ValueError as exc:
         assert "symlinked" in str(exc)
     else:
-        raise AssertionError("symlinked results directory was accepted")
+        raise AssertionError("symlinked run directory was accepted")
 
 
 async def test_execution_failure_leaves_terminal_yaml_record(tmp_path, monkeypatch):

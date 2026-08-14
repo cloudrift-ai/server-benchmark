@@ -57,10 +57,8 @@ class ExperimentRow:
 
 @dataclass
 class Provenance:
-    emmy_code_sha256: str
     git_revision: str | None
     git_dirty: bool | None
-    source: dict[str, Any] | None = None
 
 
 @dataclass
@@ -96,18 +94,10 @@ class Execution:
 
 
 @dataclass
-class Artifact:
-    kind: str
-    path: str
-    status: str | None = None
-    exit_code: int | None = None
-
-
-@dataclass
 class ExperimentRecord:
     """Serializable schema for generic facts about one experiment-row execution."""
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     schema_version: int
     timestamp: str
@@ -116,7 +106,6 @@ class ExperimentRecord:
     provenance: Provenance
     system: SystemInformation | None
     execution: Execution
-    artifacts: list[Artifact] = field(default_factory=list)
 
     @staticmethod
     def utc_timestamp() -> str:
@@ -124,10 +113,9 @@ class ExperimentRecord:
         return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     @classmethod
-    def new_run_id(cls, code_hash: str) -> str:
+    def new_run_id(cls) -> str:
         """Return a readable invocation identifier shared by all selected rows."""
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return f"{timestamp}-{code_hash[:8]}"
+        return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
     @staticmethod
     def _git_provenance() -> tuple[str | None, bool | None]:
@@ -145,7 +133,7 @@ class ExperimentRecord:
         return revision, bool(status) if status is not None else None
 
     @classmethod
-    def create(cls, task: BenchmarkTask, run_id: str, code_hash: str) -> ExperimentRecord:
+    def create(cls, task: BenchmarkTask, run_id: str) -> ExperimentRecord:
         """Create the initial record for one expanded matrix row."""
         revision, dirty = cls._git_provenance()
         return cls(
@@ -160,11 +148,7 @@ class ExperimentRecord:
                 variant=str(task.variant),
                 parameters=_builtins(task.variant.params),
             ),
-            provenance=Provenance(
-                emmy_code_sha256=code_hash,
-                git_revision=revision,
-                git_dirty=dirty,
-            ),
+            provenance=Provenance(git_revision=revision, git_dirty=dirty),
             system=None,
             execution=Execution(run_id=run_id),
         )
@@ -184,27 +168,21 @@ class ExperimentRecord:
         self.execution.timing_seconds = timing
         self.execution.error = None if success else ExecutionError(stage=stage, message=error or f"{stage} failed")
 
-    def artifact(self, task: BenchmarkTask, path: Path, kind: str, **metadata: Any) -> Artifact:
-        """Describe a raw file relative to the experiment directory."""
-        experiment_dir = Path(task.recipe_dir).resolve()
-        try:
-            rendered = str(path.resolve().relative_to(experiment_dir))
-        except ValueError:
-            rendered = str(path)
-        return Artifact(kind=kind, path=rendered, **metadata)
-
     def missing_command_provenance(self) -> list[str]:
         """Return missing generic facts required by strict command rows."""
         missing = []
-        source = self.provenance.source
-        if not source or not source.get("source_id") or not source.get("files"):
-            missing.append("staged source manifest")
+        if not self.provenance.git_revision or self.provenance.git_dirty is None:
+            missing.append("Git provenance")
+        elif self.provenance.git_dirty:
+            missing.append("clean Git worktree")
         gpus = self.system.gpus if self.system else []
         if not gpus or not all(item.uuid or item.pci_bus_id for item in gpus):
             missing.append("GPU provenance")
         software = self.system.software if self.system else SoftwareInformation()
-        if not software.cuda_compiler and not software.hip_compiler:
-            missing.append("GPU compiler provenance")
+        if not software.nvcc_version:
+            missing.append("NVCC provenance")
+        if not software.cublas_version:
+            missing.append("cuBLAS provenance")
         return missing
 
     def to_mapping(self) -> dict[str, Any]:
@@ -228,6 +206,9 @@ class ExperimentRecord:
         version = value.get("schema_version")
         if version != cls.SCHEMA_VERSION:
             raise ValueError(f"unsupported experiment record schema version: {version}")
+        expected = {"schema_version", "timestamp", "status", "experiment", "provenance", "system", "execution"}
+        if set(value) != expected:
+            raise ValueError("experiment record fields do not match schema version 2")
         execution_value = value["execution"]
         infrastructure = execution_value.get("infrastructure")
         error = execution_value.get("error")
@@ -248,7 +229,6 @@ class ExperimentRecord:
                 error=ExecutionError(**error) if error else None,
                 cleanup_error=execution_value.get("cleanup_error"),
             ),
-            artifacts=[Artifact(**item) for item in value.get("artifacts", [])],
         )
 
     @classmethod

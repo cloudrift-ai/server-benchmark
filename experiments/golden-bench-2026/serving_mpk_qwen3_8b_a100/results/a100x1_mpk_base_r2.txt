@@ -1,14 +1,0 @@
-Input arguments: Namespace(use_mirage=False, max_num_batched_tokens=8, max_num_batched_requests=1, page_size=4096, max_num_pages=16, output_dir=None, trace_name='', profiling=False, spec_decode=None, ngram_size=3, max_seq_length=512, spec_length=3, model_path=None, model='Qwen/Qwen3-8B', use_cutlass_kernel=True, ignore_eos=False, max_new_tokens=None, temperature=0.0, top_p=1.0, do_sample=False, save_tokens=None, prompt='Give me a short introduction to large language model.', split_kv_cache=False)
-world_size(1) rank(0)
-Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.83it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.84it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:01,  1.84it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:02<00:00,  1.94it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.59it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.21it/s]
-system
-You are Qwen, created by Alibaba Cloud. You are a helpful assistant.
-user
-Give me a short introduction to large language model.
-assistant
-<think>
-Okay, the user asked for a short introduction to large language models. Let me start by defining what they are. They're AI models trained on vast amounts of text data, right? I should mention their ability to understand and generate human-like text. Maybe include examples like GPT, BERT, or others. Also, highlight their applications in areas like answering questions, writing, coding, and more. Keep it concise but cover the key points. Make sure to explain why they're called "large" – probably due to their size in terms of parameters and data. Avoid technical jargon so it's accessible. Check if there's anything else important, like their training process or recent advancements. Alright, that should cover it without being too lengthy.
-</think>
-
-Large language models (LLMs) are advanced artificial intelligence systems trained on vast amounts of text data to understand and generate human-like language. They can process and respond to complex queries, create content (e.g., essays, code, stories), and perform tasks like translation, summarization, and reasoning. Their "large" designation refers to their scale—often containing billions of parameters and trained on diverse datasets—enabling them to capture nuanced patterns in language. LLMs are widely used in applications such as chatbots, virtual assistants, and data analysis, revolutionizing how humans interact with technology.
-Prompt length 39, generate length 274, per-token latency 32.632 ms

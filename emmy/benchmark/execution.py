@@ -8,11 +8,7 @@ from pathlib import Path
 
 from emmy.benchmark.bench_logging import _get_group_logger, active_run_dir, add_group_file_handler
 from emmy.benchmark.command_workload import run_command_workload
-from emmy.benchmark.experiment_record import (
-    Artifact,
-    ExperimentRecord,
-    Infrastructure,
-)
+from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
 from emmy.deploy import DeployParams
 from emmy.deploy import deploy as deploy_entry
@@ -41,11 +37,10 @@ def _persist(task: BenchmarkTask, dry_run: bool) -> None:
 
 
 def _ensure_records(group: ExecutionGroup, dry_run: bool) -> None:
-    code_hash = BenchmarkTask.compute_code_hash()
-    run_id = ExperimentRecord.new_run_id(code_hash)
+    run_id = ExperimentRecord.new_run_id()
     for task in group.tasks:
         if task.record is None:
-            task.record = ExperimentRecord.create(task, run_id, code_hash)
+            task.record = ExperimentRecord.create(task, run_id)
         task.record.start("provisioning")
         _persist(task, dry_run)
 
@@ -72,29 +67,16 @@ def _infrastructure(group: ExecutionGroup, group_label: str, conn, *, preallocat
     )
 
 
-def _base_artifacts(task: BenchmarkTask, group_label: str) -> list[Artifact]:
-    if task.run_dir is None or task.record is None:
-        return []
-    artifacts = [task.record.artifact(task, task.run_dir / "benchmark.log", "run_log")]
-    group_log = task.run_dir / f"benchmark_{group_label}.log"
-    if group_log.exists():
-        artifacts.append(task.record.artifact(task, group_log, "group_log"))
-    return artifacts
-
-
 def _finalize_failure(
     task: BenchmarkTask,
     *,
     stage: str,
     error: str,
     timing: dict[str, float],
-    group_label: str,
     dry_run: bool,
 ) -> None:
     if task.record is None:
         return
-    if not task.record.artifacts:
-        task.record.artifacts = _base_artifacts(task, group_label)
     task.record.finish(success=False, stage=stage, timing=timing, error=error)
     _persist(task, dry_run)
 
@@ -179,13 +161,12 @@ async def run_execution_group(
                 for path in task.recipe.command.stage:
                     if path not in stage_paths:
                         stage_paths.append(path)
-        stage_manifest = None
         if stage_paths:
             repo_dir_remote = f"{REMOTE_DEPLOY_DIR}/{group_label}/repo"
             strict_stage = any(
                 task.recipe.command.strict for task in group.tasks if task.recipe.kind == "command" and task.recipe.command is not None
             )
-            stage_manifest = await stage_to_remote(
+            await stage_to_remote(
                 Path.cwd(),
                 stage_paths,
                 conn.address,
@@ -195,11 +176,6 @@ async def run_execution_group(
                 dry_run=dry_run,
                 require_clean=strict_stage,
             )
-        for task in group.tasks:
-            if task.recipe.kind == "command":
-                task.record.provenance.source = stage_manifest
-                _persist(task, dry_run)
-
         for task in group.tasks:
             active_run_dir.set(task.run_dir)
             recipe = task.recipe
@@ -244,9 +220,6 @@ async def run_execution_group(
                     task_logger.error("Required command provenance is missing: %s", ", ".join(errors))
 
                 timing = task_timer.as_dict()
-                task.record.artifacts = _base_artifacts(task, group_label)
-                for result_path in command_info.get("result_paths", []):
-                    task.record.artifacts.append(task.record.artifact(task, Path(result_path), "command_result"))
                 error = command_info.get("error") or "; ".join(command_info.get("result_errors", [])) or None
                 task.record.finish(success=success, stage="command", timing=timing, error=error)
                 _persist(task, dry_run)
@@ -275,7 +248,6 @@ async def run_execution_group(
                     stage="deploy",
                     error="model deployment failed",
                     timing=timing,
-                    group_label=group_label,
                     dry_run=dry_run,
                 )
                 task_results.append((task, False, timing))
@@ -305,17 +277,6 @@ async def run_execution_group(
                     await teardown_entry(params)
 
             timing = task_timer.as_dict()
-            task.record.artifacts = [
-                *_base_artifacts(task, group_label),
-                task.record.artifact(task, benchmark_log, "benchmark_output"),
-                task.record.artifact(
-                    task,
-                    server_log_path,
-                    "server_log",
-                    status=server_log["status"],
-                    exit_code=server_log["exit_code"],
-                ),
-            ]
             task.record.finish(success=success, stage="benchmark", timing=timing)
             _persist(task, dry_run)
             task_results.append((task, success or dry_run, timing))
@@ -334,7 +295,6 @@ async def run_execution_group(
                 stage=stage,
                 error=str(exc),
                 timing=timing,
-                group_label=group_label,
                 dry_run=dry_run,
             )
             task_results.append((task, False, timing))

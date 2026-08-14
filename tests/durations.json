@@ -14,7 +14,6 @@
  "tests/benchmark/test_bench_dryrun.py::test_bench_no_teardown_dry_run": 0.45,
  "tests/benchmark/test_bench_dryrun.py::test_bench_results_in_recipe_dir": 0.37,
  "tests/benchmark/test_bench_dryrun.py::test_teardown_help": 0.44,
- "tests/benchmark/test_code_hash.py::test_code_hash_deterministic": 0.06,
  "tests/benchmark/test_fixed_hosts.py::test_bench_fixed_host_dry_run_cli": 0.46,
  "tests/commands/test_publish.py::test_publish_cli_dry_run_uses_fake_docker_without_mutation": 0.68,
  "tests/compiler/backend/test_bench_worker_compare.py::test_run_job_send_times_out_on_unresponsive_worker": 2.02,

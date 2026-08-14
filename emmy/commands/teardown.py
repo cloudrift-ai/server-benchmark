@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _load_active_instances(directory: Path) -> dict[tuple, list[tuple[Path, ExperimentRecord]]]:
     """Group active infrastructure handles from row records."""
-    paths = [*directory.glob("*.experiment.yaml"), *(directory / "results").glob("*.experiment.yaml")]
+    paths = [*directory.glob("*.experiment.yaml"), *directory.glob("????-??-??_??-??-??/*.experiment.yaml")]
     instances: dict[tuple, list[tuple[Path, ExperimentRecord]]] = defaultdict(list)
     for path in sorted(set(paths)):
         record = ExperimentRecord.read(path)

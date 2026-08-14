@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -81,33 +81,21 @@ class BenchmarkTask:
             raise ValueError("experiment results directory has not been assigned")
         return self.run_dir / f"{self.file_stem}.benchmark.log"
 
-    def setup_results_dir(self, run_dir: Path) -> None:
-        """Assign the fixed raw-results directory."""
+    def setup_run_dir(self, run_dir: Path) -> None:
+        """Assign the timestamped raw-results directory."""
         self.run_dir = run_dir
 
     @staticmethod
-    def compute_code_hash() -> str:
-        """SHA256 hash of all .py files under emmy/, sorted by relative path."""
-        pkg_dir = Path(__file__).parent.parent
-        hasher = hashlib.sha256()
-        for py_file in sorted(pkg_dir.rglob("*.py")):
-            rel = py_file.relative_to(pkg_dir)
-            content = py_file.read_text(encoding="utf-8")
-            hasher.update(f"{rel}\n{content}\n".encode())
-        return hasher.hexdigest()
-
-    @staticmethod
-    def prepare_results_dir(base_dir: str, *, overwrite: bool) -> Path:
-        """Create ``results/``, replacing the preceding run when requested."""
+    def create_run_dir(base_dir: str, run_id: str, *, create: bool) -> Path:
+        """Return the timestamped raw-results directory for one invocation."""
         experiment_dir = Path(base_dir).resolve()
-        results_dir = experiment_dir / "results"
-        if results_dir.is_symlink():
-            raise ValueError(f"refusing to replace symlinked experiment results directory: {results_dir}")
-        if overwrite and results_dir.exists():
-            shutil.rmtree(results_dir)
-        if overwrite:
-            results_dir.mkdir(parents=True, exist_ok=True)
-        return results_dir
+        timestamp = datetime.strptime(run_id, "%Y%m%dT%H%M%SZ").strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir = experiment_dir / timestamp
+        if run_dir.is_symlink():
+            raise ValueError(f"refusing to use symlinked experiment run directory: {run_dir}")
+        if create:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        return run_dir
 
 
 @dataclass

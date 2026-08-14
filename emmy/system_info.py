@@ -45,10 +45,6 @@ gpu_fields=$gpu_fields,utilization.gpu,clocks.sm,clocks.mem,power.draw,power.lim
 nvidia-smi --query-gpu="$gpu_fields" --format=csv,noheader,nounits 2>/dev/null || echo "N/A"
 
 echo ""
-echo "=== NVIDIA DRIVER ==="
-nvidia-smi 2>/dev/null || echo "N/A"
-
-echo ""
 echo "=== GPU PCI DEVICES ==="
 """
     + GPU_PCI_INFORMATION_COMMAND
@@ -60,12 +56,29 @@ echo "=== AMD SMI ==="
   --showdriverversion --showtemp --showuse --showclocks --showpower --json 2>/dev/null) || echo "N/A"
 
 echo ""
-echo "=== CUDA COMPILER ==="
-(nvcc --version 2>/dev/null || /usr/local/cuda/bin/nvcc --version 2>/dev/null) || echo "N/A"
+echo "=== NVCC VERSION ==="
+nvcc_output=$(nvcc --version 2>/dev/null || /usr/local/cuda/bin/nvcc --version 2>/dev/null) || true
+nvcc_version=$(printf '%s\n' "$nvcc_output" | sed -n 's/.*V\([0-9][0-9.]*\).*/\1/p' | tail -n 1)
+[ -n "$nvcc_version" ] && printf '%s\n' "$nvcc_version" || echo "N/A"
 
 echo ""
-echo "=== HIP COMPILER ==="
-(hipcc --version 2>/dev/null || /opt/rocm/bin/hipcc --version 2>/dev/null) || echo "N/A"
+echo "=== CUBLAS VERSION ==="
+cublas_header=
+for candidate in /usr/local/cuda/include/cublas_api.h /usr/local/cuda/targets/*/include/cublas_api.h; do
+  if [ -f "$candidate" ]; then cublas_header=$candidate; break; fi
+done
+if [ -n "$cublas_header" ]; then
+  cublas_major=$(awk '$2 == "CUBLAS_VER_MAJOR" {print $3; exit}' "$cublas_header")
+  cublas_minor=$(awk '$2 == "CUBLAS_VER_MINOR" {print $3; exit}' "$cublas_header")
+  cublas_patch=$(awk '$2 == "CUBLAS_VER_PATCH" {print $3; exit}' "$cublas_header")
+  cublas_build=$(awk '$2 == "CUBLAS_VER_BUILD" {print $3; exit}' "$cublas_header")
+  printf '%s.%s.%s.%s\n' "$cublas_major" "$cublas_minor" "$cublas_patch" "$cublas_build"
+else
+  cublas_path=$(ldconfig -p 2>/dev/null | awk '/libcublas\.so/{print $NF; exit}')
+  cublas_path=$(readlink -f "$cublas_path" 2>/dev/null || true)
+  cublas_version=$(printf '%s\n' "$cublas_path" | sed -n 's/.*libcublas\.so\.//p')
+  [ -n "$cublas_version" ] && printf '%s\n' "$cublas_version" || echo "N/A"
+fi
 
 echo ""
 echo "=== ROOT FILESYSTEM ==="
@@ -172,9 +185,8 @@ class PciGpuDevice:
 
 @dataclass
 class SoftwareInformation:
-    cuda_driver_api: str | None = None
-    cuda_compiler: str | None = None
-    hip_compiler: str | None = None
+    nvcc_version: str | None = None
+    cublas_version: str | None = None
     docker_client: str | None = None
     docker_server: str | None = None
     docker_os: str | None = None
@@ -309,8 +321,6 @@ class SystemInformation:
                 mount=filesystem[-1],
             )
 
-        cuda_driver = _section(raw_text, "NVIDIA DRIVER")
-        cuda_match = re.search(r"CUDA Version:\s+([\d.]+)", cuda_driver)
         amd_smi = _section(raw_text, "AMD SMI")
         return cls(
             hostname=_section(raw_text, "HOSTNAME") or None,
@@ -333,9 +343,8 @@ class SystemInformation:
             gpus=gpus,
             gpu_pci_devices=pci_gpus,
             software=SoftwareInformation(
-                cuda_driver_api=cuda_match.group(1) if cuda_match else None,
-                cuda_compiler=_tool_output(raw_text, "CUDA COMPILER"),
-                hip_compiler=_tool_output(raw_text, "HIP COMPILER"),
+                nvcc_version=_tool_output(raw_text, "NVCC VERSION"),
+                cublas_version=_tool_output(raw_text, "CUBLAS VERSION"),
                 docker_client=docker.get("ClientVersion"),
                 docker_server=docker.get("ServerVersion"),
                 docker_os=docker.get("OperatingSystem"),

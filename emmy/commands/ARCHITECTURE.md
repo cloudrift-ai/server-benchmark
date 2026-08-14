@@ -584,7 +584,7 @@ dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is the ex
 are unlabeled rather than known-bad). Its fits are not byte-reproducible — CatBoost's histogram build is threaded —
 so two fits are compared by their metrics files rather than by a checksum.
 
-Shared: `--seed`, `--folds {op_family,gpu,both,none}` (default `both`), `--out DIR`, and `--features SPEC` — the
+Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
 the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
 the trainer's own**: `fit/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
@@ -596,9 +596,10 @@ affine copies of a kept feature, so excluding them is expressiveness-neutral. `-
 `_tune/fits/<timestamp>-<trainer>-<data>/`.
 
 A run writes `metrics.json` — the per-run record two fits
-are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and one `cv.<axis>`
-block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and `weights.json`, the full-train
-artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
+are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and the `cv.shape`
+block (pooled holdout / train tables, per-card gap, per-fold detail); folds group by shape, so goldens sharing a
+candidate pool are held out together rather than scored by a model trained on that pool — and `weights.json`, the
+full-train artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
 `scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
 (`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and
@@ -615,8 +616,8 @@ both seeding policies and the ranking loss the fit ran under; two fits are only 
 same way they must match on `--features`.
 
 ```bash
-emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/
-emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run dir for an A/B
+emmy fit                                  # linear x golden, 5 shape folds, metrics under _tune/fits/
+emmy fit --folds 0 --out _tune/fits/ab    # full-train only, fixed run dir for an A/B
 ```
 
 ## Experiments

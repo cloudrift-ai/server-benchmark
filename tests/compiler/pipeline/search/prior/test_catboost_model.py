@@ -32,7 +32,7 @@ def _groups(n_pools: int = 8, n_rows: int = 30, dynamic: bool = False) -> list[G
     out = []
     for gi in range(n_pools):
         rows = [{"D_a": float(i), "D_b": float(rng.integers(0, 5)), **stamp} for i in range(n_rows)]
-        out.append(Group.from_dicts(f"gpuA/p{gi}", f"p{gi}", "dyn" if dynamic else "warp", "gpuA", n_rows - 1, rows))
+        out.append(Group.from_dicts(f"gpuA/p{gi}", f"p{gi}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi}", n_rows - 1, rows))
     return out
 
 

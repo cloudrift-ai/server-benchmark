@@ -18,23 +18,24 @@ from __future__ import annotations
 
 import logging
 
-from emmy.compiler.pipeline.search.prior.fit.cv import build_metrics, run_axis
+from emmy.compiler.pipeline.search.prior.fit.cv import build_metrics, run_folds
 from emmy.compiler.pipeline.search.prior.fit.group import Group
 
 
-def run_fit(groups: list[Group], skipped: list[tuple[str, str, str]], *, trainer, fold_trainer, axes, header):
+def run_fit(groups: list[Group], skipped: list[tuple[str, str, str]], *, trainer, fold_trainer, folds, header):
     """One complete fit run → ``(metrics, fit)``. ``trainer.fit(groups)`` produces the shippable
     model over every group; ``fold_trainer`` is the same trainer under the fold-seeding policy and
-    fits one model per :func:`~.cv.run_axis` fold."""
+    fits one model per :func:`~.cv.run_folds` fold. ``folds`` is the fold count (``0`` skips
+    cross-validation entirely and the metrics carry an empty ``cv`` block)."""
     full = trainer.fit(groups)
 
-    # CV folds re-fit ~2x per axis per fold — silence the fit package's per-case rank
-    # logging for that stage (the full-train fit above already reported it).
+    # Each fold re-fits — silence the fit package's per-case rank logging for that stage
+    # (the full-train fit above already reported it).
     pkg_logger = logging.getLogger(__package__)
     level = pkg_logger.level
     pkg_logger.setLevel(logging.WARNING)
     try:
-        cv = {axis: run_axis(groups, axis, trainer=fold_trainer) for axis in axes}
+        cv = {"shape": run_folds(groups, trainer=fold_trainer, k=folds)} if folds else {}
     finally:
         pkg_logger.setLevel(level)
 

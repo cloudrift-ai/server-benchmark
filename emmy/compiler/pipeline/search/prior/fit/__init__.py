@@ -5,7 +5,6 @@ from emmy.compiler.pipeline.search.prior.fit.group import (
     Group,
     feature_matrix,
     feature_view,
-    op_family,
 )
 from emmy.compiler.pipeline.search.prior.fit.linear import (
     DEFAULT_L2,
@@ -36,7 +35,6 @@ __all__ = [
     "gate_columns",
     "l2_penalty",
     "mean_log_rank",
-    "op_family",
     "rank_of_golden",
     "raw_weights",
     "topk_table",

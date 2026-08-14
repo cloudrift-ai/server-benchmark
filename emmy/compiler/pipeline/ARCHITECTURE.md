@@ -587,7 +587,9 @@ tune are ordinary measurements and do train it; it is the recorded configs and t
 The **offline** prior IS fitted on them: `emmy fit` reconstructs the set of candidates each golden competed against
 and trains the weights to rank the recorded config well inside that set (the fit description above). An offline
 golden-rank number is therefore measured on the very data the fit saw; the fit harness's cross-validation folds are
-the view on data it did not. A golden's µs is true of the deployable flags only, and never settles a compile at other
+the view on data it did not — grouped by SHAPE, so every golden enumerating the same candidate pool is held out
+together and on every card at once. Grouping any coarser (by op-name family, as it once did) leaves a hole rather
+than a bias: the fold model is scored on a pool it was trained on. A golden's µs is true of the deployable flags only, and never settles a compile at other
 flags.
 
 **A golden entry the compiler can no longer produce is worse than no entry at all.** When a shape matches but none of

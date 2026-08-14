@@ -11,7 +11,7 @@ A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two 
 compared by (same header inputs → identical content; the run dir name, not the file,
 carries the timestamp) — and ``<out>/weights.json``, the full-train artifact in the
 shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
-``cv.<axis>`` holdout/train/gap blocks) is documented on
+a ``cv.shape`` holdout/train/gap block) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
 module owns what ``pipeline/`` must not import: the snippet-tracing golden case builder
@@ -34,14 +34,13 @@ from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.prior.fit import Group
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
+from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, TREE_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
 logger = logging.getLogger(__name__)
-
-FOLD_AXES = ("op_family", "gpu")
 
 
 def register_fit_command(subparsers) -> None:
@@ -77,7 +76,13 @@ def register_fit_command(subparsers) -> None:
         help="catboost only: fit rounds — the first draws negatives uniformly, each further one mines hard negatives.",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--folds", choices=(*FOLD_AXES, "both", "none"), default="both", help="Cross-validation fold axes (default: both).")
+    parser.add_argument(
+        "--folds",
+        type=int,
+        default=fit_cv.DEFAULT_FOLDS,
+        help="Cross-validation folds, grouped by shape so goldens sharing a candidate pool are held out together "
+        f"(default {fit_cv.DEFAULT_FOLDS}; 0 skips cross-validation).",
+    )
     parser.add_argument(
         "--features",
         default=None,
@@ -94,6 +99,20 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>-<data>/).")
     parser.set_defaults(func=handle_fit)
+
+
+def _shape_group(g) -> str:
+    """The golden's cross-validation fold group: its ``ShapeKey`` with the two fields normalized away that
+    separate goldens sharing a candidate pool.
+
+    ``is_dyn`` because a ``.dynM`` golden *enumerates its static counterpart's pool* (see
+    :func:`build_golden_groups`) — split them across folds and the fold model is scored on rows it trained on.
+    ``is_warp`` because the fp16/fp32 twins of one geometry are the same physical shape; their pools are
+    disjoint, so this one is conservatism rather than necessity, and it costs 21 groups out of 435.
+
+    ``kind`` and the extents stay: ``flash`` / ``softmax`` / ``rms_norm`` / ``fused`` are different kernels, not
+    variants of one shape. The result is a string so it lands in the metrics file as-is."""
+    return str(replace(g.shape_key, is_dyn=False, is_warp=False))
 
 
 def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Group], list[tuple[str, str, str]]]:
@@ -169,7 +188,7 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
             key = f"{key}#{key_counts[key]}"
-        cases.append(Group.from_dicts(key, g.name, tier, g.gpu_name, gidx, feats))
+        cases.append(Group.from_dicts(key, g.name, tier, g.gpu_name, _shape_group(g), gidx, feats))
     return cases, skipped
 
 
@@ -252,7 +271,6 @@ def handle_fit(args) -> None:
         raise SystemExit(
             f"--data {args.data} is not yet supported — only 'golden' exists (the freeze cells land with the training-data work)"
         )
-    axes = list(FOLD_AXES) if args.folds == "both" else [] if args.folds == "none" else [args.folds]
 
     out_dir = Path(args.out) if args.out else Path("_tune/fits") / f"{time.strftime('%Y%m%d-%H%M%S')}-{args.trainer}-{args.data}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -273,13 +291,13 @@ def handle_fit(args) -> None:
         "seed": args.seed,
         "feat_ver": features.FEATURIZER_VERSION,
         "features": view,
-        "fold_axes": axes,
+        "folds": args.folds,
         "repo_commit": _repo_commit(),
         "trainer_params": trainer_params,
     }
     import datetime  # noqa: PLC0415
 
-    metrics, fit = run_fit(cases, skipped, trainer=trainer, fold_trainer=fold_trainer, axes=axes, header=header)
+    metrics, fit = run_fit(cases, skipped, trainer=trainer, fold_trainer=fold_trainer, folds=args.folds, header=header)
 
     model, notes = fit.model, fit.notes
     # Shipping policy, and the reason ``run_fit`` hands back a fit rather than an artifact: a LINEAR fit with no

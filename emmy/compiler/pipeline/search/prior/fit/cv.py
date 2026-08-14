@@ -5,18 +5,33 @@ Works entirely on pre-built :class:`~.group.Group` lists (the command layer owns
 building, which needs the snippet tracer ``pipeline/`` must not import) and produces the
 run's metrics dict, so every piece here is testable on synthetic cases with no tracing.
 
-The report structure (one :func:`run_axis` block per fold axis) is standard grouped
-cross-validation: individual folds are construction machinery; the pooled tables are the
-result. Each golden is held out exactly ONCE per axis — its ``holdout`` rank comes from
-the single fold model that never trained on it, its ``train`` rank is the median across
-the fold models that did — and the per-card ``gap`` (holdout median − train median)
+The report is standard grouped cross-validation: individual folds are construction machinery;
+the pooled tables are the result. Each golden is held out exactly ONCE — its ``holdout`` rank
+comes from the single fold model that never trained on it, its ``train`` rank is the median
+across the fold models that did — and the per-card ``gap`` (holdout median − train median)
 separates overfitting (train good, holdout bad) from a too-weak model class (both bad,
 small gap). Per-fold medians survive only in ``fold_detail`` as the spread/noise view,
 plus ``excluded`` folds with reasons: a fold whose training slice can't fit a weight set
 the holdout needs is dropped loudly, never scored with a stale or empty vector.
 
+**Folds group by SHAPE** (:attr:`Group.shape` — the extent identity), five of them, balanced by
+case count. That is the deploy question stated as an experiment: a new shape, on a card we have
+data for, no measurements. Two retired axes are worth naming so they do not come back:
+
+- ``op_family``, keyed on the golden's NAME family, both leaked and barely folded. What decides
+  whether two goldens compete over one candidate pool is their extent identity, not their name:
+  178 shape groups spanned more than one family, covering 695 of 1385 goldens, so a "held-out"
+  golden was routinely scored by a model trained on its own pool. And at 891 families over 951
+  names it was nearly leave-one-out — ~891 refits, which is why cross-validation was never run.
+- ``gpu`` (leave-one-card-out) asked a transfer question the deploy path does not face, and with
+  720/348/297/10/10 goldens per card mostly measured sample-size imbalance.
+
+Note the difference in kind: a shape group must be held out on EVERY card at once (173 groups span
+more than one), because the same shape's answer on another card is still the answer.
+
 Aggregates are per card ONLY — pooling cards is the failure mode the 2026-07 sweeps
-documented (a pooled win trading one arch against the other), so the shape forbids it.
+documented (a pooled win trading one arch against the other), so the shape forbids it. That is a
+REPORT axis and always was; it is independent of what the folds group by.
 
 Fold models are seeded from ZEROS (not the incumbent artifact): the incumbent's weights
 were themselves fit on every golden, so seeding folds from them would leak each held-out
@@ -39,10 +54,29 @@ TOP_KS = (1, 10, 25, 50, 100)
 OUT_OF_SCOPE = "kernel kind not case-buildable"
 
 
-def fold_key(case: Group, axis: str) -> str:
-    if axis not in ("op_family", "gpu"):
-        raise ValueError(f"unknown fold axis {axis!r}")
-    return case.gpu if axis == "gpu" else case.family
+DEFAULT_FOLDS = 5
+
+
+def assign_folds(cases: list[Group], k: int = DEFAULT_FOLDS) -> dict[str, int]:
+    """Shape group → fold index, balanced by case count.
+
+    Groups are wildly uneven — on the golden dataset the largest holds 122 cases, the next 14, and 162 are
+    singletons — so groups are assigned largest-first to whichever fold is currently smallest. Random or hashed
+    assignment would let one fold carry the 122-case group and leave the rest thin, and per-fold medians over a
+    thin fold are noise. Measured on the real dataset this lands 277 cases in every one of 5 folds.
+
+    Ties break on the group key, so the assignment is a pure function of the case list and a re-run reproduces
+    it exactly."""
+    sizes: dict[str, int] = {}
+    for c in cases:
+        sizes[c.shape] = sizes.get(c.shape, 0) + 1
+    loads = [0] * k
+    out: dict[str, int] = {}
+    for shape, n in sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])):
+        f = min(range(k), key=lambda i: (loads[i], i))
+        out[shape] = f
+        loads[f] += n
+    return out
 
 
 def _unfittable(trainer, train: list[Group], hold: list[Group]) -> str | None:
@@ -100,30 +134,34 @@ def evaluate_full_train(cases: list[Group], model) -> dict:
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
 
 
-def run_axis(cases: list[Group], axis: str, *, trainer) -> dict:
-    """One fold axis's full cross-validation → its ``cv.<axis>`` metrics block.
+def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
+    """The full cross-validation → the ``cv.shape`` metrics block.
 
     ``trainer`` is any object with ``fit(groups) -> model`` where the model satisfies
     :func:`case_ranks`' protocol. ONE instance serves every fold: the trainer is immutable and
-    its ``fit`` is pure, so a fold's fit never depends on how many folds ran before it — adding a
-    golden family changes that family's fold and nothing else, keeping cross-run diffs meaningful.
-    The caller passes the FOLD trainer, seeded from zeros rather than the incumbent, since the
-    incumbent's weights were fit on every golden and would leak each held-out golden into its own
-    holdout model. Guard: a fold is excluded (with a recorded reason) when its training slice has
-    no static cases (the dynamic stage seeds from the static fit, so nothing is fittable) or when
-    its holdout needs the dynamic set and the training slice has no dynamic cases."""
-    folds = sorted({fold_key(c, axis) for c in cases})
+    its ``fit`` is pure, so a fold's fit never depends on how many folds ran before it, keeping
+    cross-run diffs meaningful. The caller passes the FOLD trainer, seeded from zeros rather than
+    the incumbent, since the incumbent's weights were fit on every golden and would leak each
+    held-out golden into its own holdout model. Guard: a fold is excluded (with a recorded reason)
+    when the trainer declares its training slice unfittable (:func:`_unfittable`).
+
+    Folds group by :attr:`Group.shape` (:func:`assign_folds`), so every golden sharing a candidate
+    pool is held out together — on any card. Splitting them is not a bias, it is a hole: the fold
+    model would be scored on a pool it had already been given the answer to."""
+    by_shape = assign_folds(cases, k)
     holdout: list[tuple[Group, tuple[int, int]]] = []
-    holdout_fold: dict[str, str] = {}
+    holdout_fold: dict[str, int] = {}
     train_acc: dict[str, tuple[Group, list[int], list[int]]] = {}
     fold_medians: dict[str, dict] = {}
     excluded: dict[str, str] = {}
 
-    for f in folds:
-        train = [c for c in cases if fold_key(c, axis) != f]
-        hold = [c for c in cases if fold_key(c, axis) == f]
+    for f in range(k):
+        train = [c for c in cases if by_shape[c.shape] != f]
+        hold = [c for c in cases if by_shape[c.shape] == f]
+        if not hold:
+            continue
         if reason := _unfittable(trainer, train, hold):
-            excluded[f] = reason
+            excluded[str(f)] = reason
             continue
         model = trainer.fit(train)
         hold_entries = [(c, r) for c in hold if (r := case_ranks(c, model)) is not None]
@@ -134,7 +172,7 @@ def run_axis(cases: list[Group], axis: str, *, trainer) -> dict:
                 acc = train_acc.setdefault(c.key, (c, [], []))
                 acc[1].append(r[0])
                 acc[2].append(r[1])
-        fold_medians[f] = {"median": _median([r for _, (r, _) in hold_entries]) if hold_entries else None, "n": len(hold_entries)}
+        fold_medians[str(f)] = {"median": _median([r for _, (r, _) in hold_entries]) if hold_entries else None, "n": len(hold_entries)}
 
     train_entries = [(c, (_median(pes), _median(opt))) for c, pes, opt in train_acc.values()]
     holdout_cards = _per_card(holdout)

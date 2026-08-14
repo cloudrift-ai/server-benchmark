@@ -58,7 +58,7 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
         # it; ``Group.from_dicts`` lifts it into ``Group.dynamic`` and out of the fitted matrix.
         if tier == "dyn":
             feats = [{**f, "S_ext_n_symbolic_axis": 1.0} for f in feats]
-        cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", int(rng.integers(0, n_rows)), feats))
+        cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", f"shape{c}", int(rng.integers(0, n_rows)), feats))
     return cases, names
 
 
@@ -201,7 +201,7 @@ def test_dict_and_matrix_paths_score_identically(dynamic, monkeypatch):
         }
         for _ in range(60)
     ]
-    group = Group.from_dicts("x/case", "case", "dyn" if dynamic else "warp", "x", 0, rows)
+    group = Group.from_dicts("x/case", "case", "dyn" if dynamic else "warp", "x", "case", 0, rows)
     assert group.dynamic is dynamic  # routed by the rows' stamp, not the tier label
     fitted = fit.score_rows(group)
     deployed = np.array([prior.quality(row) for row in rows])

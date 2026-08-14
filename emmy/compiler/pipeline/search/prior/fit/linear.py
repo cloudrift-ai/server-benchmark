@@ -112,7 +112,10 @@ def fit_weights(
     z-space. The params are NOT z-scored — they are raw quality units, and ``matz @ w_z`` equals the
     raw quality up to a per-pool constant that ranking drops, so the two add consistently. Returns
     ``(best_w, best_params, best_ranks, mu, sd)`` with ``best_w`` in this pool's z-space."""
-    mats = [g.matrix(names) for g in groups]
+    # A PRIVATE copy: the z-scoring below is in place, and ``Group.matrix`` hands back a shared read-only
+    # projection. Copying here is what it has always done — the difference is that the projection it copies
+    # from is now built once for the whole run instead of once per fold.
+    mats = [g.matrix(names).copy() for g in groups]
     gidx = [g.pinned_idx for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.

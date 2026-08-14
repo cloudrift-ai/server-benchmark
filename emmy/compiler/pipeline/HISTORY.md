@@ -151,6 +151,28 @@ now: bench-to-node recording (`search/bench_record.py`) — every clean pinned/g
 preserves no `LoopOp` in `.source`, and until the tile-dialect fallback was added to the offer-site recovery, every
 tensor-core kernel was silently unrecordable. See Part 6.
 
+### The holdout that trained on the held-out shape
+
+`emmy fit`'s cross-validation folded on the golden's NAME family (`op_family`, the dot-name with size and dtype
+segments stripped). What actually decides whether two goldens compete over one candidate pool is their extent
+identity (`ShapeKey`), and the two do not agree: measured over the 1385-record corpus, **178 shape groups spanned
+more than one family, covering 695 goldens** — `rms_norm`, `gemma4_12b.rms_norm` and
+`gemma4_12b.rms_norm.k3840.m512` are one shape under three names. Holding out any one of them trained the fold
+model on its twin's pool, so half the corpus's "held-out" ranks were scored by a model that had been shown the
+answer. A second version of the same hole ran across cards: 173 groups span more than one GPU, and the fold key
+never mentioned that either.
+
+The axis was also barely a fold axis — 891 families over 951 distinct names is nearly leave-one-out, ~891 refits —
+which is why, combined with the projection copying, cross-validation had never actually been run and the defect
+had nothing to show itself in.
+
+Guard now: folds group by shape (`Group.shape`, stamped from the record's `ShapeKey` with `is_dyn` and `is_warp`
+normalized away so a `.dynM` golden shares a fold with the static twin whose pool it enumerates), five of them,
+balanced by case count, and a group is held out on every card at once. The `gpu` axis went with it: leave-one-card-
+out asks a transfer question the deploy path does not face, and with 720/348/297/10/10 goldens per card it mostly
+measured sample-size imbalance. Per-card *aggregation* is unchanged — that is a report axis and always was. See
+Part 3.
+
 ### Machine-dependent golden evals
 
 `eval offline` / `eval online` once featurized each golden under the LIVE host's context: a 4090 golden scored on a

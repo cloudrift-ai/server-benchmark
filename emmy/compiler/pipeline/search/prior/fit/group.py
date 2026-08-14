@@ -21,21 +21,18 @@ the two so neither model constrains the other.
 ``key`` is ``"<gpu>/<name>"``, disambiguated by the builder when one name records several parity entries
 (``#2``, ``#3``, … in dataset order). ``tier`` is the fit's case tier (``thread`` / ``warp`` / ``dyn`` /
 ``reduce`` / ``pointwise``) and is a REPORT LABEL only — it decides nothing. The weight set a group scores
-under is ``dynamic``, read off the routing stamp exactly as the deployed prior reads it.
+under is ``dynamic``, read off the routing stamp exactly as the deployed prior reads it. ``shape`` is the
+cross-validation fold group, and is the one identity here that decides something structural: two goldens
+sharing it enumerate the same candidates, so a fold that separated them would train on the answer.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, LinearModel
-
-# A golden name's trailing size/dtype/variant segments (``512``, ``fp16``, ``dynM``, ``h4096``, ``s2048``,
-# ``n16384``, ``k8192``, ``hd128``) — stripped by :func:`op_family`.
-_VARIANT_SEG = re.compile(r"fp16|dynM|(?:hd|[hsnk])?\d+")
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -171,13 +168,21 @@ class Group:
     name: str
     tier: str
     gpu: str
+    # The cross-validation fold group: this pool's extent identity, spelled by the builder from the source
+    # record's ``ShapeKey``. Goldens sharing it compete over the same candidates, so they must be held out
+    # TOGETHER — see :func:`~.cv.assign_folds`. Unlike ``gpu`` (a report axis) this decides folds; unlike
+    # ``tier`` (a label) it is load-bearing.
+    shape: str
     dynamic: bool
     pinned_idx: int
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
+    # The last ``matrix()`` projection, ``((names, fill), array)`` — a cache, not part of the group's value, so
+    # it stays out of ``__eq__`` / ``repr``. See :meth:`matrix`.
+    _cache: tuple | None = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def from_dicts(cls, key: str, name: str, tier: str, gpu: str, pinned_idx: int, feats: list[dict[str, float]]) -> Group:
+    def from_dicts(cls, key: str, name: str, tier: str, gpu: str, shape: str, pinned_idx: int, feats: list[dict[str, float]]) -> Group:
         """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
         union of the pool's keys, the matrix a column per name (absent key = 0.0). Callers
         drop the dicts after this — the matrix is the stored representation.
@@ -199,7 +204,7 @@ class Group:
                 f"the source record's flag and its featurized rows disagree about the weight set"
             )
         names = tuple(sorted({k for f in feats for k in f} - set(ROUTING_FEATURES)))
-        return cls(key, name, tier, gpu, dynamic, pinned_idx, names, feature_matrix(feats, list(names), fill=np.nan))
+        return cls(key, name, tier, gpu, shape, dynamic, pinned_idx, names, feature_matrix(feats, list(names), fill=np.nan))
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``
@@ -215,29 +220,26 @@ class Group:
 
         Which is why the STORED matrix holds ``NaN``: it is strictly the more informative of the two, so the
         0.0 view is derivable from it and the reverse is not. Packing 0.0 would have destroyed the
-        distinction at :meth:`from_dicts` time, before any model got a say."""
-        idx = {n: j for j, n in enumerate(self.feat_names)}
-        out = np.full((len(self.feats), len(names)), fill, dtype=float)
-        for j, n in enumerate(names):
-            if n in idx:
-                out[:, j] = self.feats[:, idx[n]]
-        if not np.isnan(fill):
-            np.nan_to_num(out, copy=False, nan=fill)
-        return out
+        distinction at :meth:`from_dicts` time, before any model got a say.
 
-    @property
-    def family(self) -> str:
-        return op_family(self.name)
+        **The result is memoized and READ-ONLY.** Building it is a strided column copy of the whole pool, and a
+        cross-validated run asks for the same projection over and over — once per fold's fit and again per
+        fold's scoring pass. Measured on the golden dataset, those copies were 85% of a fit's wall time. One
+        entry is enough: a fit uses one column list for its whole run, so a different ``(names, fill)`` simply
+        evicts the previous one instead of growing without bound.
 
-
-def op_family(name: str) -> str:
-    """The golden's op family — its dot-name with trailing size/dtype/variant segments stripped:
-    ``matmul.square.512.fp16`` → ``matmul.square``, ``gemma4_12b.q_proj.s2048`` → ``gemma4_12b.q_proj``,
-    ``reduce.k2048.dynM`` → ``reduce``. The leave-one-family-out axis holds out every size/dtype/dynamic
-    variant of one op shape together, so the holdout fold measures generalization to an unseen shape family,
-    not interpolation between its own sizes. (Model-prefixed names keep the model tag: ``gemma4_12b.mlp_down``
-    and ``matmul.mlp_down`` are distinct families — different shape geometry.)"""
-    segs = name.split(".")
-    while len(segs) > 1 and _VARIANT_SEG.fullmatch(segs[-1]):
-        segs.pop()
-    return ".".join(segs)
+        Read-only is what makes sharing safe, and it keeps the dataset free of any per-model special case: a
+        caller that needs to mutate — the linear fitter z-scores in place — copies inside itself, and one that
+        does not pays nothing. Mutating the shared array instead raises."""
+        want = (tuple(names), fill)
+        if self._cache is None or self._cache[0] != want:
+            idx = {n: j for j, n in enumerate(self.feat_names)}
+            out = np.full((len(self.feats), len(names)), fill, dtype=float)
+            for j, n in enumerate(names):
+                if n in idx:
+                    out[:, j] = self.feats[:, idx[n]]
+            if not np.isnan(fill):
+                np.nan_to_num(out, copy=False, nan=fill)
+            out.flags.writeable = False
+            object.__setattr__(self, "_cache", (want, out))  # frozen dataclass; the cache is not part of its value
+        return self._cache[1]

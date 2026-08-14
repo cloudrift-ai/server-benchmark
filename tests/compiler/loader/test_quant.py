@@ -744,6 +744,43 @@ def test_fp4_and_fp8_recognizers_do_not_cross_match(tmp_path):
     assert _fp4_quant_config(fp8_dir) is None
 
 
+def _nvfp4_checkpoint(dirpath, *, prefix="layer", ignore=("lm_head",)):
+    """Single NVFP4-quantized linear (K=32) + config; returns (packed, scale_bits, s2)."""
+    packed = rng.integers(0, 256, (8, 16)).astype(np.uint8)
+    scale_bits = rng.integers(0, 0x7F, (8, 2)).astype(np.uint8)  # finite e4m3 codes
+    dirpath.mkdir(exist_ok=True)
+    _write_checkpoint(
+        dirpath,
+        {
+            f"{prefix}.weight": torch.from_numpy(packed),
+            f"{prefix}.weight_scale": _fp8_tensor(scale_bits),
+            f"{prefix}.weight_scale_2": torch.tensor(0.25, dtype=torch.float32),
+        },
+        quant_config={**_FP4_MODELOPT_QC, "ignore": list(ignore)},
+    )
+    return packed, scale_bits, np.array(0.25, dtype=np.float32)
+
+
+def test_spell_nvfp4_matches_oracle(tmp_path):
+    packed, scale_bits, s2 = _nvfp4_checkpoint(tmp_path)
+    g = _weight_graph(shape=(8, 32), dtype="f32", source_path="layer.weight")
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    np.testing.assert_array_equal(_run_spelled(g, str(tmp_path)), dequantize_nvfp4(packed, scale_bits, s2))
+
+
+def test_spell_nvfp4_idempotent(tmp_path):
+    _nvfp4_checkpoint(tmp_path)
+    g = _weight_graph(shape=(8, 32), dtype="f32", source_path="layer.weight")
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+
+
+def test_spell_nvfp4_respects_ignore(tmp_path):
+    _nvfp4_checkpoint(tmp_path, prefix="lm_head")
+    g = _weight_graph(shape=(8, 32), dtype="f32", source_path="lm_head.weight")
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+
+
 def test_load_dequantized_state_dict_nvfp4(tmp_path):
     """The twin read of a synthetic NVFP4 checkpoint: the packed trio dequantizes to the
     oracle's exact values, consumed scales drop, activation-quant metadata and bf16

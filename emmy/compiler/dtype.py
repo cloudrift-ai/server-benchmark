@@ -235,6 +235,17 @@ _F4_LUT = np.array(
 )
 
 
+def decode_f4(codes: np.ndarray) -> np.ndarray:
+    """Decode e2m1 codes to f32 by LUT indexing — the single-code sibling of
+    :func:`decode_f4x2`, for callers that already hold unpacked codes on an
+    integer carrier (the ``from_f4e2m1`` elementwise decode). Codes must lie
+    in ``[0, 16)`` — a set bit above the low 4 is a caller bug, not data."""
+    a = np.asarray(codes)
+    assert np.issubdtype(a.dtype, np.integer), f"decode_f4 expects integer codes, got {a.dtype}"
+    assert np.all((a & ~0xF) == 0), "decode_f4 expects codes in [0, 16); upper bits set"
+    return _F4_LUT[a]
+
+
 def decode_f4x2(bits: np.ndarray) -> np.ndarray:
     """Decode packed e2m1 pairs (the f4e2m1x2 uint8 carrier ``b``) to f32, doubling the
     last axis: ``out[..., 2j] = val4(b[..., j] & 0xF)``, ``out[..., 2j+1] = val4(b[..., j] >> 4)``

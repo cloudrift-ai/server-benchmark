@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, I16, DataType, F4E2M1x2, F16x2, StructuredType, decode_f4x2, get
+from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, I16, DataType, F4E2M1x2, F16x2, StructuredType, decode_f4, decode_f4x2, get
 
 
 def test_scalars_are_not_structured():
@@ -85,3 +85,14 @@ def test_decode_f4x2_rejects_non_uint8():
     # The carrier contract is asserted, not coerced — garbage input is an error.
     with pytest.raises(AssertionError):
         decode_f4x2(np.zeros((2, 2), dtype=np.int64))
+
+
+def test_decode_f4_single_codes():
+    # The unpacked-code sibling: LUT order matches decode_f4x2's low-nibble decode.
+    codes = np.arange(16, dtype=np.int32)
+    packed = (codes[1::2] << 4 | codes[0::2]).astype(np.uint8)
+    np.testing.assert_array_equal(decode_f4(codes), decode_f4x2(packed))
+    with pytest.raises(AssertionError):
+        decode_f4(np.array([16], dtype=np.int32))  # upper bits set
+    with pytest.raises(AssertionError):
+        decode_f4(np.array([1.0]))  # non-integer carrier

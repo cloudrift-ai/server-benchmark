@@ -157,10 +157,16 @@ Indirect operands compose: bits and scale inputs both compile as table-resolved 
 
 **NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
 pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes
-both checkpoint dialects (modelopt, compressed-tensors `nvfp4-pack-quantized`; MXFP4's 32-element blocks stay
-excluded) and dequantizes the packed trio `<key>` + `<key>_scale` (e4m3, read as raw bits) + `<key>_scale_2` (f32)
-for the accuracy twin via `dequantize_nvfp4` — `fuse_nvfp4_scales` collapses the two scale levels into one f16
-tensor, the format's single rounding point. No graph speller and no kernel consume the type yet.
+both checkpoint config conventions (modelopt, compressed-tensors `nvfp4-pack-quantized`; MXFP4's 32-element blocks
+stay excluded) and dequantizes the packed trio `<key>` + `<key>_scale` (e4m3, read as raw bits) + `<key>_scale_2`
+(f32) for the accuracy twin via `dequantize_nvfp4` — `fuse_nvfp4_scales` collapses the two scale levels into one
+f16 tensor, the format's single rounding point. At graph birth, `spell_quantized_constants` rewrites each NVFP4
+weight constant into its decode cone. The packed-bits constant feeds a pair-table gather; the e4m3 block-scale
+constant and the f32 per-tensor scale (`weight_scale_2`) fuse into one f16 scale that multiplies the gathered
+values, one scale per 16 along the last axis. The 256×2 byte-to-value-pair table is a `ConstantOp` whose
+`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph. No kernel
+lowering tier consumes the packed dtype yet — a contraction whose operand is this cone lowers through the
+unspecialized lowering tiers, materializing the decoded weight.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.

@@ -323,6 +323,14 @@ def bind_contraction_channels(
     if any(accum.op.name != "add" for accum in accums):
         raise LoweringError("warp tier: product contraction channels must use additive folds")
     defs = {name: stmt for stmt in loop.body if isinstance(stmt, (Load, Assign)) for name in stmt.defines()}
+    if len(accums) == 1:
+        # The one-channel form delegates whole: the single-channel binder may legally rewrite the
+        # epilogue (the k-invariant mul-hoist moves a decode scale onto the accumulator), and with
+        # one channel there is no cross-channel tail to reconcile.
+        a, b, acc, epi = bind_contraction(loop, m_name, n_name, epilogue)
+        product = defs.get(accums[0].value)
+        b_edge = b if isinstance(b, Load) else Fold.projection(body=Body(tuple(b)))
+        return a, (Channel(b=b_edge, acc=acc),), product.dtype if isinstance(product, Assign) else None, epi
     common_a: Load | list | None = None
     common_a_key: tuple | None = None
     channels: list[Channel] = []

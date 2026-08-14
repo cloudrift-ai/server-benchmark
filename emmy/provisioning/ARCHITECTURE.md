@@ -45,6 +45,10 @@ then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `r
 into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
 no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
 
+Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
+through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
+var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.
+
 For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) attempts on transient errors. On the contracted exceptions it short-circuits:
 
 | Provider raises | Orchestrator does |

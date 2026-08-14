@@ -53,6 +53,7 @@ async def _handle_create(args):
             billing_exempt=args.billing_exempt,
             network=args.network,
             node=args.node,
+            tags=args.tag,
         )
     except (CapacityExhausted, TerminalProvisionError) as exc:
         logger.error(f"{exc}")
@@ -110,6 +111,12 @@ def register_create_target(subparsers):
         "--node",
         default=None,
         help="Pin the rental to one node, by node ID or hostname (hostname resolution requires operator access)",
+    )
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=None,
+        help="Rental tag, repeatable (default: EMMY_RENTAL_TAGS, else 'emmy')",
     )
     parser.set_defaults(func=handle_create)
 

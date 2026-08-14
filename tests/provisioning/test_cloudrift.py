@@ -285,6 +285,73 @@ async def test_create_instance_pins_resolved_node(mock_wait, mock_resolve, mock_
     assert mock_rent.call_args.kwargs["node_id"] == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
 
 
+# ── rental tags ───────────────────────────────────────────────────
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_tags_payload(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        tags=["emmy", "experiment:mpk"],
+    )
+
+    call_data = mock_api.call_args[0][2]
+    assert call_data["tags"] == ["emmy", "experiment:mpk"]
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_no_tags_field_when_untagged(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(API_KEY, "rtx49-7c-kn.1", ["ssh-ed25519 AAAA user@host"], DEFAULT_IMAGE_URL_NVIDIA, api_url=API_URL)
+
+    assert "tags" not in mock_api.call_args[0][2]
+
+
+def _tagged_create(tmp_path, mock_rent, mock_wait, **kwargs):
+    key_path = tmp_path / "id_ed25519.pub"
+    key_path.write_text("ssh-ed25519 AAAA user@host")
+    mock_rent.return_value = RENT_RESPONSE
+    mock_wait.return_value = INSTANCE_ACTIVE_RESPONSE["instances"][0]
+    return create_instance(API_KEY, "rtx49-7c-kn.1", str(key_path), api_url=API_URL, **kwargs)
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_tags_default_to_emmy(mock_wait, mock_rent, tmp_path, monkeypatch):
+    monkeypatch.delenv("EMMY_RENTAL_TAGS", raising=False)
+
+    await _tagged_create(tmp_path, mock_rent, mock_wait)
+
+    assert mock_rent.call_args.kwargs["tags"] == ["emmy"]
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_tags_env_override(mock_wait, mock_rent, tmp_path, monkeypatch):
+    monkeypatch.setenv("EMMY_RENTAL_TAGS", "experiment:mpk, gh:job-7")
+
+    await _tagged_create(tmp_path, mock_rent, mock_wait)
+
+    assert mock_rent.call_args.kwargs["tags"] == ["experiment:mpk", "gh:job-7"]
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_explicit_tags_win(mock_wait, mock_rent, tmp_path, monkeypatch):
+    monkeypatch.setenv("EMMY_RENTAL_TAGS", "ignored")
+
+    await _tagged_create(tmp_path, mock_rent, mock_wait, tags=["experiment:mpk"])
+
+    assert mock_rent.call_args.kwargs["tags"] == ["experiment:mpk"]
+
+
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
 async def test_rent_instance_network(mock_api):
     mock_api.return_value = RENT_RESPONSE

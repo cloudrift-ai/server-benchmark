@@ -8,6 +8,7 @@ import uuid
 
 import httpx
 
+from emmy import config
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
 from emmy.provisioning.ssh import wait_for_ssh
 from emmy.provisioning.types import VMConnectionInfo
@@ -85,6 +86,7 @@ async def _rent_instance(
     billing_exempt=False,
     network=None,
     node_id=None,
+    tags=None,
 ):
     """Rent a new CloudRift VM instance.
 
@@ -94,6 +96,7 @@ async def _rent_instance(
         ssh_public_keys: list of public key strings (e.g. ["ssh-ed25519 AAAA..."])
         node_id: optional node UUID; when set, rents on exactly that node via the
             ``ByNodeId`` selector instead of letting the provider place the instance.
+        tags: optional list of free-form labels attached to the rental.
     """
     vm_config = {
         "ssh_key": {"PublicKeys": ssh_public_keys},
@@ -117,6 +120,8 @@ async def _rent_instance(
         data["billing_exempt"] = True
     if network is not None:
         data["network"] = network
+    if tags:
+        data["tags"] = list(tags)
     return await _api_request("POST", "/api/v1/instances/rent", data, api_key, api_url, dry_run)
 
 
@@ -405,6 +410,7 @@ async def create_instance(
     extra_public_keys=None,
     allocation_observer=None,
     node=None,
+    tags=None,
 ):
     """Create a CloudRift VM instance.
 
@@ -414,6 +420,8 @@ async def create_instance(
         ssh_key_path: path to the SSH **public** key file.
         node: optional node UUID or hostname to pin the rental to (see
             :func:`resolve_node_id`); placement fallback does not apply to a pinned node.
+        tags: rental labels; ``None`` resolves through :func:`emmy.config.rental_tags`
+            (``EMMY_RENTAL_TAGS`` override, default ``["emmy"]``).
         extra_public_keys: optional list of additional SSH public key strings to
             install in the VM's authorized_keys alongside the key from
             ``ssh_key_path`` (e.g. ["ssh-ed25519 AAAA bob@host"]).
@@ -439,6 +447,9 @@ async def create_instance(
         node_id = await resolve_node_id(api_key, node, api_url=api_url, dry_run=dry_run)
         logger.info(f"Pinning rental to node {node} (id={node_id}).")
 
+    if tags is None:
+        tags = config.rental_tags()
+
     ssh_key_path = os.path.expanduser(ssh_key_path)
     if dry_run and not os.path.exists(ssh_key_path):
         public_key = "dry-run-placeholder"
@@ -460,6 +471,7 @@ async def create_instance(
             billing_exempt=billing_exempt,
             network=network,
             node_id=node_id,
+            tags=tags,
         )
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code

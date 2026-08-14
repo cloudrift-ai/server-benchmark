@@ -1210,16 +1210,27 @@ class _ScalarOps(_AtomOps):
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.axis
         m, n = mn
-        prot = _scalar_protected(c, self.tile, self.lead)
+        # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
+        # fold axes): a replicated read of such a coordinate must keep its name — the loop that
+        # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
+        # emitted references no scope defines.
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*operand_body(c.a), *operand_body(c.b)))
         b_name, a_name = operand_name(c.b), operand_name(c.a)
 
+        # Each operand's σ also binds the SIBLING output axis: a value-dead reshape/broadcast
+        # residue can keep a syntactic reference to it in the operand index (the same rule the
+        # staged fills apply — the read is sibling-invariant in VALUE, so any in-bounds
+        # representative evaluates it unchanged, and the bare axis name no longer exists after
+        # the tile split).
         def read_row(i):
+            sib = {} if n is None else {n.name: _wrap(n, offset[1].base(0))}
             if m is None:
-                return copy_cell(operand_body(c.a), Sigma({}), f"__ar{i}", prot)
-            return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
+                return copy_cell(operand_body(c.a), Sigma(sib), f"__ar{i}", prot)
+            return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i)), **sib}), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            sib = {} if m is None else {m.name: _wrap(m, offset[0].base(0))}
+            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j)), **sib}), f"__bc{j}", prot)
 
         def contract(i, j):
             v = f"{c.acc}__v__c{i}_{j}"

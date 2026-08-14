@@ -10,16 +10,7 @@ description: >-
 # Run Experiment
 
 Produce one durable snapshot of the last requested run. Use Emmy for execution. Preserve measurements as raw evidence
-and review them yourself.
-
-## Boundary
-
-- Emmy, experiment recipes, and repository scripts MUST NOT interpret experiment measurements or assemble
-  human-readable reports.
-- Experiment records MUST NOT contain measurements, comparisons, conclusions, or workload output. They contain only
-  row identity, execution lifecycle, Git provenance, and generic system information.
-- Raw result files MUST NOT be rewritten or normalized.
-- Review the raw evidence yourself and write the thoughtful interpretation in `RESULTS.md`.
+and review them yourself; do not add a result-conversion, plotting, manifest, analysis, or report-generation script.
 
 ## Prepare
 
@@ -56,7 +47,8 @@ For each selected experiment directory:
    `succeeded` or `failed` status. Treat a missing row as a run failure.
 2. Check declared command results for presence and scan records and raw files for secrets. Read the raw measurements,
    compare the intended lanes, calculate only quantities needed for a clear interpretation, and inspect repeat
-   stability, failures, correctness evidence, and protocol limitations.
+   stability, failures, correctness evidence, and protocol limitations. Do this as intelligent review, not with code
+   added to the experiment recipe or repository.
 3. Remove only the prior top-level `*.experiment.yaml` files for that exact experiment. Copy the latest records beside
    `recipe.yaml`, preserving the timestamped local directory exactly as Emmy produced it.
 4. Replace `<experiment>/results.tar.gz` with a gzip-compressed tar archive whose root member is the latest timestamped

@@ -29,9 +29,25 @@ not substitute requested hardware for an unavailable live observation.
 
 ## Boundary
 
-The orchestrator may expand/filter matrices, allocate hosts, stage declared inputs, run workloads, capture raw
-client/server logs, enforce generic execution integrity, and retain partial evidence. It must not parse experiment
-measurements, interpret model responses, decide scientific thresholds, compare outputs, or generate `RESULTS.md`.
+The orchestrator may:
+
+- expand and filter recipe matrices;
+- group experiment rows by requested hardware and provision or allocate hosts;
+- stage declared inputs and invoke the selected workload adapter;
+- capture stdout, stderr, raw server logs, timing, system information, recipe metadata, and declared result files;
+- retain partial raw evidence after failure and continue independent experiment rows;
+- return a nonzero status for generic execution-integrity failures; and
+- tear down resources or record retained instances.
+
+The orchestrator MUST NOT:
+
+- parse experiment measurements or interpret model responses;
+- decide whether request counts, latency, throughput, accuracy, or coverage are acceptable;
+- aggregate repeat measurements or compare outputs;
+- recognize compiler, quantization, serving-backend, or publication-specific evidence;
+- match required or forbidden log text;
+- reject a filtered matrix for scientific reasons; or
+- generate `RESULTS.md` or invoke result-validation or report-generation scripts.
 
 Command records preserve timing, status, errors, and system information. `command.strict` requires a clean Git
 worktree, every declared result file, GPU identity, NVCC, and cuBLAS. A failed command still attempts to retrieve

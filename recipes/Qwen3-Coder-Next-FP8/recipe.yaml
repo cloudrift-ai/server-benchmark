@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Retained for a 262K coding-focused FP8 deployment on one Pro 6000; the maintained 30B AWQ recipe covers the smaller RTX 5090 tier."
+  rationale: "Maintained as the flagship 80B coding MoE FP8 on Pro 6000 with 1.4M HF downloads and 262K context."
 
 engine:
   llm:

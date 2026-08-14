@@ -4,7 +4,7 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Maintained for a qualified 118B agentic-coding FP8 deployment with 1M context on eight V100s, preserving large-context serving coverage on Volta."
+  rationale: "Maintained for qualified 118B agentic-coding FP8 deployment with 1M context on eight V100s."
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 

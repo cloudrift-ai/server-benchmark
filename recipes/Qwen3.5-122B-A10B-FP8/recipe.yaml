@@ -1,5 +1,5 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Maintained as the single-GPU mid-size Qwen3.6 path on Pro 6000 and H200, with the full 262K context and H200 MTP coverage."
+  rationale: "Maintained as the single-GPU mid-size Qwen3.6 dense path with full 262K context and H200 MTP."
 
 engine:
   llm:

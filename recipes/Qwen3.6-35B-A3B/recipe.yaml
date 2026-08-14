@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Maintained as the BF16 Qwen3.6 MoE baseline for agent and coding workloads across two Pro 6000 or two H200 GPUs."
+  rationale: "Maintained as the BF16 Qwen3.6 MoE baseline for agent and coding workloads across Pro 6000 and H200."
 
 engine:
   llm:

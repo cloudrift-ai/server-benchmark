@@ -22,7 +22,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "Retained as the lightweight instruction-tuned Gemma 4 serving recipe with a prebuilt Emmy fast-math image on one RTX 5090."
+  rationale: "Retained as the lightweight instruction-tuned Gemma 4 recipe with prebuilt fast-math image on 5090."
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 
 engine:

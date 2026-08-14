@@ -39,7 +39,7 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Retained as the one-V100 Qwen3.6 MoE option; the AWQ checkpoint trades prefill speed and context for low deployment cost."
+  rationale: "Retained as the unique one-V100 Qwen3.6 MoE option at the lowest-cost deployment tier."
 
 engine:
   llm:

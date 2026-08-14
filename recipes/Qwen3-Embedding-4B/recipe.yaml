@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Retained as the middle Qwen3 embedding size for stock-vLLM versus Emmy plugin comparisons on RTX 4090 and 5090."
+  rationale: "Retained as the middle Qwen3 embedding size for stock-vLLM versus Emmy plugin comparisons."
   task: embed
 
 engine:

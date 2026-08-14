@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Retained for its qualified two-H200, 1M-context deployment until the stronger official 0731 release is qualified on the same hardware; the current 0731 Emmy recipe is V100-only."
+  rationale: "Retained for its qualified two-H200, 1M-context path until the 0731 official version qualifies there."
 
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).

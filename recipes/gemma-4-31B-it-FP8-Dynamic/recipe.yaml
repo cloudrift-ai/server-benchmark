@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Retained as the 262K-context FP8 Gemma 4 option on one H200; the maintained BF16 recipe supplies the reference configuration at 131K."
+  rationale: "Retained as the 262K-context FP8 Gemma 4 option on one H200."
 
 engine:
   llm:

@@ -244,9 +244,7 @@ def _trace_decide(expected: Sequence[Mapping]):
     return decide, finish
 
 
-def _resolve_transcript(
-    graph: Graph, *, pipeline, ctx: Context, transcript: Sequence[Mapping], dump=None
-) -> tuple[Graph, list[Decision]]:
+def _resolve_transcript(graph: Graph, *, pipeline, ctx: Context, transcript: Sequence[Mapping], dump=None) -> tuple[Graph, list[Decision]]:
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
     decide, finish = _trace_decide(transcript)

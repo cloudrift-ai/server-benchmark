@@ -776,9 +776,7 @@ def test_broadcast_expansion_materializes_the_compact_producer_domain(monkeypatc
         leaves = flatten_leaves(fp.options)
         return next((leaf for leaf in leaves if leaf.knobs.get("PLACE@broadcast") == "cut"), leaves[0])
 
-    out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((12, 0))).resolve(
-        _expanded_reduce_graph(), choose_compact
-    )
+    out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((12, 0))).resolve(_expanded_reduce_graph(), choose_compact)
     compact = out.buffer("expanded__cut_compact")
     assert compact is not None
     assert sorted(dim.as_static() for dim in compact.shape) == [2, 8]
@@ -823,17 +821,12 @@ def test_raw_multireduction_broadcast_is_a_maximal_first_fork(monkeypatch) -> No
 
     def choose_maximal(fp):
         leaves = flatten_leaves(fp.options)
-        rows = [
-            {key: value for key, value in leaf.knobs.items() if key.startswith("PLACE")}
-            for leaf in leaves
-        ]
+        rows = [{key: value for key, value in leaf.knobs.items() if key.startswith("PLACE")} for leaf in leaves]
         if any("PLACE@broadcast" in row for row in rows):
             offered.extend(rows)
         return leaves[0]
 
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(
-        _sdpa_projection_graph(), choose_maximal
-    )
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_sdpa_projection_graph(), choose_maximal)
     assert offered and all(value == "fuse" for value in offered[0].values())
     assert any(row["PLACE@broadcast"] == "cut" for row in offered[1:])
     assert out.buffer("o_a_unsq_bc__cut_compact") is None

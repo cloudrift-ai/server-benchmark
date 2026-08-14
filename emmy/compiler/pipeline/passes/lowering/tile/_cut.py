@@ -506,7 +506,7 @@ def _placement_decision(
     alternatives = _placement_alternatives(root, stores, free, graph, graph_root)
     if not alternatives:
         return _PlacementDecision(True, None, (), {})
-    if (pins := _place_pins()):
+    if pins := _place_pins():
         selected, row = _decide_values(pins, root, alternatives, source="placement pin")
         if not row:
             selected = next((alt for alt in alternatives if alt.realized_value == _FUSE), None)

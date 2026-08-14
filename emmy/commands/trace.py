@@ -138,7 +138,21 @@ def handle_trace(args):
     model = args.model_provenance or (
         args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
     )
-    result = write_trace_inventory(graph, destination, model=model, force_loop_targets=args.loop_targets)
+    model_quant_digest = None
+    if args.input:
+        from emmy.compiler.loader.quant import checkpoint_quant_digest  # noqa: PLC0415
+        from emmy.compiler.trace.huggingface import quantized_checkpoint_dir  # noqa: PLC0415
+
+        quant_dir = quantized_checkpoint_dir(args.input)
+        if quant_dir is not None:
+            model_quant_digest = checkpoint_quant_digest(quant_dir)
+    result = write_trace_inventory(
+        graph,
+        destination,
+        model=model,
+        force_loop_targets=args.loop_targets,
+        model_quant_digest=model_quant_digest,
+    )
     logger.info("Saved golden YAML: %s (%d distinct kernel(s))", result.path, result.target_count)
 
 

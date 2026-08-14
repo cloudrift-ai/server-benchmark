@@ -26,9 +26,25 @@ Related command workloads also stay under the model. Image qualification, kernel
 and final benchmarks for one model should not become unrelated top-level directories. A genuinely cross-model
 compiler experiment may remain at the top level.
 
+## Result analysis
+
+`emmy bench` is an experiment-agnostic runner. Recipes define workloads and neutral matrix labels; they do not define
+semantic gates, log predicates, or output comparisons. A short self-contained `aggregate.run` command may perform
+readable mechanical post-processing, but it may not invoke an external script or generate the experiment report.
+Tests verify the intended configuration before measurement. After a run, an agent examines every raw result, failure,
+log, and artifact against the experiment protocol and writes the model-specific report.
+
+When an experiment changes only hardware allocation or one small platform-specific control, keep one protocol in one
+recipe and express the platforms as a zipped recipe matrix. Split directories only when the workload, evidence set,
+or interpretation differs; do not copy a command body once per GPU.
+
+Command workloads may preserve partial artifacts and then exit nonzero after all declared cases run. The harness
+still pulls every declared `result_files` match from a failed command task, so a failure remains in the denominator
+and retains the logs needed to classify it. A recipe should archive its evidence before returning its exit status.
+
 ## Lifetime
 
-Keep experiment configurations that reproduce a published comparison, protect a qualification gate, or are needed
+Keep experiment configurations that reproduce a published comparison, support a durable qualification, or are needed
 for a planned measurement. Delete exploratory configurations, intermediate candidates, duplicate run snapshots, and
 their one-off helper scripts after the result is encoded in a final recipe, its `RESULTS.md`, a golden config, a test,
 or a durable architecture note. Plans and local run artifacts are not experiment deliverables.

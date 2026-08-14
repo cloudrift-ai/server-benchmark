@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import asdict
+from pathlib import Path
 
 import yaml
 
@@ -17,15 +18,6 @@ SECTION_DELIMITER = "=" * 50
 def _section(title: str, content: str) -> str:
     """Wrap content in a section with title delimiters."""
     return f"============ {title} ============\n{content}\n{SECTION_DELIMITER}"
-
-
-def extract_benchmark_results(output: str) -> str:
-    """Extract benchmark results section from vllm bench serve output."""
-    marker = "============ Serving Benchmark Result ============"
-    idx = output.find(marker)
-    if idx == -1:
-        return output
-    return output[idx:]
 
 
 def _bench_args(recipe: Recipe) -> list[str]:
@@ -49,6 +41,8 @@ def _bench_args(recipe: Recipe) -> list[str]:
     ]
     if bench.seed is not None:
         args.append(f"--seed {bench.seed}")
+    if bench.num_warmups:
+        args.append(f"--num-warmups {bench.num_warmups}")
     if not recipe.is_embedding:
         args.append(f"--random-output-len {bench.random_output_len}")
         if bench.temperature is not None:
@@ -142,7 +136,22 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
     outputs = []
     for _ in range(max(1, bench.repeats)):
         rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
+        outputs.append(output)
         if rc != 0:
-            return False, output, stderr, bench_command_str
-        outputs.append(extract_benchmark_results(output))
+            return False, "\n\n".join(outputs), stderr, bench_command_str
     return True, "\n\n".join(outputs), stderr, bench_command_str
+
+
+async def capture_server_log(run_cmd, path: Path, *, dry_run: bool = False) -> dict:
+    """Preserve the complete serving log without interpreting its contents."""
+    if dry_run:
+        return {"path": path.name, "status": "dry-run", "exit_code": None}
+
+    rc, stdout, stderr = await run_cmd("docker compose logs --no-color", stream=False, timeout=120)
+    content = "\n".join(part for part in (stdout, stderr) if part)
+    path.write_text(redact_secrets(content) + ("\n" if content and not content.endswith("\n") else ""), encoding="utf-8")
+    return {
+        "path": path.name,
+        "status": "collected" if rc == 0 else "failed",
+        "exit_code": rc,
+    }

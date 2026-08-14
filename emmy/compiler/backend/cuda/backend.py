@@ -283,6 +283,7 @@ class CudaBackend(Backend):
         seed: int = 0,
         accuracy: bool = False,
         want_ref: bool = False,
+        strict_accuracy: bool = False,
     ) -> dict:
         """``run --bench``'s greedy-row comparison (eager / torch.compile / emmy, plus the
         optional in-child accuracy verdict and wrong-answer reference) through this
@@ -301,4 +302,5 @@ class CudaBackend(Backend):
             seed=seed,
             accuracy=accuracy,
             want_ref=want_ref,
+            strict_accuracy=strict_accuracy,
         )

@@ -8,8 +8,8 @@ the compiler emits code for a different architecture than the host —
 useful for ``emmy compile`` on a CPU box that wants to see the
 sm_120 codegen path, or for cross-compiling for a benchmark target.
 
-CLI commands attach the ``--target`` flag with :func:`add_target_arg`
-and resolve it via :func:`apply_target_arg`. Both forms accept the
+CLI commands attach their compute-capability option with :func:`add_target_arg`
+and resolve it via :func:`apply_target_arg`. The options accept the
 canonical NVIDIA spelling (``sm_80``, ``sm_90``, ``sm_120``); the
 optional architecture suffix on Hopper (``sm_90a``) is stripped.
 """
@@ -49,16 +49,15 @@ def set_target(cap: tuple[int, int] | None) -> None:
     compute_capability.cache_clear()
 
 
-def add_target_arg(parser, *, dest: str = "target") -> None:
-    """Add a ``--target sm_NN`` argument to ``parser``.
+def add_target_arg(parser, *, dest: str = "target", option: str = "--target") -> None:
+    """Add a compute-capability argument to ``parser``.
 
-    Commands that produce or run code (``compile``, ``run``, ``bench``)
-    use this so the same flag means the same thing everywhere. The
-    parsed value is a string; pass it to :func:`apply_target_arg` after
-    parsing to install the override.
+    The parsed value is a string; pass it to :func:`apply_target_arg` after parsing
+    to install the override. Most commands use ``--target``; ``run`` reserves that
+    spelling for working-golden selection and uses ``--gpu-arch`` here.
     """
     parser.add_argument(
-        "--target",
+        option,
         dest=dest,
         default=None,
         metavar="sm_NN",

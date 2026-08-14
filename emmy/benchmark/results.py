@@ -55,6 +55,8 @@ class SystemInfo:
     cuda_version: str | None = None
     gpu_count: int | None = None
     docker_version: str | None = None
+    gpu_provenance: list[str] | None = None
+    cuda_compiler: str | None = None
 
 
 # (label in bench output, dataclass field name, type constructor)
@@ -212,6 +214,14 @@ def parse_system_info(raw_text: str) -> SystemInfo:
     if m:
         fields["cuda_version"] = m.group(1)
 
+    gpu_provenance = _get_section(raw_text, "GPU PROVENANCE")
+    if gpu_provenance and gpu_provenance != "N/A":
+        fields["gpu_provenance"] = [line.strip() for line in gpu_provenance.splitlines() if line.strip()]
+
+    cuda_compiler = _get_section(raw_text, "CUDA COMPILER")
+    if cuda_compiler and cuda_compiler != "N/A":
+        fields["cuda_compiler"] = cuda_compiler
+
     # DOCKER VERSION
     docker_section = _get_section(raw_text, "DOCKER VERSION")
     m = re.search(r"Docker version ([\d.]+)", docker_section)
@@ -219,6 +229,16 @@ def parse_system_info(raw_text: str) -> SystemInfo:
         fields["docker_version"] = m.group(1)
 
     return SystemInfo(**fields)
+
+
+def _task_metadata(task) -> dict:
+    return {
+        "recipe_dir": task.recipe_dir,
+        "variant": str(task.variant),
+        "gpu_name": task.gpu_name,
+        "gpu_short": task.gpu_short,
+        "gpu_count": task.gpu_count,
+    }
 
 
 def compose_json_result(
@@ -242,13 +262,7 @@ def compose_json_result(
     repeats = parse_repeat_metrics(benchmark_output)
     mean_metrics, stddev = aggregate_metrics(repeats)
     result = {
-        "task": {
-            "recipe_dir": task.recipe_dir,
-            "variant": str(task.variant),
-            "gpu_name": task.gpu_name,
-            "gpu_short": task.gpu_short,
-            "gpu_count": task.gpu_count,
-        },
+        "task": _task_metadata(task),
         "recipe": asdict(task.recipe),
         "metrics": asdict(mean_metrics),
         "system": asdict(parse_system_info(system_info_raw)),
@@ -261,3 +275,40 @@ def compose_json_result(
     if timing is not None:
         result["timing"] = timing
     return result
+
+
+def compose_command_json_result(
+    task,
+    command_info: dict,
+    system_info_raw: str,
+    *,
+    success: bool,
+    timing: dict[str, float] | None = None,
+    source: dict | None = None,
+) -> dict:
+    """Assemble the standard result for a command-recipe task."""
+    result = {
+        "task": _task_metadata(task),
+        "recipe": asdict(task.recipe),
+        "command": redact_secrets(command_info),
+        "system": asdict(parse_system_info(system_info_raw)),
+        "status": "ok" if success else "failed",
+    }
+    if timing is not None:
+        result["timing"] = timing
+    if source is not None:
+        result["source"] = source
+    return result
+
+
+def missing_command_provenance(system_info_raw: str, source: dict | None) -> list[str]:
+    """Return missing fields required for reproducible command measurements."""
+    system = parse_system_info(system_info_raw)
+    missing = []
+    if not source or not source.get("source_id") or not source.get("files"):
+        missing.append("staged source manifest")
+    if not system.gpu_provenance:
+        missing.append("GPU provenance")
+    if not system.cuda_compiler:
+        missing.append("CUDA compiler provenance")
+    return missing

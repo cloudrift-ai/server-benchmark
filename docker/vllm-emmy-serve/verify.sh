@@ -55,6 +55,7 @@ check_baked EMMY_GEN_EMBED_HOST "${SERVE_EMBED_HOST:-}"
 check_baked EMMY_GEN_PREFILL_CAPACITY "${SERVE_PREFILL_CAPACITY:-}"
 check_baked EMMY_GEN_PREFILL_BUCKET "${SERVE_PREFILL_BUCKET:-}"
 check_baked EMMY_GEN_M1_TIER "${SERVE_M1_TIER:-}"
+check_baked SERVE_V2_MODEL_RUNNER "${SERVE_V2_MODEL_RUNNER:-}"
 
 PORT="${PORT:-8000}"
 GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
@@ -84,9 +85,16 @@ curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] timed ou
 # Under HF_HUB_OFFLINE vLLM serves the model under the RESOLVED snapshot path, not the
 # repo id — ask the server for its served name rather than assuming $SERVE_MODEL.
 served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
+jit_before=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
 curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
     -d "{\"model\": \"$served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
     | head -c 400; echo
+jit_after=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
+if [ "$jit_before" != "$jit_after" ]; then
+    echo "[verify] FAIL — request-time Triton JIT ran despite the baked warm cache:" >&2
+    docker logs "$NAME" 2>&1 | grep "Triton kernel JIT compilation during inference" | tail -10 >&2 || true
+    exit 1
+fi
 
 after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
 # When the image ships a pack, the boot must have actually used it — a silent fallback to
@@ -107,7 +115,7 @@ if [ "$before" != "$after" ]; then
     diff <(echo "$before") <(echo "$after") || true
     exit 1
 fi
-echo "[verify] PASS — served offline with zero new cubins ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack-hit boot}"
+echo "[verify] PASS — served offline with zero new cubins or request-time Triton JIT ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack-hit boot}"
 
 # ---- the extra shapes ------------------------------------------------------------------
 # Each shape warm.sh baked a pack for must ALSO hit it, for the same reason the pinned shape
@@ -132,6 +140,17 @@ for spec in ${SERVE_WARM_SHAPES:-}; do
         sleep 10
     done
     curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] FAIL — shape $spec timed out"; docker logs --tail 50 "$NAME"; exit 1; }
+    shape_served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
+    shape_jit_before=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
+    curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
+        -d "{\"model\": \"$shape_served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
+        >/dev/null
+    shape_jit_after=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
+    if [ "$shape_jit_before" != "$shape_jit_after" ]; then
+        echo "[verify] FAIL — shape $spec ran request-time Triton JIT despite the baked warm cache:" >&2
+        docker logs "$NAME" 2>&1 | grep "Triton kernel JIT compilation during inference" | tail -10 >&2 || true
+        exit 1
+    fi
     shape_after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
     if ! docker logs "$NAME" 2>&1 | grep "pack hit" >/dev/null; then
         echo "[verify] FAIL — shape $spec baked a pack but its boot did not hit it:"
@@ -139,5 +158,5 @@ for spec in ${SERVE_WARM_SHAPES:-}; do
         exit 1
     fi
     [ "$shape_after" = "$after" ] || { echo "[verify] FAIL — shape $spec compiled new cubins at runtime:"; diff <(echo "$after") <(echo "$shape_after") || true; exit 1; }
-    echo "[verify] PASS — shape $spec: pack-hit boot, zero new cubins"
+    echo "[verify] PASS — shape $spec: pack-hit boot, zero new cubins or request-time Triton JIT"
 done

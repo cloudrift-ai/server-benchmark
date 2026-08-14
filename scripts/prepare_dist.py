@@ -22,7 +22,13 @@ import shutil
 import sys
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from emmy.recipe.lifecycle import recipe_is_runnable  # noqa: E402
+
 BUNDLED_RECIPES = REPO_ROOT / "emmy" / "recipes"
 GITHUB_TREE = "https://github.com/cloudrift-ai/emmy/tree/main"
 GITHUB_BLOB = "https://github.com/cloudrift-ai/emmy/blob/main"
@@ -38,13 +44,15 @@ def stage_recipes() -> int:
 
     staged = 0
     for recipe in sorted((REPO_ROOT / "recipes").glob("*/recipe.yaml")):
+        if not recipe_is_runnable(yaml.safe_load(recipe.read_text()) or {}):
+            continue
         target = BUNDLED_RECIPES / recipe.parent.name / "recipe.yaml"
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(recipe, target)
         staged += 1
 
     if not staged:
-        sys.exit("No recipes found under recipes/*/recipe.yaml — refusing to build a recipe-less package.")
+        sys.exit("No runnable recipes found under recipes/*/recipe.yaml — refusing to build a recipe-less package.")
     print(f"staged {staged} recipes into {BUNDLED_RECIPES.relative_to(REPO_ROOT)}/")
     return staged
 

@@ -7,6 +7,7 @@ import yaml
 
 from emmy.planner import BenchmarkTask
 from emmy.planner.variant import Variant
+from emmy.recipe.lifecycle import recipe_is_runnable, recipe_lifecycle
 from emmy.recipe.matrix import build_override, expand_matrix, filter_combinations
 from emmy.recipe.recipe import _validate_and_build, deep_merge
 
@@ -34,6 +35,10 @@ def enumerate_tasks(recipe_dirs, filters=None) -> list[BenchmarkTask]:
 
         with open(recipe_path) as f:
             raw = yaml.safe_load(f)
+
+        if not recipe_is_runnable(raw):
+            logger.warning(f"Warning: Recipe in {recipe_dir} is {recipe_lifecycle(raw)}, skipping.")
+            continue
 
         matrices = raw.get("matrices")
         if not matrices:

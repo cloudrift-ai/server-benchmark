@@ -9,15 +9,15 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
-commands/agent ─► agent (tracked skill runner and tool schemas)
+commands/recipe ─► recipe (catalog queries and onboarding shell creation)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
-- `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
+- `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping, catalog
+  queries, and onboarding shell creation
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
-- `emmy/agent/` — OpenAI-compatible tracked-skill runner, bounded tools, and tool schemas
 - `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
   runner
 - `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
@@ -39,9 +39,9 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 ### `emmy/recipe/` — Recipe Library
 
 Recipe loading, configuration dataclasses (`Recipe`, `ModelConfig`, `EngineConfig`, `LLMConfig`, `VllmConfig`,
-`SglangConfig`, `BenchmarkConfig`), deep merge / hardware resolution / extra-arg validation, and engine flag mapping
-(`VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`). `load_recipe()` returns a `Recipe` dataclass; all consumers use attribute access
-(e.g. `recipe.engine.llm.tensor_parallel_size`).
+`SglangConfig`, `BenchmarkConfig`), deep merge / hardware resolution / extra-arg validation, engine flag mapping
+(`VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`), compact catalog queries, and onboarding shell creation. `load_recipe()` returns a
+`Recipe` dataclass; all consumers use attribute access (e.g. `recipe.engine.llm.tensor_parallel_size`).
 
 ### `emmy/deploy/` — Deploy Library
 
@@ -54,7 +54,8 @@ transports, and the scale-out strategies (`DataParallelismScaleOutStrategy`, `Re
 The post-health **smoke test** branches on the recipe model config. Embedding models (`model.task: embed`) POST
 `/v1/embeddings` and require a non-empty finite vector with L2 norm in [0.9, 1.1]. Generative models use the chat
 endpoint by default ("What is 2+2?" must contain "4"); base checkpoints set `model.smoke_test: completion` to test the
-same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop.
+same arithmetic through `/v1/completions`. All paths share the retry, timeout, and log-dump loop. Benchmark
+orchestration uses the same probe as a transport-readiness check but does not interpret the returned model content.
 `parse_engine_load_phases()` extracts best-effort `weights_load` / `cuda_graph_capture` from container logs.
 
 `model.revision` is the one immutable Hugging Face revision for a deployment. The model-download phase passes it to
@@ -79,6 +80,14 @@ Benchmark configuration (`load_config()` / `validate_config()`), per-run logging
 task; task results are `(task, ok, timing)` triples), and structured results (`BenchmarkMetrics` / `SystemInfo`
 dataclasses, `parse_benchmark_metrics()`, `compose_json_result()` / `compose_result()` — both take an optional `timing`
 arg feeding the `"timing"` JSON key / `=== Timing ===` text section).
+
+The benchmark library is an experiment-agnostic runner: it records complete client output, server logs, timing,
+system information, and partial observations after failure. It treats execution and evidence-collection failures as
+authoritative, but does not judge model output, metrics, backend selection, or scientific claims. A recipe may use a
+small self-contained post-processing command, but cannot delegate result interpretation or report generation to a
+script. Command recipes may opt into the single `command.strict` integrity contract for clean/content-addressed staged
+inputs, required declared artifacts, and source/GPU/CUDA provenance. The complete boundary lives in
+`emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
 `--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` (nothing is generated); the
@@ -115,7 +124,11 @@ They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. Dynamic-shape parsing, quantized architecture twins and
+and Emmy always rebuild the same module and example inputs. Inductor compiles with
+`fullgraph=True, mode="max-autotune"`; its output must match eager on the same inputs at `rtol=atol=1e-3` before its
+latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
+Emmy-vs-eager proof authoritative. It records max/mean/relative error in `--json` and exits
+nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
 identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
 For a single-layer trace, the loader derives a missing attention `layer_type` from
@@ -125,7 +138,7 @@ modules with independent rotary keys (for example DeepSeek V4's `main` / `compre
 The trace/tune handlers delegate working-golden inventory construction, target reconstruction, proposal measurement,
 and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by
 `run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
-handlers retain only the workflow's argument validation, process orchestration, and user-facing error/reporting.
+handlers retain only the workflow's argument validation and user-facing error/reporting.
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
 The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
@@ -133,7 +146,8 @@ structurally identical occurrences are not collapsed and a missing cache key nev
 frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
 Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
 stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
-refuses replacement, and never writes a traced Graph JSON or provenance sidecar.
+refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
+checkpoint-declaration digest in the same YAML.
 
 `emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
 calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct
@@ -143,7 +157,7 @@ warm shapes, symbolic fallbacks, and standard/precision-trading input pin regime
 `realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
 independent serving-shape surface. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
-directly by `tune --golden-file` and verified by `run --golden-file --golden NAME`.
+directly by `tune --golden-file` and verified by `run --golden PATH [--target NAME]`.
 
 The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
 dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
@@ -171,12 +185,25 @@ With `--bench`, each target's `62_kernel_bench.json` records whether an eager re
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
 
-`emmy compile/run --golden-file PATH --golden NAME` is the verification counterpart: it resolves the name only in
-that explicit working YAML and compiles its exact provenance or Loop IR target, without canonical-corpus or live-card
-filtering. Inventory and proposal rows select the graph but are not trusted as automatic A/B pins; only verified rows
-with paired measurements auto-pin, while a proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded
-Loop IR stores stable algebra rather than derived structural stamps, so `run --golden` replays it through the full
-compiler pipeline. A direct `run --ir` input remains a stage-complete artifact and runs only the later passes.
+`emmy compile --golden-file PATH --golden NAME` and `emmy run --golden PATH [--target NAME]` are the verification
+counterparts. They resolve targets only in the explicit working YAML and compile its exact provenance or Loop IR,
+without canonical-corpus or live-card filtering. `run` visits every distinct target sequentially in the current
+process unless `--target` narrows the file to one exact or unambiguous substring match. With several targets,
+`--json DIR` writes one readable JSON record per target; there is no repeat or child-process orchestration layer.
+Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
+graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
+proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
+derived structural stamps, so `run --golden` replays it through the full compiler pipeline. When that replay has
+pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
+check; the reference backend is `emmy-greedy` when no Torch twin exists. A completed reference survives a later greedy
+timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
+nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
+request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
+of each boundary input; full-program price probes therefore retain the execution path's device-memory contract.
+Repeated names that resolve to different embedded targets remain ambiguous;
+qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
+stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
+rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
@@ -221,7 +248,7 @@ For each task in group:
     +-- set gpu_device_ids if task.gpu_count < group.gpu_count
     +-- deploy(DeployParams) -> compose up
     +-- run_benchmark_workload()
-    +-- save results
+    +-- capture raw server log and save raw or partial results
     +-- on_task_done callback (--commit-results: git add + commit + push)
     +-- teardown() (skipped with --no-teardown)
     |
@@ -285,6 +312,9 @@ emmy
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
++-- recipe
+|   +-- list      -- inspect and filter compact recipe metadata
+|   +-- create    -- create a validated onboarding shell
 +-- vm
     +-- create
     |   +-- gpu        -- name a GPU from the hardware table (orchestrator: retries + fallback)
@@ -304,6 +334,20 @@ Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` v
 positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
 installed package, copying it into the current directory first. An existing path always wins over a bundled name.
 See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
+
+### `emmy recipe`
+
+`recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
+Repeat `--tag` to require several tags; `--json` makes the result suitable for lifecycle counts and agent input.
+`recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
+table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
+directory.
+
+```bash
+emmy recipe list [ROOT] [--tag TAG]... [--json]
+emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
+  --deployment GPU COUNT [--deployment GPU COUNT]...
+```
 
 ### `emmy deploy local`
 
@@ -521,21 +565,6 @@ Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRi
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
 
-### `emmy agent`
-
-Runs a tracked repository skill non-interactively through an OpenAI-compatible Chat Completions endpoint. The API key
-must arrive through a one-use mode-`0600` file or inherited file descriptor and is removed from every tool subprocess.
-
-```bash
-emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
-emmy agent tools --output /tmp/emmy-agent-tools.json
-```
-
-Repository writes are limited to the workspace plus explicit `--allow-write` paths. The generated tool JSON comes
-from the same definitions the runner sends to the model. See `emmy/agent/ARCHITECTURE.md` for the security and
-workflow-ownership boundary.
-
 ### `emmy fit`
 
 Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
@@ -555,9 +584,18 @@ block per fold axis (pooled holdout / train tables, per-card gap, per-fold detai
 artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
 `scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
-(`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring and file writing; the run
-harness and fold/metrics machinery are library code in `emmy/compiler/pipeline/search/prior/fit/` (`run.py` /
-`cv.py`), documented there and in the pipeline ARCHITECTURE's prior sections.
+(`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and
+the file writing; the run harness and fold/metrics machinery are library code in
+`emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline
+ARCHITECTURE's prior sections.
+
+The command layer builds two `LinearTrainer` objects from these flags — the full-train one, warm-started from the
+incumbent artifact, and the fold one derived as `replace(trainer, warm_start=False)` so no held-out golden leaks
+into the model that is supposed to have never seen it. `run_fit` returns the fit rather than an artifact, because
+deciding what a fit with no dynamic cases ships with (it carries the incumbent's dynamic weight set forward, and
+says so in the provenance notes) is a shipping choice, not part of the shape of a run. The metrics header records
+both seeding policies and the ranking loss the fit ran under; two fits are only comparable when those match, the
+same way they must match on `--features`.
 
 ```bash
 emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/

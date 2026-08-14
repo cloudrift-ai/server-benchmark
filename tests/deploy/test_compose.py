@@ -199,6 +199,15 @@ def test_compose_vllm_no_entrypoint(sample_config):
     assert "entrypoint:" not in result
 
 
+def test_compose_vllm_explicit_entrypoint_for_same_image_control(sample_config):
+    sample_config["engine"]["llm"]["vllm"]["entrypoint"] = "python3 -m vllm.entrypoints.openai.api_server"
+    recipe = Recipe.from_dict(sample_config)
+
+    result = generate_compose(recipe, "/mnt/models", "test-token", num_instances=1)
+
+    assert "entrypoint: python3 -m vllm.entrypoints.openai.api_server" in result
+
+
 def test_compose_sglang_parses_as_valid_yaml(sample_config_sglang):
     recipe = Recipe.from_dict(sample_config_sglang)
     result = generate_compose(recipe, "/mnt/models", "test-token", num_instances=1)

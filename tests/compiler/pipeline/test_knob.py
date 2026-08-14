@@ -654,3 +654,15 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     assert axed["TILE@dd"] == "f2" and axed["REDUCE@a1"] == "coop"
     assert "TILE" not in axed and "REDUCE" not in axed
     assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WORK"] == "" and axed["RASTER"] == ""
+
+    # Re-stamping an already filled row keeps one schedule spelling per family. The
+    # exact site decision supersedes the bare OFF that an earlier pass recorded.
+    restamped = stamp_schedule_families({"REDUCE": "", "REDUCE@a0": "coop"})
+    assert restamped["REDUCE@a0"] == "coop"
+    assert "REDUCE" not in restamped
+
+    # A non-OFF bare value names a real primary-site decision. Keep it visible so a
+    # repository promotion can reject or explicitly re-key it rather than lose work.
+    primary_and_scoped = stamp_schedule_families({"REDUCE": "g2k", "REDUCE@a0": ""})
+    assert primary_and_scoped["REDUCE"] == "g2k"
+    assert primary_and_scoped["REDUCE@a0"] == ""

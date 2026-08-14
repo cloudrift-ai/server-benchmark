@@ -58,6 +58,11 @@ def torch_dtype(dtype) -> torch.dtype | None:
         "f32": torch.float32,
         "f16": torch.float16,
         "bf16": torch.bfloat16,
+        # Graph FP8 tensors carry the exact checkpoint / encode bit pattern as
+        # uint8.  Only the explicit ``from_f8*`` op decodes those bits to a
+        # numeric torch float8 value.
+        "f8e4m3": torch.uint8,
+        "f8e5m2": torch.uint8,
         "i32": torch.int32,
         "i64": torch.int64,
     }.get(str(dtype))
@@ -67,12 +72,34 @@ def is_runnable(graph: Graph) -> bool:
     """True if every compute op in ``graph`` has a torch mapping."""
     from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
 
-    return all(is_boundary(n.op) or type(n.op).__name__ in SUPPORTED for n in graph.nodes.values())
+    for node in graph.nodes.values():
+        if is_boundary(node.op):
+            continue
+        if type(node.op).__name__ not in SUPPORTED:
+            return False
+        if type(node.op).__name__ == "ElementwiseOp":
+            try:
+                _elementwise_callable(node.op.op.name)
+            except NotImplementedError:
+                return False
+    return True
 
 
 def _build_elementwise_table() -> dict[str, Callable]:
     import torch  # noqa: PLC0415
     import torch.nn.functional as F  # noqa: PLC0415
+
+    def to_f8(bits_dtype):
+        # The Graph dtype is a uint8 bits carrier.  A numeric cast to uint8
+        # would truncate the quantized values; cast to torch float8 first, then
+        # reinterpret that one-byte storage as uint8.
+        return lambda a: a[0].to(bits_dtype).view(torch.uint8)
+
+    def from_f8(bits_dtype):
+        # Reverse the exact storage reinterpretation before widening.  This is
+        # deliberately not ``bits.to(float)``: that would convert codes such as
+        # 0x38 to 56 instead of decoding the FP8 value 1.0.
+        return lambda a: a[0].contiguous().view(bits_dtype).to(torch.float32)
 
     return {
         "add": lambda a: a[0] + a[1],
@@ -103,6 +130,10 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "erf": lambda a: torch.erf(a[0]),
         "gelu": lambda a: F.gelu(a[0]),
         "gelu_tanh": lambda a: F.gelu(a[0], approximate="tanh"),
+        "to_f8e4m3": to_f8(torch.float8_e4m3fn),
+        "to_f8e5m2": to_f8(torch.float8_e5m2),
+        "from_f8e4m3": from_f8(torch.float8_e4m3fn),
+        "from_f8e5m2": from_f8(torch.float8_e5m2),
         "copy": lambda a: a[0],
     }
 

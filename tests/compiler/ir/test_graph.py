@@ -73,6 +73,22 @@ def test_topological_order():
     assert order.index("ew") < order.index("red")
 
 
+def test_topological_order_stabilizes_sibling_users(monkeypatch):
+    """Persisted program order must not inherit the hash order of the user index."""
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,)), node_id="x")
+    g.add_node(op=ElementwiseOp(op="exp"), inputs=[x], output=Tensor("z", (4,)), node_id="z")
+    g.add_node(op=ElementwiseOp(op="negative"), inputs=[x], output=Tensor("a", (4,)), node_id="a")
+
+    original_users = g.users
+
+    def reverse_users(node_id):
+        return list(reversed(sorted(original_users(node_id))))
+
+    monkeypatch.setattr(g, "users", reverse_users)
+    assert g.topological_order() == ["x", "a", "z"]
+
+
 def test_consumers():
     g = _make_matmul_graph()
     assert g.consumers("A") == ["ew"]
@@ -92,6 +108,22 @@ def test_replace_node():
     )
     g.replace_node("red", new_id)
     assert "red2" in [o for o in g.outputs]
+
+
+def test_replace_input_rewires_only_one_consumer():
+    g = _make_matmul_graph()
+    replacement = g.add_node(
+        op=ElementwiseOp(op="negative"),
+        inputs=["A"],
+        output=Tensor("negative_a", ("M", "K", "N")),
+        node_id="negative_a",
+    )
+
+    g.replace_input("ew", "A", replacement)
+
+    assert g.nodes["ew"].inputs == ["negative_a", "B"]
+    assert g.users("A") == {"negative_a"}
+    assert g.users("negative_a") == {"ew"}
 
 
 def test_remove_node():

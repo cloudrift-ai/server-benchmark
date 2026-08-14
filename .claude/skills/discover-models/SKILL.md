@@ -2,19 +2,37 @@
 name: discover-models
 description: >-
   Use this skill when the user asks what new models to try or benchmark, wants newly released open models discovered,
-  or wants trending models mapped to suitable GPU hardware. It produces a ranked shortlist ready for the
-  `onboard-model` skill, using keyless discovery data, web search, and a VRAM fit calculation.
+  wants trending models mapped to suitable GPU hardware, or wants the maintained recipe set refreshed. It produces a
+  ranked shortlist or lifecycle selection ready for the `onboard-model` skill, using keyless discovery data, web
+  search, and a VRAM fit calculation.
 ---
 
 # Discover Models to Explore
 
-Turn "what new models are worth our GPU hours?" into a concrete, ranked shortlist: newly-released open-weight
-models emmy **doesn't support yet**, filtered to the ones with real demand/hype, each tagged with the GPU
-configs it fits. The output is a hand-off list for the **`onboard-model`** skill — this skill never
-deploys or benchmarks anything itself; it researches and recommends.
+Turn "what models are worth our GPU hours?" into either a concrete shortlist or a refresh of Emmy's recipe
+lifecycle. New open-weight models are filtered to the ones with real demand, then mapped to the GPU configurations
+they fit. Existing recipes are ranked by current community and serving value so the small maintained set stays
+focused, useful lower-priority recipes stay available on a best-effort basis, and only technically superseded or
+unusable models become obsolete.
 
 Everything here is **keyless and read-only**: `scripts/new_models.py` hits public OpenRouter + HuggingFace
-endpoints, and the rest is web search. No servers are touched, no recipes are written.
+endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a JSON
+manifest; repository-owned workflow code validates it and writes recipe tags and onboarding shells.
+
+## Automated rolling PR prerequisite
+
+The discovery agent remains read-only in lifecycle mode. When an existing rolling discovery PR or unpaired discovery
+branch is present, workflow orchestration must complete these steps before it builds the recipe inventory or starts
+this skill:
+
+1. Fetch the latest `main` and the exact current remote head of the rolling branch.
+2. Fail if the checked-out head no longer matches that remote head.
+3. Rebase the rolling branch onto `main`; fail without applying lifecycle updates if the rebase conflicts.
+4. Push a changed rebase with an exact `--force-with-lease` expectation for the original remote head.
+
+The workflow, not the discovery agent, owns this Git mutation. A lease failure means another writer advanced the
+branch, so the run must stop rather than overwrite it. Research and lifecycle classification begin only from the
+successfully rebased checkout.
 
 ## Pipeline
 
@@ -24,9 +42,17 @@ scripts/new_models.py  →  per-model news/hype search  →  rank by demand  →
     HF popularity + Elo)
 ```
 
-## Step 0 — Confirm scope (only what's unstated)
+## Step 0 — Choose the output mode
 
-Ask only if the user hasn't already implied it:
+Use **survey mode** for an interactive shortlist or hardware matrix. Use **lifecycle mode** when the prompt requests
+`maintained_models`, `best_effort_models`, `obsolete_models`, and `onboarding_models` JSON for repository automation.
+The prompt owns the exact maintained-set size and any supplied hardware constraints; do not ask follow-up questions
+in lifecycle mode. When the prompt does not supply target hardware, choose one to three useful deployment setups per
+onboarding model. Keep lifecycle research bounded by the prompt. Prefer repository inventory and a few targeted
+searches over an exhaustive survey, and write the required manifest as soon as the conservative partition is
+supported.
+
+For survey mode, ask only if the user has not already implied it:
 
 - **Time window** — default the script's ~90 days (`--since` default). Widen with `--since 2026-01-01` if they
   want "this year".
@@ -36,7 +62,29 @@ Ask only if the user hasn't already implied it:
   subset, only bucket for those.
 - **How many finalists** — default ~5–8, spread across the hardware tiers.
 
-## Step 1 — Get the candidate list (the script)
+## Step 1 — Inventory recipes and candidates
+
+In lifecycle mode, inventory every `recipes/*/recipe.yaml` first. Use one compact query that returns only the recipe
+path, model ID, tags, task, deployment matrix, and existing rationale. Read a complete recipe only when a specific
+classification needs closer inspection. Treat the top-level tags as follows:
+
+- `maintained` — a tested recipe selected for periodic testing and optimization;
+- `best-effort` — a useful runnable recipe that is not selected for periodic testing and optimization;
+- `obsolete` — retained for history but disabled because an all-around better model for the same task is available at
+  a comparable or lower practical VRAM footprint;
+- `onboarding` + `untested` — a recipe shell that is not eligible for the maintained set yet.
+
+Low demand, age, and exclusion from the maintained set are not reasons to mark a recipe obsolete. An obsolete recipe
+can return to the maintained or best-effort set when the evidence changes. Never classify an onboarding/untested
+shell. Untagged complete recipes are eligible and must be classified on the first lifecycle run.
+
+Treat obsolete as a conservative, tradeoff-free decision. When a successor exists, compare the qualified targets in
+the recipe YAML: the replacement's smallest deployment must use no more total physical GPU memory than the old
+recipe's smallest deployment. The old model must retain no material advantage in quality, context, supported
+hardware, latency or throughput, operating cost, modality, or licensing. A smaller or quantized recipe is not obsolete
+merely because a larger or unquantized recipe exists. An obsolete decision without a successor needs a concrete
+technical reason the recipe should no longer be used. Prefer best-effort whenever evidence is ambiguous or the model
+has a useful advantage.
 
 Run the discovery script with arena enrichment, capturing JSON for parsing and the table for a human view.
 Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bursts; don't re-run in a loop):
@@ -47,7 +95,7 @@ Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bur
 ```
 
 The script already does the hard part: it lists open-weight models OpenRouter hosts (catalog entries with a
-`hugging_face_id`), **excludes families already in `recipes/`**, drops anything older than `--since`, verifies
+`hugging_face_id`), **excludes active families already in `recipes/`**, drops anything older than `--since`, verifies
 each on HuggingFace, and ranks by HF momentum. Each JSON row in `models[]` carries:
 
 | Field | Meaning | Use |
@@ -63,6 +111,7 @@ each on HuggingFace, and ranks by HF momentum. Each JSON row in `models[]` carri
 The table footer also flags stale OpenRouter→HF mappings ("NOT ON HF") and likely arena fuzzy-match misses —
 skim those; a miss can mean a model you'd otherwise drop actually has a strong Elo under a slightly different name.
 
+Obsolete recipes are deliberately not excluded, which lets a renewed model resurface as a reactivation candidate.
 Take the top ~8–12 by `trending` (tie-break `elo`, then `downloads`) into Step 2. The script's full flag list is
 documented in `CLAUDE.md` (scripts section).
 
@@ -82,7 +131,7 @@ Distill each into a one-line **demand read**: *strong* (benchmark wins + active 
 *moderate*, or *niche/quiet*. Cross-check against the script signals — a model high on HF trend **and** loud
 online is a strong pick; high downloads but silent is often a small fine-tuning base, not a flagship.
 
-## Step 3 — Select the most promising
+## Step 3 — Classify recipes and select onboarding models
 
 Combine signals into a shortlist. A model is **promising** when it scores on several of:
 
@@ -95,6 +144,25 @@ Combine signals into a shortlist. A model is **promising** when it scores on sev
 Drop: tiny fine-tuning bases riding download counts, models with no engine support yet (note it, revisit later),
 and anything the user explicitly doesn't care about. Aim for a spread of **sizes** so the next step can fill
 several hardware tiers (don't pick five 400B MoEs).
+
+In lifecycle mode:
+
+- choose exactly the requested number of existing, fully configured recipes as maintained;
+- classify every other fully configured recipe as best-effort or obsolete, with every complete recipe appearing in
+  exactly one of the three lifecycle lists;
+- give every maintained, best-effort, obsolete, and onboarding decision a concise evidence-backed rationale;
+- prefer best-effort whenever a recipe remains useful; use obsolete only when a named maintained or best-effort
+  replacement is all-around better for the same task at a comparable or lower practical VRAM footprint, or when a
+  technical limitation means the recipe should no longer be used;
+- include that replacement and a concise technical rationale with the qualified target VRAM comparison and why the
+  old recipe retains no material advantage for every superseded obsolete decision; otherwise explain why the recipe
+  should be dropped without a replacement;
+- choose only enough genuinely new models to keep at most three total onboarding shells; existing
+  onboarding/untested shells consume the available slots;
+- propose one to three deployment setups for each new model using only canonical `deploy.gpu` and positive
+  `deploy.gpu_count` values;
+- use exact `model.huggingface` IDs from recipe YAML for maintained entries;
+- prefer current demand and serving value, while keeping a useful mix of sizes, modalities, and architectures.
 
 ## Step 4 — Hardware requirements per finalist
 
@@ -158,7 +226,21 @@ why. Cover the spectrum — small flagships on consumer cards, mid-size on Pro60
 
 Flag any model with **no engine support yet** or **no suitable quant** as "watch, revisit" rather than slotting it.
 
-## Step 6 — Hand off
+## Step 6 — Return the lifecycle manifest
+
+When lifecycle mode is requested, produce exactly the JSON shape in the prompt and no prose or Markdown fence. If the
+prompt supplies a manifest path, use `write_file` to store the JSON there before the final response. Every lifecycle
+row needs a rationale. Each new onboarding row needs `generate` or `embed` and a `deployments` list containing one to
+three objects with exactly `deploy.gpu` and `deploy.gpu_count`. Empty `best_effort_models`, `obsolete_models`, and
+`onboarding_models` lists are valid when the complete partition permits them. Do not edit recipe files yourself: the
+workflow validates exact model IDs, the maintained count, the complete lifecycle partition, active replacements for
+obsolete recipes, canonical hardware, deployment counts, duplicates, and rationales before making any change. It
+demotes a superseded obsolete decision to best-effort unless the replacement is active, serves the same task, and its
+smallest known qualified deployment uses no more total physical GPU memory than the old recipe's smallest deployment.
+If the agent omits a complete recipe, the workflow also assigns it to best-effort rather than guessing that it is
+obsolete.
+
+## Step 7 — Hand off in survey mode
 
 For each (model, hardware) pair the user wants to pursue, offer to invoke **`onboard-model`** — pass the
 `hf_id` and the chosen GPU + `gpu_count`. That skill does the real work (engine/image research, recipe, validate,
@@ -177,6 +259,7 @@ If the user just wanted the survey, stop at the matrix.
   snapshot — lean on HF `trending` + news there.
 - **Don't spam the script.** HF rate-limits bursts; use `--workers 4` and re-run sparingly (transient failures
   land in the script's "COULD NOT VERIFY" bucket — wait and re-run, don't hammer).
-- **Don't deploy or write recipes in this skill.** Discovery only; `onboard-model` owns deployment.
+- **Don't deploy or edit recipes in this skill.** The automated workflow applies a validated lifecycle manifest;
+  `onboard-model` owns real deployment and qualification.
 - **Don't forget overhead.** The fit table is weights-only; real serving needs ~1.3× for activations + KV, more
   for long context / high concurrency.

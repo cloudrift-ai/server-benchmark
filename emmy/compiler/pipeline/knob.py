@@ -609,6 +609,15 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
 
     out = dict(tuning_knob_items(knobs))
+    # A previously stamped row can carry the family's bare OFF together with a later
+    # axis-scoped decision (for example ``REDUCE=''`` plus ``REDUCE@a0='coop'``).
+    # The scoped spelling is the exact tree-site decision; retaining the bare spelling
+    # would fan OFF across every eligible site during replay and make the row ambiguous.
+    scoped_families = {family_of(name) for name in out if "@" in name}
+    for family in scoped_families:
+        bare = out.get(family)
+        if bare == "":
+            out.pop(family)
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:

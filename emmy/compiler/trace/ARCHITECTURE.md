@@ -138,7 +138,8 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
   coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
   input-side channel vector and the merged spelling would only add a concat the chunk split undoes.
-  A model's `routed_scaling_factor` multiplies only the routed expert result before that shared-expert addition.
+  A model's `routed_scaling_factor` ordinarily multiplies only the routed expert result before that shared-expert
+  addition. An architecture may mark the factor as folded into router weights when fp16 partials cannot carry it.
   Laguna's optional softplus `g_proj` attention gate is likewise retained in both dense and MoE post-attention
   programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
   The split reads an explicit gate layout when the Transformers module provides one and otherwise derives it from the
@@ -156,14 +157,22 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   streams as values too: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on
   read and consumes the scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert
   lane has no packed-trio decode. An EXL3 checkpoint takes the same split at the trellis format's own shapes
-  (`fmt == "exl3"`). Its explicit reference API may decode trunk values, while serving passes
-  `compress_trunk=True`: the twin parameters stay uninitialized placeholders and the caller re-sources each
-  coded linear from the checkpoint (`serving/gen_runner.py`). There is no automatic dense serving fallback; an
-  unsupported coded linear fails during birth-time spelling. Either way every routed expert keeps its PACKED
-  CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot` reports an expert index and
-  `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one E-leading tensor, putting `suh`
-  in its 128-blocked form and trimming `svh` to the logical out extent — the shapes `spell_trellis_inputs`
-  declares, so a launch's per-expert slice needs no reshape. The store also carries
+  (`fmt == "exl3"`). Laguna EXL3 additionally stores routed up projections with the architecture's
+  `interm_div=128` scale; the loader folds the inverse and the model's base routed scale into selected routing
+  weights and marks their combine for fp32 accumulation, matching the reference runtime without scaling expert
+  partials in fp16. The architecture's residual stream is fp32 from embedding through every decoder block. Norms,
+  q/k/v, attention output, and gate/up intermediates stay fp16; the marked trace promotes exactly the
+  checkpoint-provenanced attention `o_proj`, dense and routed `down_proj`, and the shared-expert activation/down
+  cone to fp32 before trellis spelling. Operands remain compressed. The final norm returns fp16 for the head. The
+  precision marker is limited to Laguna EXL3; ordinary and other EXL3 graphs keep their existing dtypes. Its
+  explicit reference API may decode trunk values, while serving passes `compress_trunk=True`: the twin parameters
+  stay uninitialized placeholders and the caller re-sources each coded linear from the checkpoint
+  (`serving/gen_runner.py`). There is no automatic dense serving fallback; an unsupported coded linear fails
+  during birth-time spelling. Either way every routed expert keeps its PACKED CODES. EXL3 stores experts as
+  per-expert MODULES, so `_expert_slot` reports an expert index and `_stack_exl3_experts` stacks each
+  `(layer, projection, leaf)` triple into one E-leading tensor, putting `suh` in its 128-blocked form and
+  trimming `svh` to the logical out extent — the shapes `spell_trellis_inputs` declares, so a launch's
+  per-expert slice needs no reshape. The store also carries
   `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
   `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
   whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
@@ -219,7 +228,9 @@ shared with CausalLM traces.
   every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden YAML. Each
   target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
   post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
-  file is loaded.
+  file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
+  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy, preserving an
+  internal storage boundary without changing an ordinary model call.
   `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,

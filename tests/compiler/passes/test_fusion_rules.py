@@ -16,7 +16,7 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
-from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline import Pipeline
@@ -757,6 +757,79 @@ def test_gather_into_reduce_correctness():
     _assert_correctness(_make_gather_into_reduce, {"w": w, "idx": idx})
 
 
+def _make_repeated_projection_read():
+    """A reduction producer consumed twice by one pointwise node."""
+    m, k, n = 2, 8, 6
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (n, k)), node_id="w")
+    g.add_node(LinearOp(), ["x", "w"], Tensor("projection", (m, n)), node_id="projection")
+    g.add_node(ElementwiseOp("multiply"), ["projection", "projection"], Tensor("square", (m, n)), node_id="square")
+    g.inputs, g.outputs = ["x", "w"], ["square"]
+    return g
+
+
+def test_equal_coordinate_projection_reads_share_one_reduction():
+    """The splicer shares identical demands instead of treating every repeated read as duplication."""
+    result = _decompose_and_fuse(_make_repeated_projection_read())
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 1
+    assert sum(isinstance(stmt, Accum) for stmt in kernels[0].op.body.iter()) == 1
+
+
+def test_repeated_projection_read_fusion_is_correct():
+    x = rng.standard_normal((2, 8)).astype(np.float32)
+    w = rng.standard_normal((6, 8)).astype(np.float32)
+    _assert_correctness(_make_repeated_projection_read, {"x": x, "w": w})
+
+
+def _make_norm_linear():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (8,)), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("w", (6, 8)), node_id="w")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("normalized", (2, 8)), node_id="normalized")
+    g.add_node(LinearOp(), ["normalized", "w"], Tensor("out", (2, 6)), node_id="out")
+    g.inputs, g.outputs = ["x", "nw", "w"], ["out"]
+    return g
+
+
+def test_single_read_norm_linear_still_fuses():
+    """The repeated-reduce guard must not block the intended computed-A norm→linear cone."""
+    result = _decompose_and_fuse(_make_norm_linear())
+    assert len(_kernel_nodes(result)) == 1
+
+
+def _make_projection_norm():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (6, 8)), node_id="w")
+    g.add_node(InputOp(), [], Tensor("nw", (6,)), node_id="nw")
+    g.add_node(LinearOp(), ["x", "w"], Tensor("projection", (2, 6)), node_id="projection")
+    g.add_node(RmsNormOp(eps=1e-6), ["projection", "nw"], Tensor("out", (2, 6)), node_id="out")
+    g.inputs, g.outputs = ["x", "w", "nw"], ["out"]
+    return g
+
+
+def test_projection_feeding_rms_value_and_statistic_stays_materialized():
+    """RMSNorm reads its input for both x² and x; do not execute an upstream projection twice."""
+    result = _decompose_and_fuse(_make_projection_norm())
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 2
+    projection = next(node for node in kernels if set(node.inputs) == {"w", "x"})
+    norm = next(node for node in kernels if node is not projection)
+    assert sum(load.input == projection.id for load in norm.op.loads) == 2
+
+
+def test_projection_norm_materialization_is_correct():
+    inputs = {
+        "x": rng.standard_normal((2, 8)).astype(np.float32),
+        "w": rng.standard_normal((6, 8)).astype(np.float32),
+        "nw": rng.standard_normal((6,)).astype(np.float32),
+    }
+    _assert_correctness(_make_projection_norm, inputs)
+
+
 def _make_shared_broadcast_chain():
     """A scalar broadcast (shared) feeding two *further* broadcasts that each feed
     a downstream multiply — mirrors the full-model RoPE/mask shape:
@@ -1004,3 +1077,53 @@ def test_pending_product_exp_residual_correctness():
     w = rng.standard_normal((6, 8)).astype(np.float32)
     r = rng.standard_normal((4, 6)).astype(np.float32)
     _assert_correctness(_make_pending_product_into_exp_residual_add, {"act": act, "w": w, "r": r})
+
+
+def test_product_reduction_fuses_before_upstream_activation():
+    """An activation feeding a decomposed contraction must not strand its M×K×N product."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    graph = _make_pending_product_into_exp_residual_add()
+    graph.rename_node("act", "act_src")
+    a0, a1 = Var("a0"), Var("a1")
+    activation = LoopOp(
+        body=Body(
+            (
+                Loop(
+                    axis=Axis("a0", Dim(4)),
+                    body=Body(
+                        (
+                            Loop(
+                                axis=Axis("a1", Dim(8)),
+                                body=Body(
+                                    (
+                                        Load(name="x", input="act_src", index=(a0, a1)),
+                                        Assign(name="xa", op="tanh", args=("x",)),
+                                        Write(output="act", index=(a0, a1), value="xa"),
+                                    )
+                                ),
+                            ),
+                        )
+                    ),
+                ),
+            )
+        )
+    )
+    graph.add_node(activation, ["act_src"], Tensor("act", (4, 8)), node_id="act")
+    graph.replace_input("ew", "act_src", "act")
+
+    before = graph.copy()
+    fused = Pipeline.build(["loop/fusion"]).run(graph)
+    bare = [node.id for node in _kernel_nodes(fused) if not _has_update(node.op.body) and len(node.output.shape) > 2]
+    assert bare == [], f"activation fusion stranded a product workspace: {bare}"
+
+    inputs = {
+        "act_src": rng.standard_normal((4, 8)).astype(np.float32),
+        "w": rng.standard_normal((6, 8)).astype(np.float32),
+        "r": rng.standard_normal((4, 6)).astype(np.float32),
+    }
+    _assert_close(_run(before, inputs), _run(fused, inputs))

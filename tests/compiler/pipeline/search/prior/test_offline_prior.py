@@ -89,8 +89,8 @@ def test_params_come_from_the_file(tmp_path, monkeypatch):
     path.write_text(json.dumps(art))
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     p = OfflinePrior()
-    assert p._scale == 0.5
-    assert p._atomic_free_weight == 7.0
+    assert p.model.scale == 0.5
+    assert p.model.atomic_free_weight == 7.0
 
 
 def test_explicit_kwargs_win_over_the_file(tmp_path, monkeypatch):
@@ -98,9 +98,21 @@ def test_explicit_kwargs_win_over_the_file(tmp_path, monkeypatch):
     path.write_text(json.dumps(_artifact()))
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     p = OfflinePrior(weights={"D_square": 1.0}, scale=1.0)
-    assert p._w == {"D_square": 1.0}  # kwarg, not the file's 3.0
-    assert p._scale == 1.0
-    assert p._w_dyn == {"D_square": -3.0}  # unpassed fields still resolve from the file
+    assert p.model.weights == {"D_square": 1.0}  # kwarg, not the file's 3.0
+    assert p.model.scale == 1.0
+    assert p.model.weights_dynamic == {"D_square": -3.0}  # unpassed fields still resolve from the file
+
+
+def test_model_and_field_overrides_do_not_mix():
+    """Passing both a ready model and a per-field override is rejected, not silently resolved one
+    way. Ignoring the override would hand an A/B the unmodified model and let it report a difference
+    of zero as a real result."""
+    from emmy.compiler.pipeline.search.prior.linear_model import LinearModel  # noqa: PLC0415
+
+    model = LinearModel(weights={"D_square": 1.0}, weights_dynamic={}, scale=0.1, atomic_free_weight=0.0, atomic_free_split_threshold=4.0)
+    assert OfflinePrior(model=model).model is model
+    with pytest.raises(ValueError, match="not both"):
+        OfflinePrior(model=model, scale=2.0)
 
 
 def test_missing_file_is_a_hard_error(tmp_path, monkeypatch):

@@ -1,40 +1,46 @@
-"""The linear trainer and its fitted model — the offline learning-to-rank fit of the
-:class:`OfflinePrior` weights.
+"""The linear trainer — the offline learning-to-rank fit of the :class:`OfflinePrior` weights.
 
-This module owns everything specific to the linear model class: the loss (:func:`objective` — mean golden
-rank — plus :func:`l2_penalty`, the raw-space L2 regularizer), the optimizer (:func:`fit_weights` —
-random search + coordinate descent), the static/dyn
-two-stage chaining (:func:`fit_two_stage`), and the fitted model (:class:`TwoStageFit`, whose
-:meth:`~TwoStageFit.score_rows` is the single fit-side home of the static-vs-dynamic weight-set split — the
-CV harness and any other consumer score through it and never touch weight dicts). The dataset representation
-lives in :mod:`.group`, the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in
-:mod:`.cv`; the trainer is importable library code with the one featurization and one artifact format shared
-by every caller of ``emmy fit``.
+:class:`LinearTrainer` holds the hyperparameters and :meth:`~LinearTrainer.fit` turns a
+:class:`~.group.Group` list into a :class:`LinearFit`. The trainer is immutable and its ``fit`` is pure, so a
+fit is a function of ``(groups, hyperparameters)`` alone: the same inputs give a byte-identical artifact, one
+instance serves every cross-validation fold without copying, and an A/B between two fits measures the fit
+inputs rather than run-to-run noise.
 
-What is optimized is the **deployed** scoring function, not a linear proxy for it: :func:`quality_rows` is the
-vector form of :meth:`~..offline.OfflinePrior.quality`, sharing the one
-:func:`~..offline.atomic_free_term` definition, and the interaction's ``(weight, threshold)`` pair are descent
-coordinates alongside the feature weights (:data:`PARAM_NAMES`). Because the optimizer is derivative-free,
-fitting a threshold costs nothing extra — and a scoring constant the fit cannot see is a constant the fit
-optimizes around, which is what the hand-set gates were doing until 2026-08-05.
+This module owns what is specific to the linear model class: the default loss (:func:`mean_log_rank`) and the
+raw-space L2 regularizer (:func:`l2_penalty`), the optimizer (:func:`fit_weights` — random search plus
+coordinate descent), and the static→dynamic chaining. Anything a different model class would also need lives
+elsewhere: the scoring function itself in :mod:`..linear_model`, the dataset representation in :mod:`.group`,
+the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in :mod:`.cv`.
 
-The fit consumes :class:`~.group.Group` lists directly. Each fit z-scores over its own candidate pool;
-``seed_w`` arrives scaled by ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to chain
-fits). Deterministic for a given seeded ``rng``.
+What is optimized is the **deployed** scoring function, not a proxy for it. The descent scores through
+:func:`~..linear_model.quality_columns`, the same arithmetic ``OfflinePrior`` ranks with, and the atomic-free
+interaction's ``(weight, threshold)`` pair ride the descent as coordinates alongside the feature weights
+(:data:`FITTED_PARAMS`). Because the optimizer is derivative-free, fitting a threshold costs nothing extra — and
+a scoring constant the fit cannot see is a constant the fit optimizes around, which is what the hand-set gates
+were doing until 2026-08-05.
+
+Each fit z-scores over its own candidate pool; ``seed_w`` arrives scaled by ``sd_ref`` (``ones`` for a
+raw-weight seed, the previous fit's ``sd`` to chain fits).
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_table
-from emmy.compiler.pipeline.search.prior.offline import atomic_free_term
+from emmy.compiler.pipeline.search.prior.linear_model import (
+    FITTED_PARAMS,
+    GATE_DEFAULTS,
+    LinearModel,
+    gate_columns,
+    quality_columns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,35 +60,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_L2 = 1e-6
 
 
-# The scalar scoring params the descent fits alongside the weights, in coordinate order. These are the
-# offline prior's non-linear term (:func:`~..offline.atomic_free_term`) — everything else in the deployed
-# quality IS a linear weight, so it lives in the weight vector and needs no separate coordinate.
-PARAM_NAMES = ("atomic_free_weight", "atomic_free_split_threshold")
-
-
-def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, np.ndarray]:
-    """The two feature columns :func:`~..offline.atomic_free_term` reads, defaulted exactly as the
-    deployed ``feats.get`` calls do when the featurization omits them (finalize 0.0, split count 1.0).
-
-    Copies, never column views: :func:`fit_weights` z-scores its pools IN PLACE, and these values must
-    stay in raw units — the interaction compares a split COUNT against its threshold."""
-    idx = {n: j for j, n in enumerate(names)}
-    n_rows = len(mat)
-    fin = mat[:, idx["D_finalize_kernel"]].copy() if "D_finalize_kernel" in idx else np.zeros(n_rows)
-    spl = mat[:, idx["D_splitk"]].copy() if "D_splitk" in idx else np.ones(n_rows)
-    return fin, spl
-
-
-def quality_rows(mat: np.ndarray, w: np.ndarray, gates: tuple[np.ndarray, np.ndarray], params: np.ndarray) -> np.ndarray:
-    """A pool's per-row deployed quality (higher = predicted faster) — the linear part plus the
-    atomic-free interaction, scored through the SAME function ``OfflinePrior`` deploys. The fit's
-    objective is this quantity's golden rank, so the fitter optimizes the deployed ranking itself
-    rather than a proxy that omits the term."""
-    return mat @ w + atomic_free_term(gates[0], gates[1], weight=params[0], threshold=params[1])
-
-
 def eval_weights(mats, gidx: list[int], gates, w: np.ndarray, params: np.ndarray) -> list[int]:
-    return [rank_of_golden(quality_rows(m, w, g, params), gi) for m, g, gi in zip(mats, gates, gidx, strict=True)]
+    """Each pool's golden rank under a candidate weight vector. Scores through
+    :func:`~..linear_model.quality_columns` — the same arithmetic ``OfflinePrior`` deploys — so the fit's
+    objective is the deployed ranking itself rather than a proxy that omits the interaction term."""
+    return [
+        rank_of_golden(quality_columns(m, w, g, weight=params[0], threshold=params[1]), gi)
+        for m, g, gi in zip(mats, gates, gidx, strict=True)
+    ]
 
 
 def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
@@ -92,23 +77,29 @@ def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
     return float(np.sum((w / sd) ** 2))
 
 
-def objective(ranks: list[int]) -> float:
-    # Mean log2(rank+1) over the cases, unweighted: rewards pushing every golden up, dominated
-    # by the worst offenders. Lower is better. Cases count ONE each — the retired ``1/count(tier)``
-    # weighting gave every tier an equal share of the loss regardless of size, so with 396 warp
-    # against 13 thread cases a single fp32 golden outweighed 30 fp16 ones (and on a single-tier
-    # slice one case could carry half the loss). Its comment justified that by "fp16 warp is only
-    # ~7/32 cases" — a ratio that inverted long ago.
+def mean_log_rank(ranks: list[int]) -> float:
+    """The default fit loss: mean ``log2(rank+1)`` over the cases, unweighted. Lower is better.
+
+    Rewards pushing every golden up and is dominated by the worst offenders. Cases count ONE each —
+    the retired ``1/count(tier)`` weighting gave every tier an equal share of the loss regardless of
+    size, so with 396 warp against 13 thread cases a single fp32 golden outweighed 30 fp16 ones (and
+    on a single-tier slice one case could carry half the loss). Its comment justified that by "fp16
+    warp is only ~7/32 cases" — a ratio that inverted long ago.
+
+    Any ``list[int] -> float`` may replace it via :attr:`LinearTrainer.objective`; the fit records
+    which one it ran under, since two fits are only comparable under the same loss."""
     return float(sum(math.log2(r + 1) for r in ranks) / len(ranks))
 
 
-def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng, samples, l2=DEFAULT_L2, fit_params=True):
+def fit_weights(
+    groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng, samples, l2=DEFAULT_L2, fit_params=True, objective=mean_log_rank
+):
     """Random-search + coordinate-descent the deployed scoring function over ``groups``, minimizing
-    ``objective + l2 * l2_penalty`` (the golden rank plus the raw-space L2 — see :data:`DEFAULT_L2`
+    ``objective + l2 * l2_penalty`` (the ranking loss plus the raw-space L2 — see :data:`DEFAULT_L2`
     for why the loss carries the penalty).
 
-    The optimized quantity is :func:`quality_rows` — the linear weights AND the atomic-free
-    interaction's ``(weight, threshold)`` pair, which ride the descent as :data:`PARAM_NAMES`
+    The optimized quantity is :func:`~..linear_model.quality_columns` — the linear weights AND the atomic-free
+    interaction's ``(weight, threshold)`` pair, which ride the descent as :data:`FITTED_PARAMS`
     coordinates past the feature block. Fitting them is only possible because the optimizer is
     derivative-free: a threshold has no useful gradient, but a coordinate step over it is ordinary.
     ``fit_params=False`` freezes the pair at ``seed_params`` (the dynamic stage, which inherits the
@@ -165,7 +156,7 @@ def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng,
     # Coordinate-descent refine around the best, over the feature weights and then the scalar
     # params. On a rank-flat direction the penalty is the only gradient — the descent walks the
     # plateau toward zero magnitude, which is what heals a poisoned incumbent seed on the next refit.
-    n_coord = len(names) + (len(PARAM_NAMES) if fit_params else 0)
+    n_coord = len(names) + (len(FITTED_PARAMS) if fit_params else 0)
     step = 1.0
     for _ in range(8):
         improved = False
@@ -186,7 +177,7 @@ def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng,
             step /= 2
 
     logger.info("  best: %s", topk_table(best_ranks))
-    logger.info("  params: %s", ", ".join(f"{n}={v:g}" for n, v in zip(PARAM_NAMES, best_p, strict=True)))
+    logger.info("  params: %s", ", ".join(f"{n}={v:g}" for n, v in zip(FITTED_PARAMS, best_p, strict=True)))
     for g, r in sorted(zip(groups, best_ranks, strict=True), key=lambda t: -t[1]):
         logger.info("    %-32s [%-6s] rank=%5d", g.name, g.tier, r)
     return best_w, best_p, best_ranks, mu, sd
@@ -198,91 +189,113 @@ def raw_weights(names, best_w, sd) -> dict[str, float]:
     return {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
 
 
-@dataclass
-class TwoStageFit:
-    """One trainer invocation's fitted weight sets, in raw-feature space
-    (:func:`raw_weights` — the format the artifact stores). ``dyn_raw`` / ``dyn_ranks`` are
-    ``None`` when the input had no dynamic cases: the CALLER decides the fallback
-    (the script carries the incumbent's dynamic set forward; a CV fold treats the
-    set as unfittable rather than silently substituting a stale vector)."""
+@dataclass(frozen=True)
+class LinearTrainer:
+    """The offline-prior trainer: hyperparameters in, a fitted :class:`LinearFit` out.
 
-    static_raw: dict[str, float]
+    Immutable, and :meth:`fit` never touches ``self`` — so ONE instance serves every
+    cross-validation fold with no copying, and a fit is a pure function of
+    ``(groups, hyperparameters)``. That is what makes a refit reproducible and an A/B between two
+    fits a measurement of the fit inputs rather than of run-to-run noise.
+
+    ``init`` is the incumbent model this fit chains from. It always seeds the scalar params (two
+    numbers a fit re-derives, not a per-golden memory) and, when ``warm_start``, the feature weights
+    too. Fold models set ``warm_start=False``: the incumbent's weights were themselves fit on every
+    golden, so seeding a fold from them would leak each held-out golden into the model that is
+    supposed to have never seen it. ``init.scale`` carries into the fitted model unchanged — it is
+    rank-neutral, so the fit has no opinion on it."""
+
+    feature_names: tuple[str, ...]
+    init: LinearModel
+    samples: int = 0
+    l2: float = DEFAULT_L2
+    random_state: int = 0
+    warm_start: bool = True
+    objective: Callable[[list[int]], float] = mean_log_rank
+
+    def fit(self, groups: list[Group]) -> LinearFit:
+        """Fit both weight sets over ``groups``: a static fit over the non-dynamic groups, then the
+        dynamic fit over the rest, seeded from the static result in its own z-space (the ``sd_ref``
+        chaining) and drawing from the same RNG after it. That RNG is built here from
+        :attr:`random_state`, so a fold's fit never depends on how many folds ran before it.
+
+        The scalar params are fitted by the STATIC stage and frozen for the dynamic one: the artifact
+        carries a single params block that both weight sets score under, so the dynamic weights must
+        be fit against the pair that will actually deploy.
+
+        The static group list must be non-empty — the dynamic stage seeds from it. Callers guard
+        that; this does not."""
+        names = list(self.feature_names)
+        static_groups = [g for g in groups if not g.dynamic]
+        dyn_groups = [g for g in groups if g.dynamic]
+        rng = np.random.default_rng(self.random_state)
+        seed_weights = self.init.weights if self.warm_start else {}
+
+        logger.info("== static fit (%d cases) ==", len(static_groups))
+        static_w, params, static_ranks, _, static_sd = fit_weights(
+            static_groups,
+            names,
+            np.ones(len(names)),
+            seed_w=np.array([seed_weights.get(n, 0.0) for n in names]),
+            seed_params=np.array([getattr(self.init, n) for n in FITTED_PARAMS]),
+            rng=rng,
+            samples=self.samples,
+            l2=self.l2,
+            objective=self.objective,
+        )
+        model = LinearModel(
+            weights=raw_weights(names, static_w, static_sd),
+            weights_dynamic=None,
+            scale=self.init.scale,  # carried from the incumbent: rank-neutral, so the fit has no opinion on it
+            **{n: float(v) for n, v in zip(FITTED_PARAMS, params, strict=True)},
+        )
+        if not dyn_groups:
+            return LinearFit(model, static_ranks, None)
+
+        logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
+        dyn_w, _, dyn_ranks, _, dyn_sd = fit_weights(
+            dyn_groups,
+            names,
+            static_sd,
+            seed_w=static_w,
+            seed_params=params,
+            rng=rng,
+            samples=self.samples,
+            l2=self.l2,
+            fit_params=False,
+            objective=self.objective,
+        )
+        return LinearFit(replace(model, weights_dynamic=raw_weights(names, dyn_w, dyn_sd)), static_ranks, dyn_ranks)
+
+
+@dataclass(frozen=True)
+class LinearFit:
+    """One :meth:`LinearTrainer.fit` result: the fitted model plus the golden ranks it reached.
+
+    ``model.weights_dynamic`` / :attr:`dyn_ranks` are ``None`` when the input had no dynamic groups.
+    The CALLER decides what to do about that — the shipping path substitutes the incumbent's dynamic
+    set, a CV fold treats the set as unfittable rather than silently scoring under a stale vector."""
+
+    model: LinearModel
     static_ranks: list[int]
-    dyn_raw: dict[str, float] | None
     dyn_ranks: list[int] | None
-    params: dict[str, float]
 
     def score_rows(self, group: Group) -> np.ndarray | None:
-        """The group's per-row quality (higher = predicted faster) under the raw weight sets
-        and this fit's params — scored exactly as the shipped prior ranks, interaction term
-        included. The static-vs-dynamic weight-set selection lives HERE and nowhere else on the
-        fit side. ``None`` when the group needs the dynamic set and this fit has none (an
-        unfittable fold — callers exclude it up front)."""
-        w = self.dyn_raw if group.tier == "dyn" else self.static_raw
-        if w is None:
+        """The group's per-row quality (higher = predicted faster), scored exactly as the shipped
+        prior ranks. ``None`` when the group needs the dynamic set and this fit has none."""
+        if group.dynamic and self.model.weights_dynamic is None:
             return None
         # The gate columns must be present whether or not the weight dict names them (a pruned
-        # zero weight drops the key), so score over the union.
-        names = sorted(set(w) | {"D_finalize_kernel", "D_splitk"})
-        mat = group.matrix(names)
-        vec = np.array([w.get(n, 0.0) for n in names])
-        return quality_rows(mat, vec, gate_columns(mat, names), np.array([self.params[n] for n in PARAM_NAMES]))
+        # zero weight drops the key), so score over the union. The weight set itself comes from
+        # the model, which is where the static-vs-dynamic choice is made — this must not become a
+        # second copy of that routing.
+        names = sorted(set(self.model.weight_set(group.dynamic)) | set(GATE_DEFAULTS))
+        return self.model.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
 
-    def to_artifact(self, *, params: dict, provenance: dict) -> dict:
-        """This fit as the ``OfflinePrior`` weights artifact dict. ``params`` supplies the
-        NON-fitted scoring params (``scale``); this fit's own :attr:`params` override the
-        fitted ones. Both weight sets must be present — a caller shipping a fit with no
-        dynamic set substitutes its fallback (e.g. the incumbent's) into ``dyn_raw`` first."""
-        assert self.dyn_raw is not None, "no dynamic weight set — substitute a fallback before assembling the artifact"
-        return build_artifact(
-            weights=self.static_raw, weights_dynamic=self.dyn_raw, params={**params, **self.params}, provenance=provenance
-        )
-
-
-def fit_two_stage(
-    groups: list[Group], names, *, seed_weights: dict[str, float], seed_params: dict[str, float], rng, samples: int, l2: float = DEFAULT_L2
-) -> TwoStageFit:
-    """The incumbent trainer's full chaining as one call: a static fit over the
-    non-``dyn`` groups seeded from the ``seed_weights`` raw dict (zeros where a name is
-    absent — an empty dict seeds from zero), then the dynamic fit over the ``dyn``
-    groups seeded from the static result in its z-space (``sd_ref`` chaining). ``rng``
-    is consumed sequentially by both stages, matching the script's draw order. The
-    static group list must be non-empty (the dynamic stage seeds from it) — callers
-    guard, this function does not.
-
-    The scalar params (:data:`PARAM_NAMES`, seeded from ``seed_params``) are fitted by the STATIC
-    stage and frozen for the dynamic one: the artifact carries a single params block that both
-    weight sets score under, so the dynamic weights must be fit against the pair that will deploy."""
-    static_groups = [g for g in groups if g.tier != "dyn"]
-    dyn_groups = [g for g in groups if g.tier == "dyn"]
-    seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
-    seed_p = np.array([seed_params[n] for n in PARAM_NAMES])
-    logger.info("== static fit (%d cases) ==", len(static_groups))
-    static_w, params, static_ranks, _, static_sd = fit_weights(
-        static_groups, names, np.ones(len(names)), seed_w=seed_raw, seed_params=seed_p, rng=rng, samples=samples, l2=l2
-    )
-    fitted = {n: float(v) for n, v in zip(PARAM_NAMES, params, strict=True)}
-    static_raw = raw_weights(names, static_w, static_sd)
-    if not dyn_groups:
-        return TwoStageFit(static_raw, static_ranks, None, None, fitted)
-    logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
-    dyn_w, _, dyn_ranks, _, dyn_sd = fit_weights(
-        dyn_groups, names, static_sd, seed_w=static_w, seed_params=params, rng=rng, samples=samples, l2=l2, fit_params=False
-    )
-    return TwoStageFit(static_raw, static_ranks, raw_weights(names, dyn_w, dyn_sd), dyn_ranks, fitted)
-
-
-def build_artifact(*, weights: dict[str, float], weights_dynamic: dict[str, float], params: dict, provenance: dict) -> dict:
-    """Assemble the ``OfflinePrior`` weights artifact dict in its checked-in shape.
-    ``params`` is the complete scoring-param block — the caller merges the fit's own fitted
-    params over whatever it carries forward (``scale``); ``provenance`` is caller-supplied whole
-    (fitted date, script, args, case counts, notes) so the assembly stays a pure, deterministic
-    function."""
-    return {
-        "feat_ver": FEATURIZER_VERSION,
-        "kind": "linear",
-        "weights": weights,
-        "weights_dynamic": weights_dynamic,
-        "params": params,
-        "provenance": provenance,
-    }
+    @property
+    def notes(self) -> str:
+        """The one-line provenance summary the artifact records — rank tables per weight set plus
+        the fitted scalar params."""
+        dyn = f"dynamic {topk_table(self.dyn_ranks)}" if self.dyn_ranks is not None else "no dynamic cases"
+        params = ", ".join(f"{n}={getattr(self.model, n):g}" for n in sorted(FITTED_PARAMS))
+        return f"static {topk_table(self.static_ranks)}; {dyn}; params {params}"

@@ -1,0 +1,171 @@
+# One bounded model-derived corpus and its diagnostics. Every row is an ordinary matrix task on a shared per-GPU VM;
+# the study field keeps the headline common corpus, large-shape supplement, convergence check, and ablation separate.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/kernels/recipe.yaml
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    mkdir -p $task_dir/verification
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      else
+        echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
+        final_status=1
+      fi
+      printf 'study=%s\nstatus=%s\n' "$study" "$$final_status" > $task_dir/status.txt
+      archive_tmp=$${task_dir}.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+    if [ "$fp8_mma" = "1" ]; then
+      export EMMY_FP8_MMA=1
+    fi
+    devices="$gpu_device_ids"
+    first_device=$${devices%%,*}
+
+    trace_args=(
+      ./venv/bin/emmy trace "$model_ref" --layer "$layer" --seq-len "$seq_len"
+      --model-provenance "$model_ref" --output $task_dir/working.yaml
+    )
+    "$${trace_args[@]}" 2>&1 | tee $task_dir/trace.log
+
+    if [ "$budget" = "0" ]; then
+      echo "tuning intentionally skipped for the cold greedy case" | tee $task_dir/tune.log
+    else
+      ./venv/bin/emmy tune --golden-file $task_dir/working.yaml --clean \
+        --devices "$$devices" --max-candidates "$budget" --patience "$patience" --seed "$seed" \
+        --dump-dir $task_dir/dump 2>&1 | tee $task_dir/tune.log
+    fi
+
+    for repeat in 0 1 2 3 4; do
+      EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
+        --golden $task_dir/working.yaml --bench --strict \
+        --json $task_dir/verification/repeat-$$repeat --warmup 10 --iters 100 \
+        --bench-backends eager,tcompile,emmy 2>&1 | tee $task_dir/verification-$$repeat.log
+    done
+  result_files:
+    - artifacts.tar.gz
+  timeout: 86400
+
+matrices:
+  # Headline common corpus: identical model, layer, sequence lengths, budget, and correctness gate on every GPU.
+  - cross:
+      study: common
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      seq_len: [1, 512]
+      budget: 12
+      patience: 4
+      seed: 0
+      fp8_mma: 0
+      zip:
+        deploy.gpu:
+          - "NVIDIA Tesla V100 SXM3 32GB"
+          - "NVIDIA A100 80GB"
+          - "NVIDIA GeForce RTX 4090"
+          - "NVIDIA GeForce RTX 5090"
+          - "NVIDIA H200 141GB"
+          - "NVIDIA B200"
+        deploy.gpu_count: 1
+
+  # Dynamic-FP8 checkpoint layers on FP8-capable GPUs. A future golden filter will define the W8A8-only corpus.
+  - cross:
+      study: fp8-common
+      model_ref: RedHatAI/Qwen3-0.6B-FP8-dynamic@068a9040b238d65f5c1064f10232bb15b96c0ff0
+      layer: 0
+      seq_len: [1, 512]
+      budget: 12
+      patience: 4
+      seed: 0
+      fp8_mma: 1
+      zip:
+        deploy.gpu:
+          - "NVIDIA GeForce RTX 4090"
+          - "NVIDIA GeForce RTX 5090"
+          - "NVIDIA H200 141GB"
+          - "NVIDIA B200"
+        deploy.gpu_count: 1
+
+  # One large dynamic-FP8 checkpoint layer on datacenter GPUs; W8A8-only reporting awaits a golden filter.
+  - cross:
+      study: fp8-large-layer
+      model_ref: RedHatAI/Qwen3-32B-FP8-dynamic@c6732fc26128341172e4005bad34aafa51c32866
+      layer: 0
+      seq_len: [1, 512]
+      budget: 8
+      patience: 3
+      seed: 0
+      fp8_mma: 1
+      zip:
+        deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
+        deploy.gpu_count: 1
+
+  # Unsharded BF16 large-shape supplement; separate from the common-corpus geometric mean and not TP8 evidence.
+  - cross:
+      study: large-layer
+      model_ref: Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+      layer: [0, 3]
+      seq_len: [1, 512]
+      budget: 8
+      patience: 3
+      seed: 0
+      fp8_mma: 0
+      zip:
+        deploy.gpu: ["NVIDIA H200 141GB", "NVIDIA B200"]
+        deploy.gpu_count: 1
+
+  # Three-seed search-stability diagnostic for one representative common-corpus shape.
+  - cross:
+      study: convergence
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      seq_len: 512
+      budget: 12
+      patience: 4
+      seed: [0, 1, 2]
+      fp8_mma: 0
+      deploy.gpu: "NVIDIA H200 141GB"
+      deploy.gpu_count: 1
+
+  # Dynamic-FP8 layer search stability; a W8A8-only stability claim awaits a golden filter.
+  - cross:
+      study: fp8-convergence
+      model_ref: RedHatAI/Qwen3-0.6B-FP8-dynamic@068a9040b238d65f5c1064f10232bb15b96c0ff0
+      layer: 0
+      seq_len: 512
+      budget: 12
+      patience: 4
+      seed: [0, 1, 2]
+      fp8_mma: 1
+      deploy.gpu: "NVIDIA H200 141GB"
+      deploy.gpu_count: 1
+
+  # Search-budget ablation. Budget zero is a fresh cold-greedy process with empty local evidence.
+  - study: search-ablation
+    model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+    layer: 0
+    seq_len: 512
+    seed: 0
+    fp8_mma: 0
+    deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+    zip:
+      budget: [0, 4, 12, 48]
+      patience: [0, 4, 4, 12]

@@ -4,7 +4,7 @@
 #
 # Build from the repository root:
 #   docker build -f docker/1cat-vllm-sm70/Dockerfile \
-#     -t cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift .
+#     -t emmy-round2-laguna-fp8-sm70:96f26179bf28 .
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43
 
 FROM ${CUDA_IMAGE} AS builder
@@ -34,16 +34,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ARG ONECAT_REPO=https://github.com/cloudrift-ai/1Cat-vLLM.git
-ARG ONECAT_COMMIT=91aca502d2bb1f05d9208ab2edec9fae53ff0d0b
-ARG ONECAT_BASE_REF=cloudrift/v1.2.2
-ARG ONECAT_BASE_TAG=v1.2.2
+ARG ONECAT_COMMIT=96f26179bf28aaea645635b8ec6f26c98360e0c2
+ARG ONECAT_BASE_COMMIT=644d8a7cd05ed4ecd1cd188e3c05b4bbd074f504
 RUN git init /src \
     && git -C /src remote add origin "${ONECAT_REPO}" \
-    && git -C /src fetch --depth 16 origin "${ONECAT_COMMIT}" \
-    && git -C /src fetch --depth 16 origin "refs/heads/${ONECAT_BASE_REF}:refs/tags/${ONECAT_BASE_TAG}" \
+    && git -C /src fetch --depth 128 origin "${ONECAT_COMMIT}" \
     && git -C /src checkout --detach "${ONECAT_COMMIT}" \
     && test "$(git -C /src rev-parse HEAD)" = "${ONECAT_COMMIT}" \
-    && git -C /src merge-base --is-ancestor "${ONECAT_COMMIT}" "${ONECAT_BASE_TAG}"
+    && git -C /src merge-base --is-ancestor "${ONECAT_BASE_COMMIT}" "${ONECAT_COMMIT}"
 
 RUN pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu128 \

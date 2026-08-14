@@ -25,6 +25,9 @@ GPU
 
 `Graph` (`compiler/graph.py`) hosts nodes from every dialect; rewrite
 passes swap node ops in place, so there is no separate "program" type.
+Its topological traversal resolves every ready node by node id rather than the hash or insertion order of the
+set-backed graph indexes. Stable traversal is part of the persistence boundary: Torch/Loop wire programs and their
+target indexes must be byte-identical across fresh Python processes, including graph slices assembled from sets.
 
 Nodes are **multi-output**: `Node.outputs` is an ordered, non-empty tuple of `Tensor`s, and `node.output` is a
 read-only alias of slot 0 (the **primary** output), so single-output code reads exactly what it always did.
@@ -141,6 +144,13 @@ generic constant folder deliberately excludes storage-decode cones because mater
 buffer into its compute dtype. Scale pairing is the general `<key>_scale` / `<key>_scale_inv` rule — it subsumes the
 `.weight` → `.weight_scale` convention and covers non-`.weight` leaves (gpt-oss's 3-D expert params,
 `…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
+
+When an official FP8 declaration also specifies dynamic activations, `loader.quant.spell_dynamic_fp8_activations`
+wraps each eligible linear input in the checkpoint's per-row amax, zero-safe scale, encode, decode, and scale algebra.
+Linears sharing one projection input share the spelled value. A normal compile retains the model's original outputs;
+working-golden inventory generation alone promotes the marked bits and scale values to auxiliary outputs so fusion
+preserves the materialized W8A8 boundary. Native FP8 tensor-core enumeration remains explicitly gated by `FP8_MMA`,
+and a conservative compile can still execute the same graph algebra without selecting that hardware path.
 
 **Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
 expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never

@@ -1,7 +1,10 @@
 ---
 name: reproduce-article-benchmarks
-description: Use this skill when the user asks to "re-run the benchmarks from the article", "reproduce the blog post numbers", "validate that <article url> still holds", "check the latest code still performs like the published post", or otherwise wants a published article's benchmarks re-measured with emmy and compared against what was published. Works for any article — it reads the article itself (fetch the URL), finds the experiments/recipes in this repo that back it, reports whether the code has moved since any pinned docker image was published (and offers to rebuild), asks where the hardware comes from (auto-provisioned cloud VM, a pre-allocated remote host, or a local GPU), runs the benchmarks, and reports the deltas.
-version: 0.1.0
+description: >-
+  Use this skill when the user asks to re-run an article's benchmarks, reproduce blog post numbers, validate that an
+  article URL still holds, check whether the latest code still performs like a published post, or otherwise compare
+  re-measured Emmy results with published results. It fetches the article, finds its experiments or recipes, reports
+  code and image drift, selects supplied or provisioned hardware, runs the benchmarks, and reports the deltas.
 ---
 
 # Reproduce a published article's benchmarks
@@ -226,6 +229,10 @@ canonical run found in Step 2. Each `*_benchmark.json` carries both the recipe a
 cell identifies its own lane and workload — derive the lane from the recipe (image, env knobs, speculative config),
 never from a filename. Command recipes leave whatever their tool writes; read it directly. Show measured,
 published, and the delta per cell.
+
+Do not delegate this interpretation to an aggregate script or expect `emmy bench` to make scientific judgments.
+Inspect every raw result, server log, failure, and declared artifact, then write the comparison directly. Adapt the
+organization to the article and experiment; there is no required report schema or universal table shape.
 
 Where a prior committed run exists, diff against it too and show both columns. It is the like-for-like comparison,
 and when the two disagree — matching the prior run but not the article, or vice versa — that disagreement is itself

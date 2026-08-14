@@ -9,7 +9,8 @@
 #     --model Qwen/Qwen3-Embedding-0.6B --runner pooling --enforce-eager \
 #     --max-model-len 4096 --hf-overrides '{"architectures":["EmmyEmbedModel"]}'
 ARG VLLM_VERSION=v0.23.0
-FROM vllm/vllm-openai:${VLLM_VERSION}
+ARG BASE_IMAGE=vllm/vllm-openai:${VLLM_VERSION}
+FROM ${BASE_IMAGE}
 
 # The emmy wheel installs --no-deps so the image's pinned torch /
 # transformers / numpy (vLLM's own dependency set) are never touched; the

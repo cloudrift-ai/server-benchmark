@@ -47,8 +47,3 @@ matrices:
       engine.llm.vllm.extra_args:
         - "--runner pooling"
         - "--runner pooling --enforce-eager --hf-overrides '{\"architectures\":[\"EmmyEmbedModel\"]}'"
-
-aggregate:
-  run: |
-    ./venv/bin/python scripts/aggregate_embedding.py $run_dir --output $run_dir/report.md
-  timeout: 120

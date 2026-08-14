@@ -40,6 +40,15 @@ The orchestrator tries candidates in this order until one succeeds or all are ex
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
 so callers that request CloudRift are never silently relocated to GCP.
 
+CloudRift rentals can also be pinned to one node (`vm create cloudrift --node <id-or-hostname>`): the rent request
+then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `resolve_node_id()` turns a hostname
+into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
+no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
+
+Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
+through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
+var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.
+
 For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) attempts on transient errors. On the contracted exceptions it short-circuits:
 
 | Provider raises | Orchestrator does |
@@ -71,6 +80,14 @@ is always a hard refusal.
 → `remote_provision` in a timer. These run once per `ExecutionGroup` (shared VM) but are seeded into each task's timer,
 so every task's result reflects its host's stand-up cost. `vm_provision` is omitted for pre-allocated/fixed/local hosts
 (no VM created). See `emmy/commands/ARCHITECTURE.md` → Timing metrics.
+
+## Command source staging
+
+Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
+while ignored files are excluded. Staging returns a manifest containing the Git revision, selected paths, per-file
+SHA-256 digests, working-tree status, and a content-derived source ID. `command.strict` rejects dirty selected paths
+before any transfer. The same manifest is retained in the command result, binding a measurement to the bytes sent to
+the remote host without requiring a `.git` directory there.
 
 ## Error contract
 

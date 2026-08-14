@@ -20,7 +20,6 @@ from emmy.benchmark.tasks import enumerate_tasks
 from emmy.benchmark.workload import (
     build_bench_command,
     compose_result,
-    extract_benchmark_results,
     format_task_yaml,
     run_benchmark_workload,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "collect_system_info",
     "build_bench_command",
     "compose_result",
-    "extract_benchmark_results",
     "format_task_yaml",
     "run_benchmark_workload",
     "enumerate_tasks",

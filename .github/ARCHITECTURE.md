@@ -13,7 +13,7 @@ tracked skills and CloudRift inference endpoint.
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
 | **Run Experiment** | Authorized `/run-experiment` PR comment | GitHub-hosted | Runs selected cloud experiments and commits results to the PR branch. |
 | **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
-| **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Selects one model and opens a capped plan PR without renting a VM. |
+| **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
 ## Pull-request checks
 
@@ -56,24 +56,38 @@ detector constructs the supported Emmy command from validated experiment paths a
 
 ## Model discovery and onboarding
 
-All discovery paths use the tracked `discover-models` skill and select at most one open-weight Hugging Face model
-without an existing recipe for one exact GPU name and count. Discovery is read-only: the workflow checks that the
-agent did not modify the checkout, then `.github/scripts/discovery_selection.py` validates the model ID, target,
-rationale, and absence of an existing recipe.
+All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
+recipes for the maintained set, classifies the remaining complete recipes, and supplies a rationale for every
+lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each shell
+contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
+consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
+ignores otherwise valid new candidates beyond the remaining shell slots. `emmy recipe list --json` supplies the
+compact agent inventory, and tag-filtered list queries enforce the maintained and onboarding counts after application.
+The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
+validates and applies its lifecycle manifest. The helper
+tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
+before validating their contents. The named OpenCode discovery agent denies repository edits and subagents, permits
+only the tracked discovery skill, public-web tools, repository reads, and read-only Git inspection, and caps work at 48
+agentic steps. The last complete lifecycle object in OpenCode's final completed text event becomes the temporary
+manifest; the repository validator remains
+the authoritative completion gate. The project provider configuration selects the configurable CloudRift model through
+an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking mode for the concise
+JSON result. Discovery never provisions hardware.
 
-The repo-owned `emmy agent run` command calls a configurable OpenAI-compatible CloudRift endpoint. It provides bounded
-public-web search and fetch tools while rejecting private, link-local, and metadata addresses. Search results,
-redirects, response sizes, extracted text, command output, and the final transcript are bounded. Discovery never
-provisions hardware. The reusable runner contract is documented in `emmy/agent/ARCHITECTURE.md`.
+OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
+provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
+tracked `.claude/skills/` remain the task definitions loaded through OpenCode's native skill tool.
 
 ### Direct onboarding
 
 **Onboard model** accepts an exact Hugging Face model ID, exact GPU name/count, multimodal qualification mode, optional
 existing onboarding PR, and explicit image-publication authorization. The job has a six-hour limit and gives the
-agent an earlier deadline so artifact validation and cleanup retain time.
+agent an earlier deadline so artifact validation and cleanup retain time. When the PR contains a discovery shell, the
+qualified recipe replaces it and changes `onboarding`/`untested` to `best-effort`; later discovery runs can promote it
+to the maintained set.
 
-The workflow resolves an existing labeled onboarding PR or creates a new artifact branch, provisions exactly the
-requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
+The workflow uses `gh` to resolve an existing labeled onboarding PR or prepares a new artifact branch, provisions
+exactly the requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
 `onboard-model` skill. If neither provider can supply the exact target, the workflow fails; it does not silently change
 GPU type or count. The skill produces the recommended recipe, its compact serving report, and reproducible experiment
 YAML. Raw benchmark output, experiment reports, dated run snapshots, and onboarding summaries are not repository
@@ -81,33 +95,57 @@ artifacts. An Emmy-tuned prebuilt image is produced only when the architecture, 
 release gates pass.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, canonical-golden, and matching plan paths. Unmanifested or exploratory
-output is rejected. The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable
-GitHub App credentials for the long-running push path.
+allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
+The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable GitHub App
+credentials for the long-running push path.
 
-### Discovery and plan PR
+### Discovery lifecycle PR
 
-**Discover model** runs nightly or by manual dispatch. It defaults to one H200, with repository variables and manual
-inputs able to select another exact target. It creates no plan when three `model-onboarding` PRs are already open.
-After discovery it queries open PRs again, both to reject a duplicate model and to close the race in which another
-run reached the cap during discovery.
+**Discover model** runs nightly or by manual dispatch. It updates one rolling draft PR rather than opening one PR per
+model, and the workflow fails closed if more than one rolling discovery PR exists. It also adopts one unpaired
+discovery branch left by an interrupted PR-creation step, while
+failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
+agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
+remote head as its force-with-lease expectation; a conflict, a stale checkout, or a concurrent branch update stops the
+run before any lifecycle changes are applied.
 
-When allowed, the workflow commits one `plans/onboard-<model>.md` file on a new branch and opens a draft,
-`model-onboarding`-labeled PR. It never rents a VM. Running **Onboard model** from that branch, or with the PR number,
-replaces the plan with measured artifacts and removes the plan file.
+The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
+`best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or
+best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical
+reason the recipe should no longer be used. The manifest must classify every complete recipe at most once; the validator
+conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
+qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
+and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. A
+replacement described as merely comparable, or whose recipe reduces configured context or concurrency, also defaults
+to `best-effort`. Unknown or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes
+also default to `best-effort`. A checkpoint name is normalized across a missing or incorrect organization only when it
+uniquely identifies one existing recipe; ambiguous or unknown maintained IDs still fail validation because all ten
+selections must resolve exactly. The agent must use
+`best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
+the current rationale immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be deployed,
+benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort set.
+
+The workflow creates `onboarding`/`untested` shells up to the three-shell total through the same catalog library that
+backs `emmy recipe create`. Each shell stores its rationale under `model` and a list of one to three candidate
+deployment entries under `matrices`; subsequent runs validate and report the same setups while the shell remains
+pending. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and uses
+the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR discovery and updates. It never
+rents a VM. Network operations use bounded retries, and discovery keeps research, prompt inventory, retained history,
+and final output within the inference endpoint's context limit. The lifecycle helper retains only classification
+policy and manifest application.
 
 ## Credentials, VM ownership, and cleanup
 
-Agent workflows transfer the CloudRift inference key through a mode-`0600`, one-use file, replace the secret-bearing
-shell, and unlink the file before the first agent tool call. Agent tool subprocesses do not inherit CloudRift, GCP, or
-GitHub credentials. Onboarding retains only the explicitly required Hugging Face and Docker Hub credentials. The
-self-hosted runner must not carry unrelated ambient cloud credentials.
+OpenCode inherits the CloudRift inference key only for provider requests. The project plugin removes CloudRift, GCP,
+GitHub Actions, and GitHub CLI credentials from every agent shell subprocess. Onboarding retains only the explicitly
+required Hugging Face and Docker Hub credentials. The self-hosted runner must not carry unrelated ambient cloud
+credentials.
 
 `emmy vm create gpu --lease` writes a run-owned lease as soon as CloudRift returns an instance ID or GCP creates the
 named instance. The lease binds the provider handle, exact request, workflow owner, and SSH target. Cleanup through
 `emmy vm delete lease` accepts only that lease, retries deletion, and audits only the recorded handle; it never
-enumerates or deletes unrelated VMs. Cleanup runs from both the agent shell trap and an `if: always()` workflow step,
-then `emmy vm audit lease` fails the job if its owned VM is still active.
+enumerates or deletes unrelated VMs. An `if: always()` workflow step performs cleanup after OpenCode exits, then
+`emmy vm audit lease` fails the job if its owned VM is still active.
 
 GitHub App credentials are used for long-lived branch writes and PR operations. Private keys and temporary provider
 configuration live only under run-specific `/tmp/emmy-*` paths and are removed by unconditional cleanup steps.
@@ -124,5 +162,4 @@ Agent and experiment workflows use these repository secrets as applicable:
 
 `ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
-`https://inference.cloudrift.ai/v1`. Scheduled discovery defaults can be changed with `DISCOVERY_TARGET_GPU` and
-`DISCOVERY_TARGET_GPU_COUNT`.
+`https://inference.cloudrift.ai/v1`.

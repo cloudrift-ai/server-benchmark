@@ -9,7 +9,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | Dialect           | When populated                  | Ops                                                                                                   |
 |-------------------|---------------------------------|-------------------------------------------------------------------------------------------------------|
 | `base`            | always                          | `Op` (base), `InputOp`, `ConstantOp`                                                                  |
-| `frontend/ir`     | after tracing                   | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, `UnsqueezeOp`, `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp` |
+| `frontend/ir`     | after tracing / loader spelling | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, layout ops                             |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
 | `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: ONE `Fold` kind) + `place` / `work` / `workers` / `knobs` / `schedule` / `stores` — every per-node slice keyed into `schedule` by the tree-path codec |
@@ -119,10 +119,10 @@ Ops captured directly from PyTorch. Every one has a decomposition rule
 under `pipeline/passes/frontend/decomposition/`; after that pass none of these
 remain.
 
-| Group         | Ops                                                                                       |
-|---------------|-------------------------------------------------------------------------------------------|
-| Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.  |
-| Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, `RmsNormOp`, `LayerNormOp`, `SoftmaxOp` — rewrite to elementwise + reduce chains. |
+| Group         | Ops                                                                                                      |
+|---------------|----------------------------------------------------------------------------------------------------------|
+| Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.                 |
+| Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, normalization/reduction ops — rewrite to elementwise + reduce chains. |
 
 ## `tensor/ir.py`
 

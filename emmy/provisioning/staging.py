@@ -8,7 +8,9 @@ it on the remote without committing first.
 """
 
 import asyncio
+import hashlib
 import io
+import json
 import logging
 import tarfile
 from pathlib import Path
@@ -16,6 +18,11 @@ from pathlib import Path
 from emmy.provisioning.ssh_transport import ssh_base_args
 
 logger = logging.getLogger(__name__)
+
+
+def _source_id(files: dict[str, str]) -> str:
+    payload = json.dumps(files, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 async def enumerate_staged_files(repo_root: Path, stage_paths: list[str]) -> list[str]:
@@ -60,6 +67,39 @@ def build_stage_tar(repo_root: Path, files: list[str]) -> bytes:
     return buf.getvalue()
 
 
+async def _git_output(repo_root: Path, *args: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=str(repo_root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {stderr.decode().strip()}")
+    return stdout.decode().rstrip()
+
+
+async def build_stage_manifest(repo_root: Path, stage_paths: list[str], files: list[str] | None = None) -> dict:
+    """Describe the exact content staged for a command workload."""
+    candidates = files if files is not None else await enumerate_staged_files(repo_root, stage_paths)
+    selected = [relative for relative in candidates if (repo_root / relative).exists()]
+    digests = {relative: hashlib.sha256((repo_root / relative).read_bytes()).hexdigest() for relative in selected}
+    revision = await _git_output(repo_root, "rev-parse", "HEAD")
+    status = await _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all", "--", *stage_paths)
+    dirty = [line for line in status.splitlines() if line]
+    return {
+        "schema_version": 1,
+        "source_id": _source_id(digests),
+        "git_revision": revision,
+        "clean": not dirty,
+        "dirty": dirty,
+        "stage_paths": list(stage_paths),
+        "files": digests,
+    }
+
+
 async def stage_to_remote(
     repo_root: Path,
     stage_paths: list[str],
@@ -68,22 +108,26 @@ async def stage_to_remote(
     ssh_port: int,
     remote_dir: str,
     dry_run: bool = False,
-) -> None:
+    require_clean: bool = False,
+) -> dict | None:
     """Stream a tar of staged files into `remote_dir` on the remote VM.
 
     No-op when `stage_paths` is empty.
     """
     if not stage_paths:
-        return
+        return None
 
     files = await enumerate_staged_files(repo_root, stage_paths)
     if not files:
         logger.warning(f"stage_to_remote: no files matched {stage_paths}")
-        return
+        return None
+    manifest = await build_stage_manifest(repo_root, stage_paths, files)
+    if require_clean and not manifest["clean"]:
+        raise RuntimeError(f"command staging requires a clean source tree: {manifest['dirty']}")
 
     if dry_run:
-        logger.info(f"[dry-run] stage {len(files)} files to {server}:{remote_dir}")
-        return
+        logger.info(f"[dry-run] stage {len(files)} files ({manifest['source_id']}) to {server}:{remote_dir}")
+        return manifest
 
     tar_bytes = build_stage_tar(repo_root, files)
 
@@ -105,4 +149,5 @@ async def stage_to_remote(
     _, stderr = await proc.communicate(input=tar_bytes)
     if proc.returncode != 0:
         raise RuntimeError(f"stage_to_remote failed (rc={proc.returncode}): {stderr.decode().strip()}")
-    logger.info(f"Staged {len(files)} files to {server}:{remote_dir}")
+    logger.info(f"Staged {len(files)} files ({manifest['source_id']}) to {server}:{remote_dir}")
+    return manifest

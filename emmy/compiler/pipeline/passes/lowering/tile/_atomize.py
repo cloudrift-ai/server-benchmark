@@ -293,14 +293,18 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
     """The canonical value tree of SSA ``name`` within a k-loop body — Loads keyed by (buffer,
     index), Assigns by (op, child keys), a name defined outside the body by itself. Two folds
     share one A operand iff their lift values have EQUAL keys: fusion duplicates the producer
-    cone per consumer (fresh SSA names, interleaved body order), so name/order equality is too
-    strict but value-tree equality is exact."""
+    cone per consumer (fresh SSA names, interleaved body order, and per-copy operand order — a
+    commutative op's children are sorted so ``x̂·s`` and ``s·x̂`` key equal), so name/order
+    equality is too strict but value-tree equality is exact."""
     st = defs.get(name)
     if st is None:
         return ("free", name)
     if isinstance(st, Load):
         return ("load", st.input, tuple(e.pretty() for e in st.index))
-    return ("op", st.op.name, tuple(_cone_value_key(a, defs) for a in st.args))
+    children = tuple(_cone_value_key(a, defs) for a in st.args)
+    if st.op.commutative:
+        children = tuple(sorted(children))
+    return ("op", st.op.name, children)
 
 
 def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | None:

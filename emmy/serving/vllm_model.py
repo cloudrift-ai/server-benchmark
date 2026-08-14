@@ -19,6 +19,7 @@ normalization (+ matryoshka), identical to stock Qwen3-Embedding serving.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -52,9 +53,14 @@ def pinned_model_id(model_config) -> str:
     ``lm_head`` siblings) — vLLM's own resolution does not carry over. Untagged, every one of
     those reads took the repo's DEFAULT branch while vLLM's config came from the pinned one, so
     a repo publishing one rung per branch traced the requested rung's geometry against another
-    rung's weights. A local path or an unpinned load passes through unchanged."""
+    rung's weights. A local path or an unpinned load passes through unchanged. vLLM's
+    offline resolver replaces a repository id with its absolute snapshot path but retains
+    ``revision``; appending the tag to that path would make the checkpoint nonexistent."""
+    model = str(model_config.model)
+    if Path(model).is_absolute() or Path(model).exists():
+        return model
     revision = getattr(model_config, "revision", None)
-    return f"{model_config.model}@{revision}" if revision else model_config.model
+    return f"{model}@{revision}" if revision else model
 
 
 class EmmyEmbedModel(nn.Module, IsAttentionFree):

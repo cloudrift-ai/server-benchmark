@@ -1,6 +1,6 @@
-# google/gemma-4-12B base-checkpoint text generation on one RTX 5090. This is
-# deliberately distinct from the instruction-tuned checkpoint used by the Gemma 4
-# performance article: base checkpoints serve continuations through /v1/completions.
+# google/gemma-4-12B base-checkpoint text generation through the Emmy generative plugin on
+# one RTX 5090. Base checkpoints serve continuations through /v1/completions; this recipe
+# does not claim the instruction-tuned checkpoint's chat or multimodal contract.
 model:
   huggingface: "google/gemma-4-12B"
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
@@ -9,16 +9,24 @@ model:
 engine:
   llm:
     tensor_parallel_size: 1
-    context_length: 16384
-    max_concurrent_requests: 1
-    # The supplied workstation retains about 941 MiB for its graphical session. vLLM
-    # sees 29.91 GiB after imports, below the 30.07 GiB requested at 0.96.
-    gpu_memory_utilization: 0.95
+    context_length: 131072
+    max_concurrent_requests: 64
+    gpu_memory_utilization: 0.96
     vllm:
-      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      # Local, release-qualified image retained on kenshin. Publication was intentionally
+      # omitted; rebuild it from docker/vllm-emmy-serve/models/gemma-4-12b.env when absent.
+      image: "cloudriftai/vllm-emmy-gemma-4-12b:0.23.0-5208dcf6"
       extra_args: >-
+        --runner generate
         --dtype float16
-        --generation-config vllm
+        --hf-overrides '{"architectures":["EmmyGenModel"]}'
+        --max-num-batched-tokens 4128
+        --no-enable-prefix-caching
+      extra_env:
+        # The exact standard-vs-FAST_MATH completion gate is recorded in RESULTS.md.
+        EMMY_FAST_MATH: "1"
+        EMMY_GEN_DECODE_BUCKET: "32"
+        VLLM_USE_V2_MODEL_RUNNER: "1"
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"

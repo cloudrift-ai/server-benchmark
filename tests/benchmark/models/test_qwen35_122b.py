@@ -30,12 +30,11 @@ def test_onecat_image_is_reproducibly_pinned(project_root) -> None:
     dockerfile = Path(project_root, "docker/1cat-vllm-sm70/Dockerfile").read_text()
     assert "12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa" in dockerfile
     assert "ONECAT_REPO=https://github.com/cloudrift-ai/1Cat-vLLM.git" in dockerfile
-    assert "ONECAT_COMMIT=91aca502d2bb1f05d9208ab2edec9fae53ff0d0b" in dockerfile
-    assert "ONECAT_BASE_REF=cloudrift/v1.2.2" in dockerfile
-    assert "ONECAT_BASE_TAG=v1.2.2" in dockerfile
-    assert 'fetch --depth 16 origin "refs/heads/${ONECAT_BASE_REF}:refs/tags/${ONECAT_BASE_TAG}"' in dockerfile
+    assert "ONECAT_COMMIT=96f26179bf28aaea645635b8ec6f26c98360e0c2" in dockerfile
+    assert "ONECAT_BASE_COMMIT=644d8a7cd05ed4ecd1cd188e3c05b4bbd074f504" in dockerfile
+    assert 'fetch --depth 128 origin "${ONECAT_COMMIT}"' in dockerfile
     assert 'test "$(git -C /src rev-parse HEAD)" = "${ONECAT_COMMIT}"' in dockerfile
-    assert 'merge-base --is-ancestor "${ONECAT_COMMIT}" "${ONECAT_BASE_TAG}"' in dockerfile
+    assert 'merge-base --is-ancestor "${ONECAT_BASE_COMMIT}" "${ONECAT_COMMIT}"' in dockerfile
     assert "python -m build --wheel --no-isolation --outdir /wheels" in dockerfile
     assert "CMAKE_BUILD_TYPE=Release python -m build" in dockerfile
     assert "--mount=from=builder,source=/wheels,target=/tmp/wheels,ro" in dockerfile
@@ -83,7 +82,8 @@ def test_qwen_serving_recipe_is_one_exact_fp16_pp8_tp2_variant(project_root) -> 
 def test_serving_smoke_matches_the_serving_configuration(project_root) -> None:
     serving = yaml.safe_load(Path(project_root, "recipes/Qwen3.5-122B-A10B/recipe.yaml").read_text())
     probe = yaml.safe_load(Path(project_root, "experiments/qwen35-122b/serving_smoke_v100/recipe.yaml").read_text())
-    for section in ("model", "engine", "matrices"):
+    assert {key: value for key, value in serving["model"].items() if key != "rationale"} == probe["model"]
+    for section in ("engine", "matrices"):
         assert probe[section] == serving[section]
     assert probe["benchmark"] == {
         "max_concurrency": 1,

@@ -1,0 +1,35 @@
+# RTX 5090 mixed-precision checkpoint qualification. This checkpoint uses FP8 attention and W4A16 NVFP4 MLP
+# projections; its pinned vLLM route deliberately selects Marlin, so this is not native Blackwell FP4-MMA evidence.
+model:
+  huggingface: "nvidia/Qwen3.6-27B-NVFP4"
+  revision: 0893e1606ff3d5f97a441f405d5fc541a6bdf404
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.92
+    context_length: 32768
+    max_concurrent_requests: 8
+    vllm:
+      image: "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+      extra_args: >-
+        --quantization modelopt --language-model-only --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder --reasoning-parser qwen3 --no-enable-prefix-caching
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      repeat: [0, 1, 2, 3, 4]
+      zip:
+        benchmark.random_input_len: [128, 4096, 16384]
+        benchmark.random_output_len: [128, 1024, 256]
+        benchmark.max_concurrency: [8, 4, 1]
+        benchmark.num_prompts: [64, 24, 6]

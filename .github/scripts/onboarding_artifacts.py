@@ -41,15 +41,6 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
         raise ValueError(f"Artifact path is not repository-relative: {raw_path}")
     if normalized.startswith(ALLOWED_ARTIFACT_PREFIXES) and (workspace / path).is_file():
         return path
-    if normalized.startswith("plans/onboard-") and normalized.endswith(".md") and not (workspace / path).exists():
-        tracked = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", normalized],
-            cwd=workspace,
-            capture_output=True,
-            check=False,
-        )
-        if tracked.returncode == 0:
-            return path
     raise ValueError(f"Artifact path is outside the allowed onboarding areas or does not exist: {raw_path}")
 
 
@@ -132,14 +123,11 @@ def stage_artifacts(workspace: Path, artifacts: list[Path]) -> None:
         check=True,
     ).stdout.splitlines()
     allowed = {path.as_posix() for path in artifacts}
-    plan_deletions = {path for path in allowed if path.startswith("plans/onboard-") and not (workspace / path).exists()}
     unexpected = (set(tracked_changes) | set(untracked) | set(ignored_experiments)) - allowed
     if unexpected:
         raise ValueError(f"Agent changed paths outside its artifact manifest: {sorted(unexpected)}")
 
-    if plan_deletions:
-        subprocess.run(["git", "add", "-u", "--", *sorted(plan_deletions)], cwd=workspace, check=True)
-    regular = [str(path) for path in artifacts if path.parts and path.parts[0] not in {"experiments", "plans"}]
+    regular = [str(path) for path in artifacts if path.parts and path.parts[0] != "experiments"]
     if regular:
         subprocess.run(["git", "add", "--", *regular], cwd=workspace, check=True)
     experiments = [str(path) for path in artifacts if path.parts and path.parts[0] == "experiments"]

@@ -82,6 +82,64 @@ def test_declared_dtype_cast_is_enforced():
     assert out.dtype == torch.float16
 
 
+def _dynamic_w8a8_graph() -> Graph:
+    """A post-spelling dynamic-activation FP8 projection target."""
+    from emmy.compiler.dtype import F8E4M3, F16, F32
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 8), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("x_scale", (4, 1), F32), node_id="x_scale")
+    g.add_node(ElementwiseOp(op="divide"), ["x", "x_scale"], Tensor("x_normalized", (4, 8), F32), node_id="x_normalized")
+    g.add_node(ElementwiseOp(op="to_f8e4m3"), ["x_normalized"], Tensor("x_bits", (4, 8), F8E4M3), node_id="x_bits")
+    g.add_node(ElementwiseOp(op="from_f8e4m3"), ["x_bits"], Tensor("x_decoded", (4, 8), F16), node_id="x_decoded")
+    g.add_node(ElementwiseOp(op="multiply"), ["x_decoded", "x_scale"], Tensor("x_quantized", (4, 8), F16), node_id="x_quantized")
+    g.add_node(InputOp(), [], Tensor("w_bits", (6, 8), F8E4M3), node_id="w_bits")
+    g.add_node(InputOp(), [], Tensor("w_scale", (6, 1), F32), node_id="w_scale")
+    g.add_node(ElementwiseOp(op="from_f8e4m3"), ["w_bits"], Tensor("w_decoded", (6, 8), F16), node_id="w_decoded")
+    g.add_node(ElementwiseOp(op="multiply"), ["w_decoded", "w_scale"], Tensor("w_quantized", (6, 8), F16), node_id="w_quantized")
+    g.add_node(LinearOp(), ["x_quantized", "w_quantized"], Tensor("o", (4, 6), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "x_scale", "w_bits", "w_scale"], ["o"]
+    return g
+
+
+def _dynamic_w8a8_inputs():
+    from emmy.compiler.dtype import encode_f8
+
+    x = torch.linspace(-2.0, 2.0, 32, dtype=torch.float16).reshape(4, 8)
+    x_scale = x.abs().amax(dim=-1, keepdim=True).float() / 448.0
+    weight = np.linspace(-3.0, 3.0, 48, dtype=np.float32).reshape(6, 8)
+    w_scale = np.max(np.abs(weight), axis=-1, keepdims=True).astype(np.float32) / 448.0
+    w_bits = encode_f8(weight / w_scale, "f8e4m3")
+    return {"x": x, "x_scale": x_scale, "w_bits": torch.from_numpy(w_bits), "w_scale": torch.from_numpy(w_scale)}
+
+
+def test_dynamic_w8a8_eager_preserves_fp8_bit_semantics():
+    g = _dynamic_w8a8_graph()
+    tensors = _dynamic_w8a8_inputs()
+    fn, inputs = torch_ref.build_callable(g, tensors)
+
+    out = fn(*inputs)
+    x_bits = (tensors["x"] / tensors["x_scale"]).to(torch.float8_e4m3fn).view(torch.uint8)
+    x_quantized = (x_bits.view(torch.float8_e4m3fn).to(torch.float16) * tensors["x_scale"]).to(torch.float16)
+    w_quantized = (tensors["w_bits"].view(torch.float8_e4m3fn).to(torch.float16) * tensors["w_scale"]).to(torch.float16)
+    expected = torch.nn.functional.linear(x_quantized, w_quantized)
+
+    assert torch_ref.is_runnable(g)
+    assert tensors["w_bits"].dtype == torch.uint8
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+def test_dynamic_w8a8_torch_compile_is_fullgraph():
+    g = _dynamic_w8a8_graph()
+    fn, inputs = torch_ref.build_callable(g, _dynamic_w8a8_inputs())
+    eager = fn(*inputs)
+
+    compiled = torch.compile(fn, fullgraph=True)
+    actual = compiled(*inputs)
+
+    torch.testing.assert_close(actual, eager, rtol=1e-3, atol=1e-3)
+
+
 def test_matmul_softmax():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
@@ -179,3 +237,11 @@ def test_is_runnable_accepts_frontend():
     g.add_node(RmsNormOp(), ["x", "w"], Tensor("o", (1, 4, 8)), node_id="o")
     g.inputs, g.outputs = ["x", "w"], ["o"]
     assert torch_ref.is_runnable(g)
+
+
+def test_is_runnable_rejects_unmapped_elementwise():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
+    g.add_node(ElementwiseOp(op="square"), ["x"], Tensor("o", (4, 8)), node_id="o")
+    g.inputs, g.outputs = ["x"], ["o"]
+    assert not torch_ref.is_runnable(g)

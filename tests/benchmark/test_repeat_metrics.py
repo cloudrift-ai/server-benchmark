@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 
 from emmy.benchmark.results import (
     BenchmarkMetrics,
@@ -9,7 +10,7 @@ from emmy.benchmark.results import (
     compose_json_result,
     parse_repeat_metrics,
 )
-from emmy.benchmark.workload import run_benchmark_workload
+from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
 from emmy.planner import BenchmarkTask
 from emmy.planner.variant import Variant
 from emmy.recipe.types import Recipe
@@ -96,7 +97,7 @@ def test_run_benchmark_workload_repeats_client_runs():
     assert success
     assert len(calls) == 3
     assert len(parse_repeat_metrics(output)) == 3
-    assert "client noise" not in output  # per-repeat outputs are trimmed to the stanza
+    assert output.count("client noise") == 3
 
 
 def test_run_benchmark_workload_fails_on_failed_repeat():
@@ -107,3 +108,42 @@ def test_run_benchmark_workload_fails_on_failed_repeat():
     assert not success
     assert output == "boom"
     assert stderr == "err"
+
+
+def test_failed_later_repeat_preserves_earlier_observations():
+    calls = 0
+
+    async def fake_run_cmd(command, stream=True, timeout=600):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0, _stanza(100.0, 50.0), ""
+        return 1, "client failed after partial output", "connection lost"
+
+    success, output, stderr, _ = asyncio.run(run_benchmark_workload(fake_run_cmd, _recipe(3)))
+    assert not success
+    assert len(parse_repeat_metrics(output)) == 1
+    assert "client failed after partial output" in output
+    assert stderr == "connection lost"
+
+
+def test_capture_server_log_preserves_raw_evidence(tmp_path: Path):
+    async def fake_run_cmd(command, stream=True, timeout=600):
+        assert command == "docker compose logs --no-color"
+        assert stream is False
+        return 0, "selected backend: native\nlatency: 1.2", ""
+
+    path = tmp_path / "server.log"
+    result = asyncio.run(capture_server_log(fake_run_cmd, path))
+    assert result == {"path": "server.log", "status": "collected", "exit_code": 0}
+    assert path.read_text() == "selected backend: native\nlatency: 1.2\n"
+
+
+def test_capture_server_log_reports_transport_failure(tmp_path: Path):
+    async def fake_run_cmd(command, stream=True, timeout=600):
+        return 1, "partial", "connection lost"
+
+    path = tmp_path / "server.log"
+    result = asyncio.run(capture_server_log(fake_run_cmd, path))
+    assert result["status"] == "failed"
+    assert path.read_text() == "partial\nconnection lost\n"

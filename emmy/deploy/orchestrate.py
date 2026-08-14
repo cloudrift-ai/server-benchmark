@@ -54,6 +54,7 @@ async def run_deploy(
     gpu_device_ids=None,
     port_mappings=None,
     timer: PhaseTimer | None = None,
+    check_smoke_output: bool = True,
 ):
     """Shared deploy orchestration.
 
@@ -69,6 +70,9 @@ async def run_deploy(
         port_mappings: optional list of (internal, external) port tuples
         timer: optional PhaseTimer; deploy step durations are recorded into it. A
             throwaway timer is used when None, so the timing log lines still print.
+        check_smoke_output: whether a valid smoke response must also satisfy the
+            model-specific deployment check. Benchmark orchestration disables this
+            semantic judgment and uses the probe only for API readiness.
     """
     timer = timer or PhaseTimer()
     num_instances = calculate_num_instances(recipe)
@@ -198,36 +202,33 @@ async def run_deploy(
     logger.info(f"Instances: {num_instances}")
     logger.info(f"Status: {status}")
 
-    # Step 7: Smoke test inference (retry — first request may be slow due to warmup)
-    # Chat models: asks a trivial factual question and checks the answer to detect
-    # broken models (e.g. wrong quantization producing garbage output). Embedding
-    # models: requests one embedding and checks it's a unit-norm finite vector.
+    # Step 7: Probe inference (retry — first request may be slow due to warmup).
+    # Standalone deploy checks model-specific content; benchmark callers request
+    # transport readiness only and retain the response for later review.
     if not dry_run:
         logger.info("\nRunning smoke test...")
         async with timer.ameasure(PHASE_SMOKE_TEST):
             if recipe.is_embedding:
                 smoke_cmd = (
-                    f"curl -s http://localhost:{internal_port}/v1/embeddings"
+                    f"curl --fail-with-body -s http://localhost:{internal_port}/v1/embeddings"
                     f" -H 'Content-Type: application/json'"
                     f''' -d '{{"model":"{model_name}","input":"What is 2+2?"}}' '''
                 )
-                check = _check_embedding_response
             elif recipe.model.smoke_test == "completion":
                 prompt = "2 + 2 ="
                 smoke_cmd = (
-                    f"curl -s http://localhost:{internal_port}/v1/completions"
+                    f"curl --fail-with-body -s http://localhost:{internal_port}/v1/completions"
                     f" -H 'Content-Type: application/json'"
                     f''' -d '{{"model":"{model_name}","prompt":"{prompt}","max_tokens":16,"temperature":0}}' '''
                 )
-                check = _check_completion_response
             else:
                 prompt = "What is 2+2? Answer with just the number."
                 smoke_cmd = (
-                    f"curl -s http://localhost:{internal_port}/v1/chat/completions"
+                    f"curl --fail-with-body -s http://localhost:{internal_port}/v1/chat/completions"
                     f" -H 'Content-Type: application/json'"
                     f''' -d '{{"model":"{model_name}","messages":[{{"role":"user","content":"{prompt}"}}],"max_tokens":128}}' '''
                 )
-                check = _check_chat_response
+            check = _smoke_response_check(recipe, check_smoke_output=check_smoke_output)
             smoke_timeout = 600
             smoke_interval = 10
             deadline = asyncio.get_event_loop().time() + smoke_timeout
@@ -237,6 +238,8 @@ async def run_deploy(
                     # Server not ready yet, keep retrying
                     await asyncio.sleep(smoke_interval)
                     continue
+                if not check_smoke_output:
+                    logger.info("Smoke response: %s", stdout)
                 verdict, detail = check(stdout)
                 if verdict == "retry":
                     # Malformed/empty response, server may still be starting
@@ -309,6 +312,26 @@ def _check_chat_response(stdout: str) -> tuple[str, str]:
     return "fail", f"model returned wrong answer: {answer!r}"
 
 
+def _check_readiness_response(stdout: str) -> tuple[str, str]:
+    """Accept any nonempty JSON API response without interpreting model content."""
+    try:
+        body = json.loads(stdout)
+    except json.JSONDecodeError:
+        return "retry", ""
+    return ("pass", "") if body else ("retry", "")
+
+
+def _smoke_response_check(recipe: Recipe, *, check_smoke_output: bool):
+    """Select semantic deployment checking or protocol-only benchmark readiness."""
+    if not check_smoke_output:
+        return _check_readiness_response
+    if recipe.is_embedding:
+        return _check_embedding_response
+    if recipe.model.smoke_test == "completion":
+        return _check_completion_response
+    return _check_chat_response
+
+
 def _check_completion_response(stdout: str) -> tuple[str, str]:
     """Validate the base-model completion smoke response."""
     try:
@@ -351,7 +374,7 @@ async def run_teardown(run_cmd):
     return rc == 0
 
 
-async def deploy(params: DeployParams, timer: PhaseTimer | None = None) -> bool:
+async def deploy(params: DeployParams, timer: PhaseTimer | None = None, *, check_smoke_output: bool = True) -> bool:
     """Deploy a recipe to a server via SSH. Single entry point."""
     run_cmd = make_run_cmd(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
     write_file = make_write_file(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
@@ -367,6 +390,7 @@ async def deploy(params: DeployParams, timer: PhaseTimer | None = None) -> bool:
         gpu_device_ids=params.gpu_device_ids,
         port_mappings=params.port_mappings,
         timer=timer,
+        check_smoke_output=check_smoke_output,
     )
 
 

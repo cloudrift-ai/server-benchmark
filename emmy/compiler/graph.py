@@ -19,6 +19,7 @@ its only users.
 
 from __future__ import annotations
 
+import heapq
 import itertools
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -584,6 +585,26 @@ class Graph:
         self.inputs = [new_id if i == old_id else i for i in self.inputs]
         self.outputs = [new_id if o == old_id else o for o in self.outputs]
 
+    def replace_input(self, consumer_id: str, old_buf: str, new_buf: str) -> None:
+        """Replace one consumer edge while keeping the buffer indexes consistent.
+
+        Unlike :meth:`replace_node`, this rewires only ``consumer_id``. It is the
+        graph-mutation primitive for birth-time frontend spelling that inserts an
+        explicit value transform in front of selected consumers without redirecting
+        the transform's own input edge.
+        """
+        if consumer_id not in self.nodes:
+            raise KeyError(f"Consumer node {consumer_id!r} not found")
+        if new_buf not in self._producers and new_buf not in self.nodes:
+            raise KeyError(f"Replacement buffer {new_buf!r} not found")
+        consumer = self.nodes[consumer_id]
+        if old_buf not in consumer.inputs:
+            raise ValueError(f"Consumer {consumer_id!r} does not read buffer {old_buf!r}")
+        consumer.inputs = [new_buf if item == old_buf else item for item in consumer.inputs]
+        consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+        self._users.get(old_buf, set()).discard(consumer_id)
+        self._users.setdefault(new_buf, set()).add(consumer_id)
+
     def splice(
         self,
         fragment: Graph,
@@ -1044,7 +1065,9 @@ class Graph:
     def topological_order(self) -> list[str]:
         """Return node ids in topological order (inputs before consumers).
 
-        Kahn's algorithm in O(N+E) using the maintained ``_users`` index.
+        Kahn's algorithm using the maintained ``_users`` index. The ready queue is ordered by node
+        id: ``_users`` stores sets and graph slices may be assembled from sets, so insertion order
+        cannot keep persisted Torch/Loop programs independent of Python's per-process hash seed.
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
         for node in self.nodes.values():
@@ -1052,14 +1075,15 @@ class Graph:
             in_degree[node.id] += len(deps - {node.id})
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        heapq.heapify(queue)
         result: list[str] = []
         while queue:
-            nid = queue.pop(0)
+            nid = heapq.heappop(queue)
             result.append(nid)
             for consumer_id in self.users(nid):
                 in_degree[consumer_id] -= 1
                 if in_degree[consumer_id] == 0:
-                    queue.append(consumer_id)
+                    heapq.heappush(queue, consumer_id)
 
         if len(result) != len(self.nodes):
             raise ValueError("Graph has a cycle")

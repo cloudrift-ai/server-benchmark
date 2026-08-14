@@ -1,5 +1,7 @@
 """Unit tests for recipe loading and deep merge."""
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -143,6 +145,29 @@ def test_load_recipe_no_deploy_gpu(tmp_recipe_dir):
     """Base recipe has no deploy.gpu (it comes from matrices)."""
     recipe = load_recipe(tmp_recipe_dir)
     assert recipe.deploy.gpu is None
+
+
+@pytest.mark.parametrize("tag", ["maintained", "best-effort"])
+def test_load_recipe_parses_runnable_lifecycle_tag(tmp_recipe_dir, tag):
+    recipe_path = Path(tmp_recipe_dir) / "recipe.yaml"
+    config = yaml.safe_load(recipe_path.read_text())
+    config["tags"] = [tag]
+    recipe_path.write_text(yaml.safe_dump(config))
+
+    recipe = load_recipe(tmp_recipe_dir)
+
+    assert recipe.tags == (tag,)
+
+
+@pytest.mark.parametrize("tags", [["obsolete"], ["onboarding", "untested"]])
+def test_load_recipe_rejects_disabled_lifecycle(tmp_recipe_dir, tags):
+    recipe_path = Path(tmp_recipe_dir) / "recipe.yaml"
+    config = yaml.safe_load(recipe_path.read_text())
+    config["tags"] = tags
+    recipe_path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="disabled by its"):
+        load_recipe(tmp_recipe_dir)
 
 
 # ── benchmark section ──────────────────────────────────────────────

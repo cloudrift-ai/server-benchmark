@@ -22,7 +22,20 @@ command:
 
 aggregate:
   run: |
-    ./venv/bin/python scripts/aggregate_sgemm.py $run_dir --output $run_dir/report.md
+    rows="$run_dir/small_m_results.tsv"
+    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
+    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
+      sort |
+      while IFS= read -r result; do
+        jq -r '
+          . as $run
+          | ($run.results // [])[]
+          | select(.dimensions.M <= 128)
+          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
+             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
+          | @tsv
+        ' "$result"
+      done >> "$rows"
   timeout: 60
 
 matrices:

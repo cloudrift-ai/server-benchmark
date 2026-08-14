@@ -43,6 +43,19 @@ Session caveats worth keeping: the 5090 golden set was orphaned for the current 
 measurement base (fix in PR #449; the A/B ran on a box-local 12-twin tuned DB instead), and the over-bucket c64
 cell's req/s is bimodal by boot order (8 vs 22 req/s, symmetric across arms) — compare arms on median TPOT.
 
+## Status (2026-08-13) — whole-chunk-step capture IMPLEMENTED (the promoted item); 5090 bench pending
+
+The promoted follow-up landed as `EMMY_GEN_CHUNK_CAPTURE` (default on): `emmy serve --generate` now asks vLLM for
+`cudagraph_mode: FULL` with token-count capture sizes spanning the prefill widths — the exact chunk width rides
+the chunk twin, the rider top rides the chunk+decode row split (whose `out=` copies now record under capture),
+every other rung rides the capture-aware symbolic programs — and selects `--attention-backend TRITON_ATTN`,
+because mixed-batch FULL capture needs `AttentionCGSupport.ALWAYS` and FA2 declares uniform-batch support only
+(vLLM silently downgrades FULL to FULL_DECODE_ONLY there). This activates Milestone A2's post→pre chaining on
+chunk steps (the eager protective clone was the pointer-breaker) and removes the per-program host framing and
+per-step staging D2D from mixed steps. Off under speculative decoding; MoE keeps its capture-size-1 ladder.
+Validation per the serving findings protocol (small_c1 TTFT, c64 TPOT vs stock, 3 runs, greedy parity) is the
+next step; the decode-attention swap FA2→triton is the one regression risk the A/B must price.
+
 ## Target architecture
 
 ```text

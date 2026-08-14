@@ -984,7 +984,7 @@ def _placed_loop(node: Node) -> LoopOp | None:
     cell = effect_tail(node.op.op.lower(), node.op.stores)
     if not any(write.output == node.output.name for write in Body(cell).writes):
         return None
-    loop = LoopOp(body=Body(tuple(_nest(list(cell), list(node.op.place.free)))))
+    loop = LoopOp(body=Body(tuple(_nest(list(cell), list(node.op.place.free)))), name=node.op.name)
     return loop
 
 
@@ -1009,6 +1009,11 @@ def _collapse_materialized_product_reduction(match, producer: Node) -> Graph | N
     merged = splice_loop_ops(producer.op, consumer_loop, producer.id)
     if merged is None:
         return None
+    # The reconstituted/spliced loop must carry the consumer's kernel name: split-reduce and the
+    # backend derive kernel identities from it, and two anonymous collapsed cells would collide
+    # in one program's kernel table (both partial kernels named "__partial", launching one
+    # function with the other's arguments).
+    merged.name = merged.name or consumer.op.name or consumer.id
 
     frag = Graph()
     reads = list(dict.fromkeys(load.input for load in merged.body.loads))

@@ -1,9 +1,7 @@
 command:
   stage: []
   run: |
-    nvidia-smi --query-gpu=name,memory.used,temperature.gpu,utilization.gpu \
-      --format=csv > $task_dir/result.csv
-    echo "marker,$marker" >> $task_dir/result.csv
+    printf 'marker\n%s\n' "$marker" > $task_dir/result.csv
   result_files:
     - result.csv
     - "*.log"

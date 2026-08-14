@@ -28,22 +28,26 @@ def fake_repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_stages_recipe_files_without_the_result_dirs(fake_repo):
-    """Local timestamped run outputs must not reach the wheel."""
+def test_stages_recipe_files_without_experiment_artifacts(fake_repo):
+    """Raw results, records, and reports must not reach the wheel."""
     model = fake_repo / "recipes" / "gemma-4-12B-it"
     model.mkdir(parents=True)
     (model / "recipe.yaml").write_text("model:\n  name: google/gemma-4-12b-it\n")
-    run_dir = model / "2026-08-05_09-57-40_4f335056"
-    run_dir.mkdir()
-    (run_dir / "benchmark.json").write_text("{}")
-    (run_dir / "recipe.yaml").write_text("model:\n  name: archived\n")
+    results_dir = model / "results"
+    results_dir.mkdir()
+    (results_dir / "row.benchmark.log").write_text("raw output")
+    (model / "row.experiment.yaml").write_text("schema_version: 1\n")
+    (model / "RESULTS.md").write_text("# Results\n")
 
     assert prepare_dist.stage_recipes() == 1
 
     staged = fake_repo / "emmy" / "recipes"
     assert [p.name for p in staged.iterdir()] == ["gemma-4-12B-it"]
     assert (staged / "gemma-4-12B-it" / "recipe.yaml").is_file()
-    assert not (staged / "gemma-4-12B-it" / "2026-08-05_09-57-40_4f335056").exists()
+    staged_model = staged / "gemma-4-12B-it"
+    assert not (staged_model / "results").exists()
+    assert not (staged_model / "row.experiment.yaml").exists()
+    assert not (staged_model / "RESULTS.md").exists()
 
 
 def test_staging_is_idempotent(fake_repo):

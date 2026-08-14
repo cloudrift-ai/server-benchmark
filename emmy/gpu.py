@@ -312,8 +312,7 @@ def by_pci_device_id(device_id: str) -> GpuSpec | None:
 
 
 def pci_device_id_to_name() -> dict[str, str]:
-    """``{pci_device_id: canonical_name}`` over the registry — the back-compat map
-    :mod:`emmy.detect` exposes as ``GPU_PCI_DEVICE_IDS``."""
+    """``{pci_device_id: canonical_name}`` over the registry."""
     return {pid: g.name for g in KNOWN_GPUS for pid in g.pci_device_ids}
 
 

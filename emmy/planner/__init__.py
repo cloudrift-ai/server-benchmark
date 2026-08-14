@@ -1,17 +1,22 @@
 """Planner: group benchmark tasks into execution groups for VM allocation."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
-import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from emmy.hardware import gpu_short_name
 from emmy.planner.variant import Variant
 from emmy.recipe.types import Recipe
+
+if TYPE_CHECKING:
+    from emmy.benchmark.experiment_record import ExperimentRecord
 
 
 @dataclass
@@ -22,6 +27,7 @@ class BenchmarkTask:
     variant: Variant
     recipe: Recipe
     run_dir: Path | None = None
+    record: ExperimentRecord | None = field(default=None, repr=False, compare=False)
 
     @property
     def gpu_name(self) -> str:
@@ -52,78 +58,44 @@ class BenchmarkTask:
         """Basename of the recipe directory (e.g. 'Qwen3-Coder-30B-A3B-Instruct-AWQ')."""
         return os.path.basename(self.recipe_dir)
 
-    def result_path(self) -> Path:
-        """Full result path: run_dir / {variant}_{engine}_benchmark.txt.
+    @property
+    def row_id(self) -> str:
+        """Stable short identity for the raw matrix parameters."""
+        payload = json.dumps(self.variant.params, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
-        For command recipes, this is the captured-stdout log path; the
-        actual result files are named by the command workload's scp-back logic.
-        """
-        if self.recipe.kind == "command":
-            return self.run_dir / f"{self.variant}_command.log"
-        engine = self.recipe.engine.llm.engine_name
-        return self.run_dir / f"{self.variant}_{engine}_benchmark.txt"
+    @property
+    def file_stem(self) -> str:
+        """Readable collision-safe stem shared by this row's artifacts."""
+        return f"{self.variant}_{self.row_id}"
 
-    def json_result_path(self) -> Path:
-        """Full result path: run_dir / {variant}_{engine}_benchmark.json."""
-        if self.recipe.kind == "command":
-            return self.run_dir / f"{self.variant}_command.json"
-        engine = self.recipe.engine.llm.engine_name
-        return self.run_dir / f"{self.variant}_{engine}_benchmark.json"
+    def record_path(self) -> Path:
+        """Path to the sole structured experiment-row output."""
+        if self.run_dir is None:
+            raise ValueError("experiment results directory has not been assigned")
+        return self.run_dir / f"{self.file_stem}.experiment.yaml"
 
-    def to_dict(self) -> dict:
-        """Build a task dict for tasks.json."""
-        return {
-            "task_id": self.task_id,
-            "recipe_dir": self.recipe_dir,
-            "variant": str(self.variant),
-            "recipe_name": self.recipe_name,
-            "gpu_name": self.gpu_name,
-            "gpu_short": self.gpu_short,
-            "gpu_count": self.gpu_count,
-            "model_name": self.model_name,
-            "result_file": str(self.result_path().relative_to(self.run_dir)),
-            "json_result_file": str(self.json_result_path().relative_to(self.run_dir)),
-        }
+    def benchmark_log_path(self) -> Path:
+        """Path to raw inference-client output."""
+        if self.run_dir is None:
+            raise ValueError("experiment results directory has not been assigned")
+        return self.run_dir / f"{self.file_stem}.benchmark.log"
 
     def setup_run_dir(self, run_dir: Path) -> None:
-        """Assign run_dir and copy recipe.yaml into it."""
+        """Assign the timestamped raw-results directory."""
         self.run_dir = run_dir
-        src = Path(self.recipe_dir) / "recipe.yaml"
-        dest = run_dir / "recipe.yaml"
-        if src.exists() and not dest.exists():
-            shutil.copy2(str(src), str(dest))
 
     @staticmethod
-    def compute_code_hash() -> str:
-        """SHA256 hash of all .py files under emmy/, sorted by relative path."""
-        pkg_dir = Path(__file__).parent.parent
-        hasher = hashlib.sha256()
-        for py_file in sorted(pkg_dir.rglob("*.py")):
-            rel = py_file.relative_to(pkg_dir)
-            content = py_file.read_text(encoding="utf-8")
-            hasher.update(f"{rel}\n{content}\n".encode())
-        return hasher.hexdigest()
-
-    @staticmethod
-    def create_run_dir(base_dir: str) -> Path:
-        """Create a timestamped run directory: {base_dir}/{YYYY-MM-DD_HH-MM-SS}_{hash[:8]}/."""
-        code_hash = BenchmarkTask.compute_code_hash()
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        run_dir = Path(base_dir) / f"{ts}_{code_hash[:8]}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+    def create_run_dir(base_dir: str, run_id: str, *, create: bool) -> Path:
+        """Return the timestamped raw-results directory for one invocation."""
+        experiment_dir = Path(base_dir).resolve()
+        timestamp = datetime.strptime(run_id, "%Y%m%dT%H%M%SZ").strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir = experiment_dir / timestamp
+        if run_dir.is_symlink():
+            raise ValueError(f"refusing to use symlinked experiment run directory: {run_dir}")
+        if create:
+            run_dir.mkdir(parents=True, exist_ok=False)
         return run_dir
-
-    @staticmethod
-    def write_tasks_json(run_dir, tasks: "list[BenchmarkTask]") -> None:
-        """Write tasks.json to run_dir from a list of BenchmarkTask objects."""
-        tasks_path = Path(run_dir) / "tasks.json"
-        tasks_path.write_text(json.dumps([t.to_dict() for t in tasks], indent=2) + "\n")
-
-    @staticmethod
-    def read_tasks_json(run_dir) -> list[dict]:
-        """Read and return parsed tasks.json from run_dir."""
-        tasks_path = Path(run_dir) / "tasks.json"
-        return json.loads(tasks_path.read_text())
 
 
 @dataclass

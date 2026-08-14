@@ -23,10 +23,11 @@ validation.
 
 A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because
 `recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
-site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories
-there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe
-into the current directory and returns that path. An existing directory always takes precedence, so a name that
-matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a timestamped
+run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the
+bundled recipe into the current directory and returns that path. An existing directory always takes precedence, so a
+name that matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never
+clobbered.
 
 ### Recipe Lifecycle Tags
 
@@ -130,7 +131,8 @@ Variant naming is handled by `Variant` in `emmy.planner.variant`. Each matrix co
 - Non-deploy params: abbreviated via first-letter-of-each-word heuristic (`max_concurrency` → `mc`, `num_prompts` → `np`, `max_concurrent_requests` → `mcr`), sorted alphabetically, appended with `_`
 - All params appear in the label, not just the variable ones
 
-Examples: `rtx5090x1_mc8_mcr8_np80_vllm_benchmark.txt`, `rtx5090x1_vllm_benchmark.txt` (deploy-only params).
+The experiment record filename combines this readable label with a stable hash of the raw parameters, for example
+`rtx5090x1_mc8_mcr8_np80_<row-id>.experiment.yaml`. The hash prevents two compacted labels from colliding.
 
 ### Driver / CUDA Version Pinning
 
@@ -191,14 +193,14 @@ Use it when the serving engine performs request-time initialization after the de
 requests use the same controlled workload configuration and run before every measured repeat.
 
 `benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
-the model is deployed once, only the client run repeats. The text result then holds one stanza per repeat, and the
-JSON result's `metrics` becomes the per-field mean, with `metrics_stddev` (sample stddev) and `metrics_repeats` (the
-raw per-repeat metrics) added alongside (`benchmark/results.py`). Because the seed and prompts are identical across
-repeats, the spread measures run-to-run noise, not workload variation.
+the model is deployed once, only the client run repeats. Every client stanza remains in the raw benchmark artifact;
+the experiment record does not parse or aggregate those measurements. Because the seed and prompts are identical
+across repeats, a separate intelligent review may use their spread to assess run-to-run noise rather than workload
+variation.
 
 The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
-result validators. `emmy bench` preserves raw observations but does not interpret whether they support an experiment's
-claim; that decision belongs to review of the completed run directory.
+result validators. `emmy bench`, the experiment record, and the `run-experiment` skill preserve raw observations but
+do not interpret whether they support an experiment's claim.
 
 ### Extra Args Ban Enforcement
 
@@ -278,7 +280,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
-  strict: true                     # clean source, required artifacts and provenance
+  strict: true                     # clean Git state, required results and system provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -290,40 +292,16 @@ The `run` template uses `string.Template` `$var` syntax. Substitution variables 
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
 
-Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
-paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
-entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
-declared artifacts so partial evidence is not lost.
+Without `strict`, result transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, the Git revision and dirty flag are recorded, every `result_files` entry must be
+retrieved, and GPU, NVCC, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
+declared results so partial evidence is not lost.
 
-### Inline Post-Processing
+### Result interpretation
 
-A recipe may declare an `aggregate` block for a short local command after its variants complete:
-
-```yaml
-aggregate:
-  run: |
-    rows="$run_dir/small_m_results.tsv"
-    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
-    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
-      sort |
-      while IFS= read -r result; do
-        jq -r '
-          . as $run
-          | ($run.results // [])[]
-          | select(.dimensions.M <= 128)
-          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
-             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
-          | @tsv
-        ' "$result"
-      done >> "$rows"
-  timeout: 60
-```
-
-The template receives `$run_dir`. The example performs transparent structural processing: it selects the small-M
-rows from each SGEMM JSON and assembles one TSV table. Keep such commands self-contained and readable in the recipe;
-do not invoke an external result-analysis script. This hook may select fields, reshape rows, sort, join, or tabulate
-structured data, but it must not interpret the results or generate a human-readable report such as `RESULTS.md`.
-Agents inspect the raw run and write model-specific reports when richer analysis is required.
+Recipes do not contain post-processing or report-generation hooks. `emmy bench` writes the common YAML experiment
+record and raw evidence for each row. The repository `run-experiment` skill inspects those records and writes the
+claim-specific `RESULTS.md` after the complete run.
 
 ### Docker Options
 

@@ -62,7 +62,7 @@ and persistent-kernel lanes are therefore both repeatable enough that run-to-run
 
 - Experiment record: `a100x1_e246bb6279fd.experiment.yaml`
 - Raw-results archive: `results.tar.gz`
-- Archive root retained locally for inspection: `2026-08-14_20-24-20/`
+- Archived root: `2026-08-14_20-24-20/`
 - Raw measurements: `a100x1_mpk_base_r0.txt` through `a100x1_mpk_base_r4.txt`,
   `a100x1_mpk_mega_r0.txt` through `a100x1_mpk_mega_r4.txt`, and `a100x1_stock_r0.txt` through
   `a100x1_stock_r4.txt`

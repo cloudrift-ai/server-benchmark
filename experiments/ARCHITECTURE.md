@@ -8,7 +8,7 @@ An experiment answers a comparison or qualification question. It uses the recipe
 ```text
 experiments/<model>/<workload_or_question>_<hardware>/
   recipe.yaml
-  <YYYY-MM-DD_HH-MM-SS>/      # ignored local raw output retained for inspection
+  <YYYY-MM-DD_HH-MM-SS>/      # temporary ignored raw output
   results.tar.gz              # Git LFS archive of the last run directory
   <row>.experiment.yaml      # assembled record for each last-run row
   RESULTS.md                  # thoughtful interpretation of the last run
@@ -26,9 +26,9 @@ writes legacy JSON/TXT wrappers, a task/instance manifest, or a report. Dry runs
 
 Use the repository `run-experiment` skill to finish a requested run. The skill checks matrix-row coverage, system
 information, declared command-result presence, and terminal status; copies the records beside `recipe.yaml`; replaces
-the Git LFS-backed `results.tar.gz`; overwrites `RESULTS.md`; and commits the complete durable snapshot. The raw
-timestamped directory remains locally for inspection and stays ignored. Existing records, archive, and report always
-describe the same most recent run.
+the Git LFS-backed `results.tar.gz`; overwrites `RESULTS.md`; and commits the complete durable snapshot. Once the
+archive has been extracted or byte-checked against the raw files, the ignored timestamped directory may be deleted;
+the archive is the durable raw copy. Existing records, archive, and report always describe the same most recent run.
 
 `RESULTS.md` is an intelligent review of the last run. It reports the protocol, measurements, repeat variation,
 comparisons, conclusion, limitations, system, status, and archive location, with every claim grounded in the raw

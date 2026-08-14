@@ -1,9 +1,9 @@
 # Golden bench 2026
 
-This experiment suite supports the Emmy compiler submission. Each executed experiment retains its latest raw
-`results/` directory, per-row experiment records, and `RESULTS.md` beside the recipe and frozen protocol inputs. A
-recipe is not evidence until its required artifacts exist and an intelligent reviewer accepts them against the
-checklist below.
+This experiment suite supports the Emmy compiler submission. Each executed experiment retains its latest raw-results
+archive, available per-row experiment records, and `RESULTS.md` beside the recipe and frozen protocol inputs. The
+ignored raw directory may be removed after the archive is verified. A recipe is not evidence until its required
+artifacts exist and an intelligent reviewer accepts them against the checklist below.
 
 ## Evidence sets
 

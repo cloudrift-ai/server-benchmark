@@ -904,12 +904,10 @@ def test_run_code_sdpa_k_chunked(run_cli):
 
 @requires_cuda
 def test_run_code_sdpa_tinyllama_per_head(run_cli):
-    """Per-head SDPA at TinyLlama-block-seq=512 dimensions, mirroring the
-    ``k_scaled_dot_product_attention_reduce_reduce.json`` kernel in
-    ``experiments/kernel_dataset/tinyllama_block_seq512`` (M=512, K=512,
-    N=64). The K=512 reduction does not fit a full smem slab once
-    register-tile + double-buffer apply, so this exercises the chunked
-    blockify + staging path on the per-head shape."""
+    """Per-head SDPA at TinyLlama-block-seq=512 dimensions (M=512, K=512,
+    N=64). The K=512 reduction does not fit a full smem slab once register-tile
+    + double-buffer apply, so this exercises the chunked blockify + staging
+    path on the per-head shape."""
     rc, _, stderr = run_cli(
         "run",
         "--code",

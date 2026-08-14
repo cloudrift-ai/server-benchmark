@@ -69,14 +69,30 @@ class AtomKind:
         """An explicit per-lane register count for ``role``, or ``None`` for the shape-derived layout."""
         return next((n for r, n in self.fragment_registers if r == role), None)
 
+    def fragment_register_count(self, role: str) -> int:
+        """The resolved per-lane 32-bit register count for one fragment.
+
+        Exceptional instruction layouts carry an explicit value; regular MMA layouts derive it
+        from geometry and element packing. This is the atom-level counterpart of the kernel IR's
+        declaration sizing, for schedulers that need a concrete register cost before rendering.
+        """
+        explicit = self.fragment_nregs(role)
+        if explicit is not None:
+            return explicit
+        m, n, k = self.shape
+        dtype = self.operand_dtype(role)
+        if role in ("a", "b"):
+            per_reg = 4 if dtype.nbytes == 1 else 2
+            elements = m * k if role == "a" else k * n
+            return elements // (32 * per_reg)
+        if role == "c":
+            return (m * n) // (64 if dtype.nbytes == 2 else 32)
+        raise ValueError(f"mma atom: unsupported fragment role {role!r}; expected 'a', 'b', or 'c'")
+
     @property
     def accumulator_registers_per_lane(self) -> int:
         """The C fragment's per-lane 32-bit register count."""
-        explicit = self.fragment_nregs("c")
-        if explicit is not None:
-            return explicit
-        m, n, _ = self.shape
-        return (m * n) // (64 if self.operand_dtype("c").nbytes == 2 else 32)
+        return self.fragment_register_count("c")
 
     def available_on(self, ctx) -> bool:
         """Whether the target Context selects this atom's instruction family."""

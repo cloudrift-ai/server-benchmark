@@ -29,6 +29,7 @@ geometry."""
 
 from __future__ import annotations
 
+from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
@@ -231,8 +232,17 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     k_name = loop.axis.name
     body = list(loop.body)
     loads = [s for s in body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
-    a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index)), None)
-    b_leaf = next((ld for ld in loads if n_name in _idx_vars(ld.index)), None)
+    # A register/mma contraction shares one A read across every N cell in a tile and one B read
+    # across every M cell. That requires separable operands: A may depend on (m, k), never n;
+    # B may depend on (n, k), never m. Merely checking that the expected axis was present let a
+    # broadcast-normalized ``A[m, k, n]`` bind as A in a non-separable contraction. Scalar tiling then
+    # replicated rows with only ``m`` substituted and emitted an undeclared ``n__ar25``; keeping
+    # plain ``n`` would still be invalid because the tiled grid binds only ``n_b``/``n_u``. Decline
+    # the contraction binding instead so recognition preserves it as a PLANAR fold with the full
+    # per-cell index expression.
+    indexed = {id(ld): _idx_vars(ld.index) for ld in loads}
+    a_leaf = next((ld for ld in loads if m_name in indexed[id(ld)] and n_name not in indexed[id(ld)]), None)
+    b_leaf = next((ld for ld in loads if n_name in indexed[id(ld)] and m_name not in indexed[id(ld)]), None)
     fold = next((s for s in body if isinstance(s, Accum)), None)
     if fold is None:
         raise LoweringError("warp tier: contraction loop has no fold accumulator")
@@ -287,6 +297,54 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
     return a_leaf, b_leaf, acc, epilogue
+
+
+def bind_contraction_channels(
+    loop: Loop, m_name: str, n_name: str, epilogue: Body
+) -> tuple[Load | list, tuple[tuple[Load | list, str], ...], DataType | None, Body]:
+    """Bind every product-monoid channel of one materialized-A contraction loop.
+
+    A placement cut can turn a shared computed-A gate/up contraction into ordinary Loop IR with
+    several additive ``Accum`` channels.  Binding only the first channel and treating the second
+    accumulator as epilogue state creates an invalid projection.  Bind each accumulator's closed
+    backward cone through the ordinary single-channel legality routine instead, and accept the
+    group only when every channel shares byte-identical A semantics.
+
+    Per-channel mul-hoist can rewrite the epilogue.  Combining several independently rewritten
+    tails is not yet defined, so that shape declines as a group and retains the correct PLANAR
+    fallback.  The common materialized/load or pure computed-A cases need no tail rewrite.
+    """
+    accums = tuple(stmt for stmt in loop.body if isinstance(stmt, Accum))
+    if not accums:
+        raise LoweringError("warp tier: contraction loop has no fold accumulator")
+    common_a: Load | list | None = None
+    channels: list[tuple[Load | list, str]] = []
+    product_dtypes: list[DataType | None] = []
+    for accum in accums:
+        cone = loop.body.backward_cone((accum.name,))
+        channel_loop = Loop(
+            axis=loop.axis,
+            body=Body(cone.members),
+            unroll=loop.unroll,
+            role=loop.role,
+            seed=loop.seed,
+        )
+        a, b, acc, channel_epi = bind_contraction(channel_loop, m_name, n_name, epilogue)
+        if channel_epi != epilogue:
+            raise LoweringError("warp tier: multi-channel contraction requires a shared unchanged epilogue")
+        if common_a is None:
+            common_a = a
+        elif a != common_a:
+            raise LoweringError("warp tier: contraction channels do not share one A operand")
+        channels.append((b, acc))
+        product = next((stmt for stmt in channel_loop.body if isinstance(stmt, Assign) and stmt.name == accum.value), None)
+        if product is None:
+            raise LoweringError("warp tier: contraction channel has no bilinear product")
+        product_dtypes.append(product.dtype)
+    assert common_a is not None
+    if any(dtype != product_dtypes[0] for dtype in product_dtypes[1:]):
+        raise LoweringError("warp tier: contraction channels disagree on product dtype")
+    return common_a, tuple(channels), product_dtypes[0], epilogue
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:
@@ -365,6 +423,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     # the other arg is the fold's A value. Every fold must share ONE A value (key equality).
     folds: list[tuple[Load, str]] = []
     a_names: list[str] = []
+    product_dtypes: list[DataType | None] = []
     for acc in accums:
         lift = defs.get(acc.value)
         if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
@@ -374,6 +433,9 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
             return None
         a_names.append(next(a for a in lift.args if a != b_name))
         folds.append((loads[b_name], acc.name))
+        product_dtypes.append(lift.dtype)
+    if any(dtype != product_dtypes[0] for dtype in product_dtypes[1:]):
+        return None
     if len({_cone_value_key(nm, kdefs) for nm in a_names}) != 1:
         return None  # per-fold A values differ — not a shared-operand multi-fold
     cone = map_cone(kbody, a_names[0])
@@ -438,8 +500,9 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
         k_axis=k_ax,
         a=make_cone(list(cone), k_ax.name, stat=red, sweep=tuple(stat_epi)),
         channels=tuple(Channel(b=bl, acc=acc) for bl, acc in folds),
+        product_dtype=product_dtypes[0],
     )
     return Fold.projection(body=Body((*prefix, *tail_ops)), operands=(node,)), n_ax, (Store(write=write),)
 
 
-__all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone"]
+__all__ = ["bind_contraction", "bind_contraction_channels", "bind_prologue_contraction", "make_cone", "map_cone"]

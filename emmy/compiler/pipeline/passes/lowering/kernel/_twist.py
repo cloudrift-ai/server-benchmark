@@ -951,12 +951,28 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     close: list[Stmt] = []
     batch_idx = tuple(qk.a.index[:-2])  # (batch…, head) — passthrough grid vars (fallback)
     for qt in qtiles:
+        row_values = {name: f"{name}{qt.sfx}" for name in names if name != expect_name}
         for s in proj_tail:
             if isinstance(s, Assign) and expect_name in s.args:
-                others = tuple(_row_pair(f"{a}{qt.sfx}") if a in names else a for a in s.args if a != expect_name)
-                kinds = tuple(ROW if a in names else UNIFORM for a in s.args if a != expect_name)
+                others = tuple(_row_pair(row_values[a]) if a in row_values else a for a in s.args if a != expect_name)
+                kinds = tuple(ROW if a in row_values else UNIFORM for a in s.args if a != expect_name)
                 for f in qt.ofrags:
                     close.append(FragmentApply(out=f, op=s.op, args=(f, *others), kinds=(FRAG, *kinds), in_place=True))
+                continue
+            if isinstance(s, Assign) and s.op.name == "copy" and len(s.args) == 1 and s.dtype is not None and s.args[0] in row_values:
+                # A typed identity boundary on a row statistic (for example the f16 softmax
+                # denominator before O/l) stays row-resident: realize one scalar copy per C-fragment
+                # row and let the following fragment op consume their row pair. This is driven by
+                # projection structure and dtype, independent of the attention/model/target.
+                src = row_values[s.args[0]]
+                dst = f"{s.name}{qt.sfx}"
+                for c in _COMPS:
+                    narrowed = f"{dst}__typed{c}"
+                    close.append(Assign(name=narrowed, op=s.op, args=(f"{src}{c}",), dtype=s.dtype))
+                    # FragmentApply's C storage is f32. Re-promote after the explicit boundary so
+                    # its scalar row operand has the carrier type while retaining the rounding.
+                    close.append(Assign(name=f"{dst}{c}", op="copy", args=(narrowed,), dtype=F32))
+                row_values[s.name] = dst
                 continue
             raise NotImplementedError(f"fragment realizer: unrealizable projection stmt {type(s).__name__}")
         m_guard = (qt.row_base, _ext(qk_t.axes[0])) if symbolic_q else None

@@ -93,8 +93,8 @@ emmy tune ─┬─ sweep benches ─────────▶ perf table   (a
 run --bench pinned/golden/--ab rows ─▶ node table   (autotune.db)
 recorded by hand from those rows ────▶ search/goldens/*.yaml (repo) ───────▶ greedy compile, tier 1
                                                                   └─ emmy fit ─▶ offline_weights.json (repo)
-                                       offline_weights.json ──────────────▶ greedy compile, tier 4 (cold)
-                                       online prior model (online.json) ──▶ greedy compile, tier 4 (trusted)
+                                       offline_weights.json ──────────────▶ greedy compile, tiers 4–5 (cold)
+                                       online prior model (online.json) ──▶ greedy compile, tier 5 (trusted)
 ```
 
 One asymmetry trips people up: the `-O3` re-benches a tune runs never reach the `perf` table. On a machine tuned at
@@ -426,7 +426,14 @@ the authoritative order** — the summaries elsewhere in this file defer to it.
    a deployable-flag measurement. An `-O1` median is a ranking signal that is known to invert against `-O3`, so it
    must never override a deployable-flag row — but it is still a real measurement of this exact op, so it beats the
    model's extrapolation;
-4. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
+4. a **capability/geometry cold lead**, only when the active prior is the fixed offline cold-start model (or an
+   untrustworthy fallback), no measured tier answered, and the offered rows prove a generic hardware-efficiency
+   invariant. Current leads cover materialized tensor-core operands whose declared transport offers a cooperative
+   stage, and scalar one-dimensional reductions whose legal cross-CTA split removes a long serial tail. They rank
+   only already-legal rows from atom/transport properties, extents, worker inventory, and card limits; they never
+   name a GPU, model, operation, or product shape. Golden, reservoir, DB, and a calibrated online prior remain
+   authoritative.
+5. the prior's `mean_scores` argmin — only when no candidate has any evidence or qualifying cold lead. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
 Three definitions the list leans on:
@@ -456,7 +463,7 @@ Three definitions the list leans on:
   while anything else counts as deployable for the DB tier. An explicit `-O2` pin therefore gets DB evidence but
   neither goldens nor reservoir — an accepted edge case.
 
-**With no prior object at all, tiers 2–4 are ALL gone.** That happens when `load_prior` failed (a corrupt online
+**With no prior object at all, tiers 2–5 are ALL gone.** That happens when `load_prior` failed (a corrupt online
 checkpoint, or the strict offline-artifact load raising; the loader is best-effort and swallows any failure), and on
 `Pipeline.run`'s last-resort resolve that deliberately takes the rule's first option. The reservoir is carried by the
 prior object, and the DB tier is only consulted on the path where a prior exists, so a corrupt checkpoint costs the
@@ -481,17 +488,20 @@ audits — `emmy eval golden` re-runs the golden-tier consultations and prints a
 Part 7). Answering "which tier decided this fork, and did I expect that one?" means correlating those three, not
 flipping one switch.
 
-**Where the kernel gets cut is settled before any of this.** Ahead of the schedule pick, a separate decision splits —
-or does not split — the recognized work into kernels. A **routing** golden entry is how that decision is recorded: an
+**Where the kernel gets cut is settled before any of this.** Fusion first constructs target-independent maximal
+regions. Ahead of the schedule pick, placement then splits — or does not split — the recognized work into kernels.
+A **routing** golden entry is how an evidence-driven decision is recorded: an
 entry whose knobs are only `PLACE@<label>` values, where the label names an edge inside the recognized kernel.
 `PLACE@cone = cut`, for instance, says "split at the edge labelled `cone`, so that sub-computation becomes its own
 kernel". The loader rejects an entry that mixes `PLACE` with schedule knobs, and `_golden_evidence_index` skips
 routing entries. They are consulted during recognition (`lowering/tile/_cut.py`, joined by `ShapeKey.joins` against
 the live GPU, and restricted to `-O3` like the golden tier itself). Each resulting piece is then recognized afresh and
 resolves its OWN `(kind, shape)` through the same hierarchy above; see the tile-lowering ARCHITECTURE's
-placement-routing section. Keeping the work in one kernel is the default and is what an absent entry means; cutting
-happens only from recorded evidence or a hand-forced pin. That makes routing one of exactly two ways a greedy compile
-can change which kernels exist: a routing golden (or pin) cuts with no prior involved, while a structural fork
+placement-routing section. Keeping the work in one kernel is the evidence-free default only when generic
+schedulability invariants admit that reading. A legality-derived cut requires neither a model nor a GPU special case;
+it selects a closed `PLACE` seam from the target's atom capabilities and the tree's workspace geometry. An explicit
+pin remains authoritative, including `fuse` for diagnostics. That makes placement one of exactly two ways a greedy compile
+can change which kernels exist: a legality default, routing golden, or pin cuts with no prior involved, while a structural fork
 (Part 4) needs the trusted online prior to estimate its cost. Everything else — offline prior and option-0
 included — keeps the default kernel set.
 

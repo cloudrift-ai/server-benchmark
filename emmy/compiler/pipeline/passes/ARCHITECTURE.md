@@ -510,6 +510,38 @@ fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary
 routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut_cone_*` schedule entries stamp the
 OLD piece shapes' keys and are re-seeded rather than joined).
 
+**Fusion/placement ownership invariant.** Loop fusion and algebra recognition are target-independent and maximal
+subject to semantic closure and target-independent work preservation: they may reject a splice that changes
+observable effects, escapes a value, duplicates a reduction, or causes pathological logical-work expansion, but
+they never inspect a GPU capability, atom inventory, tile, stage, timing, or product name. Whether the resulting
+region is executable and efficient as one kernel is exclusively a placement/schedule question. The scheduler may
+therefore choose a `PLACE` cut when the fused/composed reading excludes every target-available legal hardware atom,
+contains a reduce-bearing operand no available atom can compose, or would materialize an expanded virtual layout
+instead of its compact value. A target that exposes no applicable atom retains the functional fused fallback: a cut
+is useful only when it recovers a declared hardware tier. Those rules are phrased over the tree, operand capabilities, and workspace
+geometry; they apply unchanged to every target. Every such decision remains addressable by the ordinary `PLACE`
+control (`PLACE=fuse|cut`, and `PLACE@<path>` where the seam is part of the recognized tree). An explicit pin is
+authoritative; deployable routing evidence is consulted only when no structural schedulability invariant fires.
+Adding an operation or platform
+must extend atom/transport capabilities or generic legality predicates, never add `if gpu == ...` or
+`if model == ...` routing.
+
+Maximal fusion also preserves numerical type boundaries. A narrow tensor result produced by a wide
+accumulator remains an explicit typed `copy` in Loop IR. A scalar path renders that conversion in the
+ordinary SSA chain, while a fragment path carries it into `RegEpilogue` and performs the same
+narrow-then-promote round before the next fused operation. This is an in-register semantic boundary,
+not a placement cut: residual adds and activations may stay fused without silently changing
+`f16(reduce(...))` into `f32(reduce(...))`.
+
+Matmul has one additional numeric contract shared by direct `MatmulOp` and `LinearOp`: low-precision
+floating operands multiply into the declared wide accumulator. Their decomposition therefore gives the
+virtual product an `f32` dtype, accumulates it in `f32`, and rounds once at the matmul tensor's output
+dtype. The scalar tier renders `f32(a) * f32(b)` and the MMA tier obtains the same contract from its
+wide-C atom; neither may materialize an intermediate `f16(a * b)` round. A deferred cross-CTA split is
+only a schedule of that reduction, so its raw partial workspace is `f32` and the finalizer performs the
+typed output copy after combining all partitions. A separately materialized pointwise `f16` multiply
+followed by sum remains distinct: its tensor boundary is real and retains the narrow product.
+
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
 reuse it on flash's nested QK^T / PV; flash's score IS a role=CONTRACTION **fold** on a hoisted operand edge of the

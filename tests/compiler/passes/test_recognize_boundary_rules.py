@@ -414,6 +414,9 @@ def test_normed_gqa_sdpa_certifies_flash():
     first = src.step_stmts()[0]
     assert getattr(first, "role", None) is AxisRole.CONTRACTION, "flash did not absorb the score contraction (fold stayed cut)"
     assert not isinstance(first.a, Load) and not isinstance(first.b, Load), "normalized Q/K cones were reduced to raw loads"
+    score_rounds = [s for s in src.lift.body if isinstance(s, Assign) and s.op.name == "copy" and s.args == ("sacc",) and s.dtype == F16]
+    denom_rounds = [s for s in flash[0].op.body if isinstance(s, Assign) and s.op.name == "copy" and s.args == ("l_i",) and s.dtype == F16]
+    assert len(score_rounds) == len(denom_rounds) == 1, "flash erased a typed reduction boundary while looking through identity copies"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():
@@ -442,6 +445,36 @@ def test_bind_contraction_declined_cone_raises_not_positional():
         )
     )
     loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
+    with pytest.raises(LoweringError, match="computed cone"):
+        bind_contraction(loop, "m", "n", Body(()))
+
+
+def test_bind_contraction_declines_a_that_depends_on_both_output_axes():
+    """A contraction tile reuses A across its N cells, so a direct ``A[m, k, n]`` load is not a
+    legal A edge even though it contains the expected M and K axes. This is the broadcast-shaped
+    Llama FP16 prefill loop that previously reached ``TILE=f2x26`` and emitted undefined
+    ``n__ar0`` ... ``n__ar25`` variables instead of staying on the PLANAR reduction path."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+    from emmy.compiler.pipeline.pipeline import LoweringError
+
+    m, n, k = Var("m"), Var("n"), Var("k")
+    loop = Loop(
+        axis=Axis(name="k", extent=Dim(4096)),
+        body=Body(
+            (
+                Load(name="b", input="B", index=(n, k)),
+                Load(name="a", input="A", index=(m, k, n)),
+                Assign(name="v", op=ElementwiseImpl("multiply"), args=("b", "a")),
+                Accum(name="acc", op=ElementwiseImpl("add"), value="v"),
+            )
+        ),
+        role=AxisRole.CONTRACTION,
+    )
+
     with pytest.raises(LoweringError, match="computed cone"):
         bind_contraction(loop, "m", "n", Body(()))
 

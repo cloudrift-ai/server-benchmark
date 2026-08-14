@@ -10,10 +10,14 @@ That op IS the rewrite's result. The schedule picks it up on the next rule sweep
 axes onto the grid and offers the scheduling forks; materialization back to loop IR happens in
 ``lowering/kernel``.
 
-Nothing here reads a knob or a pin — recognition is structure, and every choice it makes is
-unconditional. (The one exception is PLACEMENT ROUTING, step 3.5: a routing golden / ``PLACE`` pin
-cuts the recognized tree into a fragment of un-mapped ``LoopOp``\\ s, and it must resolve BEFORE any
-schedule fork exists, so it cannot wait for ``020``.)
+Recognition itself reads no knob or pin: it always constructs the same maximal algebraic tree from
+the same Loop IR. Placement then consumes that tree at the recognition/schedule boundary. A
+``PLACE`` pin, routing golden, or generic schedulability invariant parameterized by the target's
+declared capabilities may materialize one of its closed internal seams before schedule
+enumeration. This ordering is load-bearing: fusion and recognition describe WHAT may execute
+together; placement decides WHETHER the target can schedule
+that region efficiently. A hardware capability, product name, or benchmark result must never alter
+the fused/recognized algebra.
 
 All recognition lives in THIS one rule (no separate flash / softmax pass), in order (each
 step unconditional — no knobs):
@@ -75,7 +79,12 @@ from emmy.compiler.ir.tile import (
 )
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import (
+    bind_contraction_channels,
+    bind_prologue_contraction,
+    make_cone,
+    map_cone,
+)
 from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -319,7 +328,7 @@ def _nodify_contraction(node, free: tuple):
     projection = Body(tuple(node.body[1:]))
     if len(free) >= 2:
         try:
-            a_load, b_load, acc, epi = bind_contraction(rloop, free[-2].name, free[-1].name, projection)
+            a_load, bound_channels, product_dtype, epi = bind_contraction_channels(rloop, free[-2].name, free[-1].name, projection)
         except LoweringError:
             pass
         else:
@@ -329,7 +338,14 @@ def _nodify_contraction(node, free: tuple):
                 # A computed B is a closed zero-axis operand node. Unlike A's norm/activation
                 # cone it has no row-statistic seam to split; its whole generic MAP tree is
                 # evaluated at each (k, n) slab cell by the sync compute-fill.
-                channels=(Channel(b=b_load if isinstance(b_load, Load) else Fold.projection(body=Body(tuple(b_load))), acc=acc),),
+                channels=tuple(
+                    Channel(
+                        b=b_load if isinstance(b_load, Load) else Fold.projection(body=Body(tuple(b_load))),
+                        acc=acc,
+                    )
+                    for b_load, acc in bound_channels
+                ),
+                product_dtype=product_dtype,
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The
             # STORED form is the contraction itself (1s) — pure algebra; the
@@ -437,9 +453,20 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # form, by absence. The fused (computed-A) reading is the routing reference tree when it
     # binds — its seams (the `a` cone edge) are the ones a routing entry spells.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
-    seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
+    seam = route_cut(
+        ctx,
+        dict(loop.knobs or {}),
+        route_tree,
+        route_stores,
+        route_free,
+        inputs=map_tile.inputs,
+        graph=graph,
+        graph_root=root,
+    )
     if seam is not None:
-        return realize_cut(match, root, route_tree, route_free, route_stores, seam)
+        cut = realize_cut(match, root, route_tree, route_free, route_stores, seam)
+        if cut is not None:
+            return cut
     # Recognition ends here: the UNMAPPED tile is the rewrite's result. The MONOID-producer
     # composition (``pro``) is re-derived by the schedule — it is a decision about the SCHEDULE
     # (which of the two readings of this one loop each fork row realizes), not about the structure,

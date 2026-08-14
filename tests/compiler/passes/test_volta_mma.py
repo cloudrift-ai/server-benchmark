@@ -11,6 +11,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.target import set_target
@@ -71,6 +72,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
     assert atom.materialized_edges_only and atom.sync_copy_staging and not atom.c_to_a_repack
+    assert tuple(ATOM_REGISTRY[AMPERE].fragment_register_count(role) for role in ("a", "b", "c")) == (4, 2, 4)
 
     # The PTX C-fragment map covers the logical 16x16 output exactly once.
     coords = []
@@ -140,6 +142,80 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
         assert fragment in src
     assert src.count("emmy_mma_m8n8k4_f16_f32(_c0_0") == 2
     assert "cp.async" not in src and "ldmatrix" not in src
+
+
+def test_staged_mma_streams_larger_fragment_bank(monkeypatch) -> None:
+    _pin(monkeypatch, VOLTA, tile="f4x2/k4", stage="d1/sync")
+    src, _ = _source(_graph(m=64, n=32, k=16), Context(compute_capability=(7, 0)))
+
+    # B is the smaller bank (2 fragments × 2 regs versus A's 4 × 2), so it
+    # stays resident while each A fragment is loaded, consumed by both B
+    # columns, and retired before the next A load.
+    marks = [
+        "emmy_mma884_load_b_smem(_b0, &_b_smem",
+        "emmy_mma884_load_b_smem(_b1, &_b_smem",
+        "emmy_mma884_load_a_smem(_a0, &_a_smem",
+        "emmy_mma_m8n8k4_f16_f32(_c0_0",
+        "emmy_mma_m8n8k4_f16_f32(_c0_1",
+        "emmy_mma884_load_a_smem(_a1, &_a_smem",
+    ]
+    positions = [src.index(mark) for mark in marks]
+    assert positions == sorted(positions)
+
+
+def test_fused_residual_observes_f16_contraction_boundary(monkeypatch) -> None:
+    graph = Graph()
+    for name in ("x", "w", "residual"):
+        graph.add_node(InputOp(), [], Tensor(name, (16, 16), dtype=F16), node_id=name)
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("linear", (16, 16), dtype=F16), node_id="linear")
+    graph.add_node(ElementwiseOp("add"), ["linear", "residual"], Tensor("out", (16, 16), dtype=F16), node_id="out")
+    graph.inputs, graph.outputs = ["x", "w", "residual"], ["out"]
+    _pin(monkeypatch, VOLTA, stage="d1/sync")
+
+    src, _ = _source(graph, Context(compute_capability=(7, 0)))
+
+    # F.linear materializes an f16 tensor in eager semantics.  Even though fusion keeps its
+    # accumulator in f32 registers, the residual add must consume the rounded f16 value.
+    assert "const float v1_e0 = __half2float(__float2half(_c0_0[0]));" in src
+    assert "const float v2_e0 = in2_e0 + v1_e0;" in src
+    assert "const float v2_e0 = _c0_0[0] + in0_e0;" not in src
+
+
+@pytest.mark.parametrize(("op", "weight_shape"), [(MatmulOp(), (4096, 16)), (LinearOp(), (16, 4096))])
+@pytest.mark.parametrize("cc", [(7, 0), (8, 0)])
+def test_scalar_splitk_keeps_lowp_product_and_raw_carrier_f32_until_typed_finalize(monkeypatch, op, weight_shape, cc) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 4096), dtype=F16), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("weight", weight_shape, dtype=F16), node_id="weight")
+    graph.add_node(InputOp(), [], Tensor("residual", (1, 16), dtype=F16), node_id="residual")
+    graph.add_node(op, ["x", "weight"], Tensor("product", (1, 16), dtype=F16), node_id="product")
+    graph.add_node(ElementwiseOp("add"), ["product", "residual"], Tensor("out", (1, 16), dtype=F16), node_id="out")
+    graph.inputs, graph.outputs = ["x", "weight", "residual"], ["out"]
+    monkeypatch.setenv("EMMY_WORK", "")
+    monkeypatch.setenv("EMMY_TILE", "")
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_STAGE", "")
+
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=cc))
+    sources = {node.id: node.op.kernel_source for node in lowered.nodes.values() if getattr(node.op, "kernel_source", None)}
+    partial, finalize = sources["out__partial"], sources["out"]
+
+    # Matmul's f16 inputs multiply directly into the wide carrier (the scalar counterpart of
+    # MMA/cuBLAS), and cross-CTA partitioning is a schedule rather than a numerical boundary:
+    # every partial remains f32, the finalizer combines in f32, and only then observes the
+    # declared f16 tensor result before adding the residual.
+    assert "float v0 = __half2float(in0) * __half2float(in1);" in partial
+    assert "float* out__partial" in partial and "out__partial[_ksplit * 16 + a0] = acc0;" in partial
+    assert "const float* out__partial" in finalize and "float acc0__p = out__partial" in finalize
+    assert "= __float2half(acc0);" in finalize
+
+
+def test_modern_staged_mma_uses_shape_derived_fragment_cost(monkeypatch) -> None:
+    _pin(monkeypatch, AMPERE, tile="f2x2/k2", stage="d1/cp")
+    src, knobs = _source(_graph(m=32, n=16, k=32), Context(compute_capability=(8, 0)))
+    assert knobs["STAGE"] == "d1/cp"
+    assert "ldmatrix.sync.aligned" in src
+    assert src.count("emmy_mma_m16n8k16_f16_f32(_c") == 4
 
 
 def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:

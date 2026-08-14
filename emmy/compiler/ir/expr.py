@@ -340,6 +340,9 @@ class BinaryExpr(_ExprOps):
                 return right
             if _is_zero(right):
                 return left
+            rejoined = _rejoin_mixed_radix(left, right, ctx)
+            if rejoined is not None:
+                return rejoined
         elif op == "-":
             if _is_zero(right):
                 return left
@@ -851,6 +854,66 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     rng = expr.range(ctx)
     if rng is not None and rng.lo >= 0 and rng.hi < n:
         return (_make_int_literal(0), expr)
+    return None
+
+
+def _rejoin_mixed_radix(left: Expr, right: Expr, ctx: SimplifyCtx) -> Expr | None:
+    """Rejoin adjacent quotient/remainder digits of one non-negative index.
+
+    Layout composition commonly flattens an index ``x`` and immediately splits it into
+    mixed-radix coordinates.  Recombining adjacent coordinates then leaves the canonical
+    identity::
+
+        ((x // low) % high) * low + (x % low) == x % (low * high)
+
+    Syntactically retaining the split form is more than cosmetic: it makes every variable
+    occurring in ``x`` appear to index the rejoined dimension.  A reshape around a matrix
+    projection can therefore make a weight's N coordinate appear M-dependent and correctly
+    disqualify the separable tensor-core binding.  Collapse the identity here, where ranges
+    prove the integer-domain precondition, so the existing modulo decomposition can eliminate
+    outer flattened coordinates too.
+    """
+
+    def digit(expr: Expr) -> tuple[Expr, int, int] | None:
+        if not isinstance(expr, BinaryExpr) or expr.op != "*":
+            return None
+        for scaled, scale in ((expr.left, expr.right), (expr.right, expr.left)):
+            if not (isinstance(scale, Literal) and scale.dtype == "int" and isinstance(scale.value, int)):
+                continue
+            low = scale.value
+            if low <= 0 or not isinstance(scaled, BinaryExpr) or scaled.op != "%":
+                continue
+            high = scaled.right
+            quotient = scaled.left
+            if not (
+                isinstance(high, Literal)
+                and high.dtype == "int"
+                and isinstance(high.value, int)
+                and high.value > 0
+                and isinstance(quotient, BinaryExpr)
+                and quotient.op in ("/", "//")
+                and quotient.right == scale
+            ):
+                continue
+            return quotient.left, low, high.value
+        return None
+
+    for high_digit, low_digit in ((left, right), (right, left)):
+        found = digit(high_digit)
+        if found is None:
+            continue
+        source, low, high = found
+        if not (
+            isinstance(low_digit, BinaryExpr)
+            and low_digit.op == "%"
+            and low_digit.left == source
+            and low_digit.right == _make_int_literal(low)
+        ):
+            continue
+        source_range = source.range(ctx)
+        if source_range is None or source_range.lo < 0:
+            continue
+        return BinaryExpr("%", source, _make_int_literal(low * high)).simplify(ctx)
     return None
 
 

@@ -614,7 +614,12 @@ def _promoted(node, inputs, ctx):
         return None
     # ``a`` is a DERIVED reading, so the rewrite REBUILDS the bilinear fold over the new edge — the
     # one-``Load`` cone keeps the edge's bound name, so the regenerated lift is the same program.
-    return Fold.contraction(k_axis=node.axis, a=make_cone([node.a], node.axis.name), channels=node.channels)
+    return Fold.contraction(
+        k_axis=node.axis,
+        a=make_cone([node.a], node.axis.name),
+        channels=node.channels,
+        product_dtype=node.product_dtype,
+    )
 
 
 def _readings(tile: TileOp, ctx) -> list[_Term]:
@@ -1604,11 +1609,25 @@ def _term_rows(term: _Term, work: Workers | None, rasters: list[str], spelled: s
     reconcile through the same :meth:`_Row.union` a site uses for its children: one rule, whichever
     level of the tree assembles the row."""
     out: list[tuple[dict, _Row]] = []
+    # The fusion-time ``S_ext_*`` histogram deliberately excludes symbolic extents so structural
+    # identity stays hint-independent.  Enumeration, however, already sizes its legal tile pool
+    # from the same axes' ``Dim.hint`` / ``DEFAULT_SEQ_HINT``.  Carry that effective FREE geometry
+    # as scheduler facts on symbolic rows so a cold deploy can rank the legal pool it actually
+    # received.  Static rows gain no keys, preserving their persisted evidence signature exactly.
+    free_axes = term.place.free
+    hint_facts = {}
+    if any(not ax.extent.is_static for ax in free_axes):
+        free_extents = [_hint_extent(ax) for ax in free_axes]
+        hint_facts = {
+            "S_hint_n_free_axis": float(len(free_extents)),
+            "S_hint_free_prod": float(prod(free_extents)) if free_extents else 1.0,
+            "S_hint_free_max": float(max(free_extents)) if free_extents else 0.0,
+        }
     for combo in product(*(_rows_at(term, node, work) for node in term.tree)):
         row = _Row.union(combo)
         if row is None or not _work_holds(row, work):
             continue
-        out.extend(({**row.knobs, WORK.name: spelled, RASTER.name: raster}, row) for raster in rasters)
+        out.extend(({**row.knobs, **hint_facts, WORK.name: spelled, RASTER.name: raster}, row) for raster in rasters)
     return out
 
 
@@ -1883,6 +1902,7 @@ def _splitk_option(
         k_axis=kslice,
         a=_sliced_a(node.a, sigma),
         channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in node.channels),
+        product_dtype=node.product_dtype,
     )
     placed = plan.placed_on(term.place)
     # Resolved against the SLICED node, whose K is K/w. A computed-A partial's compute fill is

@@ -58,9 +58,11 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   (dynamic `seq_len`) is supported — the `StridedLoop`'s `< seq_len`
   bound is the runtime-extent mask (idle lanes fold the identity; no
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
-  arg. The cross-CTA split (`030_split_reduce`), `reg` fold, a symbolic FREE
-  axis (dynamic grid), strided rows, and the tensor-core `warp_tile`
-  (incl. flash's warp tier) are reserved future tiers.
+  arg. A symbolic FREE axis also lowers to a runtime ceil-div grid with masked
+  tail tiles; that path supports tensor-core `warp_tile` plans (including the
+  masked flash warp tier) and cross-CTA split-K. Raster reordering remains a
+  static-grid-only tier. Symbolic register strips and strided rows remain
+  future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
 

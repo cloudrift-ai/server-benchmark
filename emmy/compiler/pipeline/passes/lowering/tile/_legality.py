@@ -376,7 +376,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     m, n = tile.m, tile.n
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
     if inputs:
-        for edge, role in ((c.a, "a"), (c.b, "b")):
+        for edge, role in ((c.a, "a"), *((ch.b, "b") for ch in c.channels)):
             t = inputs.get(edge.input) if isinstance(edge, Load) else None
             if t is None or t.dtype == atom.operand_dtype(role):
                 continue
@@ -396,11 +396,11 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
             return None  # byte slab: 16 B chunks + the 16 B row pad need a 16-divisible inner span
         if row_axis is not None and (not row_axis.extent.is_static or row_axis.extent.as_static() % 16):
             return None  # canonical byte B: the 16 B gmem chunks stride rows of N bytes
+    rank_ok = isinstance(c.a, Load) and all(isinstance(ch.b, Load) for ch in c.channels)
     rank_ok = (
-        isinstance(c.a, Load)
-        and isinstance(c.b, Load)  # a descriptor needs a gmem address on BOTH edges
+        rank_ok
         and _tma_operand_rank(c.a.index, m.axis.name, c.axis.name)
-        and _tma_operand_rank(c.b.index, n.axis.name, c.axis.name)
+        and all(_tma_operand_rank(ch.b.index, n.axis.name, c.axis.name) for ch in c.channels)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
@@ -416,7 +416,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
         return None
     pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
     b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.b_trans else (bk_elems, n.tile + pad_b)
-    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + b_rows * b_cols * b_nbytes
+    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + len(c.channels) * b_rows * b_cols * b_nbytes
     if slot_bytes > budget:
         return None
     depth = clamp_depth(stage, slot_bytes, budget)

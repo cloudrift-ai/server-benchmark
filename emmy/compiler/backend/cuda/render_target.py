@@ -167,6 +167,10 @@ class CudaRenderTarget:
             return f"__float2half({value})"
         if dst_dt == "f32" and src_dt == "f16":
             return f"__half2float({value})"
+        if dst_dt == "bf16" and src_dt == "f32":
+            return f"__float2bfloat16({value})"
+        if dst_dt == "f32" and src_dt == "bf16":
+            return f"__bfloat162float({value})"
         if dst_dt == "f16x2" and src_dt == "f16":
             # Broadcast scalar __half into both lanes of a __half2.
             return f"__half2half2({value})"

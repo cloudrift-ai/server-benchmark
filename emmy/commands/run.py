@@ -794,12 +794,18 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
     return proof
 
 
-def _eager_outputs_by_name(outputs: dict, eager_out) -> dict:
-    """Map positional eager outputs to the lowered graph's stable output names."""
+def _eager_outputs_by_name(outputs: dict, eager_out, *, declared_names: tuple[str, ...] | list[str] | None = None) -> dict:
+    """Map positional eager outputs to stable graph-output names.
+
+    CUDA execution-plan output buffers are not required to preserve frontend output order, so a
+    multi-output reference must use the frontend graph's declared order rather than ``outputs``
+    dictionary insertion order.
+    """
     refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
-    if len(refs) != len(outputs):
+    names = list(outputs) if declared_names is None else list(declared_names)
+    if len(refs) != len(names) or set(names) != set(outputs):
         return {}
-    return {name: ref.detach().float().cpu().numpy() if hasattr(ref, "detach") else ref for name, ref in zip(outputs, refs, strict=True)}
+    return {name: ref.detach().float().cpu().numpy() if hasattr(ref, "detach") else ref for name, ref in zip(names, refs, strict=True)}
 
 
 def _cuda_knob_dicts(graph) -> list[dict]:
@@ -1874,13 +1880,14 @@ async def bench_lowered_vs_torch(
             torch_fn, torch_inputs = torch_ref.build_callable(frontend, input_tensors)
             with torch.no_grad():
                 eager_out = torch_fn(*torch_inputs)
+            eager_named = _eager_outputs_by_name(result.outputs, eager_out, declared_names=frontend.outputs)
             if strict_accuracy:
-                correctness = _strict_correctness_proof(result.outputs, eager_out)
+                correctness = _strict_correctness_proof(result.outputs, eager_named)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
             else:
-                accuracy_error = _check_accuracy(result.outputs, eager_out)
-            reference = (input_data, _eager_outputs_by_name(result.outputs, eager_out))
+                accuracy_error = _check_accuracy(result.outputs, eager_named)
+            reference = (input_data, eager_named)
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:
@@ -2521,8 +2528,14 @@ def _check_accuracy(outputs, eager_out) -> str | None:
     # output against its positional eager counterpart (graph-output order).
     # Historic single-output behavior (every output vs THE eager tensor) is the
     # degenerate case of the fallback-to-first pairing below.
-    eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
-    eager_flats = [t.detach().cpu().flatten().tolist() for t in eager_refs]
+    if isinstance(eager_out, dict):
+        missing = [name for name in outputs if name not in eager_out]
+        if missing:
+            return f"eager reference missing outputs {missing}"
+        eager_refs = [eager_out[name] for name in outputs]
+    else:
+        eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
+    eager_flats = [t.detach().cpu().flatten().tolist() if hasattr(t, "detach") else np.asarray(t).flatten().tolist() for t in eager_refs]
     if any(e != e for flat in eager_flats for e in flat):
         return "eager reference contains NaN (reproducer inputs out of domain)"
     failures: list[str] = []

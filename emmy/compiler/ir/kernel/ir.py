@@ -1759,7 +1759,10 @@ class RegEpilogue:
 
     acc: str
     loads: tuple[EpilogueLoad, ...]
-    ops: tuple[tuple[str, str, tuple[str, ...]], ...]
+    # ``dtype`` is an optional semantic result boundary.  Narrow results are converted down and
+    # back to f32 before the next fused op, reproducing the round that a materialized tensor store
+    # and reload would have imposed while keeping the epilogue's arithmetic environment uniform.
+    ops: tuple[tuple[str, str, tuple[str, ...], str | None], ...]
     result: str
     # Coord-predicated Selects (the causal attention mask), rendered before the
     # ``ops`` chain as per-element ternaries. Each is ``(name, branches)`` where
@@ -1847,7 +1850,7 @@ class RegStore(Stmt):
         idx = ", ".join(e.pretty() for e in self.dst_index)
         epi = ""
         if self.epilogue is not None:
-            chain = ", ".join(op for _, op, _ in self.epilogue.ops)
+            chain = ", ".join(op for _, op, _, _ in self.epilogue.ops)
             bufs = ", ".join(ld.buffer for ld in self.epilogue.loads)
             epi = f" epilogue[{chain}]({bufs or 'no loads'})"
         guards = ""
@@ -1963,9 +1966,12 @@ class RegStore(Stmt):
                     expr = f"(({rc}) ? {env[value]} : {expr})"
                 lines.append(f"const float {sel_name}_e{i} = {expr};")
                 env[sel_name] = f"{sel_name}_e{i}"
-            for name, op_name, args in epi.ops:
+            for name, op_name, args, result_dtype in epi.ops:
                 expr = op_to_expr(op_name, [Var(env[a]) for a in args])
-                lines.append(f"const float {name}_e{i} = {expr.render(ctx)};")
+                body = expr.render(ctx)
+                if result_dtype is not None and result_dtype != "f32":
+                    body = ctx.target.convert(ctx.target.convert(body, "f32", result_dtype), result_dtype, "f32")
+                lines.append(f"const float {name}_e{i} = {body};")
                 env[name] = f"{name}_e{i}"
             per_elem.append(lines)
             vals.append(env[epi.result])

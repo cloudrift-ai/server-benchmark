@@ -497,7 +497,10 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
     # additive workspace stays ``ws[cta, *free]``). A multi-component (twisted flash) carrier
-    # writes its ``(m, l, O)`` state to the three ``comp`` slices, no multi-output kernel.
+    # writes its ``(m, l, O)`` state to the three ``comp`` slices, no multi-output kernel. The
+    # workspace holds raw carrier state and is therefore f32, like the structural split-K arm:
+    # using the projected output dtype would round every partition before the finalize and violate
+    # ``project(combine(partials))`` (notably f16 contraction + residual epilogues).
     ws_name = f"{out.name}__partial"
     ws_shape = (Dim(n_comp), Dim(cta), *out.shape) if n_comp > 1 else (Dim(cta), *out.shape)
 
@@ -535,7 +538,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     frag = Graph()
     for inp in root.inputs:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
-    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
+    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

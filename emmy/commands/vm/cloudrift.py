@@ -52,6 +52,7 @@ async def _handle_create(args):
             dry_run=args.dry_run,
             billing_exempt=args.billing_exempt,
             network=args.network,
+            node=args.node,
         )
     except (CapacityExhausted, TerminalProvisionError) as exc:
         logger.error(f"{exc}")
@@ -104,6 +105,11 @@ def register_create_target(subparsers):
         "--network",
         default=None,
         help="Network name to attach the instance to (must exist in the target datacenter; default: provider picks a public network)",
+    )
+    parser.add_argument(
+        "--node",
+        default=None,
+        help="Pin the rental to one node, by node ID or hostname (hostname resolution requires operator access)",
     )
     parser.set_defaults(func=handle_create)
 

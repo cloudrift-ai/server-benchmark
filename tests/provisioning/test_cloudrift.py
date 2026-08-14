@@ -6,6 +6,7 @@ Response fixtures are captured from real CloudRift API calls.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from emmy.provisioning.cloudrift import (
     API_VERSION,
@@ -23,6 +24,7 @@ from emmy.provisioning.cloudrift import (
     _rent_instance,
     _terminate_instance,
     create_instance,
+    resolve_node_id,
     select_image_url,
     wait_for_status,
 )
@@ -202,6 +204,85 @@ async def test_rent_instance_no_billing_exempt_by_default(mock_api):
 
     call_data = mock_api.call_args[0][2]
     assert "billing_exempt" not in call_data
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_node_id_selector(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        node_id="2cb28df8-86fe-11f0-b32f-3b150b0bc471",
+    )
+
+    call_data = mock_api.call_args[0][2]
+    assert call_data["selector"] == {"ByNodeId": {"node_id": "2cb28df8-86fe-11f0-b32f-3b150b0bc471", "instance_type": "rtx49-7c-kn.1"}}
+
+
+# ── resolve_node_id ───────────────────────────────────────────────
+
+NODES_LIST_RESPONSE = {
+    "nodes": [
+        {"id": "2cb28df8-86fe-11f0-b32f-3b150b0bc471", "hostname": "cato-ubuntu-66-172-10-7"},
+        {"id": "f8c403e6-7101-11ee-b00d-63f746883a19", "hostname": "atlas-ubuntu-1"},
+    ]
+}
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_uuid_passthrough(mock_api):
+    node_id = await resolve_node_id(API_KEY, "2cb28df8-86fe-11f0-b32f-3b150b0bc471", api_url=API_URL)
+
+    assert node_id == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+    mock_api.assert_not_called()
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_hostname(mock_api):
+    mock_api.return_value = NODES_LIST_RESPONSE
+
+    node_id = await resolve_node_id(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL)
+
+    assert node_id == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+    assert mock_api.call_args[0][1] == "/api/v1/nodes/list"
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_unknown_hostname(mock_api):
+    mock_api.return_value = NODES_LIST_RESPONSE
+
+    with pytest.raises(TerminalProvisionError, match="no-such-host"):
+        await resolve_node_id(API_KEY, "no-such-host", api_url=API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_forbidden_is_terminal(mock_api):
+    response = MagicMock(status_code=403, text="forbidden")
+    mock_api.side_effect = httpx.HTTPStatusError("forbidden", request=MagicMock(), response=response)
+
+    with pytest.raises(TerminalProvisionError, match="operator"):
+        await resolve_node_id(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.resolve_node_id", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_pins_resolved_node(mock_wait, mock_resolve, mock_rent, tmp_path):
+    key_path = tmp_path / "id_ed25519.pub"
+    key_path.write_text("ssh-ed25519 AAAA user@host")
+    mock_resolve.return_value = "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+    mock_rent.return_value = RENT_RESPONSE
+    mock_wait.return_value = INSTANCE_ACTIVE_RESPONSE["instances"][0]
+
+    conn = await create_instance(API_KEY, "rtx49-7c-kn.1", str(key_path), api_url=API_URL, node="cato-ubuntu-66-172-10-7")
+
+    assert conn is not None
+    mock_resolve.assert_awaited_once_with(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL, dry_run=False)
+    assert mock_rent.call_args.kwargs["node_id"] == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)

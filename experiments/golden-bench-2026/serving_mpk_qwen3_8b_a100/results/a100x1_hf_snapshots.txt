@@ -1,0 +1,3 @@
+CACHEDIR.TAG
+models--Qwen--Qwen3-0.6B
+models--Qwen--Qwen3-8B

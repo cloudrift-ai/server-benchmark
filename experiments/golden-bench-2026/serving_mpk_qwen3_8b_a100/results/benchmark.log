@@ -1,0 +1,141 @@
+[2026-08-14 13:24:20] [root] Results directory: /Users/dikobraz/Projects/emmy/experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100/results
+[2026-08-14 13:24:20] [root] 
+[2026-08-14 13:24:20] [root] Running 1 benchmark task(s) in 1 execution group(s)
+[2026-08-14 13:24:20] [root] Parallel mode (max workers: 1)
+[2026-08-14 13:24:20] [root] 
+[2026-08-14 13:24:20] [root] Fixed-host mode: 1 host(s), running 1 group(s)
+[2026-08-14 13:24:20] [a100_x_1] Starting group: NVIDIA A100 80GB x1 (1 tasks)
+[2026-08-14 13:24:20] [a100_x_1] Using pre-allocated host: riftuser@66.172.10.143:22
+[2026-08-14 13:24:23] [emmy.timing] [timing] remote_provision: 3.1s
+[2026-08-14 13:24:29] [emmy.provisioning.staging] Staged 342 files (22afeb5776c5039e5b500dbaafc101a81a010c0ea4e3080489ff5e73dd88d7ba) to riftuser@66.172.10.143:~/.local/share/emmy/a100_x_1/repo
+[2026-08-14 13:24:29] [a100_x_1] Recipe: experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 (variant: a100x1)
+[2026-08-14 13:24:30] [emmy.benchmark.command_workload] Running command for a100x1:
+set -e
+export PATH=/usr/local/cuda/bin:$PATH
+cd ~/.local/share/emmy/a100_x_1/repo
+[ -d venv ] || make setup
+./venv/bin/pip install -q vllm==0.23.0
+
+MODEL=Qwen/Qwen3-8B
+REV=b968826d9c46dd6066d109eabc6255188de91218
+MIRAGE_REV=5c28cc68dc621cc9448c5c9882ef9e21fdc85884
+export CUDA_VISIBLE_DEVICES=0
+
+# --- MPK paths: the pinned mpk-branch demo pair in its own environment ---
+MPK=~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage
+if [ ! -d "$MPK" ]; then
+  git clone --recursive https://github.com/mirage-project/mirage $MPK
+  git -C $MPK checkout --recurse-submodules $MIRAGE_REV
+fi
+[ -d ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/venv-mpk ] || python3 -m venv ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/venv-mpk
+~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/venv-mpk/bin/pip install -q -e $MPK > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mpk_install.log 2>&1
+for repeat in 0 1 2 3 4; do
+  (cd $MPK && ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/venv-mpk/bin/python demo/qwen3/demo.py) \
+    > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mpk_base_r$repeat.txt 2>&1
+  (cd $MPK && ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/venv-mpk/bin/python demo/qwen3/demo.py --use-mirage) \
+    > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mpk_mega_r$repeat.txt 2>&1
+done
+
+# --- Stock vLLM: fresh server per repeat ---
+server_pid=
+stop() {
+  if [ -n "$server_pid" ]; then
+    kill -- "-$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=
+    sleep 5
+  fi
+}
+trap stop EXIT
+wait_health() { # log
+  for i in $(seq 1 360); do curl -sf localhost:8010/health >/dev/null && return 0; sleep 15; done
+  echo "server never became healthy"; tail -30 $1; return 1
+}
+bench() { # out_file
+  ./venv/bin/vllm bench serve --model $MODEL --tokenizer $MODEL --dataset-name random \
+    --random-input-len 128 --random-output-len 512 --max-concurrency 1 --num-prompts 8 \
+    --ignore-eos --temperature 0 --seed 0 --percentile-metrics ttft,tpot,itl,e2el \
+    --base-url http://localhost:8010 > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/$1 2>&1
+  grep -E "Median TPOT|Median TTFT|Output token throughput|Successful" ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/$1
+}
+for repeat in 0 1 2 3 4; do
+  stop
+  setsid ./venv/bin/vllm serve $MODEL --revision $REV --dtype bfloat16 --max-model-len 4096 \
+    --no-enable-prefix-caching --port 8010 > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/stock_serve_r$repeat.log 2>&1 &
+  server_pid=$!
+  wait_health ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/stock_serve_r$repeat.log
+  bench stock_r$repeat.txt
+  stop
+done
+stop
+trap - EXIT
+
+./venv/bin/pip freeze --all > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/requirements.freeze.txt
+~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/venv-mpk/bin/pip freeze --all > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mpk.freeze.txt
+ls ~/.cache/huggingface/hub > ~/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/hf_snapshots.txt 2>/dev/null || true
+echo MPK_LANE_DONE
+
+[2026-08-14 13:24:31] [emmy.provisioning.ssh_transport] Warning: Permanently added '66.172.10.143' (ED25519) to the list of known hosts.
+[2026-08-14 13:24:37] [emmy.provisioning.ssh_transport] Cloning into '/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage'...
+[2026-08-14 13:24:40] [emmy.provisioning.ssh_transport] Submodule 'deps/cutlass' (https://github.com/NVIDIA/cutlass.git) registered for path 'deps/cutlass'
+[2026-08-14 13:24:40] [emmy.provisioning.ssh_transport] Submodule 'deps/json' (https://github.com/nlohmann/json.git) registered for path 'deps/json'
+[2026-08-14 13:24:40] [emmy.provisioning.ssh_transport] Submodule 'deps/z3' (https://github.com/Z3Prover/z3.git) registered for path 'deps/z3'
+[2026-08-14 13:24:40] [emmy.provisioning.ssh_transport] Cloning into '/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/deps/cutlass'...
+[2026-08-14 13:24:44] [emmy.provisioning.ssh_transport] Cloning into '/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/deps/json'...
+[2026-08-14 13:24:56] [emmy.provisioning.ssh_transport] Cloning into '/home/riftuser/.local/share/emmy/a100_x_1/a100x1/20260814T202420Z-40df5bcb/mirage/deps/z3'...
+[2026-08-14 13:25:22] [emmy.provisioning.ssh_transport] Submodule path 'deps/cutlass': checked out 'f3fde58372d33e9a5650ba7b80fc48b3b49d40c8'
+[2026-08-14 13:25:22] [emmy.provisioning.ssh_transport] Submodule path 'deps/json': checked out '8c391e04fe4195d8be862c97f38cfe10e2a3472e'
+[2026-08-14 13:25:22] [emmy.provisioning.ssh_transport] Submodule path 'deps/z3': checked out 'f9176fb4b72156bb8ceca7ebe1b817d9e87baf85'
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] Note: switching to '5c28cc68dc621cc9448c5c9882ef9e21fdc85884'.
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] You are in 'detached HEAD' state. You can look around, make experimental
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] changes and commit them, and you can discard any commits you make in this
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] state without impacting any branches by switching back to a branch.
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] If you want to create a new branch to retain commits you create, you may
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] do so (now or later) by using -c with the switch command. Example:
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport]   git switch -c <new-branch-name>
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] Or undo this operation with:
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport]   git switch -
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] Turn off this advice by setting config variable advice.detachedHead to false
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] 
+[2026-08-14 13:25:23] [emmy.provisioning.ssh_transport] HEAD is now at 5c28cc68 MPK skills: agent skill suites for MPK development  (#742)
+[2026-08-14 13:43:01] [emmy.provisioning.ssh_transport] Successful requests:                     8         
+[2026-08-14 13:43:01] [emmy.provisioning.ssh_transport] Output token throughput (tok/s):         92.64     
+[2026-08-14 13:43:01] [emmy.provisioning.ssh_transport] Median TTFT (ms):                        24.85     
+[2026-08-14 13:43:01] [emmy.provisioning.ssh_transport] Median TPOT (ms):                        10.76     
+[2026-08-14 13:45:06] [emmy.provisioning.ssh_transport] Successful requests:                     8         
+[2026-08-14 13:45:06] [emmy.provisioning.ssh_transport] Output token throughput (tok/s):         92.78     
+[2026-08-14 13:45:06] [emmy.provisioning.ssh_transport] Median TTFT (ms):                        23.72     
+[2026-08-14 13:45:06] [emmy.provisioning.ssh_transport] Median TPOT (ms):                        10.74     
+[2026-08-14 13:47:11] [emmy.provisioning.ssh_transport] Successful requests:                     8         
+[2026-08-14 13:47:11] [emmy.provisioning.ssh_transport] Output token throughput (tok/s):         92.65     
+[2026-08-14 13:47:11] [emmy.provisioning.ssh_transport] Median TTFT (ms):                        24.48     
+[2026-08-14 13:47:11] [emmy.provisioning.ssh_transport] Median TPOT (ms):                        10.75     
+[2026-08-14 13:49:32] [emmy.provisioning.ssh_transport] Successful requests:                     8         
+[2026-08-14 13:49:32] [emmy.provisioning.ssh_transport] Output token throughput (tok/s):         92.63     
+[2026-08-14 13:49:32] [emmy.provisioning.ssh_transport] Median TTFT (ms):                        24.61     
+[2026-08-14 13:49:32] [emmy.provisioning.ssh_transport] Median TPOT (ms):                        10.76     
+[2026-08-14 13:51:38] [emmy.provisioning.ssh_transport] Successful requests:                     8         
+[2026-08-14 13:51:38] [emmy.provisioning.ssh_transport] Output token throughput (tok/s):         92.66     
+[2026-08-14 13:51:38] [emmy.provisioning.ssh_transport] Median TTFT (ms):                        23.95     
+[2026-08-14 13:51:38] [emmy.provisioning.ssh_transport] Median TPOT (ms):                        10.75     
+[2026-08-14 13:51:47] [emmy.provisioning.ssh_transport] MPK_LANE_DONE
+[2026-08-14 13:52:20] [emmy.timing] [timing] command: 1670.2s
+[2026-08-14 13:52:20] [a100_x_1] Leaving pre-allocated host in place: riftuser@66.172.10.143
+[2026-08-14 13:52:20] [a100_x_1] Completed group: a100_x_1
+[2026-08-14 13:52:20] [root] 
+[2026-08-14 13:52:20] [root] SUMMARY
+[2026-08-14 13:52:20] [root] Successful: 1/1
+[2026-08-14 13:52:20] [root]    - serving_mpk_qwen3_8b_a100/a100x1
+[2026-08-14 13:52:20] [root] 
+[2026-08-14 13:52:20] [root] TIMING
+[2026-08-14 13:52:20] [root] task                              provision    command      total
+[2026-08-14 13:52:20] [root] serving_mpk_qwen3_8b_a100/a100x1        3.1     1670.2     1673.3
+[2026-08-14 13:52:20] [root] 
+[2026-08-14 13:52:20] [root] All done!
+[2026-08-14 13:52:20] [root] Full logs saved to: /Users/dikobraz/Projects/emmy/experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100/results/benchmark.log

@@ -57,7 +57,7 @@ emmy bench --ssh riftuser@66.172.10.131 \
   experiments/Meta-Llama-3.1-8B-Instruct/serving_v100_sxm3_32gb
 ```
 
-The benchmark writes ignored local output. `RESULTS.md` is the only retained measurement artifact.
+Use `$run-experiment` to retain the latest raw results, experiment records, and experiment report.
 
 ## Limits
 

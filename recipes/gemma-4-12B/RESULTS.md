@@ -64,8 +64,9 @@ execution pack is shared while the base weights and model revision remain exact.
 emmy bench experiments/gemma-4-12B/serving_base_rtx5090 --ssh dikobraz@kenshin
 ```
 
-The command uses the retained experiment YAML and writes ignored local output; do not use `--commit-results`. The
-qualified local image must already exist on the target host because registry publication was intentionally omitted.
+The command uses the retained experiment YAML and replaces its `results/` directory. Use `$run-experiment` to retain
+the latest raw results, experiment records, and experiment report. The qualified local image must already exist on the
+target host because registry publication was intentionally omitted.
 
 ## Published comparison
 

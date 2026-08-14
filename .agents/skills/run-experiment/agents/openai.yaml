@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Experiment"
+  short_description: "Run Emmy experiments and preserve last results"
+  default_prompt: "Use $run-experiment to run an Emmy experiment and preserve its records and RESULTS.md."

@@ -32,7 +32,7 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   with `redact.py`; the dynamic `EMMY_<KNOB>` namespace stays with `compiler/pipeline/knob.py`, which borrows
   `config.knob_var` / `config.knob_raw`.)
 - `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key` — or env var so its value is added to the redaction set)
-- `emmy/benchmark/` — config, logging, workload, tasks, execution, structured JSON results
+- `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
 ## Layers
 
@@ -77,17 +77,15 @@ providers.
 
 Benchmark configuration (`load_config()` / `validate_config()`), per-run logging, task enumeration
 (`enumerate_tasks()`), execution (`run_execution_group()` — times provisioning per group + deploy/bench/teardown per
-task; task results are `(task, ok, timing)` triples), and structured results (`BenchmarkMetrics` / `SystemInfo`
-dataclasses, `parse_benchmark_metrics()`, `compose_json_result()` / `compose_result()` — both take an optional `timing`
-arg feeding the `"timing"` JSON key / `=== Timing ===` text section).
+task; task results are `(task, ok, timing)` triples), and the sole structured output (`record` — benchmark/machine
+parsers, the versioned experiment-record schema, lifecycle transitions, and atomic YAML persistence).
 
 The benchmark library is an experiment-agnostic runner: it records complete client output, server logs, timing,
 system information, and partial observations after failure. It treats execution and evidence-collection failures as
-authoritative, but does not judge model output, metrics, backend selection, or scientific claims. A recipe may use a
-small self-contained post-processing command, but cannot delegate result interpretation or report generation to a
-script. Command recipes may opt into the single `command.strict` integrity contract for clean/content-addressed staged
-inputs, required declared artifacts, and source/GPU/CUDA provenance. The complete boundary lives in
-`emmy/benchmark/ARCHITECTURE.md`.
+authoritative, but does not judge model output, metrics, backend selection, or scientific claims. Recipes cannot run
+post-processing or report generation. Command recipes may opt into the single `command.strict` integrity contract for
+clean/content-addressed staged inputs, required declared artifacts, and source/GPU/compiler provenance. The complete
+boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
 `--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` (nothing is generated); the
@@ -214,8 +212,8 @@ and YAML, proves that every structural target has every config-derived realizati
 and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
 a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
-**Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
-`commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
+**Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
+via SSH, `deploy local` the local GPU
 via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` uses the recipe's `deploy.gpu` for
 matrix resolution), `commands/teardown.py`, and `commands/vm/` (a CLI handler per provider). Each exposes a `handle_*`
 and a `register_*` function.
@@ -229,10 +227,9 @@ Recipe dirs (positional args)
 enumerate_tasks() -> list[BenchmarkTask]
     |
     v
-Create per-recipe run directories:
-    +-- for each recipe_dir: create_run_dir(recipe_dir)
-    +-- assign task.run_dir per task
-    +-- write tasks.json per run_dir
+Prepare per-recipe results directories:
+    +-- replace <recipe_dir>/results for a real run (dry runs do not touch it)
+    +-- initialize one atomic YAML experiment record per task
     |
     v
 GroupByModelAndGpuPlanner.plan() -> list[ExecutionGroup]
@@ -248,12 +245,11 @@ For each task in group:
     +-- set gpu_device_ids if task.gpu_count < group.gpu_count
     +-- deploy(DeployParams) -> compose up
     +-- run_benchmark_workload()
-    +-- capture raw server log and save raw or partial results
-    +-- on_task_done callback (--commit-results: git add + commit + push)
+    +-- capture raw client/server logs and update the experiment record
     +-- teardown() (skipped with --no-teardown)
     |
     v
-delete_cloud_vm(conn.delete_info) (skipped with --no-teardown; writes instances.json)
+delete_cloud_vm(conn.delete_info) (skipped with --no-teardown; the active handle stays in each affected record)
 ```
 
 ## Timing metrics
@@ -281,8 +277,8 @@ task's result reflects what it cost to stand up its host. `vm_provision` is omit
 created). `timing["benchmark"]` is wall-clock (incl. the docker bench-client startup), distinct from
 `metrics.benchmark_duration_s` (the server-measured window).
 
-**Output:** `bench` persists timing into each task's `.json` (`"timing"` key) and `.txt` (`=== Timing ===` section) and
-prints a per-task `TIMING` table in the end-of-run summary (`commands/bench/__init__.py::_format_timing_table`).
+**Output:** `bench` persists timing under `execution.timing_seconds` in each experiment record and prints a per-task
+`TIMING` table in the end-of-run summary (`commands/bench/__init__.py::_format_timing_table`).
 Standalone `deploy local/ssh/cloud` are display-only (no results dir) — they log the `PhaseTimer.format_table()`
 breakdown at the end.
 
@@ -445,12 +441,13 @@ emmy bench recipes/*                                    # All recipes
 emmy bench experiments/.../optimal_mcr_rtx5090          # An experiment
 emmy bench recipes/* --filter "deploy.gpu=*5090*"       # Subset (fnmatch glob, AND across multiple --filter)
 emmy bench recipes/* --gpu-concurrency 4                # Split each (model, GPU) group across up to N VMs
-emmy bench recipes/* --no-teardown                      # Skip teardown; writes instances.json for later cleanup
+emmy bench recipes/* --no-teardown                      # Retain the VM handle in experiment records for later cleanup
 emmy bench recipes/* --local                            # Run on this machine via ssh to 127.0.0.1
 emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host pool (no provisioning, no teardown)
 ```
 
-Results are stored in `{recipe_dir}/{timestamp}_{hash}/` — each recipe directory holds its own run directories alongside `recipe.yaml`.
+Each actual run replaces `{recipe_dir}/results/`. Every expanded row writes one `*.experiment.yaml` plus raw logs or
+declared artifacts; dry runs leave the preceding directory untouched. The runner emits no JSON/TXT wrapper or report.
 
 ### `emmy publish`
 
@@ -480,10 +477,11 @@ emmy publish recipes/MyModel --source-image local/my-model:baked --yes
 
 ### `emmy teardown`
 
-Cleans up VMs left running by `bench --no-teardown`. Reads `instances.json` from the run directory.
+Cleans up VMs left running by `bench --no-teardown`. It finds active infrastructure handles in the experiment records,
+deduplicates shared VMs, and atomically updates their state after deletion.
 
 ```bash
-emmy teardown <run_dir> [--ssh-key ~/.ssh/id_ed25519]
+emmy teardown <experiment_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
 ### `emmy vm create / delete / audit`
@@ -604,31 +602,23 @@ emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run d
 
 ## Experiments
 
-Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a
-`recipe.yaml`; benchmark output is local and ignored by default:
+Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory keeps the recipe and
+one durable snapshot of its last run:
 
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
+  results/
+  <row>.experiment.yaml
+  RESULTS.md
 ```
 
 ```bash
 emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
-## CI Benchmark Workflow
-
-External developers can submit experiment configurations via pull requests. A maintainer triggers benchmarks by
-commenting `/run-experiment` on the PR. That explicit command authorizes the workflow to commit its selected results
-back to the PR branch; ordinary local and onboarding runs do not commit experiment output.
-
-```
-/run-experiment                                                       # Auto-detect: all experiments changed in the PR
-/run-experiment experiments/MyModel/my_experiment                      # Explicit
-/run-experiment experiments/MyModel/my_experiment --gpu-concurrency 2  # Split groups across 2 VMs each
-```
-
-Only users with **write** or **admin** access can trigger benchmarks. For fork PRs, "Allow edits from maintainers" must be checked for results to be pushed back to the fork branch (otherwise results are downloadable as workflow artifacts).
+Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, assemble
+the records and `RESULTS.md`, and commit the complete last-run snapshot. The CLI itself performs no Git operation.
 
 ## Adding a New VM Provider
 

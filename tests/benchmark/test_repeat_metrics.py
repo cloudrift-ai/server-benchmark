@@ -4,10 +4,10 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-from emmy.benchmark.results import (
+from emmy.benchmark.record import (
     BenchmarkMetrics,
     aggregate_metrics,
-    compose_json_result,
+    inference_measurement,
     parse_repeat_metrics,
 )
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
@@ -69,21 +69,19 @@ def test_aggregate_metrics_skips_fields_missing_in_any_repeat():
     assert mean.output_token_throughput == 50.0
 
 
-def test_single_repeat_json_result_unchanged():
-    task = _task(_recipe())
-    data = compose_json_result(task, _stanza(100.0, 50.0), "compose", "cmd", "")
+def test_single_repeat_measurement_is_compact():
+    data = inference_measurement(_stanza(100.0, 50.0), "compose", "cmd")
     assert data["metrics"]["median_ttft_ms"] == 100.0
     assert "metrics_stddev" not in data
-    assert "metrics_repeats" not in data
+    assert "repetitions" not in data
 
 
-def test_multi_repeat_json_result_aggregates():
-    task = _task(_recipe(3))
+def test_multi_repeat_measurement_aggregates():
     output = "\n\n".join([_stanza(100.0, 50.0), _stanza(110.0, 52.0), _stanza(105.0, 51.0)])
-    data = compose_json_result(task, output, "compose", "cmd", "")
+    data = inference_measurement(output, "compose", "cmd")
     assert data["metrics"]["median_ttft_ms"] == 105.0
     assert data["metrics_stddev"]["median_ttft_ms"] == 5.0
-    assert len(data["metrics_repeats"]) == 3
+    assert len(data["repetitions"]) == 3
 
 
 def test_run_benchmark_workload_repeats_client_runs():

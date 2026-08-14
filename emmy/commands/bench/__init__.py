@@ -5,12 +5,9 @@ ExecutionGroups that share VMs; groups run in parallel via asyncio.
 """
 
 import asyncio
-import json
 import logging
-import subprocess
 import sys
 from pathlib import Path
-from string import Template
 
 from emmy.benchmark import (
     _expand_path,
@@ -26,6 +23,7 @@ from emmy.benchmark.fixed_hosts import (
     resolve_fixed_hosts,
     validate_hosts_cover_groups,
 )
+from emmy.benchmark.record import create_record, finish_record, new_run_id, write_record
 from emmy.planner import BenchmarkTask
 from emmy.planner.group_by_model_and_gpu import GroupByModelAndGpuPlanner
 from emmy.recipe import resolve_recipe_dir
@@ -129,52 +127,12 @@ def handle_bench(args):
                 if args.debug:
                     task.recipe.command.env["EMMY_DEBUG"] = "1"
 
-    # Create per-recipe run directories
-    recipe_run_dirs = {}
-    for recipe_dir in args.recipes:
-        resolved = str(Path(recipe_dir).resolve())
-        if resolved not in recipe_run_dirs:
-            recipe_run_dirs[resolved] = BenchmarkTask.create_run_dir(resolved)
-
-    # Assign run_dir to each task and copy recipe files
-    for task in tasks:
-        resolved = str(Path(task.recipe_dir).resolve())
-        task.setup_run_dir(recipe_run_dirs[resolved])
-
-    # Write tasks.json per run_dir
-    for resolved, run_dir in recipe_run_dirs.items():
-        run_tasks = [t for t in tasks if str(Path(t.recipe_dir).resolve()) == resolved]
-        BenchmarkTask.write_tasks_json(run_dir, run_tasks)
-
-    # Attach file handlers for each run directory
-    log_file_paths = []
-    for run_dir in recipe_run_dirs.values():
-        log_file_paths.append(add_file_handler(run_dir))
-
-    for run_dir in recipe_run_dirs.values():
-        root_logger.info(f"Run directory: {run_dir}")
-    root_logger.info("")
-
     # Plan execution groups
     gpu_concurrency = args.gpu_concurrency
     planner = GroupByModelAndGpuPlanner(gpu_concurrency=gpu_concurrency)
     groups = planner.plan(tasks)
 
-    root_logger.info(f"Running {len(tasks)} benchmark task(s) in {len(groups)} execution group(s)")
-    if gpu_concurrency > 1:
-        root_logger.info(f"GPU concurrency: {gpu_concurrency} (groups split across multiple VMs)")
-    root_logger.info(f"Parallel mode (max workers: {args.max_workers or len(groups)})")
-    root_logger.info("")
-
-    # Set up commit callback if requested
-    on_task_done = None
-    if args.commit_results:
-        from emmy.commands.bench.committer import GitCommitter
-
-        root_logger.info("Commit mode enabled: results will be committed after each task")
-        on_task_done = GitCommitter(asyncio.Lock())
-
-    # Run groups
+    allocated = None
     if fixed_host_mode:
         try:
             allocated = asyncio.run(resolve_fixed_hosts(use_local, ssh_targets, ssh_key, dry_run))
@@ -189,58 +147,59 @@ def handle_bench(args):
                 root_logger.error(str(e))
                 sys.exit(1)
 
+    # A real invocation replaces each experiment's raw results after local
+    # validation. Dry runs report the same paths without touching prior artifacts.
+    recipe_results_dirs = {}
+    for recipe_dir in args.recipes:
+        resolved = str(Path(recipe_dir).resolve())
+        if resolved not in recipe_results_dirs:
+            recipe_results_dirs[resolved] = BenchmarkTask.prepare_results_dir(resolved, overwrite=not dry_run)
+
+    code_hash = BenchmarkTask.compute_code_hash()
+    run_id = new_run_id(code_hash)
+    for task in tasks:
+        resolved = str(Path(task.recipe_dir).resolve())
+        task.setup_results_dir(recipe_results_dirs[resolved])
+        task.record = create_record(task, run_id, code_hash)
+        if not dry_run:
+            write_record(task)
+
+    log_file_paths = []
+    if not dry_run:
+        for results_dir in recipe_results_dirs.values():
+            log_file_paths.append(add_file_handler(results_dir))
+
+    for results_dir in recipe_results_dirs.values():
+        prefix = "[dry-run] " if dry_run else ""
+        root_logger.info(f"{prefix}Results directory: {results_dir}")
+    root_logger.info("")
+
+    root_logger.info(f"Running {len(tasks)} benchmark task(s) in {len(groups)} execution group(s)")
+    if gpu_concurrency > 1:
+        root_logger.info(f"GPU concurrency: {gpu_concurrency} (groups split across multiple VMs)")
+    root_logger.info(f"Parallel mode (max workers: {args.max_workers or len(groups)})")
+    root_logger.info("")
+
+    # Run groups
+    if fixed_host_mode:
         root_logger.info(f"Fixed-host mode: {len(allocated)} host(s), running {len(groups)} group(s)")
-        raw_results = asyncio.run(_run_groups_on_hosts(groups, allocated, config, ssh_key, dry_run, on_task_done, provider=args.provider))
+        raw_results = asyncio.run(_run_groups_on_hosts(groups, allocated, config, ssh_key, dry_run, provider=args.provider))
     else:
-        raw_results = asyncio.run(
-            _run_groups(groups, config, ssh_key, dry_run, args.max_workers, no_teardown, on_task_done, provider=args.provider)
-        )
+        raw_results = asyncio.run(_run_groups(groups, config, ssh_key, dry_run, args.max_workers, no_teardown, provider=args.provider))
 
     # Flatten results, handling exceptions
     all_results: list[tuple[BenchmarkTask, bool, dict]] = []
-    all_instance_infos = []
     for i, r in enumerate(raw_results):
         if isinstance(r, Exception):
             root_logger.error(f"Group {i} generated an exception: {r}")
-            all_results.extend((t, False, {}) for t in groups[i].tasks)
+            for task in groups[i].tasks:
+                if task.record and task.record["status"] not in {"succeeded", "failed"}:
+                    finish_record(task.record, success=False, stage="execution", timing={}, error=str(r))
+                    if not dry_run:
+                        write_record(task)
+                all_results.append((task, False, {}))
         else:
-            task_results, instance_info = r
-            all_results.extend(task_results)
-            if instance_info is not None:
-                all_instance_infos.append(instance_info)
-
-    # Write instances.json for --no-teardown (cloud-provisioned VMs only)
-    if all_instance_infos and not fixed_host_mode:
-        for run_dir in recipe_run_dirs.values():
-            instances_path = run_dir / "instances.json"
-            instances_path.write_text(json.dumps(all_instance_infos, indent=2))
-            root_logger.info(f"Instance info saved to: {instances_path}")
-            root_logger.info("Run 'emmy teardown <run_dir>' to clean up.")
-
-    # Run small, self-contained post-processing declared directly in the recipe.
-    postprocess_failed = False
-    for recipe_dir_resolved, run_dir in recipe_run_dirs.items():
-        recipe = next(
-            (t.recipe for t in tasks if str(Path(t.recipe_dir).resolve()) == recipe_dir_resolved),
-            None,
-        )
-        if recipe is None or recipe.aggregate is None:
-            continue
-
-        rendered = Template(recipe.aggregate.run).safe_substitute({"run_dir": str(run_dir)})
-        if dry_run:
-            root_logger.info(f"[dry-run] post-process: {rendered}")
-            continue
-
-        root_logger.info(f"Running post-processing for {Path(recipe_dir_resolved).name}...")
-        try:
-            result = subprocess.run(rendered, shell=True, timeout=recipe.aggregate.timeout)
-            if result.returncode != 0:
-                root_logger.error(f"Post-processing failed (rc={result.returncode})")
-                postprocess_failed = True
-        except subprocess.TimeoutExpired:
-            root_logger.error(f"Post-processing timed out after {recipe.aggregate.timeout}s")
-            postprocess_failed = True
+            all_results.extend(r)
 
     # Print summary
     root_logger.info("")
@@ -269,13 +228,13 @@ def handle_bench(args):
             root_logger.info(line)
 
     root_logger.info("")
-    if failed or postprocess_failed:
+    if failed:
         root_logger.error("Finished with benchmark failures.")
     else:
         root_logger.info("All done!")
     for p in log_file_paths:
         root_logger.info(f"Full logs saved to: {p}")
-    _raise_on_bench_failure(task_failed=bool(failed) or postprocess_failed)
+    _raise_on_bench_failure(task_failed=bool(failed))
 
 
 def register_bench_command(subparsers):
@@ -331,12 +290,7 @@ def register_bench_command(subparsers):
     parser.add_argument(
         "--no-teardown",
         action="store_true",
-        help="Skip teardown and VM deletion after benchmarks (save instance info for later cleanup)",
-    )
-    parser.add_argument(
-        "--commit-results",
-        action="store_true",
-        help="Git commit and push result files after each task completes",
+        help="Skip teardown and VM deletion after benchmarks (retain infrastructure handles in experiment records)",
     )
     parser.add_argument(
         "--billing-exempt",

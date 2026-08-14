@@ -8,28 +8,22 @@ from emmy.benchmark.bench_logging import (
 )
 from emmy.benchmark.config import _expand_path, load_config, validate_config
 from emmy.benchmark.execution import _run_groups, run_execution_group
-from emmy.benchmark.results import (
+from emmy.benchmark.record import (
     BenchmarkMetrics,
-    SystemInfo,
-    compose_json_result,
     parse_benchmark_metrics,
-    parse_system_info,
+    parse_machine_info,
 )
 from emmy.benchmark.system_info import collect_system_info
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.benchmark.workload import (
     build_bench_command,
-    compose_result,
-    format_task_yaml,
     run_benchmark_workload,
 )
 
 __all__ = [
     "BenchmarkMetrics",
-    "SystemInfo",
-    "compose_json_result",
     "parse_benchmark_metrics",
-    "parse_system_info",
+    "parse_machine_info",
     "load_config",
     "validate_config",
     "_expand_path",
@@ -39,8 +33,6 @@ __all__ = [
     "_get_group_logger",
     "collect_system_info",
     "build_bench_command",
-    "compose_result",
-    "format_task_yaml",
     "run_benchmark_workload",
     "enumerate_tasks",
     "run_execution_group",

@@ -1,6 +1,6 @@
 """Embedding-recipe bench command + metrics parsing + smoke-response checks."""
 
-from emmy.benchmark.results import parse_benchmark_metrics
+from emmy.benchmark.record import parse_benchmark_metrics
 from emmy.benchmark.workload import build_bench_command
 from emmy.deploy.orchestrate import _check_chat_response, _check_completion_response, _check_embedding_response, _smoke_response_check
 from emmy.recipe.types import Recipe

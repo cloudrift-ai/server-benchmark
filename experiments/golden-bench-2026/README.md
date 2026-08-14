@@ -1,8 +1,9 @@
 # Golden bench 2026
 
-This experiment suite supports the Emmy compiler submission. Raw measurements remain in benchmark run directories;
-the repository holds only recipes, frozen inputs, and the scientific protocol. A recipe is not evidence until its
-required artifacts exist and an intelligent reviewer accepts them against the checklist below.
+This experiment suite supports the Emmy compiler submission. Each executed experiment retains its latest raw
+`results/` directory, per-row experiment records, and `RESULTS.md` beside the recipe and frozen protocol inputs. A
+recipe is not evidence until its required artifacts exist and an intelligent reviewer accepts them against the
+checklist below.
 
 ## Evidence sets
 
@@ -50,10 +51,10 @@ exact full-layer trace and re-resolved in that fusion context; they are not stan
 that cannot retain a runnable eager/Inductor reference fails the task and makes the supplement incomplete.
 
 Each search has an isolated tuning database, online checkpoint, and cubin cache. The positional trace input and model
-provenance use the same full revision. `emmy bench` requires a clean staged source tree and records its Git revision,
-content-addressed file manifest, package freeze, GPU UUID/state, driver, CUDA compiler, command status, online
-checkpoint, and raw tuning artifacts. Every matrix row is a separate task, so a failed case preserves its partial
-evidence and does not prevent later rows from running.
+provenance use the same full revision. `emmy bench` requires a clean staged source tree. Its experiment record captures
+the Git revision, content-addressed source manifest, GPU UUID/state, driver, GPU compiler, command status, and
+raw-artifact paths; the command retains its package freeze, online checkpoint, and tuning evidence. Every matrix row
+is a separate task, so a failed case preserves its partial evidence and does not prevent later rows from running.
 
 The directly searched winner must match its measured knob map exactly. The recipe invokes
 `emmy run --golden working.yaml --strict` five times at deployable `-O3`, with 10 warmups and 100 measured iterations.

@@ -1,51 +1,44 @@
 # Benchmark orchestration
 
-The benchmark package executes recipe matrices and preserves their observations. It is deliberately ignorant of an
-experiment's scientific question and permitted claims.
+The benchmark package expands recipe matrices, executes every experiment row, and preserves observations without
+judging the experiment's scientific claim.
+
+## Experiment record
+
+An actual `emmy bench` invocation replaces `<recipe_dir>/results/`. Dry runs never create, delete, or modify that
+directory. Every expanded row receives one collision-safe `*.experiment.yaml`; there is no JSON, TXT, task manifest,
+instance manifest, or inline aggregate result path.
+
+The versioned record is initialized before provisioning and atomically rewritten at each lifecycle transition. A
+handled failure therefore leaves a terminal row rather than only a log. An interrupted process may leave `running`,
+which is explicit incomplete evidence. The common fields are:
+
+- record version, UTC timestamp, and terminal status;
+- task ID, stable row ID, raw matrix parameters, and fully expanded recipe;
+- Emmy code digest, Git state, and command-stage source manifest when applicable;
+- execution timestamps, stage, phase timings, error, and infrastructure lifecycle;
+- hostname, OS/kernel, CPU topology, memory, per-GPU identity/state, GPU compiler/runtime, Docker, root filesystem,
+  and uptime from the measured host;
+- inference metrics and repeats or rendered command/exit/transfer observations; and
+- paths to raw logs and declared command artifacts.
+
+NVIDIA GPUs use a structured `nvidia-smi` query. PCI device identity supplies a vendor-neutral fallback, including
+AMD cards, while `amd-smi` or `rocm-smi` output is retained when available. Missing probes remain null; the runner does
+not substitute requested hardware for an unavailable live observation.
 
 ## Boundary
 
-The orchestrator may:
+The orchestrator may expand/filter matrices, allocate hosts, stage declared inputs, run workloads, capture raw
+client/server logs, parse generic benchmark labels, enforce generic execution integrity, and retain partial evidence.
+It must not interpret model responses, decide scientific thresholds, compare outputs, or generate `RESULTS.md`.
 
-- expand and filter recipe matrices;
-- group tasks by requested hardware and provision or allocate hosts;
-- stage declared inputs and invoke the selected workload adapter;
-- capture stdout, stderr, complete raw server logs, timing, system information, recipe metadata, and declared result
-  files;
-- retain partial artifacts after failure and continue independent matrix tasks;
-- return a nonzero status for generic execution-integrity failures; and
-- tear down resources or record retained instances.
+Command recipes preserve the rendered command, exit code, timing, source manifest, and artifact-transfer outcomes.
+`command.strict` requires clean content-addressed staged inputs, every declared result file, GPU identity, and a CUDA
+or HIP compiler. A failed command still attempts to retrieve declared artifacts.
 
-The orchestrator must not:
+Human interpretation belongs to the repository `run-experiment` skill. It validates row coverage, moves the latest
+records beside the recipe, writes the free-form report, and commits the raw results, records, and `RESULTS.md` as one
+durable last-run snapshot.
 
-- interpret model responses or compare outputs;
-- decide whether request counts, latency, throughput, accuracy, or coverage are acceptable;
-- recognize compiler, quantization, serving-backend, or publication-specific evidence;
-- match required or forbidden log text;
-- reject a filtered matrix for scientific reasons; or
-- run report-generation or result-validation scripts.
-
-Generic execution integrity is the only automatic acceptance boundary. Process, provisioning, transport, and raw-log
-collection failures are authoritative because they say whether the declared task executed and its evidence was
-collected, not whether the evidence supports a claim.
-
-Every command task records the rendered command, exit code, timing, system information, and declared artifact-transfer
-outcomes in its JSON result. `command.strict` makes three generic integrity requirements fail closed: staged inputs
-must be clean and content-addressed, every declared result file must be retrieved, and source, GPU, and CUDA compiler
-provenance must be present. Dry runs do not require provenance from a host that was never contacted. These checks say
-whether a command measurement is reproducible and complete; they do not interpret its output.
-
-A recipe may declare a short post-processing command directly in its `aggregate.run` block. The command may arrange
-or summarize files mechanically, but must stay readable in the recipe and cannot invoke an external result-analysis
-script. A nonzero command or timeout is an execution failure. Complex interpretation and `RESULTS.md` writing belong
-to an agent reviewing the complete run directory.
-
-The inference adapter's pre-run probe is an API-readiness check only: a successful, nonempty JSON response permits
-the benchmark regardless of its content. The response and complete server log are preserved for later review. The
-standalone deploy commands may retain their model-specific smoke checks because they are outside benchmark result
-acceptance.
-
-`commands.bench` owns orchestration, `execution` runs execution groups, `command_workload` executes arbitrary command
-tasks, and `workload` invokes the existing inference workload adapter. Result files remain raw evidence. Durable
-recipe tests verify the intended configuration before measurement, and an agent evaluates every final run directory
-against its protocol afterward.
+`commands.bench` owns orchestration, `execution` runs execution groups, `record` owns the schema/parsers/atomic writer,
+`command_workload` executes command rows, and `workload` invokes the inference client and captures raw server logs.

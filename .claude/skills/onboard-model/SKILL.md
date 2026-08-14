@@ -207,11 +207,10 @@ Use comparison lanes to select and explain the recommended configuration. Benchm
 section 5. Include the comparisons that matter for this model's decision and clearly identify the engine and
 configuration selected by `recipes/<model>/recipe.yaml`; do not force unrelated models into one table layout.
 
-Commit only a canonical experiment `recipe.yaml` when the comparison configuration remains useful. Do not commit raw
-successful results, failed run directories, dated recipe snapshots, rendered duplicates, caches, credentials, logs,
-plots, or experiment reports unless the caller explicitly requested a named result artifact. Fold the measured winner
-into a single-variant serving recipe under `recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block. Encode
-the selected result directly in the recipe report, then remove task-owned measurement output from the checkout.
+Commit a canonical experiment `recipe.yaml` when the comparison configuration remains useful. Follow the repository's
+`run-experiment` skill for the final measurement: retain its last raw `results/` directory, top-level experiment
+records, and experiment `RESULTS.md`, including failed-row evidence. Fold the measured winner into a single-variant
+serving recipe under `recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block.
 
 ## 7. Write the durable report
 
@@ -219,12 +218,12 @@ Create `recipes/<model>/RESULTS.md` only beside a valid recommended recipe. If s
 valid recipe, create no `RESULTS.md` in the repository; the caller-supplied external summary is the failure record.
 Creating or updating a valid serving recipe without creating or refreshing its `RESULTS.md` is incomplete.
 
-Do not expect `emmy bench` or recipe post-processing to interpret the run. After measurement, inspect `tasks.json`,
-every task JSON and text result, complete server logs, failures, and declared artifacts. Reconcile them with the
-recipe matrix and the model's protocol before deciding what the evidence supports. A short inline `aggregate.run`
-may arrange files mechanically, but do not add or call a result-analysis script; assemble the report directly.
+Do not expect `emmy bench` to interpret the run. After measurement, inspect every YAML experiment record, complete
+server logs, failures, and declared raw artifacts. Reconcile them with the recipe matrix and the model's protocol
+before deciding what the evidence supports. Assemble the report directly; do not add a result-analysis script.
 
-Before writing performance numbers, find a successful raw result for the exact selected recipe configuration: model
+Before writing performance numbers, find a successful experiment record for the exact selected recipe configuration:
+model
 revision, engine image tag or digest, GPU name/count, precision policy, context, concurrency, workload, and engine
 knobs must all match. Re-run that lane with the existing `emmy bench` experiment when evidence is missing, stale, or
 does not identify the selected engine. Update the report from the new measurement, but do not commit its raw output.
@@ -245,15 +244,15 @@ Use measurements only, compare complete runs without cherry-picking, and include
 - the selected recipe engine's performance lane, identified by the exact image and relevant engine knobs, plus any
   comparison needed to justify why it was selected;
 - one clean `emmy bench experiments/<model>/<name> ...` reproduction command using a retained experiment YAML;
-  filter a comparison recipe to the selected engine and precision lane, and do not use `--commit-results`;
+  filter a comparison recipe to the selected engine and precision lane;
 - for an Emmy recipe, its serving result, kernel-tuning summary, published image tag, and the accuracy result that
   authorized FAST_MATH or the quality regression that retained standard Emmy;
 - for a vLLM or SGLang recipe without Emmy, that engine's serving result without a comparison column;
 - the recommended serving configuration, limitations, and any unresolved upstream issue.
 
-Keep the report useful without the working directory. It must not link to experiment output or an experiment report.
-The recipe is the decision and its report embeds the selected lane's compact, best qualified measurements. Experiment
-YAML is reproducibility input and may remain committed; generated output is not a repository artifact.
+Keep the recipe report useful without the working directory. The recipe is the decision and its report embeds the
+selected lane's compact, best qualified measurements. The experiment directory separately retains reproducibility
+input, raw results, per-row experiment records, and its last-run report.
 
 ## 8. Verify and hand off
 

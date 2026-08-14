@@ -52,8 +52,8 @@ emmy bench experiments/gemma-4-12B/serving_rtx5090 --ssh dikobraz@kenshin \
   --filter 'engine.llm.vllm.extra_env=EMMY_FAST_MATH=1*'
 ```
 
-The filter selects only the recipe's Emmy FAST_MATH engine lane. Output remains ignored locally; do not use
-`--commit-results`.
+The filter selects only the recipe's Emmy FAST_MATH engine lane. Use `$run-experiment` to retain the latest raw results,
+experiment records, and experiment report.
 
 ## Limits
 

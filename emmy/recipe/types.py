@@ -171,14 +171,6 @@ class CommandConfig:
 
 
 @dataclass
-class AggregateConfig:
-    """Small, self-contained post-processing step run after a recipe matrix."""
-
-    run: str = ""
-    timeout: int = 300
-
-
-@dataclass
 class DeployConfig:
     """Optional deploy section — GPU info for cloud provisioning."""
 
@@ -198,7 +190,6 @@ class Recipe:
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
     command: CommandConfig | None = None
-    aggregate: AggregateConfig | None = None
 
     @property
     def kind(self) -> str:
@@ -208,6 +199,8 @@ class Recipe:
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         """Build a Recipe from a (post-merge, post-migrate) config dict."""
+        if "aggregate" in d:
+            raise ValueError("aggregate is not supported; summarize experiment records in RESULTS.md")
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
@@ -286,14 +279,6 @@ class Recipe:
                 strict=cmd_dict.get("strict", False),
             )
 
-        aggregate = None
-        agg_dict = d.get("aggregate")
-        if agg_dict is not None:
-            aggregate = AggregateConfig(
-                run=agg_dict.get("run", ""),
-                timeout=agg_dict.get("timeout", 300),
-            )
-
         return cls(
             tags=tuple(d.get("tags", ())),
             model=model,
@@ -301,7 +286,6 @@ class Recipe:
             benchmark=benchmark,
             deploy=deploy,
             command=command,
-            aggregate=aggregate,
         )
 
     @property

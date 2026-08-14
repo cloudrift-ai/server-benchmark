@@ -4,7 +4,7 @@ Used by recipes whose `command` block declares a `run` template and a list of
 `result_files` to pull back. The harness flattens variant params to leaf names,
 substitutes them into the template via `string.Template`, runs the rendered
 command on the provisioned VM, then scp's matching result files back to the
-local run directory.
+experiment results directory.
 """
 
 import logging

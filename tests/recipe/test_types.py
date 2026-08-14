@@ -3,7 +3,6 @@
 import pytest
 
 from emmy.recipe import (
-    AggregateConfig,
     CommandConfig,
     DeployConfig,
     LLMConfig,
@@ -309,20 +308,12 @@ def test_from_dict_without_docker_options():
     assert recipe.engine.llm.docker_options == {}
 
 
-# ── AggregateConfig ──────────────────────────────────────────────
+# ── Removed post-processing ──────────────────────
 
 
-def test_aggregate_config_defaults():
-    cfg = AggregateConfig()
-    assert cfg.run == ""
-    assert cfg.timeout == 300
-
-
-def test_from_dict_accepts_inline_postprocessing():
-    recipe = Recipe.from_dict({"aggregate": {"run": "printf '%s\\n' done > $run_dir/status.txt", "timeout": 60}})
-    assert recipe.aggregate is not None
-    assert recipe.aggregate.run.startswith("printf")
-    assert recipe.aggregate.timeout == 60
+def test_from_dict_rejects_inline_postprocessing():
+    with pytest.raises(ValueError, match="summarize experiment records in RESULTS.md"):
+        Recipe.from_dict({"aggregate": {"run": "printf done", "timeout": 60}})
 
 
 def test_model_task_default_generate():

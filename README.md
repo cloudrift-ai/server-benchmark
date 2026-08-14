@@ -164,7 +164,9 @@ emmy bench experiments/gemma-4-12B/* --local                            # On thi
 emmy bench experiments/gemma-4-12B/* --ssh user@host1 --ssh user@host2  # Pre-allocated hosts
 ```
 
-External contributors: open a PR with an experiment under `experiments/{model}/{name}/`, then a maintainer triggers a cloud run by commenting `/run-experiment` on the PR.
+Each real run replaces the experiment's `results/` directory and writes one YAML experiment record per matrix row.
+Use `$run-experiment` to run or customize an experiment, assemble the records and `RESULTS.md`, and commit the durable
+last-run snapshot.
 
 ## Deploy
 
@@ -181,7 +183,7 @@ emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gp
 
 `--recipe` also takes the bare name of a recipe bundled with the installed package (`--recipe gemma-4-12B-it`),
 which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
-its run directories. A path that exists always wins, so an edited working copy is never overwritten.
+its fixed `results/` directory. A path that exists always wins, so an edited working copy is never overwritten.
 
 ## Publish a serving image
 

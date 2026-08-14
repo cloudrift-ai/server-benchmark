@@ -173,8 +173,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Structural fork** — A fork whose alternatives change which kernels exist — for example, keeping operations fused
   in one kernel versus splitting them apart. The prior is never asked to rank these options. Instead, the compiler
   compares the total estimated cost of each resulting kernel set; the prior contributes only per-kernel cost
-  estimates inside that comparison. Only a trusted online prior — trained and passing calibration — may supply those
-  estimates; on the offline prior or a quarantined online prior, the default kernel set is kept.
+  estimates inside that comparison, with recorded measurements taking precedence wherever they exist. Any loaded
+  prior may supply the estimates — on a cold machine that is the offline prior, which therefore owns the quality of
+  cold kernel-set choices.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
   variable (`EMMY_STAGE=d2/cp`) or by re-running a recorded configuration exactly. A pinned benchmark measures the

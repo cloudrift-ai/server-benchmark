@@ -225,10 +225,10 @@ def _inner_free(place: Placement) -> Axis | None:
 
 
 def _matvec_b_kstride(term: _Term, carrier) -> int | None:
-    """B's gmem stride along the reduce axis at the per-cell MATVEC tier, or ``None`` when no
-    layout gate applies. A contraction demoted to PLANAR carries BOTH a vector operand (a load
+    """B's gmem stride along the reduce axis at the per-cell MATVEC tier, or ``None`` when B
+    cannot be classified. A contraction demoted to PLANAR carries BOTH a vector operand (a load
     along the reduce axis touching no non-unit free axis — A) and a matrix operand indexed by the
-    reduce axis AND a non-unit free axis (B); only that two-operand shape is gated. ``1`` means the
+    reduce axis AND a non-unit free axis (B); only that two-operand shape classifies. ``1`` means the
     reduce axis is B's fastest-varying dimension (the serving ``F.linear`` N×K layout); ``>1`` is
     k-major (canonical ``B[k, n]``)."""
     nonunit = {a.name for a in term.place.free if not (a.extent.is_static and a.extent.as_static() == 1)}
@@ -251,8 +251,8 @@ def _k_contiguous(term: _Term, node) -> bool | None:
     two node shapes carry different evidence. A contraction has a B EDGE, so ``b_trans`` reads its
     index directly; a matvec DEMOTED to a plain fold keeps its loads inline in the lift (the
     formation fact), so there is no edge and the classifier walks the loads instead. ``None`` when
-    no layout gate applies. Both answers feed the ONE predicate (``_legality.coop_band_layout``) —
-    which is what stops the rule being stated twice with opposite polarity."""
+    B cannot be classified. The answer feeds only the cold option ORDER (which band spelling leads
+    the list); every orientation stays enumerated and evidence-rankable."""
     if is_contraction(node):
         return node.b_trans
     stride = _matvec_b_kstride(term, node)
@@ -694,18 +694,18 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     )
 
 
-def _f16acc_allowed(ctx) -> bool:
-    """Whether the f16-accumulate atom forks may be OFFERED — a precision-trading gate, off by
+def _f16acc_allowed(ctx) -> bool:  # noqa: ARG001 — ctx kept for call-site symmetry with the other precision policies
+    """Whether the f16-accumulate atom forks may be OFFERED — a precision-trading policy, off by
     default: the precise ``F16_MMA_F32_ACC`` pin is authoritative on every target; unset, the
-    ``FAST_MATH`` umbrella offers it on the consumer dies (``Context.f16acc_is_faster``) where the
-    f32-accumulate half-rate nerf makes it profitable. A ``TILE`` pin naming the atom bypasses this
-    gate entirely (pins are authoritative)."""
+    ``FAST_MATH`` umbrella offers the family everywhere it is legal, and tuning evidence or the
+    prior ranks it against the f32-accumulate siblings per shape and card. A ``TILE`` pin naming
+    the atom bypasses this policy entirely (pins are authoritative)."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, precision_pin  # noqa: PLC0415
 
     raw = F16_MMA_F32_ACC.raw()
     if raw is not None:
         return F16_MMA_F32_ACC.parse(raw)
-    return precision_pin(F16_MMA_F32_ACC) and ctx.f16acc_is_faster
+    return precision_pin(F16_MMA_F32_ACC)
 
 
 def _f8_mma_allowed(ctx) -> bool:
@@ -866,10 +866,10 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     free = _free_cells(term.place)
     tail = projection_tail(term.tile)
     coop = _pick_coop(extent, free, has_tail=has_contraction_tail(tail))
-    # The layout gate (WS5, the cold-poison hardening): at the matvec tier the coop bands are only
-    # coalesced on ONE B orientation — the plain band interleaves lanes along K, the transposed
-    # band sweeps lanes along the output axis. Enumeration is the single choke point every tier
-    # resolves through, so the gate lives here; an env pin stays authoritative and un-gated.
+    # B's layout orders the cold option-0 only: at the matvec tier each coop band orientation is
+    # coalesced on one B orientation (the plain band interleaves lanes along K, the transposed band
+    # sweeps the output axis), so the classified layout picks which spelling LEADS. Every
+    # orientation stays in the row set for evidence to rank.
     k_contig = term.k_contiguous(node)
     if k_contig and extent >= _COOP_MIN_EXTENT and free >= _FREE_CAP:
         # The wide-K COALESCED matvec: a 32-wide band is the measured deploy, and option-0 is what
@@ -883,8 +883,6 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
     epilogue = legal.coop_band_epilogue(tail)  # term-wide, so it is asked ONCE, not per candidate
     for p in coop_reduce_moves():
-        if not legal.enforce(legal.coop_band_layout(p, k_contig), pinned=False):
-            continue
         if p.needs_split and not p.coop_transposed:
             # A cross-CTA split is offered on this tier only in COMPOSITE with the transposed band
             # — every split candidate in the catalog is one, so this states the catalog's shape
@@ -932,15 +930,6 @@ def _band_of(plan: ReducePlan) -> Workers | None:
 
 
 # --- the contraction: tile x stage x reduce ---
-
-# Emit unpinned split-K candidates only when the output grid alone leaves the GPU under-occupied.
-_SPLITK_MAX_CTAS = 1024
-
-
-def _tile_area(plan: TilePlan) -> int:
-    """The output cells one CTA covers under ``plan`` — the occupancy denominator."""
-    am, an = (plan.atom.atom_m, plan.atom.atom_n) if plan.is_warp else (1, 1)
-    return max(plan.units_m * plan.reg_m * am * plan.units_n * plan.reg_n * an, 1)
 
 
 def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Stage | None:
@@ -1040,8 +1029,8 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
 
 def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     """The contraction's ``REDUCE`` candidates — serial first (option-0), then the legal coop / ILP
-    moves (per-cell tier only — the non-output-tiled contract) and the divisor- and occupancy-
-    guarded split-K moves. An ATOMIC split is offered only on a single-channel node whose FULL
+    moves (per-cell tier only — the non-output-tiled contract) and the divisor-legal split-K
+    moves. An ATOMIC split is offered only on a single-channel node whose FULL
     projection tail distributes over the add; the deferred kernel finalize stays legal for any
     epilogue."""
     pin = term.pin("REDUCE", node)
@@ -1065,20 +1054,17 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     splittable = k is not None and legal.enforce(legal.splitk_materialized_b(node), pinned=False)
     if k is not None and not plan.is_tiled:
         inner = _inner_free(term.place)
-        k_contig = term.k_contiguous(node)
         for p in coop_reduce_moves():
             if not (p.coop <= k and p.reg <= k):
                 continue
             if p.needs_split and not splittable:
-                continue
-            if not legal.enforce(legal.coop_band_layout(p, k_contig), pinned=False):
                 continue
             # The transposed lane swap also needs the structure its emitter assumes — the SAME
             # geometry the reduce tier requires, stated once in ``_legality``.
             if not legal.enforce(legal.coop_band_geometry(p, k, inner), pinned=False):
                 continue
             out.append(p)
-    if splittable and _free_cells(term.place) // _tile_area(plan) <= _SPLITK_MAX_CTAS:
+    if splittable:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
         atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
@@ -1147,9 +1133,6 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
 
 # --- the streaming pair: the two sites, then the stream that must agree with them ---
 
-#: The chain's register-vector budget — one thread holds the WHOLE output row.
-_CHAIN_MAX_D = 64
-
 
 def _narrowed(term: _Term, node, plans: list[TilePlan]) -> tuple[list[TilePlan], bool]:
     """``plans`` narrowed by the site's live ``TILE`` pin, and whether the pin SELECTED here.
@@ -1176,7 +1159,8 @@ def _chain_values(term: _Term, node, work: Workers | None) -> list[TilePlan]:
     grid and rides a per-thread REGISTER VECTOR, so the score is computed once per streamed key and
     shared across the columns (against the per-cell tier's redundant recompute per column). Offered
     on the ``""`` inventory (one thread per query row) when the value axis is the innermost grid
-    axis and small enough to hold — the register budget, a hand-measured ladder stop."""
+    axis; per-thread register pressure is the row's own measurable property, ranked by evidence
+    like any other candidate."""
     if work is not None:
         return []
     mn = term.sched.placed(node, TilePlan()).axes
@@ -1184,7 +1168,7 @@ def _chain_values(term: _Term, node, work: Workers | None) -> list[TilePlan]:
     if mn is None or not grid or grid[-1].name != mn[1].name or not mn[1].extent.is_static:
         return []
     d = mn[1].extent.as_static()
-    return [TilePlan(regs=(1, d))] if 1 < d <= _CHAIN_MAX_D else []
+    return [TilePlan(regs=(1, d))] if 1 < d else []
 
 
 def _twisted_values(term: _Term, site: Site, work: Workers | None, parent: _Node) -> list[dict]:
@@ -1311,12 +1295,7 @@ def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list
         reduces = [want]
     else:
         reduces = [ReducePlan()]
-        # Split-KV siblings on an under-occupied grid: the recorded entries need the rows OFFERED,
-        # and a grid that already fills the card has nothing to win from a split. The occupancy read
-        # is the WARP row's OWN launch grid — the shrunk query axis, the value axis gone — never the
-        # pre-tiled per-cell one, whose element grid would gate the splits off always.
-        if _stream_ctas(term, placed_qk, placed_pv) <= _SPLITK_MAX_CTAS:
-            reduces += [p for p in splitk_moves() if legal.enforce(legal.splitkv_slice(node, placed_qk, p), pinned=False)]
+        reduces += [p for p in splitk_moves() if legal.enforce(legal.splitkv_slice(node, placed_qk, p), pinned=False)]
     stages = _stream_stages(term, node, ctx, placed_qk, placed_pv)
     return [
         {"REDUCE": red, "STAGE": stage}
@@ -1324,18 +1303,6 @@ def _stream_values(term: _Term, node, work: Workers | None, kids: tuple) -> list
         for stage in stages
         if not (work is not None and work.producer and not legal.enforce(legal.producer_transport(stage, red), pinned=False))
     ]
-
-
-def _stream_ctas(term: _Term, qk: TilePlan, pv: TilePlan) -> int:
-    """How many CTAs a warp-streaming row launches — its own grid: every free axis but the value
-    dim (which folds into the P@V fragment), the query axis in CTA blocks."""
-    n = 1
-    for ax in term.place.free:
-        if ax.name == pv.n.axis.name:
-            continue
-        ext = _hint_extent(ax)
-        n *= -(-ext // qk.tile_m) if ax.name == qk.m.axis.name else ext
-    return n
 
 
 def _raster_values(term: _Term) -> list[str]:

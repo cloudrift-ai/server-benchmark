@@ -27,8 +27,7 @@ post-order):
 ## Why this needs the source-buffer dtype
 
 The decision needs the source-buffer dtype, read off the stamped
-``Load.dtype`` (``030_stamp_types``). Runs after ``040_demote_to_write_dtype``
-so the demote pass sees the original scalar Loads.
+``Load.dtype`` (``030_stamp_types``).
 
 ## Observed impact
 

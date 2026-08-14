@@ -122,7 +122,7 @@ class WeightSpec:
     ``apply_weight_loads``). ``load_ops`` is ``None`` when the graph carried a load op the
     grammar can't express — such a plan still runs, but can't rebind weights from a pack.
     ``source_parts`` mirrors ``ConstantOp.source_parts`` — ``(path, shape)`` pairs the binder
-    concatenates along axis 0 before the chain (``merge_sibling_linears``' weight concat);
+    concatenates along axis 0 before the chain (a multi-source weight concat);
     exactly one of ``source_path`` / ``source_parts`` is set. ``generated`` is the third,
     self-contained alternative for deterministic source-free bind records: ``(numpy dtype
     string, shape, raw bytes)``. Assemble the pre-chain source via

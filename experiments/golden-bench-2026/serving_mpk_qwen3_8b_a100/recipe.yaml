@@ -1,26 +1,11 @@
-# Megakernel comparison lane: four single-stream decode arms on one A100 80GB box, one task, five
-# fresh-process repeats per arm. MPK (Mirage Persistent Kernel) compiles a tensor program into one
-# persistent kernel that schedules all operators inside a single launch; Emmy generates one kernel
-# per fused operator and pays a launch per kernel. This lane measures how much of the decode step
-# that per-launch structure costs, not per-kernel code quality — see the README section.
+# Megakernel comparison lane: MPK and stock vLLM on one A100 80GB box, one task, five
+# fresh-process repeats per path. MPK (Mirage Persistent Kernel) compiles a tensor program into one
+# persistent kernel that schedules all operators inside a single launch.
 #
-# Arms (all on the same box, same checkpoint Qwen/Qwen3-8B):
+# Paths (all on the same box, same checkpoint Qwen/Qwen3-8B):
 #   mpk_base  — MPK's own kernel-per-operator harness: demo/qwen3/demo.py (Triton/FlashInfer)
 #   mpk_mega  — the same harness compiled to a megakernel: demo/qwen3/demo.py --use-mirage
 #   stock     — vLLM serve (pip vllm==0.23.0) driven by `vllm bench serve`, 128 in / 512 out, c=1
-#   emmy      — the same vLLM boot through the emmy plugin (EmmyGenModel), same client point
-#
-# Interpretation rule: ratios are paired WITHIN a harness (mpk_mega/mpk_base; emmy/stock). Across
-# harnesses only the per-output-token decode latency is comparable (MPK's self-reported per-step
-# latency vs the vLLM lanes' TPOT), and the vLLM lanes carry serving-stack overhead the MPK demo
-# does not; intelligent review states that caveat next to any cross-harness number.
-#
-# The emmy arm is DEFERRED until a tuned A100 baseline exists (golden tier / online evidence for
-# Qwen3-8B on this platform), so the comparison is not made against a cold deploy. As written the
-# arm boots on isolated evidence state (fresh tune DB, online checkpoint, cubin cache) — the cold
-# fallback; point the EMMY_* paths at the tuned evidence when it lands. The first emmy boot
-# compiles per-program artifacts; later repeats hit the cubin cache. The health wait is sized for
-# that first boot.
 #
 # Repro on a pre-allocated A100 (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
@@ -41,11 +26,8 @@ command:
     REV=b968826d9c46dd6066d109eabc6255188de91218
     MIRAGE_REV=5c28cc68dc621cc9448c5c9882ef9e21fdc85884
     export CUDA_VISIBLE_DEVICES=$gpu_device_ids
-    export EMMY_TUNE_DB=$task_dir/autotune.db
-    export EMMY_ONLINE_FILE=$task_dir/online.json
-    export EMMY_CUBIN_CACHE=$task_dir/cubins
 
-    # --- MPK arms: the pinned mpk-branch demo pair in its own environment ---
+    # --- MPK paths: the pinned mpk-branch demo pair in its own environment ---
     MPK=$task_dir/mirage
     if [ ! -d "$$MPK" ]; then
       git clone --recursive https://github.com/mirage-project/mirage $$MPK
@@ -60,7 +42,7 @@ command:
         > $task_dir/mpk_mega_r$$repeat.txt 2>&1
     done
 
-    # --- vLLM arms: stock and emmy-plugin boots of the same checkpoint, fresh server per repeat ---
+    # --- Stock vLLM: fresh server per repeat ---
     server_pid=
     stop() {
       if [ -n "$$server_pid" ]; then
@@ -90,12 +72,6 @@ command:
       wait_health $task_dir/stock_serve_r$$repeat.log
       bench stock_r$$repeat.txt
       stop
-      EMMY_GEN_DECODE_BUCKET=32 setsid ./venv/bin/emmy serve $$MODEL --generate --revision $$REV \
-        --dtype bfloat16 --max-model-len 4096 --no-enable-prefix-caching --port 8010 \
-        > $task_dir/emmy_serve_r$$repeat.log 2>&1 &
-      server_pid=$$!
-      wait_health $task_dir/emmy_serve_r$$repeat.log
-      bench emmy_r$$repeat.txt
     done
     stop
     trap - EXIT

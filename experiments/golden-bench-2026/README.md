@@ -134,7 +134,7 @@ measure Emmy compiler speedup and are not inputs to the protocol-only kernel lan
 | 8x A100 | DeepSeek-V4-Flash-0731 EXL3 3.04 bpw, TP8 | New checkpoint on an older serving platform | Stretch compatibility/refusal study; requires an Emmy arm |
 | 8x H200 | GLM-5.2 FP8, TP8 | Primary datacenter serving system | Stock qualification until an Emmy arm and TP8 manifest exist |
 | 8x B200 | GLM-5.2 NVFP4, TP8 with expert parallelism | Same architecture on Blackwell | Optional stock qualification until matched evidence exists |
-| 1x A100 | Qwen3-8B BF16, TP1 | Four-arm megakernel (MPK) decode comparison | MPK pair + stock measured; Emmy arm awaits tuned baseline |
+| 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 
 All serving points disable prefix caching and use seed 0, temperature 0, and ignored EOS. Each point expands to five
 tasks with `benchmark.repeats: 1`, so every observation receives a fresh deployed server instead of five clients
@@ -179,31 +179,25 @@ never a rerun reason; after a code/configuration fix, restart the entire 40-task
 
 ## Megakernel comparison lane
 
-`serving_mpk_qwen3_8b_a100` compares Emmy's kernel-per-launch serving structure with a megakernel system: MPK
-(Mirage Persistent Kernel, arXiv 2512.22219) compiles a tensor program into one persistent kernel whose in-kernel
-scheduler runs every operator inside a single launch, eliminating per-kernel launch and synchronization gaps. Four
-arms run on one A100 80GB with the same pinned Qwen/Qwen3-8B checkpoint and five fresh-process repeats each: MPK's
-own kernel-per-operator demo harness, the same harness with `--use-mirage` (the megakernel), stock vLLM, and the
-Emmy plugin, the two vLLM arms driven by one single-stream 128-in/512-out decode point with the suite's
-deterministic controls. The mirage source and model revisions are pinned in the recipe.
+`serving_mpk_qwen3_8b_a100` runs vLLM and MPK (Mirage Persistent Kernel, arXiv 2512.22219). MPK compiles a tensor
+program into one persistent kernel whose in-kernel scheduler runs every operator inside a single launch. Three paths
+run on one A100 80GB with the same pinned Qwen/Qwen3-8B checkpoint and five fresh-process repeats each: MPK's own
+kernel-per-operator demo harness, the same harness with `--use-mirage`, and stock vLLM driven by one single-stream
+128-in/512-out decode point with the suite's deterministic controls. The mirage source and model revisions are pinned
+in the recipe.
 
-Interpretation is bounded in three ways. First, ratios pair only within a harness — megakernel over MPK's baseline,
-Emmy over stock; across harnesses only per-output-token decode latency is comparable, and the vLLM arms carry
-serving-stack overhead the MPK demo does not. Second, the lane measures what whole-model launch fusion buys at
-single-stream decode, not per-kernel code quality; it is not an input to any kernel-corpus geometric mean. Third,
-the Emmy arm awaits a tuned A100 baseline so the comparison is not made against a cold deploy; the megakernel pair
-is unaffected. MPK targets Ampere/Hopper datacenter GPUs, so this lane cannot extend to the suite's older or
-consumer platforms.
+The MPK paths use MPK's demo harness while the vLLM path includes its serving stack, so the recipe preserves their raw
+outputs without interpreting or comparing them. The lane is not an input to any kernel-corpus geometric mean. MPK
+targets Ampere/Hopper datacenter GPUs, so this lane cannot extend to the suite's older or consumer platforms.
 
-Every arm is additionally positioned against a device-calibrated roofline, reusing the boot audit's calibrations
+Every path is additionally positioned against a device-calibrated roofline, reusing the boot audit's calibrations
 (`emmy/serving/roofline.py`: measured device-to-device copy bandwidth and measured f16 dense-matmul throughput —
 no specification-sheet peaks). The decode-step floor is the checkpoint's streamed weight bytes (all parameters
 except the embedding matrix, of which decode reads one row) over measured copy bandwidth; the compute floor is
 negligible at single-token decode. The same calibrations define the per-kernel headroom metric — measured kernel
 latency over max(weight-streaming floor, compute floor) for that kernel's weight bytes and token width — which
 decomposes an end-to-end decode gap into per-kernel code headroom versus inter-kernel launch and scheduling gaps.
-The per-kernel table requires the tuned Emmy arm's kernel inventory and ships with it; until then the lane reports
-only whole-step roofline positions.
+This recipe preserves the raw MPK and vLLM outputs; any separate analysis owns the roofline calculations.
 
 ## Intelligent publication review
 

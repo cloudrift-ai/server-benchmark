@@ -599,6 +599,7 @@ def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, st
                 output=output,
             )
         )
+
     # Only a repair may lead the cold option 0: a re-fusing recomposition (spelled ``fuse``)
     # strictly shrinks memory, and the nested-reduction lift strictly shrinks work (the raw
     # fused reading replays the inner fold per outer cell — the reading recognition keeps only

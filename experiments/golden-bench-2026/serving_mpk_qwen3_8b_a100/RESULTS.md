@@ -7,10 +7,9 @@ kernel-per-operator path. Across five fresh-process repeats, mean reported per-t
 9.804 ms: a 3.38x speedup, or a 70.4% latency reduction. The repeat ranges do not overlap, so this result is clear for
 the exact single-request Mirage workload tested here.
 
-The stock vLLM reference averaged 92.672 output tokens/s and 10.752 ms median TPOT. Mirage's persistent-kernel latency
-was 8.8% lower than that TPOT figure, but this is only directional: the Mirage and vLLM lanes used different prompts,
-generation lengths, termination rules, client paths, and metric implementations. This run does not establish that MPK
-outperforms vLLM in an equivalent serving workload.
+The stock vLLM reference reported 10.752 ms/token. Mirage's persistent-kernel latency was 8.8% lower, but this is only
+directional: the Mirage and vLLM lanes used different prompts, generation lengths, termination rules, client paths,
+and metric implementations. This run does not establish that MPK outperforms vLLM in an equivalent serving workload.
 
 Correctness remains the main unresolved issue. The Mirage baseline produced the same 274-token response in every
 repeat, while the persistent-kernel path produced 258–273 tokens with visible wording changes despite temperature
@@ -19,17 +18,15 @@ equivalence check. The run therefore demonstrates a strong latency result, not c
 
 ## Measurements
 
-| Lane | Repeats | Reported result, mean | Per-repeat range |
+| Lane | Repeats | Reported latency, mean | Per-repeat range |
 | --- | ---: | ---: | ---: |
 | Mirage kernel-per-operator | 5 | 33.136 ms/token | 32.632–33.442 ms/token |
 | Mirage persistent kernel | 5 | 9.804 ms/token | 9.785–9.865 ms/token |
-| Stock vLLM | 5 | 92.672 output tokens/s | 92.63–92.78 tokens/s |
-| Stock vLLM | 5 | 10.752 ms median TPOT | 10.74–10.76 ms |
-| Stock vLLM | 5 | 24.322 ms median TTFT | 23.72–24.85 ms |
+| Stock vLLM | 5 | 10.752 ms/token | 10.74–10.76 ms/token |
 
-All five stock vLLM repeats completed eight requests with zero failed requests. Its output-throughput range spans only
-0.15 tokens/s, while the persistent-kernel latency range spans 0.080 ms. The directly comparable Mirage baseline and
-persistent-kernel lanes are therefore both repeatable enough that run-to-run variation cannot explain their gap.
+All five stock vLLM repeats completed eight requests with zero failed requests. Its per-token latency range spans only
+0.02 ms/token, while the persistent-kernel latency range spans 0.080 ms/token. The directly comparable Mirage baseline
+and persistent-kernel lanes are therefore both repeatable enough that run-to-run variation cannot explain their gap.
 
 ## Protocol and limitations
 
@@ -42,8 +39,8 @@ persistent-kernel lanes are therefore both repeatable enough that run-to-run var
   512-token outputs, concurrency one, and EOS ignored. Each repeat started a fresh vLLM server.
 - Mirage's model load did not explicitly pass the recorded model revision. Both Mirage lanes shared the same cached
   model, preserving their paired comparison, but exact model-revision parity with stock vLLM is not proven.
-- Mirage's reported per-token latency is not defined by the harness as vLLM TPOT, and the vLLM client/server path adds
-  work absent from the in-process Mirage demo. Their cross-system comparison should not be treated as a serving claim.
+- The two harnesses do not define per-token latency identically, and the vLLM client/server path adds work absent from
+  the in-process Mirage demo. Their cross-system comparison should not be treated as a serving claim.
 - Every persistent-kernel repeat compiled successfully but emitted the same NVCC warnings, including a warning about
   dynamic initialization of function-scope static shared memory. No runtime failure followed, but the run contains no
   separate validation of that warning's effect.

@@ -12,6 +12,7 @@ guarantees the extraction from the original fit script must keep:
 """
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -19,17 +20,17 @@ import pytest
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_L2,
-    PARAM_NAMES,
     Group,
-    TwoStageFit,
-    build_artifact,
+    LinearFit,
+    LinearTrainer,
     feature_matrix,
     fit_weights,
     gate_columns,
-    objective,
+    mean_log_rank,
     rank_of_golden,
     raw_weights,
 )
+from emmy.compiler.pipeline.search.prior.linear_model import GATE_DEFAULTS, LinearModel, gate_values
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # Seed for the fitted scalar params — the interaction OFF at the shipped threshold, the state a
@@ -53,30 +54,32 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
             row = {n: float(rng.integers(-4, 5)) for n in names}
             feats.append({k: v for k, v in row.items() if rng.random() > 0.25})
         tier = ["thread", "warp", "reduce", "dyn"][c % 4]
+        # The dynamic cases carry the routing stamp on every row, as the golden case builder writes
+        # it; ``Group.from_dicts`` lifts it into ``Group.dynamic`` and out of the fitted matrix.
+        if tier == "dyn":
+            feats = [{**f, "S_ext_n_symbolic_axis": 1.0} for f in feats]
         cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", int(rng.integers(0, n_rows)), feats))
     return cases, names
 
 
+# The incumbent a synthetic fit chains from: no weights to warm-start (the fits below set
+# ``warm_start=False`` anyway), the interaction seeded OFF at the shipped threshold, and the shipped
+# exp scale — which the trainer carries into the fitted model rather than fitting.
+SEED_MODEL = LinearModel(
+    weights={}, weights_dynamic=None, scale=0.1, atomic_free_weight=float(SEED_PARAMS[0]), atomic_free_split_threshold=float(SEED_PARAMS[1])
+)
+
+
+def _trainer(names, samples=200, **kwargs):
+    return LinearTrainer(feature_names=tuple(names), init=SEED_MODEL, samples=samples, random_state=0, warm_start=False, **kwargs)
+
+
 def _run_fit(samples=200):
-    """The script's two-stage fit (static, then dynamic seeded from static) on the
-    fixed synthetic case set, assembled into artifact JSON bytes."""
+    """One trainer invocation on the fixed synthetic case set, as artifact JSON bytes."""
     cases, names = _synthetic_cases()
-    static_cases = [c for c in cases if c.tier != "dyn"]
-    dyn_cases = [c for c in cases if c.tier == "dyn"]
-    rng = np.random.default_rng(0)
-    static_w, params, _, _, static_sd = fit_weights(
-        static_cases, names, np.ones(len(names)), seed_w=np.zeros(len(names)), seed_params=SEED_PARAMS, rng=rng, samples=samples
-    )
-    dyn_w, _, _, _, dyn_sd = fit_weights(
-        dyn_cases, names, static_sd, seed_w=static_w, seed_params=params, rng=rng, samples=samples, fit_params=False
-    )
-    artifact = build_artifact(
-        weights=raw_weights(names, static_w, static_sd),
-        weights_dynamic=raw_weights(names, dyn_w, dyn_sd),
-        params={"scale": 0.1, **dict(zip(PARAM_NAMES, params, strict=True))},
-        provenance={"fitted": "2026-01-01", "script": "test", "args": {"samples": samples, "seed": 0}},
-    )
-    return json.dumps(artifact, indent=2)
+    fit = _trainer(names, samples).fit(cases)
+    provenance = {"fitted": "2026-01-01", "script": "test", "args": {"samples": samples, "seed": 0}}
+    return json.dumps(fit.model.to_artifact(provenance=provenance), indent=2)
 
 
 # --- determinism / byte-identity ---------------------------------------------------
@@ -87,6 +90,38 @@ def test_fit_twice_is_byte_identical():
     assert a == b
     art = json.loads(a)
     assert art["weights"] and art["weights_dynamic"]  # a real fit, not an empty pass-through
+
+
+def test_one_trainer_instance_refits_identically():
+    """``fit`` is pure: the same trainer instance fitted twice returns equal models, and fitting
+    does not mutate the trainer. That is what lets ONE instance serve every cross-validation fold
+    with no copying — the property an sklearn-style ``clone`` would otherwise have to provide."""
+    cases, names = _synthetic_cases()
+    trainer = _trainer(names, samples=20)
+    first, second = trainer.fit(cases), trainer.fit(cases)
+    assert first.model == second.model
+    assert first.static_ranks == second.static_ranks
+    assert trainer == _trainer(names, samples=20)
+    # A fit with no dynamic groups leaves that weight set unfitted rather than substituting one,
+    # and says so in the provenance line the artifact records.
+    static_only = trainer.fit([c for c in cases if not c.dynamic])
+    assert static_only.model.weights_dynamic is None and static_only.dyn_ranks is None
+    assert "no dynamic cases" in static_only.notes and "dynamic top1" in first.notes
+
+
+def test_fitting_one_slice_does_not_perturb_the_next():
+    """Fold independence. ``run_axis`` used to hand each fold a fresh ``default_rng(seed)``; that
+    guarantee now lives inside ``fit``, which builds its own RNG from ``random_state``. So fitting
+    slice A and then slice B must give B exactly what fitting B alone gives — otherwise a fold's
+    result would depend on how many folds ran before it, and adding one golden family would silently
+    move every later fold's numbers."""
+    cases, names = _synthetic_cases()
+    trainer = _trainer(names, samples=20)
+    a, b = cases[:4], cases[2:]
+    trainer.fit(a)
+    after_a = trainer.fit(b)
+    assert after_a.model == trainer.fit(b).model  # same trainer, no carried RNG state
+    assert after_a.model == _trainer(names, samples=20).fit(b).model  # and none carried on the object either
 
 
 def test_built_artifact_loads_through_offline_prior(tmp_path, monkeypatch):
@@ -138,32 +173,67 @@ def test_incumbent_weights_rank_identically_through_fit_eval_and_prior(monkeypat
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_fit_scores_the_deployed_quality_interaction_included(dynamic, monkeypatch):
-    """The fit's ``score_rows`` and the deployed ``OfflinePrior`` are the SAME function, on rows
-    that exercise the atomic-free interaction (both sides of its split threshold) — the invariant
-    that makes the fitted objective the deployed ranking. Scored with the interaction ON, since
-    the shipped weight is 0.0 and a zero term would make the comparison vacuous."""
+def test_dict_and_matrix_paths_score_identically(dynamic, monkeypatch):
+    """One definition, two access shapes. :meth:`LinearModel.quality` scores a live candidate from a
+    feature dict; the fitter scores a packed pool as a matrix. They must agree row for row, including
+    the atomic-free interaction on both sides of its split threshold (scored with the interaction ON,
+    since the shipped weight is 0.0 and a zero term would make the comparison vacuous).
+
+    This also pins the routing agreement, which is the part that CAN break: the dict path reads the
+    symbolic-axis stamp off the row it is scoring, the matrix path reads ``Group.dynamic`` off the
+    pool. Same rows, so they must land on the same weight set."""
     monkeypatch.delenv("EMMY_OFFLINE_FILE", raising=False)
     art = json.loads(_DEFAULT_FILE.read_text())
     params = {"atomic_free_weight": 5.0, "atomic_free_split_threshold": 4.0}
-    prior = OfflinePrior(weights=art["weights"], weights_dynamic=art["weights_dynamic"], scale=0.1, **params)
-    fit = TwoStageFit(art["weights"], [], art["weights_dynamic"], [], params)
+    # ONE model object behind both paths — the prior scores dicts through it, the fit scores matrices.
+    model = LinearModel(weights=art["weights"], weights_dynamic=art["weights_dynamic"], scale=0.1, **params)
+    prior, fit = OfflinePrior(model=model), LinearFit(model, [], [])
 
     rng = np.random.default_rng(11)
     names = sorted(set(art["weights"]) | _INTERACTION_FEATURES)
+    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
     rows = [
         {
             **{n: float(rng.integers(-2, 3)) for n in names if rng.random() > 0.3},
             "D_finalize_kernel": float(rng.integers(0, 2)),
             "D_splitk": float(rng.choice([1, 2, 4, 8])),  # straddles the threshold in both directions
+            **stamp,
         }
         for _ in range(60)
     ]
-    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
     group = Group.from_dicts("x/case", "case", "dyn" if dynamic else "warp", "x", 0, rows)
+    assert group.dynamic is dynamic  # routed by the rows' stamp, not the tier label
     fitted = fit.score_rows(group)
-    deployed = np.array([prior.quality({**row, **stamp}) for row in rows])
+    deployed = np.array([prior.quality(row) for row in rows])
     assert np.allclose(fitted, deployed)
+
+
+def test_model_artifact_round_trips():
+    """``LinearModel`` → artifact → ``LinearModel`` is exact, so the file a fit ships and the model
+    that produced it rank identically. The params block keeps its full key set (order is free — the
+    writer preserves insertion order, so only the shape matters here)."""
+    art = json.loads(_DEFAULT_FILE.read_text())
+    model = LinearModel.from_artifact(art)
+    assert LinearModel.from_artifact(model.to_artifact(provenance={})) == model
+    assert model.to_artifact(provenance={})["params"] == art["params"]
+
+
+def test_gate_values_and_gate_columns_agree_including_the_defaults():
+    """The interaction's two inputs are read one way for a dict and another for a matrix, and both
+    must yield the same numbers — including for a featurization that omits them, where the defaults
+    are the whole answer. Both now read :data:`GATE_DEFAULTS`, so this pins that they stay in step,
+    and that its ORDER is the order ``atomic_free_term`` takes its positional arguments in."""
+    assert tuple(GATE_DEFAULTS) == ("D_finalize_kernel", "D_splitk")  # finalize first, as the term reads them
+
+    present = {"D_finalize_kernel": 1.0, "D_splitk": 8.0}
+    absent: dict[str, float] = {"D_other": 3.0}
+    for feats in (present, absent):
+        # Like for like: a pool's column list IS its rows' feature names, which is what makes "the
+        # name is missing" and "the key is missing" the same condition on the two sides.
+        names = sorted(feats)
+        cols = gate_columns(feature_matrix([feats], names), names)
+        assert [float(c[0]) for c in cols] == list(gate_values(feats))
+    assert gate_values(absent) == tuple(GATE_DEFAULTS.values())  # nothing stamped → the declared defaults
 
 
 def test_gate_columns_survive_the_in_place_z_scoring():
@@ -189,8 +259,7 @@ def _cases_with_flat_feature():
     behind the D_pow2_threads 686 incident, in miniature."""
     cases, names = _synthetic_cases()
     flat_cases = [
-        Group(g.key, g.name, g.tier, g.gpu, g.pinned_idx, (*g.feat_names, "D_flat"), np.hstack([g.feats, np.full((len(g.feats), 1), 3.0)]))
-        for g in cases
+        replace(g, feat_names=(*g.feat_names, "D_flat"), feats=np.hstack([g.feats, np.full((len(g.feats), 1), 3.0)])) for g in cases
     ]
     return flat_cases, [*names, "D_flat"]
 
@@ -221,7 +290,7 @@ def test_l2_heals_poisoned_seed_on_rank_flat_feature():
         healed[l2] = (raw_weights(names, w, sd), ranks)
     assert abs(healed[0.0][0]["D_flat"] - 5.0) < 1e-9  # unregularized: the poison survives
     assert abs(healed[DEFAULT_L2][0].get("D_flat", 0.0)) < 0.5  # regularized: walked to ~zero
-    assert objective(healed[DEFAULT_L2][1]) <= objective(base_ranks) + 1e-9  # rank quality held or improved
+    assert mean_log_rank(healed[DEFAULT_L2][1]) <= mean_log_rank(base_ranks) + 1e-9  # rank quality held or improved
 
 
 def test_l2_default_is_rank_neutral_on_random_restart():
@@ -244,4 +313,4 @@ def test_l2_default_is_rank_neutral_on_random_restart():
             l2=l2,
         )
         ranks[l2] = r
-    assert objective(ranks[DEFAULT_L2]) <= objective(ranks[0.0]) + 1e-9
+    assert mean_log_rank(ranks[DEFAULT_L2]) <= mean_log_rank(ranks[0.0]) + 1e-9

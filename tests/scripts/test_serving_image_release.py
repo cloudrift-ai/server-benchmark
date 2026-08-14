@@ -68,6 +68,22 @@ def test_python_slug_matches_the_shell_schema():
         assert library_model_slug(model) == slug(model)
 
 
+def test_gemma_base_and_instruction_release_configs_use_distinct_goldens():
+    """Weight siblings may share geometry but cannot share evidence when their serialized targets differ."""
+
+    def values(name: str) -> dict[str, str]:
+        return dict(
+            line.split("=", 1)
+            for line in (SERVE_DIR / "models" / name).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "=" in line
+        )
+
+    base = values("gemma-4-12b.env")
+    instruction = values("gemma-4-12b-it.env")
+    assert base["SERVE_GOLDEN_FILE"].endswith("/rtx5090_sm120_gemma4_base.yaml")
+    assert instruction["SERVE_GOLDEN_FILE"].endswith("/rtx5090_sm120_gemma4.yaml")
+
+
 @pytest.mark.parametrize(
     "golden_model, target, want",
     [
@@ -162,6 +178,7 @@ OPTIONAL_KEYS = {
     "SERVE_PREFILL_CAPACITY",
     "SERVE_PREFILL_BUCKET",
     "SERVE_M1_TIER",
+    "SERVE_V2_MODEL_RUNNER",
     "SERVE_STATIC_ONLY",
     "SERVE_CONSULT_BASELINE",
 }
@@ -281,7 +298,8 @@ def render_serve_runner_env(tmp_path: Path, env: dict[str, str]) -> list[str]:
     stub = stub_dir / "python3"
     stub.write_text(
         "#!/bin/sh\n"
-        "for name in EMMY_GEN_EMBED_HOST EMMY_GEN_PREFILL_CAPACITY EMMY_GEN_PREFILL_BUCKET EMMY_GEN_M1_TIER; do\n"
+        "for name in EMMY_GEN_EMBED_HOST EMMY_GEN_PREFILL_CAPACITY EMMY_GEN_PREFILL_BUCKET EMMY_GEN_M1_TIER "
+        "VLLM_USE_V2_MODEL_RUNNER; do\n"
         '  value=$(printenv "$name") && printf "%s=%s\\n" "$name" "$value" || printf "%s=UNSET\\n" "$name"\n'
         "done\n"
     )
@@ -404,7 +422,19 @@ def test_serve_sh_unsets_empty_optional_runner_envs(tmp_path):
         "EMMY_GEN_PREFILL_CAPACITY=UNSET",
         "EMMY_GEN_PREFILL_BUCKET=UNSET",
         "EMMY_GEN_M1_TIER=UNSET",
+        "VLLM_USE_V2_MODEL_RUNNER=UNSET",
     ]
+
+
+def test_serve_sh_maps_the_qualified_v2_runner_opt_in(tmp_path):
+    env = {
+        "SERVE_MODEL": "org/model",
+        "SERVE_MAX_MODEL_LEN": "128",
+        "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
+        "SERVE_GPU_MEM_UTIL": "0.9",
+        "SERVE_V2_MODEL_RUNNER": "1",
+    }
+    assert render_serve_runner_env(tmp_path, env)[-1] == "VLLM_USE_V2_MODEL_RUNNER=1"
 
 
 def test_runner_memory_config_is_warm_bake_verify_cache_parity():
@@ -417,6 +447,7 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
         "SERVE_PREFILL_CAPACITY": ("PREFILL_CAPACITY", "EMMY_GEN_PREFILL_CAPACITY"),
         "SERVE_PREFILL_BUCKET": ("PREFILL_BUCKET", "EMMY_GEN_PREFILL_BUCKET"),
         "SERVE_M1_TIER": ("M1_TIER", "EMMY_GEN_M1_TIER"),
+        "SERVE_V2_MODEL_RUNNER": ("V2_MODEL_RUNNER", "SERVE_V2_MODEL_RUNNER"),
     }
     for serve, (build_arg, emmy) in mappings.items():
         assert serve in OPTIONAL_KEYS
@@ -424,6 +455,19 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
         assert f"ARG {build_arg}=" in dockerfile and f'{emmy}="${{{build_arg}}}"' in dockerfile
         assert f"--build-arg {build_arg}=$({serve})" in make
         assert serve in verify and emmy in verify
+
+
+def test_release_bakes_and_verifies_the_request_time_triton_cache():
+    warm = (SERVE_DIR / "warm.sh").read_text()
+    dockerfile = (SERVE_DIR / "Dockerfile").read_text()
+    verify = (SERVE_DIR / "verify.sh").read_text()
+
+    assert "warm/triton" in warm
+    assert "TRITON_CACHE_DIR=/opt/emmy/triton" in warm
+    assert "COPY warm/triton /opt/emmy/triton" in dockerfile
+    assert "TRITON_CACHE_DIR=/opt/emmy/triton" in dockerfile
+    assert "Triton kernel JIT compilation during inference" in verify
+    assert "jit_before" in verify and "jit_after" in verify
 
 
 def test_serving_images_carry_canonical_publication_labels():

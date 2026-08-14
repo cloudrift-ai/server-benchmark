@@ -2,10 +2,11 @@
 
 This module is the ONE place quantization-as-a-concept exists (together with the
 safetensors loader that reads the checkpoint and ``trace/huggingface.py``'s
-architecture-twin construction). Two checkpoint families share the design — FP8
-(scale-paired bits, ``quant_method: "fp8"`` / compressed-tensors) and EXL3
-(trellis-coded sibling tensors, ``quant_method: "exl3"``; decode math in
-``loader/exl3.py``). Per family:
+architecture-twin construction). Three checkpoint families share the design — FP8
+(scale-paired bits, ``quant_method: "fp8"`` / compressed-tensors), AWQ GEMM
+(packed int4 ``qweight`` / ``qzeros`` plus group scales), and EXL3 (trellis-coded
+sibling tensors, ``quant_method: "exl3"``; decode math in ``loader/exl3.py``).
+Per family:
 
 - Pure numpy fp8 math: :func:`decode_f8` (re-exported from
   :mod:`emmy.compiler.dtype`, the leaf module the LUT lives in so the
@@ -20,6 +21,10 @@ architecture-twin construction). Two checkpoint families share the design — FP
   weight is just constants + algebra, and the cone stays in-graph so the
   compressed device storage reaches the ordinary lowering and scheduling rules
   (``032_fold_constant_subgraphs`` declines every storage-decode cone).
+- :func:`spell_dynamic_fp8_activations`: when the same checkpoint explicitly
+  declares dynamic activation scaling, wrap each eligible linear input in the
+  per-row amax / encode / decode algebra. The graph then carries the checkpoint's
+  W8A8 computation directly; later passes still see only dtypes and tensor algebra.
 - :func:`spell_quantized_inputs`: the input-sourced twin of the constant
   speller for graphs whose weights are forward-argument ``InputOp``s (the MoE
   serving seam's expert programs). Each named input becomes an fp8 bits input
@@ -31,10 +36,9 @@ architecture-twin construction). Two checkpoint families share the design — FP
   semantics, consumed scales dropped, have no graph counterpart).
 - :func:`spell_trellis_constants` and :func:`spell_trellis_inputs`: EXL3
   checkpoint siblings and their sole linear consumer are rewritten together at
-  graph birth into the format-neutral factorized algebra in loader/trellis.py.
-  No materialized decoded-weight fallback enters the compiler. Checkpoint
-  metadata stops in the loader; only generic tensor and layout operations enter
-  decomposition.
+  graph birth in loader/trellis.py. The serving trunk, experts, and coded output
+  head all use the same format-neutral factorized algebra. No materialized
+  decoded-weight fallback enters the compiler.
   :func:`load_dequantized_state_dict` uses the same decode for the eager twin.
 """
 
@@ -63,6 +67,11 @@ F8_SAFETENSORS_DTYPES: dict[str, str] = {"F8_E4M3": "f8e4m3", "F8_E5M2": "f8e5m2
 # selects codebook 1 / 2), and the legacy packed sign words of old checkpoints. ``bias``
 # is NOT here — it is a plain tensor the twin/loader reads by its own key.
 _EXL3_SIBLING_LEAVES = ("suh", "svh", "mcg", "mul1", "su", "sv")
+
+# AutoAWQ GEMM stores eight output-channel nibbles in one i32 word using
+# ``[0, 2, 4, 6, 1, 3, 5, 7]`` as the pack order. Reading the shifts in this
+# inverse order emits logical output channels directly, without a gather.
+_AWQ4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
 
 
 def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) -> np.ndarray:
@@ -135,6 +144,70 @@ def _exl3_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
+def _awq_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's AWQ declaration, when it is the GEMM int4 layout.
+
+    Emmy's spelling below implements the canonical AutoAWQ/vLLM GEMM layout:
+    eight output-channel nibbles per i32 word, per-input-channel groups, and
+    explicit zero points. Other AWQ layouts must not be mistaken for it.
+    """
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.exists():
+        return None
+    qc = json.loads(cfg_path.read_text()).get("quantization_config")
+    if not isinstance(qc, dict) or qc.get("quant_method") != "awq":
+        return None
+    bits = int(qc.get("bits", qc.get("w_bit", 0)) or 0)
+    version = str(qc.get("version", "gemm")).lower()
+    if bits != 4 or version != "gemm" or qc.get("zero_point", True) is not True:
+        raise ValueError(
+            "unsupported AWQ checkpoint: Emmy requires GEMM int4 with explicit zero points "
+            f"(bits={bits}, version={version!r}, zero_point={qc.get('zero_point')!r})"
+        )
+    return qc
+
+
+def is_awq_checkpoint(model_dir) -> bool:
+    """Whether the checkpoint declares the supported packed AWQ GEMM scheme."""
+    return _awq_quant_config(Path(model_dir)) is not None
+
+
+def unpack_awq4(packed: np.ndarray) -> np.ndarray:
+    """Unpack AutoAWQ GEMM i32 words to logical int4 output channels.
+
+    The returned shape is ``(*packed.shape[:-1], packed.shape[-1] * 8)``.
+    Unsigned views avoid implementation-defined signed shifts; masking then
+    returns values in ``[0, 15]`` exactly.
+    """
+    words = np.asarray(packed)
+    if words.ndim != 2 or words.dtype not in (np.dtype(np.int32), np.dtype(np.uint32)):
+        raise ValueError(f"AWQ packed tensor must be rank-2 i32/u32, got shape={words.shape}, dtype={words.dtype}")
+    shifts = np.asarray(_AWQ4_LOGICAL_SHIFTS, dtype=np.uint32)
+    unpacked = (words.astype(np.uint32, copy=False)[..., None] >> shifts) & np.uint32(0xF)
+    return unpacked.reshape(words.shape[0], words.shape[1] * 8).astype(np.int8)
+
+
+def dequantize_awq4(qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray, group_size: int) -> np.ndarray:
+    """Decode one AutoAWQ GEMM weight to its ``(in, out)`` value matrix."""
+    qweight = np.asarray(qweight)
+    qzeros = np.asarray(qzeros)
+    scales = np.asarray(scales)
+    if qweight.ndim != 2 or qzeros.ndim != 2 or scales.ndim != 2:
+        raise ValueError(f"AWQ qweight/qzeros/scales must be rank-2, got {qweight.shape}, {qzeros.shape}, {scales.shape}")
+    k, packed_n = qweight.shape
+    groups, zero_packed_n = qzeros.shape
+    n = packed_n * 8
+    effective_group = k if int(group_size) == -1 else int(group_size)
+    if effective_group <= 0 or groups * effective_group != k:
+        raise ValueError(f"AWQ group geometry {groups} x {effective_group} does not cover input size {k}")
+    if zero_packed_n != packed_n or scales.shape != (groups, n):
+        raise ValueError(f"AWQ sibling geometry mismatch: qweight={qweight.shape}, qzeros={qzeros.shape}, scales={scales.shape}")
+    integers = unpack_awq4(qweight).astype(np.float32)
+    zeros = np.repeat(unpack_awq4(qzeros), effective_group, axis=0).astype(np.float32)
+    scale_values = np.repeat(scales.astype(np.float32), effective_group, axis=0)
+    return (integers - zeros) * scale_values
+
+
 def is_exl3_checkpoint(model_dir) -> bool:
     """Whether the checkpoint declares the EXL3 scheme.
 
@@ -189,6 +262,8 @@ def checkpoint_quant_summary(model_dir) -> str:
         return f"exl3 {qc.get('bits')} bpw (head {qc.get('head_bits')})"
     if (qc := _fp8_quant_config(model_dir)) is not None:
         return f"fp8 {qc.get('fmt') or qc.get('quant_method')}"
+    if (qc := _awq_quant_config(model_dir)) is not None:
+        return f"awq int{qc.get('bits')} g{qc.get('group_size', qc.get('q_group_size'))} {qc.get('version', 'gemm')}"
     return "unquantized"
 
 
@@ -205,7 +280,7 @@ def engine_config_overrides(hf_config) -> dict:
     call site because naming a checkpoint scheme is frontend-band knowledge."""
     scheme = getattr(hf_config, "quantization_config", None)
     method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
-    return {"quantization_config": None} if method == "exl3" else {}
+    return {"quantization_config": None} if method in {"exl3", "awq"} else {}
 
 
 def strip_engine_quant_config(hf_config) -> None:
@@ -245,7 +320,7 @@ def _is_skipped(weight_key: str, patterns: list[str]) -> bool:
 
 
 def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
-    """Every checkpoint tensor as numpy VALUES, fp8 weights dequantized by their paired scale.
+    """Every checkpoint tensor as numpy VALUES, including supported coded weights.
 
     Feeds the architecture twin of a quantized checkpoint (see
     ``trace.huggingface.load_quantized_twin``) so the eager / accuracy reference
@@ -264,6 +339,9 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     the consumed siblings are dropped. NOTE: whole-dict semantics — the full
     decoded footprint materializes in host memory, so this is for models (or
     config-truncated checkpoints) whose expanded weights fit in RAM.
+
+    AWQ GEMM checkpoints: each ``<module>.qweight`` / ``qzeros`` / ``scales``
+    triplet decodes to ``<module>.weight`` in HF ``(out, in)`` orientation.
     """
     from emmy.compiler.loader.safetensors import _build_index, _read_shard  # noqa: PLC0415
 
@@ -271,6 +349,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     index = _build_index(model_dir)
     qc = _fp8_quant_config(model_dir)
     exl3 = _exl3_quant_config(model_dir) is not None
+    awq = _awq_quant_config(model_dir)
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or []) if qc else []
 
     by_shard: dict[str, list[str]] = {}
@@ -284,6 +363,16 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     consumed: set[str] = set()
     for key in index:
+        if awq is not None and key.endswith(".qweight"):
+            base = key[: -len(".qweight")]
+            qzeros_key, scales_key = base + ".qzeros", base + ".scales"
+            if qzeros_key not in index or scales_key not in index:
+                raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
+            out[base + ".weight"] = dequantize_awq4(
+                sources[key], sources[qzeros_key], sources[scales_key], int(awq.get("group_size", awq.get("q_group_size", -1)))
+            ).T
+            consumed |= {key, qzeros_key, scales_key}
+            continue
         if exl3 and key.endswith(".trellis"):
             base = key[: -len(".trellis")]
             sibs = {leaf for leaf in _EXL3_SIBLING_LEAVES if base + "." + leaf in index}
@@ -296,6 +385,11 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
             continue
         if key in consumed:
             continue
+        if awq is not None and key.endswith((".qzeros", ".scales")):
+            base = key.rsplit(".", 1)[0]
+            if base + ".qweight" in index:
+                consumed.add(key)
+                continue
         if qc is not None and key in fp8_keys and not _is_skipped(key, patterns):
             scale_key = next((k for k in (key + "_scale", key + "_scale_inv") if k in index), None)
             if scale_key is not None:
@@ -444,8 +538,243 @@ def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape:
     return True
 
 
+def _spell_awq4_weight(
+    graph: Graph,
+    nid: str,
+    *,
+    base: str,
+    qweight_shape: tuple[int, int],
+    qzeros_shape: tuple[int, int],
+    scales_shape: tuple[int, int],
+    scale_dtype: str,
+    group_size: int,
+) -> None:
+    """Replace one logical weight constant with packed AWQ decode algebra."""
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, RangeOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    node = graph.nodes[nid]
+    op, out = node.op, node.output
+    if op.load_ops or op.source_parts or op.value is not None or any(not d.is_static for d in out.shape):
+        raise ValueError(f"AWQ weight {nid!r} is not a pristine static checkpoint constant")
+    if len(out.shape) != 2:
+        raise ValueError(f"AWQ weight {nid!r} must be rank-2, got {tuple(out.shape)}")
+
+    n, k = (d.as_static() for d in out.shape)
+    qk, packed_n = qweight_shape
+    groups, zero_packed_n = qzeros_shape
+    effective_group = k if group_size == -1 else group_size
+    if (
+        qk != k
+        or packed_n * 8 != n
+        or zero_packed_n != packed_n
+        or scales_shape != (groups, n)
+        or effective_group <= 0
+        or groups * effective_group != k
+    ):
+        raise ValueError(
+            f"AWQ weight {nid!r} storage geometry qweight={qweight_shape}, qzeros={qzeros_shape}, "
+            f"scales={scales_shape}, group={effective_group} does not reproduce logical {(n, k)}"
+        )
+
+    frag = Graph()
+    qweight = frag.add_node(
+        op=ConstantOp(name=f"{op.name}_qweight", source_path=base + ".qweight", source_shape=qweight_shape, source_dtype="i32"),
+        inputs=[],
+        output=Tensor(f"{out.name}_qweight", qweight_shape, "i32"),
+    )
+    qzeros = frag.add_node(
+        op=ConstantOp(name=f"{op.name}_qzeros", source_path=base + ".qzeros", source_shape=qzeros_shape, source_dtype="i32"),
+        inputs=[],
+        output=Tensor(f"{out.name}_qzeros", qzeros_shape, "i32"),
+    )
+    graph_scale_dtype = "f32" if scale_dtype == "bf16" else scale_dtype
+    scales = frag.add_node(
+        op=ConstantOp(name=f"{op.name}_scales", source_path=base + ".scales", source_shape=scales_shape, source_dtype=scale_dtype),
+        inputs=[],
+        output=Tensor(f"{out.name}_scales", scales_shape, graph_scale_dtype),
+    )
+    slots = frag.add_node(
+        op=RangeOp(start=0, stop=8, step=1, dtype="i32"),
+        inputs=[],
+        output=Tensor(f"{out.name}_awq4_slots", (8,), "i32"),
+    )
+    slots = frag.add_node(
+        op=ReshapeOp(shape=(1, 1, 8)),
+        inputs=[slots],
+        output=Tensor(f"{out.name}_awq4_slots_view", (1, 1, 8), "i32"),
+    )
+    two = const_bc(frag, name=f"{out.name}_awq4_two", value=2, target_shape=(1, 1, 8), dtype="i32")
+    low_lane = frag.add_node(
+        op=ElementwiseOp(op="remainder"),
+        inputs=[slots, two],
+        output=Tensor(f"{out.name}_awq4_low_lane", (1, 1, 8), "i32"),
+    )
+    high_lane = frag.add_node(
+        op=ElementwiseOp(op="floor_divide"),
+        inputs=[slots, two],
+        output=Tensor(f"{out.name}_awq4_high_lane", (1, 1, 8), "i32"),
+    )
+    sixteen = const_bc(frag, name=f"{out.name}_awq4_sixteen", value=16, target_shape=(1, 1, 8), dtype="i32")
+    four = const_bc(frag, name=f"{out.name}_awq4_four", value=4, target_shape=(1, 1, 8), dtype="i32")
+    low_shift = frag.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[low_lane, sixteen],
+        output=Tensor(f"{out.name}_awq4_low_shift", (1, 1, 8), "i32"),
+    )
+    high_shift = frag.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[high_lane, four],
+        output=Tensor(f"{out.name}_awq4_high_shift", (1, 1, 8), "i32"),
+    )
+    shifts = frag.add_node(
+        op=ElementwiseOp(op="add"),
+        inputs=[low_shift, high_shift],
+        output=Tensor(f"{out.name}_awq4_shifts", (1, 1, 8), "i32"),
+    )
+
+    def unpack(packed: str, shape: tuple[int, int], name: str) -> str:
+        rows, words = shape
+        expanded_shape = (rows, words, 8)
+        view = frag.add_node(
+            op=ReshapeOp(shape=(rows, words, 1)),
+            inputs=[packed],
+            output=Tensor(f"{name}_view", (rows, words, 1), "i32"),
+        )
+        words_bc = broadcast_to(frag, view, expanded_shape)
+        shifts_bc = broadcast_to(frag, shifts, expanded_shape)
+        shifted = frag.add_node(
+            op=ElementwiseOp(op="right_shift"),
+            inputs=[words_bc, shifts_bc],
+            output=Tensor(f"{name}_shifted", expanded_shape, "i32"),
+        )
+        mask = const_bc(frag, name=f"{name}_mask", value=15, target_shape=expanded_shape, dtype="i32")
+        nibble = frag.add_node(
+            op=ElementwiseOp(op="bitwise_and"),
+            inputs=[shifted, mask],
+            output=Tensor(f"{name}_nibble", expanded_shape, "i32"),
+        )
+        return frag.add_node(
+            op=ReshapeOp(shape=(rows, words * 8)),
+            inputs=[nibble],
+            output=Tensor(name, (rows, words * 8), "i32"),
+        )
+
+    integers = unpack(qweight, qweight_shape, f"{out.name}_integers")
+    zeros_grouped = unpack(qzeros, qzeros_shape, f"{out.name}_zeros_grouped")
+
+    zeros_view = frag.add_node(
+        op=ReshapeOp(shape=(groups, 1, n)),
+        inputs=[zeros_grouped],
+        output=Tensor(f"{out.name}_zeros_view", (groups, 1, n), "i32"),
+    )
+    zeros_bc = broadcast_to(frag, zeros_view, (groups, effective_group, n))
+    zeros = frag.add_node(
+        op=ReshapeOp(shape=(k, n)),
+        inputs=[zeros_bc],
+        output=Tensor(f"{out.name}_zeros", (k, n), "i32"),
+    )
+    scale_view = frag.add_node(
+        op=ReshapeOp(shape=(groups, 1, n)),
+        inputs=[scales],
+        output=Tensor(f"{out.name}_scales_view", (groups, 1, n), graph_scale_dtype),
+    )
+    scale_bc = broadcast_to(frag, scale_view, (groups, effective_group, n))
+    scale_values = frag.add_node(
+        op=ReshapeOp(shape=(k, n)),
+        inputs=[scale_bc],
+        output=Tensor(f"{out.name}_scale_values", (k, n), graph_scale_dtype),
+    )
+    centered = frag.add_node(
+        op=ElementwiseOp(op="subtract"),
+        inputs=[integers, zeros],
+        output=Tensor(f"{out.name}_centered", (k, n), "i32"),
+    )
+    values = frag.add_node(
+        op=ElementwiseOp(op="copy"),
+        inputs=[centered],
+        output=Tensor(f"{out.name}_values", (k, n), out.dtype),
+    )
+    if graph_scale_dtype != out.dtype.name:
+        scale_values = frag.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[scale_values],
+            output=Tensor(f"{out.name}_scale_values_cast", (k, n), out.dtype),
+        )
+    scaled = frag.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[values, scale_values],
+        output=Tensor(f"{out.name}_scaled", (k, n), out.dtype),
+    )
+    final = frag.add_node(
+        op=TransposeOp(axes=(1, 0)),
+        inputs=[scaled],
+        output=Tensor(out.name, (n, k), out.dtype),
+    )
+    frag.outputs = [final]
+    graph.splice(frag, consumed=[nid], output=nid)
+
+
+def _spell_awq4_constants(graph: Graph, model_dir: Path, qc: dict) -> int:
+    """Spell supported AWQ GEMM checkpoint constants as packed decode algebra."""
+    from safetensors import safe_open  # noqa: PLC0415
+
+    from emmy.compiler.loader.safetensors import _build_index, _candidate_keys  # noqa: PLC0415
+
+    index = _build_index(model_dir)
+    group_size = int(qc.get("group_size", qc.get("q_group_size", -1)))
+    spelled = 0
+    with ExitStack() as stack:
+        handles: dict[str, object] = {}
+
+        def _slice(key: str):
+            path = str(index[key])
+            handle = handles.get(path)
+            if handle is None:
+                handle = handles[path] = stack.enter_context(safe_open(path, framework="numpy"))
+            return handle.get_slice(key)
+
+        for nid, op in list(graph.loadable_constants()):
+            if op.source_path is None or not op.source_path.endswith(".weight"):
+                continue
+            suffix = len(".weight")
+            base = next(
+                (
+                    candidate[:-suffix]
+                    for candidate in _candidate_keys(op.source_path)
+                    if candidate.endswith(".weight") and candidate[:-suffix] + ".qweight" in index
+                ),
+                None,
+            )
+            if base is None:
+                continue
+            siblings = {leaf: base + "." + leaf for leaf in ("qweight", "qzeros", "scales")}
+            missing = [key for key in siblings.values() if key not in index]
+            if missing:
+                raise ValueError(f"AWQ weight {nid!r} is missing checkpoint siblings {missing}")
+            slices = {leaf: _slice(key) for leaf, key in siblings.items()}
+            shapes = {leaf: tuple(int(d) for d in sl.get_shape()) for leaf, sl in slices.items()}
+            _spell_awq4_weight(
+                graph,
+                nid,
+                base=base,
+                qweight_shape=shapes["qweight"],
+                qzeros_shape=shapes["qzeros"],
+                scales_shape=shapes["scales"],
+                scale_dtype=slices["scales"].get_dtype().lower(),
+                group_size=group_size,
+            )
+            spelled += 1
+    if spelled:
+        logger.info("spelled %d packed AWQ int4 weight constant(s) from %s", spelled, model_dir)
+    return spelled
+
+
 def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
-    """Spell every fp8-stored weight of ``graph`` as in-graph dequant algebra, at birth.
+    """Spell supported compressed weights as in-graph dequant algebra, at birth.
 
     Source of truth is the CHECKPOINT, not the traced module (a quantized
     checkpoint is traced through its bf16 architecture twin, whose module
@@ -469,6 +798,8 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
 
     model_dir = _resolve_model_dir(model_id_or_path)
     qc = _fp8_quant_config(model_dir)
+    if (awq := _awq_quant_config(model_dir)) is not None:
+        return _spell_awq4_constants(graph, model_dir, awq)
     if qc is None:
         return 0
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
@@ -510,6 +841,188 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
     if spelled:
         logger.info("spelled %d quantized weight constant(s) from %s", spelled, model_dir)
     return spelled
+
+
+def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None]:
+    """Return ``(enabled, declared_fmt)`` for a supported dynamic FP8 activation scheme."""
+    if not qc:
+        return False, None
+    if qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "dynamic":
+        fmt = {"e4m3": "f8e4m3", "e5m2": "f8e5m2", "f8e4m3": "f8e4m3", "f8e5m2": "f8e5m2"}.get(qc.get("fmt"))
+        return fmt is not None, fmt
+    if qc.get("quant_method") == "compressed-tensors":
+        groups = list((qc.get("config_groups") or {}).values())
+        # Fail closed on mixed declarations: without resolving every group's target
+        # selector, one dynamic group must not turn a weight-only group into W8A8.
+        if groups and all(
+            isinstance(group, dict)
+            and isinstance(group.get("weights"), dict)
+            and group["weights"].get("type") == "float"
+            and int(group["weights"].get("num_bits") or 0) == 8
+            and isinstance(group.get("input_activations"), dict)
+            and group["input_activations"].get("type") == "float"
+            and int(group["input_activations"].get("num_bits") or 0) == 8
+            and group["input_activations"].get("dynamic") is True
+            and group["input_activations"].get("strategy") == "token"
+            for group in groups
+        ):
+            return True, None  # the paired weight's concrete f8 storage dtype selects the encode format
+    return False, None
+
+
+def _cone_storage_formats(graph: Graph, start: str) -> set[str]:
+    """Return FP8 storage dtypes reachable upstream from one graph buffer."""
+    pending = [start]
+    seen: set[str] = set()
+    formats: set[str] = set()
+    while pending:
+        buf = pending.pop()
+        node = graph.producer(buf)
+        if node is None or node.id in seen:
+            continue
+        seen.add(node.id)
+        if isinstance(node.op, ConstantOp):
+            dtype = node.output.dtype.name
+            if dtype in F8_SAFETENSORS_DTYPES.values():
+                formats.add(dtype)
+        pending.extend(node.inputs)
+    return formats
+
+
+def _cone_has_fp8_encode(graph: Graph, start: str) -> bool:
+    """Whether an activation buffer is already downstream of an FP8 encode."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+
+    pending = [start]
+    seen: set[str] = set()
+    while pending:
+        buf = pending.pop()
+        node = graph.producer(buf)
+        if node is None or node.id in seen:
+            continue
+        seen.add(node.id)
+        if isinstance(node.op, ElementwiseOp) and node.op.op.name.startswith("to_f8"):
+            return True
+        pending.extend(node.inputs)
+    return False
+
+
+def _fresh_buffer_name(graph: Graph, base: str) -> str:
+    """Return a deterministic unused primary-buffer name."""
+    name = base
+    suffix = 2
+    while name in graph.nodes or graph.buffer(name) is not None:
+        name = f"{base}_{suffix}"
+        suffix += 1
+    return name
+
+
+def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str) -> str:
+    """Spell one shared per-row dynamic FP8 activation value and return its decoded buffer."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    source = graph.buffer(activation)
+    if source is None or not source.shape or source.dtype.name not in {"f16", "bf16", "f32"}:
+        raise ValueError(f"dynamic FP8 activation {activation!r} must be a rank-1+ floating tensor")
+    shape = tuple(source.shape)
+    scale_shape = (*shape[:-1], 1)
+    stem = _fresh_buffer_name(graph, f"{activation}_dynamic_fp8")
+
+    absolute = graph.add_node(
+        op=ElementwiseOp(op="abs"),
+        inputs=[activation],
+        output=Tensor(f"{stem}_abs", shape, "f32"),
+    )
+    amax = graph.add_node(
+        op=ReduceOp(op="maximum", axis=-1),
+        inputs=[absolute],
+        output=Tensor(f"{stem}_amax", scale_shape, "f32"),
+    )
+    floor = const_bc(graph, name=f"{stem}_floor", value=1.0e-12, target_shape=scale_shape, dtype="f32")
+    stable_amax = graph.add_node(
+        op=ElementwiseOp(op="maximum"),
+        inputs=[amax, floor],
+        output=Tensor(f"{stem}_stable_amax", scale_shape, "f32"),
+    )
+    finite_max = 448.0 if fmt == "f8e4m3" else 57344.0
+    denominator = const_bc(graph, name=f"{stem}_finite_max", value=finite_max, target_shape=scale_shape, dtype="f32")
+    scale = graph.add_node(
+        op=ElementwiseOp(op="divide"),
+        inputs=[stable_amax, denominator],
+        output=Tensor(f"{stem}_scale", scale_shape, "f32"),
+    )
+    scale_bc = broadcast_to(graph, scale, shape)
+    normalized = graph.add_node(
+        op=ElementwiseOp(op="divide"),
+        inputs=[activation, scale_bc],
+        output=Tensor(f"{stem}_normalized", shape, "f32"),
+    )
+    bits = graph.add_node(
+        op=ElementwiseOp(op=f"to_{fmt}"),
+        inputs=[normalized],
+        output=Tensor(f"{stem}_bits", shape, fmt),
+    )
+    decoded = graph.add_node(
+        op=ElementwiseOp(op=f"from_{fmt}"),
+        inputs=[bits],
+        output=Tensor(f"{stem}_decoded", shape, source.dtype),
+    )
+    restored = graph.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[decoded, scale_bc],
+        output=Tensor(f"{stem}_value", shape, source.dtype),
+    )
+
+    # Trace inventories promote these intermediates to auxiliary outputs before
+    # fusion. That preserves the genuine encode/scale boundary needed by a native
+    # W8A8 contraction without changing ordinary model-call outputs.
+    graph.nodes[bits].hints.set("trace.materialize", True)
+    graph.nodes[scale].hints.set("trace.materialize", True)
+    return restored
+
+
+def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
+    """Spell checkpoint-declared dynamic FP8 activations in front of eligible linears.
+
+    The official ``quant_method: fp8`` declaration supplies both the activation
+    scheme and format. A linear is eligible only when its already-spelled weight
+    cone contains that same FP8 storage dtype. Shared projection inputs reuse one
+    quantized activation value. The zero-safe per-row scale is ``max(amax(abs(x)),
+    1e-12) / finite_max``. Returns the number of rewired linears; unsupported or
+    weight-only declarations are a no-op.
+    """
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+    model_dir = _resolve_model_dir(model_id_or_path)
+    enabled, declared_fmt = _dynamic_activation_declaration(_fp8_quant_config(model_dir))
+    if not enabled:
+        return 0
+
+    eligible: list[tuple[str, str, str]] = []
+    for node in list(graph.nodes.values()):
+        if not isinstance(node.op, LinearOp) or len(node.inputs) < 2:
+            continue
+        activation, weight = node.inputs[:2]
+        formats = _cone_storage_formats(graph, weight)
+        if len(formats) != 1 or (declared_fmt is not None and formats != {declared_fmt}) or _cone_has_fp8_encode(graph, activation):
+            continue
+        eligible.append((node.id, activation, next(iter(formats))))
+
+    rewritten: dict[tuple[str, str], str] = {}
+    for linear_id, activation, fmt in eligible:
+        key = (activation, fmt)
+        restored = rewritten.get(key)
+        if restored is None:
+            restored = rewritten[key] = _spell_dynamic_activation(graph, activation, fmt)
+        graph.replace_input(linear_id, activation, restored)
+    if eligible:
+        formats = ", ".join(sorted({fmt for _linear, _activation, fmt in eligible}))
+        logger.info("spelled dynamic %s activation algebra for %d linear(s) from %s", formats, len(eligible), model_dir)
+    return len(eligible)
 
 
 def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) -> tuple[int, int, int, int] | None:

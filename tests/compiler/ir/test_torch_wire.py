@@ -132,13 +132,15 @@ def _program() -> Graph:
 def test_program_round_trip_is_deterministic():
     wire = graph_to_wire(_program())
     assert set(wire) == {"inputs", "outputs", "nodes"}
-    assert wire["nodes"][0] == {
+    assert [node["id"] for node in wire["nodes"]] == ["one", "x", "y"]
+    input_node = wire["nodes"][1]
+    assert input_node == {
         "id": "x",
         "op": "input",
         "outputs": [["x", "f16", [{"sym": "seq", "hint": 9}, 8]]],
     }
-    assert "attrs" not in wire["nodes"][0]
-    assert "inputs" not in wire["nodes"][0]
+    assert "attrs" not in input_node
+    assert "inputs" not in input_node
     restored = graph_from_wire(json.loads(json.dumps(wire)))
     assert graph_to_wire(restored) == wire
 

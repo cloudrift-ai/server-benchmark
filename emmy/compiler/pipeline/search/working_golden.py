@@ -61,6 +61,7 @@ def write_trace_inventory(
     ctx=None,
     force_loop_targets: bool = False,
     realizations: list[dict] | None = None,
+    model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
     """Lower a trace through fusion and write a self-contained target inventory."""
     destination = preflight_trace_inventory(path)
@@ -79,7 +80,15 @@ def write_trace_inventory(
         force_loop_targets=force_loop_targets,
         realizations=realizations,
     )
-    _dump_trace_inventory(destination, ctx=ctx, model=model, programs=programs, loops=loops, entries=entries)
+    _dump_trace_inventory(
+        destination,
+        ctx=ctx,
+        model=model,
+        model_quant_digest=model_quant_digest,
+        programs=programs,
+        loops=loops,
+        entries=entries,
+    )
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
@@ -90,6 +99,7 @@ def write_trace_inventories(
     model: str | None = None,
     ctx=None,
     realizations: list[dict] | None = None,
+    model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
     """Combine named traces into one exact-Loop-IR working inventory.
 
@@ -121,7 +131,15 @@ def write_trace_inventories(
             seen_loops=seen_loops,
             realizations=realizations,
         )
-    _dump_trace_inventory(destination, ctx=ctx, model=model, programs=programs, loops=loops, entries=entries)
+    _dump_trace_inventory(
+        destination,
+        ctx=ctx,
+        model=model,
+        model_quant_digest=model_quant_digest,
+        programs=programs,
+        loops=loops,
+        entries=entries,
+    )
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
@@ -145,6 +163,14 @@ def _append_trace_inventory(
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
+
+    # A birth-time speller may mark an internal storage value that has to remain
+    # materialized for a faithful target inventory (dynamic activation bits and
+    # scale are the first use). Promoting only the inventory copy to an auxiliary
+    # graph output preserves the boundary without changing normal model outputs.
+    for traced_node in graph.nodes.values():
+        if traced_node.hints.get("trace.materialize") and traced_node.id not in graph.outputs:
+            graph.outputs.append(traced_node.id)
 
     # Torch tracing and checkpoint spelling may hand us a graph that has already crossed one
     # compiler pipeline and therefore carries implementation-piece provenance. The stable wire
@@ -187,6 +213,12 @@ def _append_trace_inventory(
         origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
         inventory.append((node_id, node, folded, origins))
     origin_counts = Counter(origins for _node_id, _node, _folded, origins in inventory if origins)
+    used_names = {
+        realization["name"]
+        for entry in entries
+        for realization in entry.get("realizations", [])
+        if isinstance(realization, dict) and isinstance(realization.get("name"), str)
+    }
 
     for node_id, node, folded, origins in inventory:
         key = node.op.cache_key()
@@ -194,6 +226,20 @@ def _append_trace_inventory(
         name = f"{node.op.name or node_id}.{suffix}"
         if name_prefix:
             name = f"{name_prefix}.{name}"
+        if name in used_names:
+            # One kernel body/cache key can occur at multiple exact Loop
+            # targets whose boundary shapes or checkpoint sources differ.
+            # ``emmy run --golden`` resolves by name, so retaining the bare
+            # duplicate makes the generated file impossible to replay. Node
+            # ids are deterministic within the persisted source program and
+            # distinguish these otherwise same-bodied target sites.
+            base = f"{name}.{node_id}"
+            name = base
+            duplicate = 2
+            while name in used_names:
+                name = f"{base}.{duplicate}"
+                duplicate += 1
+        used_names.add(name)
         if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:
@@ -224,6 +270,7 @@ def _dump_trace_inventory(
     *,
     ctx,
     model: str | None,
+    model_quant_digest: str | None,
     programs: list[dict],
     loops: list[dict],
     entries: list[dict],
@@ -238,6 +285,8 @@ def _dump_trace_inventory(
         document["loops"] = loops
     if ctx.gpu_name:
         document["gpu_name"] = ctx.gpu_name
+    if model_quant_digest:
+        document["model_quant_digest"] = model_quant_digest
     if model:
         document["model"] = model
 

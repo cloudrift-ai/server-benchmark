@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -6,6 +6,7 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
+	@echo "  setup-agent    - Create venv and install API-agent workflow dependencies"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
 	@echo "  bench          - Run benchmarks in parallel"
@@ -24,6 +25,17 @@ help:
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
 setup: venv/.setup-complete
+
+setup-agent: venv/.setup-agent-complete
+
+venv/.setup-agent-complete: pyproject.toml
+	@if [ ! -x "venv/bin/python" ]; then \
+		echo "Creating virtual environment..."; \
+		python3.12 -m venv venv --prompt "emmy"; \
+	fi
+	@echo "Installing API-agent workflow dependencies..."
+	./venv/bin/pip install -e .
+	@touch $@
 
 # Keep the completion marker inside the venv so an interrupted dependency install
 # cannot leave `make setup` permanently succeeding with an unusable environment.
@@ -85,6 +97,8 @@ tune-kernels: setup
 
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
+VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
+VLLM_EMMY_CUPY_PACKAGE ?= cupy-cuda13x
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
 wheel: setup
@@ -100,7 +114,8 @@ git-sha-guard:
 		 echo "  likely fix: git config --global --add safe.directory $(CURDIR)"; exit 1)
 
 vllm-emmy-image: wheel git-sha-guard
-	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) \
+	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) --build-arg BASE_IMAGE=$(VLLM_BASE_IMAGE) \
+		--build-arg CUPY_PACKAGE=$(VLLM_EMMY_CUPY_PACKAGE) \
 		-t $(VLLM_EMMY_TAG) .
 
 vllm-emmy-push: vllm-emmy-image
@@ -207,6 +222,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
 		--build-arg M1_TIER=$(SERVE_M1_TIER) \
+		--build-arg V2_MODEL_RUNNER=$(SERVE_V2_MODEL_RUNNER) \
 		-t $(SERVE_TAG) $(SERVE_DIR)
 
 serve-verify: serve-config-guard

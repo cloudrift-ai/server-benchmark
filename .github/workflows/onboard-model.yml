@@ -43,6 +43,7 @@ jobs:
       contents: read
       pull-requests: read
     env:
+      GH_REPO: ${{ github.repository }}
       MODEL_ID: ${{ inputs.model_id }}
       TARGET_GPU: ${{ inputs.gpu }}
       TARGET_GPU_COUNT: ${{ inputs.gpu_count }}
@@ -51,8 +52,8 @@ jobs:
       RUN_OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
       VM_LEASE: /tmp/emmy-onboard-${{ github.run_id }}-${{ github.run_attempt }}.json
       ONBOARD_SUMMARY: /tmp/emmy-onboard-summary-${{ github.run_id }}-${{ github.run_attempt }}.json
-      AGENT_KEY_FILE: /tmp/emmy-onboard-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
+      AGENT_EVENTS: /tmp/emmy-onboard-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
@@ -60,6 +61,7 @@ jobs:
       GCP_CONFIG_DIR: /tmp/emmy-onboard-gcloud-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -71,67 +73,59 @@ jobs:
 
       - name: Resolve existing or new pull request branch
         id: branch
-        uses: actions/github-script@v7
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MODEL_ID: ${{ env.MODEL_ID }}
           REQUESTED_PR: ${{ inputs.pull_request }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const requested = process.env.REQUESTED_PR || '';
-            let pull = null;
-            if (requested) {
-              const number = Number(requested);
-              if (!Number.isInteger(number) || number < 1) {
-                core.setFailed(`Invalid pull request number: ${requested}`);
-                return;
-              }
-              ({data: pull} = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: number,
-              }));
-            } else if (context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
-              const branch = context.ref.replace('refs/heads/', '');
-              const {data: pulls} = await github.rest.pulls.list({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'open',
-                head: `${context.repo.owner}:${branch}`,
-              });
-              pull = pulls.find(candidate => candidate.labels.some(label => label.name === 'model-onboarding')) || null;
-            }
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          pull=''
+          if [ -n "$REQUESTED_PR" ]; then
+            if ! [[ "$REQUESTED_PR" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Invalid pull request number: $REQUESTED_PR" >&2
+              exit 1
+            fi
+            pull=$(gh pr view "$REQUESTED_PR" \
+              --json number,state,headRefName,isCrossRepository,labels,title,body)
+          elif [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]; then
+            pull=$(gh pr list --state open --head "$CURRENT_BRANCH" --limit 100 \
+              --json number,state,headRefName,isCrossRepository,labels,title,body \
+              --jq '[.[] | select([.labels[].name] | index("model-onboarding"))][0] // empty')
+          fi
 
-            if (pull) {
-              if (pull.state !== 'open') {
-                core.setFailed(`Pull request #${pull.number} is not open`);
-                return;
-              }
-              if (pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
-                core.setFailed('Onboarding cannot push artifacts to a fork pull request');
-                return;
-              }
-              if (!pull.labels.some(label => label.name === 'model-onboarding')) {
-                core.setFailed(`Pull request #${pull.number} is missing the model-onboarding label`);
-                return;
-              }
-              const marker = `\`${process.env.MODEL_ID}\``;
-              if (!pull.title.includes(process.env.MODEL_ID) && !(pull.body || '').includes(marker)) {
-                core.setFailed(`Pull request #${pull.number} does not describe ${process.env.MODEL_ID}`);
-                return;
-              }
-              core.setOutput('branch', pull.head.ref);
-              core.setOutput('checkout_ref', pull.head.ref);
-              core.setOutput('pr_number', pull.number);
-              core.setOutput('existing', 'true');
-              return;
-            }
+          if [ -n "$pull" ]; then
+            number=$(jq -r .number <<< "$pull")
+            if [ "$(jq -r .state <<< "$pull")" != "OPEN" ]; then
+              echo "Pull request #$number is not open" >&2
+              exit 1
+            fi
+            if [ "$(jq -r .isCrossRepository <<< "$pull")" != "false" ]; then
+              echo "Onboarding cannot push artifacts to a fork pull request" >&2
+              exit 1
+            fi
+            if ! jq -e '[.labels[].name] | index("model-onboarding")' <<< "$pull" >/dev/null; then
+              echo "Pull request #$number is missing the model-onboarding label" >&2
+              exit 1
+            fi
+            if ! jq -e --arg model "$MODEL_ID" --arg marker "\`$MODEL_ID\`" \
+              '(.title | contains($model)) or ((.body // "") | contains($marker))' <<< "$pull" >/dev/null; then
+              echo "Pull request #$number does not describe $MODEL_ID" >&2
+              exit 1
+            fi
+            branch=$(jq -r .headRefName <<< "$pull")
+            echo "branch=$branch" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=$branch" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$number" >> "$GITHUB_OUTPUT"
+            echo "existing=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-            const slug = process.env.MODEL_ID.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-            core.setOutput('branch', `agents/onboard-${slug}-${context.runId}`);
-            core.setOutput('checkout_ref', context.payload.repository.default_branch);
-            core.setOutput('pr_number', '');
-            core.setOutput('existing', 'false');
+          slug=$(tr '[:upper:]' '[:lower:]' <<< "$MODEL_ID" | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')
+          echo "branch=agents/onboard-$slug-$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "pr_number=" >> "$GITHUB_OUTPUT"
+          echo "existing=false" >> "$GITHUB_OUTPUT"
 
       - name: Checkout onboarding base
         uses: actions/checkout@v4
@@ -169,7 +163,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Emmy
-        run: make setup
+        run: make setup-agent
 
       - name: Generate ephemeral SSH key
         run: ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
@@ -260,8 +254,9 @@ jobs:
 
           existing = os.environ.get("EXISTING_PR")
           plan = (
-              f"This is the execution of existing model-onboarding PR #{existing}. Read its plan and delete the "
-              "matching plans/onboard-*.md file after all artifacts are complete."
+              f"This is the execution of existing model-onboarding PR #{existing}. Read the matching onboarding "
+              "recipe shell. Replace the shell with the qualified recipe and replace its onboarding and untested "
+              "tags with best-effort after all artifacts are complete."
               if existing
               else "This is a new onboarding; create all required artifacts from the tracked skill."
           )
@@ -282,27 +277,28 @@ jobs:
           atomic summary, including experiment_artifacts with retained experiment recipe.yaml files only. Put the
           selected benchmark numbers in the final recipe's RESULTS.md; do not retain raw results, experiment reports,
           dated run snapshots, or onboarding summaries. Also include artifacts listing every intended created,
-          modified, or deleted repository file (including a removed onboarding plan) and no exploratory output. Allowed areas are
-          recipes/, experiments/, docker/vllm-emmy-serve/models/, canonical golden YAML files, and deletion of the
-          matching plans/onboard-*.md file.
+          modified, or deleted repository file and no exploratory output. Allowed areas are recipes/, experiments/,
+          docker/vllm-emmy-serve/models/, and canonical golden YAML files.
           """
           Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
           PY
 
-          printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
-          chmod 600 "$AGENT_KEY_FILE"
-          unset CLOUDRIFT_API_KEY
-          exec env \
-            -u CLOUDRIFT_API_KEY \
+          set +e
+          env \
             -u CLOUDSDK_CONFIG \
             -u GOOGLE_APPLICATION_CREDENTIALS \
             -u GCP_SERVICE_ACCOUNT \
-            bash .github/scripts/run_onboarding_agent.sh "$AGENT_KEY_FILE" \
-            --skill .claude/skills/onboard-model/SKILL.md \
-            --prompt "$AGENT_PROMPT" \
-            --model "$AGENT_MODEL" \
-            --output "$AGENT_OUTPUT" \
-            --allow-write "$ONBOARD_SUMMARY"
+            opencode run \
+              "Complete the attached onboarding task exactly." \
+              --agent onboard-model \
+              --model cloudrift/agent \
+              --format json \
+              --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
+          agent_status=$?
+          set -e
+          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
+            "$AGENT_EVENTS" > "$AGENT_OUTPUT"
+          exit "$agent_status"
 
       - name: Delete workflow-owned VM
         if: always()
@@ -423,9 +419,9 @@ jobs:
         run: |
           rm -f \
             "$APP_KEY_FILE" \
+            "$AGENT_EVENTS" \
             "$AGENT_PROMPT" \
             "$AGENT_OUTPUT" \
-            "$AGENT_KEY_FILE" \
             "$GCP_KEY_FILE" \
             "$ONBOARD_SUMMARY" \
             "$VM_LEASE" \

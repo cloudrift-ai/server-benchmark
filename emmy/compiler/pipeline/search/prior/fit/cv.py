@@ -28,8 +28,6 @@ from __future__ import annotations
 
 import statistics
 
-import numpy as np
-
 from emmy.compiler.pipeline.search.prior.fit.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
 
@@ -89,19 +87,18 @@ def evaluate_full_train(cases: list[Group], model) -> dict:
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
 
 
-def run_axis(cases: list[Group], axis: str, *, fit_model, seed: int) -> dict:
+def run_axis(cases: list[Group], axis: str, *, trainer) -> dict:
     """One fold axis's full cross-validation → its ``cv.<axis>`` metrics block.
 
-    ``fit_model(train_groups, rng) -> model`` is the trainer callable (the caller bakes
-    in its params — and the fold-seeding policy: fold models are seeded from ZEROS, not
-    the incumbent artifact, since the incumbent's weights were fit on every golden and
-    would leak each held-out golden into its own holdout model). Every fold gets a
-    FRESH ``default_rng(seed)`` so a fold's fit never depends on how many folds ran
-    before it — adding a golden family changes that family's fold and nothing else,
-    keeping cross-run diffs meaningful. Guard: a fold is excluded (with a recorded
-    reason) when its training slice has no static cases (the dynamic stage seeds from
-    the static fit, so nothing is fittable) or when its holdout needs the dynamic set
-    and the training slice has no dynamic cases."""
+    ``trainer`` is any object with ``fit(groups) -> model`` where the model satisfies
+    :func:`case_ranks`' protocol. ONE instance serves every fold: the trainer is immutable and
+    its ``fit`` is pure, so a fold's fit never depends on how many folds ran before it — adding a
+    golden family changes that family's fold and nothing else, keeping cross-run diffs meaningful.
+    The caller passes the FOLD trainer, seeded from zeros rather than the incumbent, since the
+    incumbent's weights were fit on every golden and would leak each held-out golden into its own
+    holdout model. Guard: a fold is excluded (with a recorded reason) when its training slice has
+    no static cases (the dynamic stage seeds from the static fit, so nothing is fittable) or when
+    its holdout needs the dynamic set and the training slice has no dynamic cases."""
     folds = sorted({fold_key(c, axis) for c in cases})
     holdout: list[tuple[Group, tuple[int, int]]] = []
     holdout_fold: dict[str, str] = {}
@@ -112,13 +109,13 @@ def run_axis(cases: list[Group], axis: str, *, fit_model, seed: int) -> dict:
     for f in folds:
         train = [c for c in cases if fold_key(c, axis) != f]
         hold = [c for c in cases if fold_key(c, axis) == f]
-        if not any(c.tier != "dyn" for c in train):
+        if not any(not c.dynamic for c in train):
             excluded[f] = "static weight set unfittable (0 static cases in training)"
             continue
-        if any(c.tier == "dyn" for c in hold) and not any(c.tier == "dyn" for c in train):
+        if any(c.dynamic for c in hold) and not any(c.dynamic for c in train):
             excluded[f] = "dynamic weight set unfittable (0 dyn cases in training)"
             continue
-        model = fit_model(train, np.random.default_rng(seed))
+        model = trainer.fit(train)
         hold_entries = [(c, r) for c in hold if (r := case_ranks(c, model)) is not None]
         holdout.extend(hold_entries)
         holdout_fold.update({c.key: f for c, _ in hold_entries})

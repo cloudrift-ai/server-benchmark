@@ -107,6 +107,7 @@ runner_env() {
     [ -n "${SERVE_EMBED_HOST:-}" ] && printf -- '-e EMMY_GEN_EMBED_HOST=%s ' "$SERVE_EMBED_HOST"
     [ -n "${SERVE_PREFILL_CAPACITY:-}" ] && printf -- '-e EMMY_GEN_PREFILL_CAPACITY=%s ' "$SERVE_PREFILL_CAPACITY"
     [ -n "${SERVE_M1_TIER:-}" ] && printf -- '-e EMMY_GEN_M1_TIER=%s ' "$SERVE_M1_TIER"
+    [ -n "${SERVE_V2_MODEL_RUNNER:-}" ] && printf -- '-e SERVE_V2_MODEL_RUNNER=%s ' "$SERVE_V2_MODEL_RUNNER"
     return 0
 }
 
@@ -125,7 +126,7 @@ shape_env() {  # $1 = spec -> echoes the docker -e flags for that shape
     return 0
 }
 
-mkdir -p warm/hf warm/cubin warm/pack
+mkdir -p warm/hf warm/cubin warm/pack warm/triton
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 initial_env=$(shape_env "")
 # shellcheck disable=SC2086 — $initial_env is a deliberately word-split flag list
@@ -135,6 +136,7 @@ docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 \
     -e HF_HOME=/opt/emmy/hf \
     -e EMMY_CUBIN_CACHE=/opt/emmy/cubin \
     -e EMMY_PACK_DIR=/opt/emmy/pack \
+    -e TRITON_CACHE_DIR=/opt/emmy/triton \
     $initial_env \
     -e SERVE_MODEL -e SERVE_MAX_MODEL_LEN -e SERVE_GPU_MEM_UTIL \
     -e SERVE_REVISION -e SERVE_QUANT -e SERVE_CAPTURE_SIZES -e SERVE_EXTRA_ARGS \
@@ -185,6 +187,7 @@ fixpoint() {  # $1 = label, $2 = shape spec ("" = the pinned shape)
             -e HF_HOME=/opt/emmy/hf \
             -e EMMY_CUBIN_CACHE=/opt/emmy/cubin \
             -e EMMY_PACK_DIR=/opt/emmy/pack \
+            -e TRITON_CACHE_DIR=/opt/emmy/triton \
             $extra \
             -e SERVE_MODEL -e SERVE_MAX_MODEL_LEN -e SERVE_GPU_MEM_UTIL \
             -e SERVE_REVISION -e SERVE_QUANT -e SERVE_CAPTURE_SIZES -e SERVE_EXTRA_ARGS \

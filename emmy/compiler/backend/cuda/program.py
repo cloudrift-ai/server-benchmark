@@ -1706,6 +1706,11 @@ class _AsyncBenchWorker:
                 if resp.get("traceback"):
                     logger.error("[bench-worker] job failed in the child; traceback:\n%s%s", resp["traceback"], self._tail_suffix())
                 raise BenchWorkerJobError(f"bench worker error: {resp.get('error', '?')}", cache_miss=bool(resp.get("cache_miss")))
+            if resp.pop("_retire_worker", False):
+                # The child returned a completed same-input reference after its later greedy
+                # timing hit the hung-kernel watchdog. Retire it before returning the reference:
+                # a queued/nonterminating kernel must never share a context with pinned rows.
+                await self.aclose()
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 
@@ -1819,6 +1824,7 @@ async def benchmark_compare_worker_async(
     seed: int,
     accuracy: bool = False,
     want_ref: bool = False,
+    strict_accuracy: bool = False,
 ) -> dict:
     """``run --bench``'s greedy-row transport: the same comparison job as
     :func:`benchmark_compare_isolated_async` but over a caller-supplied persistent
@@ -1826,7 +1832,9 @@ async def benchmark_compare_worker_async(
     run path's extras: ``accuracy`` (the in-child real-input emmy-vs-eager verdict) and
     ``want_ref`` (that run's ``(inputs, outputs)`` for the pinned rows' wrong-answer gate).
     Returns the normalized response dict — keys ``results`` / ``result`` /
-    ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io``."""
+    ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io`` plus the optional
+    ``greedy_error`` / ``reference_run_us`` when an embedded Loop reference completed before
+    its repeated greedy timing failed."""
     resp = await worker.run_job(
         {
             "graph": lowered,
@@ -1837,6 +1845,7 @@ async def benchmark_compare_worker_async(
             "seed": seed,
             "accuracy": accuracy,
             "want_ref": want_ref,
+            "strict_accuracy": strict_accuracy,
         },
         wall_timeout_s=wall_timeout_s,
     )
@@ -1847,6 +1856,9 @@ async def benchmark_compare_worker_async(
         "captured": resp.get("captured", False),
         "accuracy_error": resp.get("accuracy_error"),
         "run_io": resp.get("run_io"),
+        "greedy_error": resp.get("greedy_error"),
+        "reference_run_us": resp.get("reference_run_us"),
+        "correctness": resp.get("correctness"),
     }
 
 

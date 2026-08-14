@@ -19,9 +19,10 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.slice import single_node_graph
+from emmy.compiler.pipeline.search.slice import single_node_graph, topo_order
 from emmy.compiler.pipeline.search.two_level import LOWERING_PASSES
 
 
@@ -47,6 +48,19 @@ def _two_matmul_graph() -> Graph:
     g.inputs = ["a", "b", "d", "e"]
     g.outputs = ["c", "f"]
     return g
+
+
+def test_slice_topological_order_ignores_keep_set_iteration_order() -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("residual", (4,)), node_id="residual")
+    graph.add_node(InputOp(), [], Tensor("to", (4,)), node_id="to")
+    graph.add_node(MatmulOp(), ["residual", "to"], Tensor("root", (4,)), node_id="root")
+
+    class ReverseKeep(set):
+        def __iter__(self):
+            return iter(("to", "residual", "root"))
+
+    assert topo_order(graph, ReverseKeep(graph.nodes)) == ["residual", "to", "root"]
 
 
 def test_slice_is_standalone_and_preserves_loop_key() -> None:
@@ -121,3 +135,30 @@ def test_flash_slice_absorbs_score_producer() -> None:
     # Without absorb the producer is a synthetic input and the fusion cannot fire — two kernels.
     plain = single_node_graph(fused, consumer)
     assert isinstance(plain.nodes[producer].op, InputOp), "un-absorbed producer is a synthetic input"
+
+
+def test_slice_makes_surviving_cast_a_synthetic_boundary() -> None:
+    """Compact storage algebra can leave a value ``CastOp`` between two LoopOps.
+
+    Loop wire format cannot carry the cast as compute. The cast therefore
+    becomes an input stub, rather than a retained node with an unbound input.
+    """
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (16,), "i32"), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (16,), "i32"), node_id="b")
+    graph.add_node(ElementwiseOp(op="subtract"), ["a", "b"], Tensor("centered", (16,), "i32"), node_id="centered")
+    graph.add_node(CastOp(dtype="f16"), ["centered"], Tensor("values", (16,), "f16"), node_id="values")
+    graph.add_node(InputOp(), [], Tensor("scale", (16,), "f16"), node_id="scale")
+    graph.add_node(ElementwiseOp(op="multiply"), ["values", "scale"], Tensor("scaled", (16,), "f16"), node_id="scaled")
+    graph.inputs, graph.outputs = ["a", "b", "scale"], ["scaled"]
+
+    fused = Pipeline.build(LOOP_PASSES).run(graph, db=SearchDB())
+    loops = [nid for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)]
+    assert len(loops) == 2
+    producer = next(nid for nid in loops if "centered" in fused.nodes[nid].buffer_names())
+    consumer = next(nid for nid in loops if nid != producer)
+    sub = single_node_graph(fused, consumer, absorb=frozenset({producer}))
+    sub.validate()
+    assert producer not in sub.nodes
+    assert isinstance(sub.nodes["values"].op, InputOp)
+    assert "values" in sub.inputs

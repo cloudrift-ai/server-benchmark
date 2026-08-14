@@ -9,9 +9,17 @@ import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.frontend.ir import ReshapeOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.loader.quant import decode_f8, dequantize, spell_quantized_constants, spell_quantized_inputs
+from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.loader.quant import (
+    decode_f8,
+    dequantize,
+    dequantize_awq4,
+    spell_dynamic_fp8_activations,
+    spell_quantized_constants,
+    spell_quantized_inputs,
+    unpack_awq4,
+)
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 from tests.compiler.helpers import requires_cuda
 
@@ -104,6 +112,7 @@ def test_dequantize_rejects_rank_mismatch():
 # ===================================================================
 
 _FP8_QC = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic", "modules_to_not_convert": []}
+_AWQ_QC = {"quant_method": "awq", "bits": 4, "group_size": 4, "zero_point": True, "version": "gemm"}
 
 
 def _write_checkpoint(dirpath, tensors, quant_config=None):
@@ -139,6 +148,18 @@ def _finite_bits(shape):
     bits[bits == 0x7F] = 0x00
     bits[bits == 0xFF] = 0x80
     return bits
+
+
+def _pack_awq4(values):
+    """AutoAWQ GEMM's output-channel packing, for compact synthetic fixtures."""
+    values = np.asarray(values, dtype=np.int32)
+    assert values.ndim == 2 and values.shape[1] % 8 == 0
+    packed = np.zeros((values.shape[0], values.shape[1] // 8), dtype=np.uint32)
+    order = (0, 2, 4, 6, 1, 3, 5, 7)
+    for word in range(packed.shape[1]):
+        for slot, logical in enumerate(order):
+            packed[:, word] |= values[:, word * 8 + logical].astype(np.uint32) << np.uint32(slot * 4)
+    return packed.view(np.int32)
 
 
 def _spelled(tmp_path, *, scale_shape=(8, 1), fmt="f8e4m3", inverse=False, dtype="f32", qc=_FP8_QC):
@@ -236,6 +257,102 @@ def test_spell_is_idempotent(tmp_path):
     nodes_after_first = set(g.nodes)
     assert spell_quantized_constants(g, str(tmp_path)) == 0
     assert set(g.nodes) == nodes_after_first
+
+
+def test_spell_dynamic_activations_reuses_one_shared_w8a8_value(tmp_path):
+    bits = _finite_bits((8, 16))
+    scale = np.ones((8, 1), dtype=np.float32)
+    _write_checkpoint(
+        tmp_path,
+        {
+            "layer.a.weight": _fp8_tensor(bits),
+            "layer.a.weight_scale": torch.from_numpy(scale),
+            "layer.b.weight": _fp8_tensor(bits),
+            "layer.b.weight_scale": torch.from_numpy(scale),
+        },
+        _FP8_QC,
+    )
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    for name in ("a", "b"):
+        weight = f"p_{name}"
+        g.add_node(
+            ConstantOp(name=weight, source_path=f"layer.{name}.weight", source_shape=(8, 16), source_dtype="f16"),
+            [],
+            Tensor(weight, (8, 16), "f16"),
+            node_id=weight,
+        )
+        g.add_node(LinearOp(), ["x", weight], Tensor(f"y_{name}", (4, 8), "f16"), node_id=f"y_{name}")
+    g.inputs, g.outputs = ["x"], ["y_a", "y_b"]
+
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 2
+
+    activation_inputs = {g.nodes[name].inputs[0] for name in ("y_a", "y_b")}
+    assert len(activation_inputs) == 1
+    assert len([node for node in _ops_by_type(g, ElementwiseOp) if node.op.op.name == "to_f8e4m3"]) == 1
+    assert len([node for node in _ops_by_type(g, ReduceOp) if node.op.op.name == "maximum"]) == 1
+    materialized = {node.output.dtype.name for node in g.nodes.values() if node.hints.get("trace.materialize")}
+    assert materialized == {"f32", "f8e4m3"}
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
+
+
+def test_spell_dynamic_activations_requires_checkpoint_declaration(tmp_path):
+    qc = {**_FP8_QC, "activation_scheme": "static"}
+    g, _bits, _scale = _spelled(tmp_path, qc=qc)
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
+
+
+def test_spell_dynamic_activations_accepts_compressed_tensors_token_scheme(tmp_path):
+    qc = {
+        "quant_method": "compressed-tensors",
+        "format": "float-quantized",
+        "ignore": [],
+        "config_groups": {
+            "group_0": {
+                "weights": {"num_bits": 8, "type": "float", "strategy": "channel", "dynamic": False},
+                "input_activations": {"num_bits": 8, "type": "float", "strategy": "token", "dynamic": True},
+            }
+        },
+    }
+    bits = _finite_bits((8, 16))
+    _write_checkpoint(
+        tmp_path,
+        {"layer.weight": _fp8_tensor(bits), "layer.weight_scale": torch.ones((8, 1), dtype=torch.float32)},
+        qc,
+    )
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    g.add_node(
+        ConstantOp(name="p_w", source_path="layer.weight", source_shape=(8, 16), source_dtype="f16"),
+        [],
+        Tensor("p_w", (8, 16), "f16"),
+        node_id="p_w",
+    )
+    g.add_node(LinearOp(), ["x", "p_w"], Tensor("y", (4, 8), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 1
+    assert any(node.op.op.name == "to_f8e4m3" for node in _ops_by_type(g, ElementwiseOp))
+
+
+def test_spell_dynamic_activations_rejects_mixed_compressed_tensor_groups(tmp_path):
+    qc = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {
+            "dynamic": {
+                "weights": {"num_bits": 8, "type": "float"},
+                "input_activations": {"num_bits": 8, "type": "float", "strategy": "token", "dynamic": True},
+            },
+            "weight_only": {
+                "weights": {"num_bits": 8, "type": "float"},
+                "input_activations": None,
+            },
+        },
+    }
+    graph, _bits, _scale = _spelled(tmp_path, qc=qc)
+    assert spell_dynamic_fp8_activations(graph, str(tmp_path)) == 0
 
 
 def test_spell_honors_modules_to_not_convert(tmp_path):
@@ -421,6 +538,75 @@ def test_loader_unquantized_checkpoint_unchanged(tmp_path):
     g = _weight_graph()
     assert spell_quantized_constants(g, str(tmp_path)) == 0
     np.testing.assert_array_equal(load_constants_from_safetensors(g, str(tmp_path))["p_w"], w)
+
+
+# ===================================================================
+# AWQ GEMM int4: packed checkpoint algebra and eager-reference decode
+# ===================================================================
+
+
+def _awq_fixture(tmp_path, *, k=8, n=16, group_size=4):
+    integers = (np.arange(k * n, dtype=np.int32).reshape(k, n) * 7 + 3) % 16
+    zeros = (np.arange((k // group_size) * n, dtype=np.int32).reshape(k // group_size, n) * 5 + 1) % 16
+    scales = (np.arange((k // group_size) * n, dtype=np.float32).reshape(k // group_size, n) + 1) / 128
+    qc = dict(_AWQ_QC, group_size=group_size)
+    _write_checkpoint(
+        tmp_path,
+        {
+            "layer.qweight": torch.from_numpy(_pack_awq4(integers)),
+            "layer.qzeros": torch.from_numpy(_pack_awq4(zeros)),
+            "layer.scales": torch.from_numpy(scales).half(),
+        },
+        qc,
+    )
+    stored_scales = scales.astype(np.float16).astype(np.float32)
+    ref = (integers - np.repeat(zeros, group_size, axis=0)) * np.repeat(stored_scales, group_size, axis=0)
+    return integers, zeros, scales, ref
+
+
+def test_unpack_awq4_reverses_gemm_pack_order():
+    values = np.arange(32, dtype=np.int32).reshape(2, 16) % 16
+    np.testing.assert_array_equal(unpack_awq4(_pack_awq4(values)), values)
+
+
+def test_dequantize_awq4_matches_group_formula(tmp_path):
+    integers, zeros, scales, ref = _awq_fixture(tmp_path)
+    got = dequantize_awq4(_pack_awq4(integers), _pack_awq4(zeros), scales.astype(np.float16), 4)
+    np.testing.assert_array_equal(got, ref)
+
+
+def test_load_dequantized_state_dict_awq_emits_hf_weight(tmp_path):
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    _integers, _zeros, _scales, ref = _awq_fixture(tmp_path)
+    state = load_dequantized_state_dict(tmp_path)
+    assert set(state) == {"layer.weight"}
+    np.testing.assert_array_equal(state["layer.weight"], ref.T)
+
+
+def test_spell_awq4_constants_preserves_packed_sources_and_values(tmp_path):
+    _integers, _zeros, _scales, ref = _awq_fixture(tmp_path)
+    graph = _weight_graph(shape=(16, 8), dtype="f32")
+    assert spell_quantized_constants(graph, str(tmp_path)) == 1
+    graph.validate()
+    sources = {op.source_path for op in _constants(graph).values() if op.source_path is not None}
+    assert sources == {"layer.qweight", "layer.qzeros", "layer.scales"}
+    assert any(n.op.op.name == "right_shift" for n in _ops_by_type(graph, ElementwiseOp))
+    assert any(n.op.op.name == "bitwise_and" for n in _ops_by_type(graph, ElementwiseOp))
+
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data=load_constants_from_safetensors(compiled, str(tmp_path)))
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], ref.T)
+
+
+def test_quantized_checkpoint_dir_detects_awq(tmp_path):
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    _awq_fixture(tmp_path)
+    assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
 
 
 # ===================================================================
@@ -751,9 +937,18 @@ def test_trace_model_spells_cones_and_binds_dequantized_twin(tmp_path):
     for _nid, op in graph.loadable_constants():
         if op.source_path and ("embed_tokens" in op.source_path or "lm_head" in op.source_path):
             assert op.source_dtype != "f8e4m3", f"unexpected spelling on {op.source_path}"
-    # Each bits constant is consumed by its decode cast in-graph.
+    # Each bits constant and every dynamically encoded activation are consumed
+    # by their matching decode cast in-graph.
     decode_ops = [n for n in graph.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.op.decodes is not None]
-    assert len(decode_ops) == len(spelled)
+    weight_decodes = [
+        node
+        for node in decode_ops
+        if isinstance(graph.producer(node.inputs[0]).op, ConstantOp) and graph.producer(node.inputs[0]).output.dtype.name == "f8e4m3"
+    ]
+    activation_encodes = [node for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp) and node.op.op.name == "to_f8e4m3"]
+    assert len(weight_decodes) == len(spelled)
+    assert len(decode_ops) == len(spelled) + len(activation_encodes)
+    assert activation_encodes
 
     params = dict(wrapper.named_parameters())
     for name, ref in ref_sd.items():

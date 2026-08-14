@@ -16,8 +16,8 @@ bit-identically (an absent feature is a zero column).
 
 ``key`` is ``"<gpu>/<name>"``, disambiguated by the builder when one name records several parity entries
 (``#2``, ``#3``, … in dataset order). ``tier`` is the fit's case tier (``thread`` / ``warp`` / ``dyn`` /
-``reduce`` / ``pointwise``); ``dyn`` groups score with the dynamic weight set, everything else with the
-static one.
+``reduce`` / ``pointwise``) and is a REPORT LABEL only — it decides nothing. The weight set a group scores
+under is ``dynamic``, read off the routing stamp exactly as the deployed prior reads it.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, LinearModel
+
 # A golden name's trailing size/dtype/variant segments (``512``, ``fp16``, ``dynM``, ``h4096``, ``s2048``,
 # ``n16384``, ``k8192``, ``hd128``) — stripped by :func:`op_family`.
 _VARIANT_SEG = re.compile(r"fp16|dynM|(?:hd|[hsnk])?\d+")
@@ -34,7 +36,10 @@ _VARIANT_SEG = re.compile(r"fp16|dynM|(?:hd|[hsnk])?\d+")
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
 # (32 for the f32-accumulate atom, 16 for the f16-accumulate one). The ``S_*`` / ``H_*`` shape/regime features
-# are constant within a shape, so they drop out of a within-shape ranking.
+# are constant within a shape, so they drop out of a within-shape ranking — a weight on one is invisible to the
+# rank objective (it shifts every candidate in the pool by the same amount) and therefore unidentifiable. The
+# routing stamp is the same kind of quantity, which is why it is held out of the matrix entirely rather than
+# merely excluded from a view: see :data:`~..linear_model.ROUTING_FEATURES`.
 #
 # ``MMA_acc_bits`` is load-bearing: the f16-accumulate fork is spelled in the TILE codec's atom token, so a row
 # taking it is identical under every ``D_*`` feature to its f32-accumulate sibling. While the view dropped it,
@@ -65,9 +70,9 @@ DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
 #
 # Both exclusions are expressiveness-neutral by construction — the model can express exactly the same
 # ranking functions with these 53 coordinates as with all 72 — so this buys a smaller, faster,
-# better-identified fit, not a different model. (Dropping ``S_ext_n_symbolic_axis`` from the VIEW does
-# not affect the static-vs-dynamic weight-set choice: ``OfflinePrior`` reads that stamp off the row
-# directly, never through the weights.)
+# better-identified fit, not a different model. (Naming no ``S_ext_*`` stamp costs the view nothing on the
+# weight-set choice either: the routing stamp never reaches the matrix in the first place, and ``Group.dynamic``
+# carries the answer.)
 #
 # ``D_stage_prefetch`` is the one feature here that is a step rather than a measurement — see its
 # definition in ``search/features.py`` for why the linear model cannot form it from ``D_stage_depth``.
@@ -88,10 +93,16 @@ def feature_view(spec: str):
     """A feature-view spec — comma-separated feature names, a trailing ``*`` making a prefix glob
     (``"D_*,MMA_tier"``) — parsed into a ``keep(name) -> bool`` predicate. The view a fit trained
     under is recorded in its metrics header and artifact provenance, so two fits are only comparable
-    when the recorded specs match."""
+    when the recorded specs match.
+
+    :data:`~..linear_model.ROUTING_FEATURES` are kept by EVERY view, named or not. They select a weight
+    set rather than contribute a term, and :meth:`Group.from_dicts` lifts them out of the matrix
+    afterwards, so keeping them costs a view nothing. A view that could drop them would instead route
+    every pool to the static weight set and report a fit with zero dynamic cases — silently, since
+    nothing downstream can tell an unfittable dynamic set from a genuinely static dataset."""
     pats = [p.strip() for p in spec.split(",") if p.strip()]
     prefixes = tuple(p[:-1] for p in pats if p.endswith("*"))
-    exact = frozenset(p for p in pats if not p.endswith("*"))
+    exact = frozenset(p for p in pats if not p.endswith("*")) | frozenset(ROUTING_FEATURES)
     return lambda name: name in exact or name.startswith(prefixes)
 
 
@@ -108,6 +119,7 @@ class Group:
     name: str
     tier: str
     gpu: str
+    dynamic: bool
     pinned_idx: int
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
@@ -116,9 +128,26 @@ class Group:
     def from_dicts(cls, key: str, name: str, tier: str, gpu: str, pinned_idx: int, feats: list[dict[str, float]]) -> Group:
         """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
         union of the pool's keys, the matrix a column per name (absent key = 0.0). Callers
-        drop the dicts after this — the matrix is the stored representation."""
-        names = tuple(sorted({k for f in feats for k in f}))
-        return cls(key, name, tier, gpu, pinned_idx, names, feature_matrix(feats, list(names)))
+        drop the dicts after this — the matrix is the stored representation.
+
+        The routing features (:data:`~..linear_model.ROUTING_FEATURES`) are read off the pool into
+        :attr:`dynamic` and then LEFT OUT of ``feat_names``, so a weight-set selector can never
+        become a descent coordinate. Reading row 0 is exact: the stamp comes from the shape, which
+        every candidate in a pool shares.
+
+        The stamp must agree with ``tier``, and disagreeing is a hard error. The two reach here by
+        different routes — the stamp through the featurizer, the tier from the source record's own
+        flag — and they are the same fact, so a mismatch means one of them is wrong and this pool
+        would otherwise train and be scored under the wrong weight set with nothing reporting it.
+        This is what keeps ``tier``, a label that decides nothing, honest."""
+        dynamic = bool(feats) and LinearModel.is_dynamic_row(feats[0])
+        if dynamic != (tier == "dyn"):
+            raise ValueError(
+                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
+                f"the source record's flag and its featurized rows disagree about the weight set"
+            )
+        names = tuple(sorted({k for f in feats for k in f} - set(ROUTING_FEATURES)))
+        return cls(key, name, tier, gpu, dynamic, pinned_idx, names, feature_matrix(feats, list(names)))
 
     def matrix(self, names: list[str]) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column,

@@ -4,15 +4,6 @@ on:
   schedule:
     - cron: "17 8 * * *"
   workflow_dispatch:
-    inputs:
-      gpu:
-        description: Exact GPU name from emmy/hardware.py
-        required: false
-        type: string
-      gpu_count:
-        description: Exact GPU count
-        required: false
-        type: number
 
 concurrency:
   group: model-discovery
@@ -26,15 +17,16 @@ jobs:
       contents: read
       pull-requests: read
     env:
-      TARGET_GPU: ${{ inputs.gpu || vars.DISCOVERY_TARGET_GPU || 'NVIDIA H200 141GB' }}
-      TARGET_GPU_COUNT: ${{ inputs.gpu_count || vars.DISCOVERY_TARGET_GPU_COUNT || 1 }}
+      GH_REPO: ${{ github.repository }}
+      MAINTAINED_MODEL_COUNT: 10
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
-      AGENT_KEY_FILE: /tmp/emmy-discovery-agent-key-${{ github.run_id }}-${{ github.run_attempt }}
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
       AGENT_PROMPT: /tmp/emmy-discovery-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
-      AGENT_OUTPUT: /tmp/emmy-discovery-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
-      PLAN_PATH_FILE: /tmp/emmy-discovery-plan-${{ github.run_id }}-${{ github.run_attempt }}.txt
-      APP_KEY_FILE: /tmp/emmy-discovery-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
+      AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
+      AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_INVENTORY: /tmp/emmy-discovery-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
+      DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -44,199 +36,235 @@ jobs:
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Enforce open onboarding PR cap
-        id: cap
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const pulls = await github.paginate(github.rest.pulls.list, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
-            const count = pulls.filter(pull => pull.labels.some(label => label.name === 'model-onboarding')).length;
-            core.info(`${count} open model-onboarding pull request(s)`);
-            core.setOutput('allowed', count < 3 ? 'true' : 'false');
+      - name: Find rolling discovery pull request
+        id: rolling
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          matches=$(retry_gh gh pr list --state open --limit 100 \
+            --json number,headRefName,isCrossRepository,labels \
+            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or (.headRefName | startswith("agents/model-discovery-"))))]')
+          count=$(jq length <<< "$matches")
+          if [ "$count" -gt 1 ]; then
+            echo "Expected at most one rolling model discovery PR, found $count" >&2
+            exit 1
+          fi
 
-      - name: Checkout default branch
-        if: steps.cap.outputs.allowed == 'true'
+          number=$(jq -r '.[0].number // empty' <<< "$matches")
+          branch=$(jq -r '.[0].headRefName // empty' <<< "$matches")
+          if [ -n "$number" ]; then
+            echo "Updating rolling discovery PR #$number from $branch"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            orphan_output=$(retry_gh gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/model-discovery-" \
+              --jq '.[].ref | sub("^refs/heads/"; "")')
+            mapfile -t orphan_branches < <(printf '%s' "$orphan_output" | sort)
+            if [ "${#orphan_branches[@]}" -gt 1 ]; then
+              echo "Expected at most one unpaired model discovery branch, found ${#orphan_branches[@]}" >&2
+              exit 1
+            fi
+            branch="${orphan_branches[0]:-}"
+            if [ -n "$branch" ]; then
+              echo "Adopting unpaired discovery branch $branch"
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout discovery branch
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ steps.rolling.outputs.branch || github.ref_name }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Rebase existing discovery branch on latest main
+        if: steps.rolling.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git fetch origin \
+            "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
+            "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
+
+          original_head="$(git rev-parse HEAD)"
+          remote_head="$(git rev-parse "origin/$EXISTING_BRANCH")"
+          if [ "$original_head" != "$remote_head" ]; then
+            echo "Discovery branch changed after it was selected; refusing to overwrite $remote_head" >&2
+            exit 1
+          fi
+
+          git rebase "origin/$BASE_BRANCH"
+          rebased_head="$(git rev-parse HEAD)"
+          if [ "$rebased_head" = "$original_head" ]; then
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            if git push \
+              --force-with-lease="refs/heads/$EXISTING_BRANCH:$original_head" \
+              origin "HEAD:refs/heads/$EXISTING_BRANCH"; then
+              break
+            fi
+            git fetch origin \
+              "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
+            if [ "$(git rev-parse "origin/$EXISTING_BRANCH")" = "$rebased_head" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$attempt"
+          done
+
       - name: Setup Python
-        if: steps.cap.outputs.allowed == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install Emmy
-        if: steps.cap.outputs.allowed == 'true'
-        run: make setup
+        run: make setup-agent
 
       - name: Run discover-models agent
-        if: steps.cap.outputs.allowed == 'true'
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
+          ./venv/bin/emmy recipe list recipes --json > "$AGENT_INVENTORY"
           python3 - <<'PY'
           import os
           from pathlib import Path
 
+          inventory = Path(os.environ["AGENT_INVENTORY"]).read_text()
           Path(os.environ["AGENT_PROMPT"]).write_text(f"""Use the discover-models skill read-only.
 
-          Consider only the exact target {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}. Select at
-          most one interesting open-weight model for which this checkout has no recipe. Weight current community
-          value and expected serving value most heavily. Do not deploy, rent hardware, or edit the repository.
+          Review the existing recipes and current demand for both supported and newly released open-weight models.
+          Select exactly {os.environ['MAINTAINED_MODEL_COUNT']} existing, fully configured recipes for periodic
+          testing and optimization. Prefer current community demand, serving value, architecture coverage, and a
+          useful spread of model sizes. Classify every other complete recipe as best-effort or obsolete. Best-effort
+          means the model remains useful and runnable, but is not selected for periodic optimization. Obsolete is a
+          strict technical judgment: use it when a named all-around better replacement for the same task is available
+          at a comparable or lower practical VRAM footprint, or a concrete technical limitation means the recipe
+          should no longer be used. When naming a replacement, compare the qualified deployment targets in the
+          recipes: its smallest target must use no more total physical GPU memory than the old recipe's smallest
+          target. All-around means the old model has no material advantage in quality, context, supported hardware,
+          latency or throughput, operating cost, modality, or licensing. A smaller or quantized recipe is not obsolete
+          merely because a larger or unquantized recipe exists. A replacement that is merely comparable is not
+          all-around better. Before proposing an obsolete replacement, read both recipe files and confirm that the old
+          recipe retains no advantage in configured context, concurrency, quantization, hardware support, or model
+          capability. If evidence is ambiguous or the model retains a useful advantage, use best-effort. Low demand,
+          age, or exclusion from the maintained set is not sufficient. A previously obsolete recipe may become
+          maintained or best-effort when the evidence changes. Never classify an onboarding/untested shell. The
+          exhaustive compact repository inventory is included below; do not rebuild it or read individual recipes
+          except for this required obsolete comparison or when another entry needs closer inspection. Use at most six
+          public-web tool calls total, including calls made in parallel, then write the manifest. Do not keep
+          researching once every maintained choice and obsolete proposal has enough evidence for this conservative
+          classification. Existing obsolete tags are prior proposals, not evidence: reassess them from best-effort and
+          keep them obsolete only when the replacement is strictly better under this policy. "Comparable reasoning"
+          is evidence for best-effort, not obsolete.
 
-          Return exactly one JSON object as the final response, without a Markdown fence:
-          {{"model_id": null, "gpu": "{os.environ['TARGET_GPU']}",
-            "gpu_count": {os.environ['TARGET_GPU_COUNT']}, "rationale": "brief evidence-backed reason"}}
-          Replace null with one exact "org/model" ID only when selected. Use null and an empty rationale when there
-          is no suitable model.
+          <repository-inventory>
+          {inventory}
+          </repository-inventory>
+
+          Give every maintained, best-effort, obsolete, and onboarding decision a concise, one-sentence,
+          evidence-backed rationale of at most 20 words.
+          Copy every existing model_id exactly from repository-inventory, including its organization; never
+          abbreviate or reconstruct an existing ID.
+          For an obsolete recipe, include the exact replacement_model_id literally in the rationale too, or omit
+          replacement_model_id and explain the technical reason the recipe should be dropped when no successor is
+          appropriate. Also select zero to three new models with no recipe. For each new model, propose one to three
+          useful deployment setups using only canonical deploy.gpu and positive deploy.gpu_count values. These will
+          become untested onboarding recipe shells. Keep at most three onboarding shells total: every existing
+          onboarding/untested recipe consumes one slot, so select no new model when three already exist. Do not claim
+          shells have been deployed or benchmarked. Do not edit the repository, rent hardware, or deploy anything.
+
+          Your final response must be exactly one JSON object without a Markdown fence:
+          {{
+            "maintained_models": [
+              {{"model_id": "exact/org-model ID for an existing recipe", "rationale": "why it is maintained"}}
+            ],
+            "best_effort_models": [
+              {{"model_id": "exact/org-model ID", "rationale": "why it remains useful on a best-effort basis"}}
+            ],
+            "obsolete_models": [
+              {{"model_id": "org/old-model", "replacement_model_id": "org/better-model",
+                "rationale": "name the replacement, compare qualified target VRAM, and explain why no advantage remains"}},
+              {{"model_id": "org/drop-model", "rationale": "technical reason to drop it without a successor"}}
+            ],
+            "onboarding_models": [
+              {{"model_id": "org/model", "task": "generate", "rationale": "why it is worth onboarding",
+                "deployments": [
+                  {{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}}
+                ]}}
+            ]
+          }}
+          maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
+          for an embedding model. Copy deploy.gpu values exactly from deployment setups in repository-inventory.
+          Return an empty onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
+          repository file. When OpenCode requires your final response, return the best manifest supported by the
+          evidence already gathered without making another tool call. Before returning, check every key letter for
+          letter: maintained_models and best_effort_models entries contain exactly model_id and rationale;
+          replacement_model_id is allowed only in obsolete_models.
           """)
           PY
-          printf '%s' "$CLOUDRIFT_API_KEY" > "$AGENT_KEY_FILE"
-          chmod 600 "$AGENT_KEY_FILE"
-          unset CLOUDRIFT_API_KEY
-          exec env -u CLOUDRIFT_API_KEY ./venv/bin/emmy agent run \
-            --api-key-file "$AGENT_KEY_FILE" \
-            --skill .claude/skills/discover-models/SKILL.md \
-            --prompt "$AGENT_PROMPT" \
-            --model "$AGENT_MODEL" \
-            --output "$AGENT_OUTPUT"
+          set +e
+          opencode run \
+            "Complete the attached lifecycle task exactly." \
+            --agent discover-models \
+            --model cloudrift/agent \
+            --format json \
+            --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
+          agent_status=$?
+          set -e
+          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
+            "$AGENT_EVENTS" > "$AGENT_MANIFEST"
+          if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_MANIFEST" ]; then
+            exit "$agent_status"
+          fi
+          if [ "$agent_status" -ne 0 ]; then
+            echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
+          fi
 
       - name: Verify discovery was read-only
-        if: steps.cap.outputs.allowed == 'true'
         run: test -z "$(git status --porcelain)"
 
-      - name: Validate discovery selection
-        if: steps.cap.outputs.allowed == 'true'
-        id: selection
+      - name: Validate and apply model lifecycle
+        id: lifecycle
         run: |
-          ./venv/bin/python .github/scripts/discovery_selection.py \
-            --input "$AGENT_OUTPUT" \
-            --gpu "$TARGET_GPU" \
-            --gpu-count "$TARGET_GPU_COUNT"
-
-      - name: Skip a duplicate onboarding pull request
-        if: steps.selection.outputs.found == 'true'
-        id: duplicate
-        uses: actions/github-script@v7
-        env:
-          MODEL_ID: ${{ steps.selection.outputs.model_id }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const pulls = await github.paginate(github.rest.pulls.list, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
-            const marker = `\`${process.env.MODEL_ID}\``;
-            const onboardingPulls = pulls.filter(pull =>
-              pull.labels.some(label => label.name === 'model-onboarding')
-            );
-            const duplicate = onboardingPulls.find(pull =>
-              pull.labels.some(label => label.name === 'model-onboarding') &&
-              (pull.title.includes(process.env.MODEL_ID) || (pull.body || '').includes(marker))
-            );
-            if (duplicate) {
-              core.info(`Skipping ${process.env.MODEL_ID}; onboarding PR #${duplicate.number} is already open`);
-            }
-            core.setOutput('exists', duplicate ? 'true' : 'false');
-            core.setOutput('allowed', onboardingPulls.length < 3 ? 'true' : 'false');
-
-      - name: Create onboarding plan
-        if: >-
-          steps.selection.outputs.found == 'true' &&
-          steps.duplicate.outputs.allowed == 'true' &&
-          steps.duplicate.outputs.exists != 'true'
-        env:
-          MODEL_ID: ${{ steps.selection.outputs.model_id }}
-          RATIONALE: ${{ steps.selection.outputs.rationale }}
-        run: |
-          python3 - <<'PY'
-          import os
-          import re
-          import textwrap
-          from pathlib import Path
-
-          model_id = os.environ["MODEL_ID"]
-          slug = re.sub(r"[^a-z0-9]+", "-", model_id.lower()).strip("-")
-          path = Path("plans") / f"onboard-{slug}.md"
-          rationale = textwrap.fill(
-              os.environ["RATIONALE"],
-              width=116,
-              initial_indent="- Rationale: ",
-              subsequent_indent="  ",
-          )
-          heading = f"""\
-          # Onboard {model_id}
-
-          - Hugging Face model: `{model_id}`
-          - Exact target: `{os.environ['TARGET_GPU']} x{os.environ['TARGET_GPU_COUNT']}`
-          """
-          instructions = """\
-          Run the **Onboard model** workflow from this pull request branch. The workflow must use the exact target,
-          update this branch, and remove this plan after producing:
-
-          - `recipes/<model>/recipe.yaml`;
-          - `recipes/<model>/RESULTS.md`;
-          - a reproducible serving experiment and its successful raw results;
-          - when Emmy is eligible, tuned kernels and a verified prebuilt CloudRiftAI image.
-          """
-          path.write_text(textwrap.dedent(heading) + rationale + "\n\n" + textwrap.dedent(instructions))
-          Path(os.environ["PLAN_PATH_FILE"]).write_text(str(path))
-          PY
-          git add "$(cat "$PLAN_PATH_FILE")"
-          git diff --cached --check
-
-      - name: Configure renewable GitHub App credentials
-        if: >-
-          steps.selection.outputs.found == 'true' &&
-          steps.duplicate.outputs.allowed == 'true' &&
-          steps.duplicate.outputs.exists != 'true'
-        env:
-          APP_PRIVATE_KEY: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          APP_ID: ${{ secrets.EXPERIMENT_APP_ID }}
-        run: |
-          rm -f -- "$APP_KEY_FILE"
-          printf '%s' "$APP_PRIVATE_KEY" > "$APP_KEY_FILE"
-          chmod 600 "$APP_KEY_FILE"
-          git config user.name "emmy-onboarding-bot"
-          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
-          git config credential.helper ""
-          git config --add credential.helper \
-            "!APP_ID=$APP_ID APP_KEY_FILE=$APP_KEY_FILE $GITHUB_WORKSPACE/.github/scripts/git-credential-github-app.sh"
-
-      - name: Push plan branch
-        if: >-
-          steps.selection.outputs.found == 'true' &&
-          steps.duplicate.outputs.allowed == 'true' &&
-          steps.duplicate.outputs.exists != 'true'
-        id: branch
-        env:
-          MODEL_ID: ${{ steps.selection.outputs.model_id }}
-        run: |
-          slug=$(printf '%s' "$MODEL_ID" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')
-          branch="agents/plan-onboard-${slug}-${GITHUB_RUN_ID}"
-          git switch -c "$branch"
-          git commit -m "plan: onboard $MODEL_ID"
-          git push origin "$branch"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          ./venv/bin/python .github/scripts/discovery_lifecycle.py \
+            --input "$AGENT_MANIFEST" \
+            --summary "$DISCOVERY_SUMMARY"
+          maintained_count="$(./venv/bin/emmy recipe list recipes --tag maintained --json | jq 'length')"
+          if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
+            echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
+            exit 1
+          fi
+          onboarding_count="$(./venv/bin/emmy recipe list recipes --tag onboarding --json | jq 'length')"
+          if [ "$onboarding_count" -gt 3 ]; then
+            echo "Expected at most 3 onboarding recipes, found $onboarding_count" >&2
+            exit 1
+          fi
+          git diff --check
 
       - name: Refresh GitHub App token
-        if: >-
-          steps.selection.outputs.found == 'true' &&
-          steps.duplicate.outputs.allowed == 'true' &&
-          steps.duplicate.outputs.exists != 'true'
+        if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
         id: app-token-refresh
         uses: actions/create-github-app-token@v1
         with:
@@ -244,35 +272,87 @@ jobs:
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Open labeled onboarding plan PR
-        if: >-
-          steps.selection.outputs.found == 'true' &&
-          steps.duplicate.outputs.allowed == 'true' &&
-          steps.duplicate.outputs.exists != 'true'
+      - name: Configure GitHub CLI credentials
+        if: steps.lifecycle.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
-          MODEL_ID: ${{ steps.selection.outputs.model_id }}
-          RATIONALE: ${{ steps.selection.outputs.rationale }}
-          PLAN_BRANCH: ${{ steps.branch.outputs.branch }}
         run: |
-          gh label create model-onboarding \
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+      - name: Commit and push rolling lifecycle update
+        if: steps.lifecycle.outputs.changed == 'true'
+        id: branch
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          branch="$EXISTING_BRANCH"
+          if [ -n "$branch" ]; then
+            git switch -C "$branch"
+          else
+            branch="agents/model-discovery-${GITHUB_RUN_ID}"
+            git switch -c "$branch"
+          fi
+          git add --all -- recipes
+          git diff --cached --check
+          git commit -m "recipes: refresh model lifecycle"
+          for attempt in 1 2 3; do
+            git push origin "$branch" && break
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$attempt"
+          done
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update rolling discovery pull request
+        if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          PR_NUMBER: ${{ steps.rolling.outputs.number }}
+          DISCOVERY_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
+        run: |
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          retry_gh gh label create model-discovery \
+            --description "Automated model recipe lifecycle" \
+            --color 5319E7 --force
+          retry_gh gh label create model-onboarding \
             --description "Automated model discovery and onboarding" \
             --color 1D76DB --force
-          gh pr create \
-            --draft \
-            --head "$PLAN_BRANCH" \
-            --base "${{ github.event.repository.default_branch }}" \
-            --title "Plan onboarding for $MODEL_ID" \
-            --label model-onboarding \
-            --body "Model discovery selected \`$MODEL_ID\` for \`$TARGET_GPU x$TARGET_GPU_COUNT\`.\n\n$RATIONALE\n\nRun **Onboard model** from this PR branch to replace the plan with measured artifacts."
+          if [ -n "$PR_NUMBER" ]; then
+            retry_gh gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              -f title="Refresh model lifecycle and onboarding" \
+              -F body=@"$DISCOVERY_SUMMARY" >/dev/null
+          else
+            PR_NUMBER=$(retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
+              -f head="$DISCOVERY_BRANCH" \
+              -f base="${{ github.event.repository.default_branch }}" \
+              -f title="Refresh model lifecycle and onboarding" \
+              -F body=@"$DISCOVERY_SUMMARY" \
+              -F draft=true \
+              --jq .number)
+          fi
+          retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+            -f 'labels[]=model-discovery' \
+            -f 'labels[]=model-onboarding' >/dev/null
 
       - name: Cleanup discovery credentials and output
         if: always()
         run: |
           rm -f \
-            "$APP_KEY_FILE" \
+            "$AGENT_EVENTS" \
             "$AGENT_PROMPT" \
-            "$AGENT_OUTPUT" \
-            "$PLAN_PATH_FILE" \
-            "$AGENT_KEY_FILE"
+            "$AGENT_MANIFEST" \
+            "$AGENT_INVENTORY" \
+            "$DISCOVERY_SUMMARY"
           git config --unset-all credential.helper || true

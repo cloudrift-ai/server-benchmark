@@ -1,0 +1,43 @@
+# Conservative FP16 Volta qualification lane for Llama 3.1 8B Instruct.
+# The public NousResearch mirror has byte-identical config and all four
+# safetensor payload hashes relative to Meta's gated checkpoint. The tokenizer
+# is taken from the already-qualified AWQ repository because its tokenizer
+# config is byte-identical to Meta's tool-aware tokenizer config.
+model:
+  huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
+  revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 65536
+    max_concurrent_requests: 8
+    vllm:
+      image: "cloudriftai/1cat-vllm-sm70@sha256:8405bb60d24610417d0d6da278a753e2c968bfd1e0d7ff7f79cd6601a038b2be"
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --attention-backend FLASH_ATTN_V100
+        --max-num-batched-tokens 4096
+        --tokenizer hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+        --tokenizer-revision db1f81ad4b8c7e39777509fac66c652eb0a52f91
+        --enable-auto-tool-choice
+        --tool-call-parser llama3_json
+
+benchmark:
+  max_concurrency: 8
+  num_prompts: 32
+  random_input_len: 512
+  random_output_len: 256
+  num_warmups: 2
+  repeats: 3
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

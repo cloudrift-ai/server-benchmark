@@ -34,6 +34,8 @@ emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048,
 emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.yaml
 # Measure proposed rows, then spend the remaining per-kernel budget on MCTS
 emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
+# Run every working-golden target (add --target NAME to select one)
+emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
 # Capture one symbolic serving inventory with every release realization, then audit it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml
@@ -211,9 +213,22 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 ## Recipe
 
+```bash
+# Inspect recipe metadata or count one lifecycle group in automation.
+emmy recipe list recipes --tag maintained --json
+
+# Create an untested onboarding shell with one to three proposed deployments.
+emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
+  --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
+```
+
 ```yaml
+tags:
+  - maintained
+
 model:
   huggingface: "org/model-name"
+  rationale: "Why this model belongs at its current lifecycle level."
 
 engine:
   llm:
@@ -243,6 +258,11 @@ matrices:
       engine.llm.max_concurrent_requests: [128, 512]
       benchmark.max_concurrency: [128, 512]
 ```
+
+Discovery keeps ten tested recipes tagged `maintained` and records a rationale under every recipe's `model` block.
+Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become
+`obsolete`. New model shells use `onboarding` plus `untested` and propose up to three deployment matrix entries.
+Disabled recipes are not deployable or bundled.
 
 Generic workload (run any tool on the VM, pull back result files):
 
@@ -276,14 +296,6 @@ emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.p
 emmy vm delete cloudrift --instance-id <id>
 ```
 
-## Agent Skills
-
-```bash
-emmy agent run --skill .claude/skills/discover-models/SKILL.md --prompt /tmp/task.md \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 --api-key-file /tmp/agent-key --output /tmp/result.json
-emmy agent tools # the exact model tool definitions as JSON
-```
-
 ## Development
 
 ```bash
@@ -306,14 +318,13 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
 
 ## Project Structure
 
+- [opencode.json](opencode.json) and [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
 - [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
   (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
   - [emmy.py](emmy/emmy.py) — CLI entrypoint
   - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration
   - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
-  - [agent/](emmy/agent/) — tracked-skill runner and bounded model tools
-    (see [ARCHITECTURE.md](emmy/agent/ARCHITECTURE.md))
   - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
   - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
@@ -338,6 +349,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration
   - [provisioning/](emmy/provisioning/) — Cloud provisioning, SSH transport, VM lifecycle
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
+    (see [ARCHITECTURE.md](emmy/benchmark/ARCHITECTURE.md))
   - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
 - [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
   (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
@@ -345,7 +357,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
   [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
-  what `emmy bench` runs
+  what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
 - [kernels/](kernels/) — Standalone CUDA kernel sources
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))

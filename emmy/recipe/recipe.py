@@ -6,6 +6,7 @@ import re
 import yaml
 
 from emmy.recipe.engines import banned_extra_arg_flags
+from emmy.recipe.lifecycle import recipe_is_runnable, recipe_lifecycle, validate_recipe_tags
 from emmy.recipe.types import Recipe
 
 
@@ -79,6 +80,10 @@ _MANAGED_COMPOSE_KEYS = frozenset(
 
 def _validate_and_build(config: dict) -> Recipe:
     """Validate extra_args and docker_options, then build Recipe from config dict."""
+    validate_recipe_tags(config.get("tags"))
+    if not recipe_is_runnable(config):
+        raise ValueError(f"Recipe is disabled by its '{recipe_lifecycle(config)}' lifecycle tag")
+
     has_command = "command" in config and config["command"] is not None
     has_engine_llm = bool(config.get("engine", {}).get("llm"))
 

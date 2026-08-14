@@ -104,7 +104,7 @@ Terminal errors (auth 401/403, malformed 400, "Unknown GPU" `ValueError`, missin
 
 ## Manual Overrides
 
-Use the provider-specific commands **only** when the user explicitly asks for a specific instance type / machine type that doesn't match a hardware-table entry, or when debugging a provisioning bug. For normal "give me a server" requests, always prefer `vm create gpu`.
+Use the provider-specific commands **only** when the user explicitly asks for a specific instance type / machine type that doesn't match a hardware-table entry, when the user pins a specific CloudRift node, or when debugging a provisioning bug. For normal "give me a server" requests, always prefer `vm create gpu`.
 
 ### CloudRift (single-shot, exact instance type)
 
@@ -115,6 +115,10 @@ emmy vm create cloudrift \
 ```
 
 This command requires the **public** key path (`.pub`), unlike `vm create gpu`. It does not retry across bases/zones — one attempt, then exit.
+
+Add `--node <id-or-hostname>` when the user names a specific node: the rental then uses the `ByNodeId` selector.
+Hostname resolution goes through the operator-only node-list endpoint, so non-operator accounts must pass the node
+UUID. A pinned node has no fallback — if the rent fails, report it; do not retry elsewhere.
 
 Image is auto-selected from the instance type: `mi*` (AMD Instinct) → ROCm image; everything else → NVIDIA driver image. Override with `--image-url` only when the user explicitly asks — the wrong image leaves the GPU unusable.
 

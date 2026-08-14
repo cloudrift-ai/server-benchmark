@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emmy-ml"
-version = "0.3.0"
+version = "0.3.1"
 description = "Optimized LLM compiler, benchmarking, and deployment stack."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -38,7 +38,12 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
-compile = ["torch", "transformers>=5.10", "cppyy==3.5.0", "safetensors"]
+# transformers window (verified 2026-08-12): >=5.13 because the Laguna/GLM-4.5 MoE
+# split tests need models/attributes (e.g. LagunaAttention.gate_per_head) absent in
+# 5.12; <5.15 because 5.15's per-layer heterogeneity makes vllm 0.23's global
+# `hf_text_config.head_dim` read raise AmbiguousGlobalPerLayerAttributeError when
+# building a ModelConfig for gemma-4 (per-layer head_dim). 5.13.0–5.14.1 pass both.
+compile = ["torch", "transformers>=5.13,<5.15", "cppyy==3.5.0", "safetensors"]
 image = ["diffusers>=0.39,<0.40"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.
 # >=0.23: 0.22.1's FlashInfer dispatch cannot run gemma-4's 512-dim global attention
@@ -53,7 +58,7 @@ eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.10", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.13,<5.15", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/cloudrift-ai/emmy"

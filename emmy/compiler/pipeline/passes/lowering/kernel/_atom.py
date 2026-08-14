@@ -739,6 +739,21 @@ def _unroll_inner(axis) -> bool:
     return unroll_ok(axis.extent, 64)
 
 
+def _cell_varying(body, side: Side | None) -> bool:
+    """Whether an operand's producing ``body`` varies along ``side`` — the OTHER output axis of the
+    register tile (n for A, m for B).
+
+    A gmem ``Load`` edge indexes its own axes only, so this is False and the tile's reuse holds: one
+    A read per register row, one B read per column. A COMPUTED edge is free to read the sibling
+    coordinate — the o_proj shape whose A cone is broadcast over n (``out[m, n] = Σ_k B[n, k] ·
+    A[m, k, n]``) — and then the row read is BOTH the wrong value for every column but the first and
+    a reference to a coordinate the kernel does not define: after the tile split only the ``_b`` /
+    ``_u`` split vars are bound, so the per-copy rename (:func:`copy_cell`) suffixes the surviving
+    axis name into an undefined identifier (nvcc: ``identifier "a1__ar9" is undefined``, the
+    whole-model qwen3-0.6b layer-0 o_proj on sm_89). Such an operand is read per CELL instead."""
+    return side is not None and Body(body).depends_on(body, side.name)
+
+
 def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
     """Collapse syntactically-identical scalar ``Load``s (same buffer + index) to one binding,
     rewriting the dropped names to the survivor — the operand reuse a register tile exists for (a
@@ -1207,26 +1222,45 @@ class _ScalarOps(_AtomOps):
         gmem ``Load`` — or the computed register-resident body, e.g. flash PV's ``P``), each COL its
         B ``Load`` once, each ``(i, j)`` cell folds ``acc__c{i}_{j} += b·a``, and the K-loop is a unit
         ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
-        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
+        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`).
+
+        An operand that VARIES ALONG THE OTHER output axis (:func:`_cell_varying`) is read once per
+        CELL instead — the row / column reuse is a property of the operand, not of the tier."""
         c = self.c
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.axis
         m, n = mn
         prot = _scalar_protected(c, self.tile, self.lead)
         b_name, a_name = operand_name(c.b), operand_name(c.a)
+        a_body, b_body = operand_body(c.a), operand_body(c.b)
+        a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
+
+        def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
+            return {} if m is None else {m.name: _wrap(m, offset[0].base(i))}
+
+        def at_n(j):  # register column ``j``'s n coordinate
+            return {n.name: _wrap(n, offset[1].base(j))}
 
         def read_row(i):
-            if m is None:
-                return copy_cell(operand_body(c.a), Sigma({}), f"__ar{i}", prot)
-            return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
+            return [] if a_cell else copy_cell(a_body, Sigma(at_m(i)), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            return [] if b_cell else copy_cell(b_body, Sigma(at_n(j)), f"__bc{j}", prot)
 
         def contract(i, j):
+            # A cell-varying operand's read lands here, σ-bound to BOTH coordinates and suffixed with
+            # the full cell, so every coordinate it mentions is substituted and each cell owns its copy.
+            cell = Sigma({**at_m(i), **at_n(j)})
+            a_sfx = f"__ar{i}_{j}" if a_cell else f"__ar{i}"
+            b_sfx = f"__bc{i}_{j}" if b_cell else f"__bc{j}"
+            reads = [
+                *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
+                *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
+            ]
             v = f"{c.acc}__v__c{i}_{j}"
             return [
-                Assign(name=v, op=_MUL, args=(f"{b_name}__bc{j}", f"{a_name}__ar{i}")),
+                *reads,
+                Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
                 Accum(name=f"{c.acc}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
             ]
 

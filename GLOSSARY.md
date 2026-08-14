@@ -174,7 +174,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   in one kernel versus splitting them apart. The prior is never asked to rank these options. Instead, the compiler
   compares the total estimated cost of each resulting kernel set; the prior contributes only per-kernel cost
   estimates inside that comparison. Only a trusted online prior — trained and passing calibration — may supply those
-  estimates; on the offline prior or a quarantined online prior, the default kernel set is kept.
+  estimates. On the offline prior or a quarantined online prior, a capability-derived cold lead may select an
+  alternative from the operation's structure and the target's declared atom capabilities (never a GPU product or
+  model name); otherwise the default kernel set is kept.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
   variable (`EMMY_STAGE=d2/cp`) or by re-running a recorded configuration exactly. A pinned benchmark measures the

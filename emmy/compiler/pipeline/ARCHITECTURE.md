@@ -435,7 +435,10 @@ the authoritative order** — the summaries elsewhere in this file defer to it.
    stage, and scalar one-dimensional reductions whose legal cross-CTA split removes a long serial tail. They rank
    only already-legal rows from atom/transport properties, extents, worker inventory, and card limits; they never
    name a GPU, model, operation, or product shape. Golden, reservoir, DB, and a calibrated online prior remain
-   authoritative.
+   authoritative. The structural placement fork has its own lead in the same tier: a contraction whose computed
+   operand no target-available atom consumes inline (every atom for the operand dtype is materialized-edges-only)
+   leads the option that cuts that edge, so a cold deploy recovers the hardware contraction tier instead of the
+   scalar fallback;
 5. the prior's `mean_scores` argmin — only when no candidate has any evidence or qualifying cold lead. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
@@ -496,8 +499,9 @@ largest reasonable algebraic region subject only to semantic preservation and ge
 does not consult hardware, schedule coverage, or profitability evidence. `PLACE@<label>` then names an edge inside
 the recognized term. With no authoritative decision, placement offers a structural fork: the maximal region first,
 plus one `Graph` fragment per realizable seam. Tuning compares those kernel sets; a cold prior or option-0 keeps the
-maximal region. A schedule that cannot realize that region does not justify weakening fusion: extend the generic
-schedule domain or expose a realizable `PLACE` cut, then measure the choice.
+maximal region, except where the capability-derived placement cold lead (deploy tier 4) proves the fused form has no
+hardware contraction tier at all. A schedule that cannot realize that region does not justify weakening fusion:
+extend the generic schedule domain or expose a realizable `PLACE` cut, then measure the choice.
 
 A **routing** golden is the durable measured form of that decision: its knobs are `PLACE` keys only. The loader
 rejects records that mix placement and schedule knobs, and `_golden_evidence_index` skips routing entries. A matching

@@ -29,21 +29,27 @@ tuning, V100 FP16 Llama). The layer contract this branch lands, each line enforc
 
 ## Remaining work on this branch
 
-- [ ] Pick one exact-plan replay implementation; port the loser's unique fixes; take any non-replay drift from
-      #504's rebase.
-- [ ] Delete compat shims: `route_cut` (dead export), any dual paths found in the audit. No backwards compat.
-- [ ] Verify multi-channel sync staging is legal without `cp.async` (V100 path) — the #504 mandatory-sync rule
-      vs #505 N-channel emitters clash; "Fix cross-platform contraction legality" may already cover it.
-- [ ] Structural-fork cold tier: `_pick_structural` still drops structural leaves on a cold prior. Add the
-      capability-derived placement cold lead (rank, don't drop): computed-operand seam + every available atom
-      `materialized_edges_only` → lead the cut (the reborn #505 V100 rule); no atom at all → lead fuse.
+- [x] Replay verdict: kept this branch's transcript + `promote_replay_plans` design; ported from #504's head the
+      nested-SSA sync-fill fix, the nested-only TILE ownership fix, strict-row accounting, the accuracy
+      size-mismatch failure, `PLACE_cut_site_<path>` features, and the `no_exact_pin` fail-closed marker with
+      stale-winner supersede. The rebase carried no other compiler drift.
+- [x] Deleted `route_cut`; dropped the unused `computed_a_cover` alias.
+- [x] Multi-channel sync staging: settled on the N-channel model (Volta sync-copy offered for materialized
+      products, no forced sync transport); pinned the computed-operand transport capability boundary in
+      `test_move_catalog`.
+- [x] Placement cold lead landed (`greedy._cold_placement_lead` + deploy tier 4 wiring + tests).
 - [ ] The serving env references `goldens/v100_sm70_meta_llama_3_1_8b_instruct.yaml`, which does not exist —
       capture the V100 inventory during V100 validation or drop the reference.
 - [ ] Test on local 5090 (`make test`, lint) and on the V100 box (focused sm_70 suites + Llama FP16 kernel
       compile/run vs eager at M=1/512).
-- [ ] Docs: ARCHITECTURE placement sections (fork model is the base; keep the FP16 numeric-contract paragraph);
-      GLOSSARY amendments (*Structural fork* cold tier; add *seam*, *placement*, *cold lead*).
+- [x] Docs: deploy tier 4 + placement sections in `pipeline/ARCHITECTURE.md`; GLOSSARY *Structural fork* cold
+      lead amendment.
 - [ ] Open the superseding PR; close #504 and #505 pointing at it.
+
+Not ported from #504's final head (recoverable from branch `codex/h200-cublas-kernel-optimization`,
+`305b3de9`): the materialized-score flash lowering (`PLACE@dd=cut` → PV mma; `_twist`/`_flash`/`_schedule`
+work entangled with its `lowering/schedule` pass-package split) and the `ranking.kernel_set` persistence form
+superseded by `replay_plan`. The H200 attention placement search continues on top of this branch.
 
 ## Deferred (follow-up PRs, not this branch)
 

@@ -14,8 +14,6 @@ tile-tier rebuild:
 
 - ``030_stamp_types`` — stamp Load/Assign/Write dtypes (so the next two read
   them off the IR; overflow-prone fp16 squares promote to f32).
-- ``040_demote_to_write_dtype`` — demote native-fp16-able elementwise chains
-  feeding an fp16 Write to fp16 (dormant under today's f32 accumulators).
 - ``050_vectorize_loads`` / ``080_vectorize_stores`` — fold consecutive scalar
   Loads / Writes into one wide vector access.
 - ``095_interleave_loads`` — sink each Load to just before its first consumer.

@@ -115,10 +115,11 @@ def _duplicated_contraction(graph: Graph, region: set[str]) -> str | None:
         return frozenset().union(*(contraction_sources(input_id, next_seen) for input_id in producer.inputs))
 
     region_stmts = tuple(stmt for node_id in region for stmt in graph.nodes[node_id].op.body.iter())
-    online_softmax_region = (
-        any(isinstance(stmt, Accum) and stmt.op.name == "maximum" for stmt in region_stmts)
-        and any(isinstance(stmt, Assign) and stmt.op.name == "exp" for stmt in region_stmts)
-        and any(isinstance(stmt, Accum) and stmt.op.name == "add" for stmt in region_stmts)
+    # Regions grow incrementally, so the softmax sum may not have joined the region yet when this
+    # guard runs. The running-maximum statistic beside an exp value path already identifies online
+    # softmax; the duplication this guard targets carries an additive statistic instead.
+    online_softmax_region = any(isinstance(stmt, Accum) and stmt.op.name == "maximum" for stmt in region_stmts) and any(
+        isinstance(stmt, Assign) and stmt.op.name == "exp" for stmt in region_stmts
     )
 
     def branch_reaches_reduce(start: str) -> bool:

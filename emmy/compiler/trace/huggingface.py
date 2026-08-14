@@ -985,14 +985,14 @@ class _PassThroughMask:
 
 def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
-    (FP8 scale-paired bits, or EXL3 trellis-coded siblings)."""
-    from emmy.compiler.loader.quant import _exl3_quant_config, _fp8_quant_config  # noqa: PLC0415
+    (FP8 scale-paired bits, NVFP4 packed trios, or EXL3 trellis-coded siblings)."""
+    from emmy.compiler.loader.quant import _exl3_quant_config, _fp4_quant_config, _fp8_quant_config  # noqa: PLC0415
 
-    return _fp8_quant_config(p) is not None or _exl3_quant_config(p) is not None
+    return _fp8_quant_config(p) is not None or _fp4_quant_config(p) is not None or _exl3_quant_config(p) is not None
 
 
 def quantized_checkpoint_dir(model_id_or_path: str, revision: str | None = None):
-    """The local checkpoint dir when the model is a quantized checkpoint (FP8 or EXL3),
+    """The local checkpoint dir when the model is a quantized checkpoint (FP8, NVFP4, or EXL3),
     else ``None``.
 
     Detection reads only ``config.json`` (for a repo id, a single cached hub
@@ -1195,9 +1195,11 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
         _EXL3_SIBLING_LEAVES,
         _exl3_codebook,
         _exl3_quant_config,
+        _fp4_quant_config,
         _fp8_quant_config,
         _is_skipped,
         dequantize,
+        dequantize_nvfp4,
     )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
@@ -1210,6 +1212,8 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
 
     qc = _fp8_quant_config(model_dir) or {}
     patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    qc4 = _fp4_quant_config(model_dir)
+    patterns4 = list(qc4.get("ignore") or []) if qc4 else []
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
     by_shard: dict[str, list[str]] = {}
@@ -1246,6 +1250,11 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
                 if slot is not None:
                     layer, name, expert = slot
                     t = f.get_tensor(k)
+                    if qc4 is not None and t.dtype == torch.uint8 and k + "_scale_2" in index:
+                        raise NotImplementedError(
+                            f"NVFP4 expert weight {k!r}: the expert lane has no packed-trio decode yet; "
+                            "casting the raw bytes would silently corrupt the values"
+                        )
                     if t.dtype in torch_f8:
                         fmt = "f8e4m3" if t.dtype == torch.float8_e4m3fn else "f8e5m2"
                         t = t.view(torch.uint8)
@@ -1275,8 +1284,20 @@ def load_quantized_split(model_dir, dtype, *, compress_trunk=False):
                     w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
                     state[_checkpoint_to_model_key(base + ".weight")] = torch.from_numpy(w).to(dtype)
                     continue
-                if k.endswith(("_scale", "_scale_inv")) and k[: k.rfind("_scale")] in index:
+                if k.endswith(("_scale", "_scale_inv", "_scale_2")) and k[: k.rfind("_scale")] in index:
                     continue  # consumed by its base weight's dequant
+                if qc4 is not None and k + "_scale" in index and k + "_scale_2" in index and not _is_skipped(k, patterns4):
+                    t = f.get_tensor(k)
+                    if t.dtype == torch.uint8:  # the NVFP4 packed trio
+                        vals = dequantize_nvfp4(
+                            t.numpy(),
+                            _sibling(k + "_scale").view(torch.uint8).numpy(),
+                            _sibling(k + "_scale_2").float().numpy(),
+                        )
+                        state[_checkpoint_to_model_key(k)] = torch.from_numpy(vals).to(dtype)
+                        continue
+                    state[_checkpoint_to_model_key(k)] = t.to(dtype) if t.is_floating_point() else t
+                    continue
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:
                     scale_key = next((c for c in (k + "_scale", k + "_scale_inv") if c in index), None)

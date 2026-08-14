@@ -609,7 +609,7 @@ def _trace_model(
     quant_dir = quantized_checkpoint_dir(model_id)
     repo, revision = split_revision(model_id)
     if quant_dir is not None:
-        # Quantized checkpoint (fp8 / EXL3): trace the architecture twin from config,
+        # Quantized checkpoint (fp8 / NVFP4 / EXL3): trace the architecture twin from config,
         # carrying the decoded real weights (from_pretrained would engage transformers'
         # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
         model = load_quantized_trace_twin(quant_dir, dtype, layer) if architecture_only else load_quantized_twin(quant_dir, dtype)

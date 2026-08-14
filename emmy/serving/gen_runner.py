@@ -678,8 +678,9 @@ class EmmyGenRunner:
 
         warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
-        # engage its own fp8 machinery); build the twin from config and stream the shards —
-        # dense trunk loaded as real values, expert tensors kept fp8 (``load_quantized_split``).
+        # engage its own quantizer machinery); build the twin from config and stream the shards —
+        # dense trunk loaded as real values (fp8 and NVFP4 dequantized on read), expert tensors
+        # kept fp8 as raw bits; a packed NVFP4 expert raises (``load_quantized_split``).
         qdir = quantized_checkpoint_dir(model_id)
         if qdir is not None:
             # EXL3 keeps the TRUNK coded too — the whole point of a 2-bit checkpoint is that the

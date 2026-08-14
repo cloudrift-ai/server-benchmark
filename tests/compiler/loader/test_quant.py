@@ -831,6 +831,17 @@ def test_spelled_nvfp4_matmul_fuses_into_one_loop(tmp_path):
     assert consts == {"w_bits", "w_f4_pairs", "w_scale_bits", "w_scale_2"}
 
 
+def test_is_quantized_dir_recognizes_nvfp4(tmp_path):
+    # The trace-side quantized-checkpoint check: an NVFP4 checkpoint must take the
+    # quantized-twin path. Plain from_pretrained skips the unknown modelopt scheme
+    # with a warning, loads raw tensors, and dies on the packed [N, K/2] shape
+    # mismatches.
+    from emmy.compiler.trace.huggingface import _is_quantized_dir
+
+    _nvfp4_checkpoint(tmp_path)
+    assert _is_quantized_dir(tmp_path)
+
+
 def test_load_dequantized_state_dict_nvfp4(tmp_path):
     """The twin read of a synthetic NVFP4 checkpoint: the packed trio dequantizes to the
     oracle's exact values, consumed scales drop, activation-quant metadata and bf16

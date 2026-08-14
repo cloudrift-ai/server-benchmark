@@ -152,19 +152,22 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
   (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
   and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
-  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An EXL3 checkpoint takes the
-  same split at the trellis format's own shapes (`fmt == "exl3"`). Its explicit reference API may decode trunk
-  values, while serving passes `compress_trunk=True`: the twin parameters stay uninitialized placeholders and the
-  caller re-sources each coded linear from the checkpoint (`serving/gen_runner.py`). There is no automatic dense
-  serving fallback; an unsupported coded linear fails during birth-time spelling. Either
-  way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
-  reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
-  E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the
-  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. The store also carries
+  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An NVFP4 dense-trunk weight
+  streams as values too: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on
+  read and consumes the scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert
+  lane has no packed-trio decode. An EXL3 checkpoint takes the same split at the trellis format's own shapes
+  (`fmt == "exl3"`). Its explicit reference API may decode trunk values, while serving passes
+  `compress_trunk=True`: the twin parameters stay uninitialized placeholders and the caller re-sources each
+  coded linear from the checkpoint (`serving/gen_runner.py`). There is no automatic dense serving fallback; an
+  unsupported coded linear fails during birth-time spelling. Either way every routed expert keeps its PACKED
+  CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot` reports an expert index and
+  `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one E-leading tensor, putting `suh`
+  in its 128-blocked form and trimming `svh` to the logical out extent — the shapes `spell_trellis_inputs`
+  declares, so a launch's per-expert slice needs no reshape. The store also carries
   `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
   `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
   whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
-  whole-dict eager/accuracy twin for models small enough to hold (fp8 and EXL3 checkpoints alike); on the way in
+  whole-dict eager/accuracy twin for models small enough to hold (fp8, NVFP4, and EXL3 checkpoints alike); on the way in
   it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
   round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
   the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).

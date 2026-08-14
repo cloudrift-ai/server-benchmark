@@ -43,9 +43,11 @@ tuning, V100 FP16 Llama). The layer contract this branch lands, each line enforc
 - [x] V100 validation (8× V100-SXM3 box): `make test` green (3458 passed; the two failures were the dropped
       envelope and a sync-method artifact); whole Llama 3.1 8B block compiles, runs, and passes accuracy vs
       eager at seq 1 AND seq 512. Three defects found and fixed on the way: the trace-native wide-product
-      recomposition (120 GB workspace), cold option order hoisting value-seam cuts, and f16 carriers under a
-      cross-thread combine. Cold perf without goldens is far behind eager (a single cold gate-up kernel is 87%
-      of block time) — per design; the tuned V100 inventory is the follow-up that closes it.
+      recomposition (120 GB workspace), cold option order hoisting value-seam cuts, f16 carriers under a
+      cross-thread combine, and anonymous collapsed loops colliding as bare `__partial` kernel identities (an
+      intermittent serving-boot segfault, also fixed the device-prefill serving test relative to main). Cold perf
+      without goldens is far behind eager (a single cold gate-up kernel is 87% of block time) — per design; the
+      tuned V100 inventory is the follow-up that closes it.
 - [x] Docs: deploy tier 4 + placement sections in `pipeline/ARCHITECTURE.md`; GLOSSARY *Structural fork* cold
       lead amendment.
 - [ ] Open the superseding PR; close #504 and #505 pointing at it.

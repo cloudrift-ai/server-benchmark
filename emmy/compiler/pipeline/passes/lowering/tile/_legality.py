@@ -514,9 +514,6 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
     return None
 
 
-def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
-    """Compatibility alias for callers/tests phrased around the original computed-A lane."""
-    return computed_operand_cover(c, tile)
 
 
 def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
@@ -798,7 +795,6 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
 
 
 __all__ = [
-    "computed_a_cover",
     "computed_operand_cover",
     "computed_operand_copy_dtype",
     "enforce",

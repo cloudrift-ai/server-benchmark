@@ -575,3 +575,49 @@ def test_option_zero_is_conservative_per_family(monkeypatch):
                 assert value == f"t{coop}", f"{label}: option-0 leads with coop={coop} but spells WORK={value!r}"
                 continue
             assert is_off_value(family_of(fam), value), f"{label}: option-0 stamps {fam}={value!r}, not the family's OFF"
+
+
+def _computed_a_contraction_term():
+    """A contraction whose A edge is a pointwise cone over a load and whose B peer is materialized."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Assign, Load
+    from emmy.compiler.ir.tile import Channel, Fold, TileOp
+    from emmy.compiler.ir.tile.ir import Placement
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone
+
+    cone = make_cone(
+        [
+            Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+            Assign(name="a_s", op="silu", args=("a_e",)),
+        ],
+        "k",
+    )
+    node = Fold.contraction(
+        k_axis=Axis("k", 64),
+        a=cone,
+        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc0"),),
+    )
+    inputs = {"a": Tensor("a", (64, 64), "f16"), "b": Tensor("b", (64, 64), "f16")}
+    return TileOp(op=node, place=Placement(free=(Axis("m", 64), Axis("n", 64))), inputs=inputs), node
+
+
+def test_computed_operand_sync_transport_needs_its_copy_primitive():
+    """The sync compute fill copies materialized peers with cp.async; without that primitive the
+    warp reading declines and the demoted reading remains schedulable."""
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    tile, node = _computed_a_contraction_term()
+    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((8, 0)))
+    warp = [plan for group in term.tiles(node).values() for plan in group if plan.is_warp]
+    stages = [stage for plan in warp for stage in sch._stage_values(term, node, plan)]
+    assert any(stage is not None and stage.transport == "sync" for stage in stages)
+
+    volta = sch._Term(tile, tile.place.on_grid(), Context.from_target((7, 0)))
+    volta_warp = [plan for group in volta.tiles(node).values() for plan in group if plan.is_warp]
+    volta_stages = [stage for plan in volta_warp for stage in sch._stage_values(volta, node, plan)]
+    assert not any(stage is not None and stage.transport == "sync" for stage in volta_stages)
+
+    terms = sch._readings(tile, Context.from_target((7, 0)))
+    rows, _keys, _idents, _origin = sch._enumerate(terms)
+    assert rows, "the demoted reading must remain schedulable without cp.async"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -328,7 +329,7 @@ def test_verify_replay_plan_records_fresh_whole_and_child_references(tmp_path, m
             path,
             document,
             backend=backend,
-            ctx=Context.from_target((8, 9)),
+            ctx=replace(Context.from_target((8, 9)), compile_flags=""),
             warmup=10,
             iters=50,
             seed=0,
@@ -387,7 +388,7 @@ def test_verify_replay_plan_failure_does_not_replace_working_file(tmp_path, monk
                 path,
                 document,
                 backend=_ReplayVerifyBackend(wrong_call=1),
-                ctx=Context.from_target((8, 9)),
+                ctx=replace(Context.from_target((8, 9)), compile_flags=""),
                 warmup=10,
                 iters=50,
                 seed=0,
@@ -417,7 +418,7 @@ def test_verify_replay_plan_rejects_untrusted_timing(tmp_path, monkeypatch, back
                 path,
                 document,
                 backend=backend,
-                ctx=Context.from_target((8, 9)),
+                ctx=replace(Context.from_target((8, 9)), compile_flags=""),
                 warmup=10,
                 iters=50,
                 seed=0,

@@ -1266,6 +1266,43 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers():
     assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))
 
 
+def test_accuracy_check_rejects_missing_or_misordered_output_shape():
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    outputs = {
+        "small": np.zeros(4, dtype=np.float32),
+        "large": np.zeros(8, dtype=np.float32),
+    }
+    eager = (torch.zeros(8), torch.zeros(4))
+
+    error = _check_accuracy(outputs, eager)
+
+    assert error is not None
+    assert "size 4 does not match eager 8" in error
+
+
+def test_accuracy_check_pairs_named_outputs_independent_of_mapping_order():
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy, _strict_correctness_proof
+
+    outputs = {
+        "small": np.zeros(4, dtype=np.float32),
+        "large": np.ones(8, dtype=np.float32),
+    }
+    eager = {
+        "large": torch.ones(8),
+        "small": torch.zeros(4),
+    }
+
+    assert _check_accuracy(outputs, eager) is None
+    assert _strict_correctness_proof(outputs, eager)["status"] == "pass"
+
+
 def test_accuracy_check_gaussian_fp16_budget_not_free():
     """A GAUSSIAN fp16 output earns no outlier budget (``peak ≈ 5·RMS`` — the heavy-tail
     signature ``peak > 8·RMS`` doesn't fire), and the escape hatch consults the budget:

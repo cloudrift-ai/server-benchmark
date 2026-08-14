@@ -1997,12 +1997,16 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
     if not valid_proof(correctness):
         errors.append("deployed Emmy row lacks direct strict eager correctness")
 
-    ab_rows = [row for row in pinned_rows or [] if getattr(row.sample, "shape", None) is None]
+    pinned_rows = list(pinned_rows or [])
+    ab_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is None]
+    automatic_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is not None]
+    expected_automatic_rows = len(getattr(args, "golden_configs", []) or [])
+    if len(automatic_rows) != expected_automatic_rows:
+        errors.append(f"expected {expected_automatic_rows} exact working-golden row(s), got {len(automatic_rows)}")
     expected_ab_rows = len(args.ab or [])
     if len(ab_rows) != expected_ab_rows:
         errors.append(f"expected {expected_ab_rows} exact --ab row(s), got {len(ab_rows)}")
-    exact_rows = ab_rows if expected_ab_rows else list(pinned_rows or [])
-    for row in exact_rows:
+    for row in pinned_rows:
         label = row.sample.name
         if row.status != "ok" or row.flags:
             errors.append(f"{label} failed exact-pin integrity: status={row.status}, flags={list(row.flags)}")
@@ -2684,7 +2688,7 @@ def _check_accuracy(outputs, eager_out) -> str | None:
                     budget,
                 )
         else:
-            logger.warning("Output size %d does not match eager %d; skipping accuracy", len(values), len(eager_flat))
+            failures.append(f"output {buf_name}: size {len(values)} does not match eager {len(eager_flat)}")
     return f"accuracy check failed vs eager: {'; '.join(failures)}" if failures else None
 
 

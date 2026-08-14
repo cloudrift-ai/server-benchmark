@@ -38,10 +38,14 @@ tuning, V100 FP16 Llama). The layer contract this branch lands, each line enforc
       products, no forced sync transport); pinned the computed-operand transport capability boundary in
       `test_move_catalog`.
 - [x] Placement cold lead landed (`greedy._cold_placement_lead` + deploy tier 4 wiring + tests).
-- [ ] The serving env references `goldens/v100_sm70_meta_llama_3_1_8b_instruct.yaml`, which does not exist —
-      capture the V100 inventory during V100 validation or drop the reference.
-- [ ] Test on local 5090 (`make test`, lint) and on the V100 box (focused sm_70 suites + Llama FP16 kernel
-      compile/run vs eager at M=1/512).
+- [x] Dropped the V100 Llama serving envelope (its golden was never captured; `serve-config-guard` rejects it).
+      The envelope returns with the tuned inventory.
+- [x] V100 validation (8× V100-SXM3 box): `make test` green (3458 passed; the two failures were the dropped
+      envelope and a sync-method artifact); whole Llama 3.1 8B block compiles, runs, and passes accuracy vs
+      eager at seq 1 AND seq 512. Three defects found and fixed on the way: the trace-native wide-product
+      recomposition (120 GB workspace), cold option order hoisting value-seam cuts, and f16 carriers under a
+      cross-thread combine. Cold perf without goldens is far behind eager (a single cold gate-up kernel is 87%
+      of block time) — per design; the tuned V100 inventory is the follow-up that closes it.
 - [x] Docs: deploy tier 4 + placement sections in `pipeline/ARCHITECTURE.md`; GLOSSARY *Structural fork* cold
       lead amendment.
 - [ ] Open the superseding PR; close #504 and #505 pointing at it.

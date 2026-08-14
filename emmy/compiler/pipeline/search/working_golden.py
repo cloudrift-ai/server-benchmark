@@ -829,12 +829,44 @@ def persist_tune_winner(
     compile_flags: str,
     replay_plan: dict | None = None,
 ) -> None:
-    """Atomically persist a searched winner, including heterogeneous plans."""
+    """Atomically persist a searched winner, including heterogeneous plans, or fail closed.
+
+    A tune that produced neither an exact plan nor a scalar winner writes a target-scoped
+    ``no_exact_pin`` marker, and every stale ``tune_winner`` / marker ranking from an earlier
+    tune retires to ``superseded`` — so a strict publication run cannot mistake an older winner
+    or unchanged inventory for this run's success.
+    """
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     configs = document["configs"]
+    plan_key = replay_plan["lowering"]["terminal_key"] if replay_plan is not None else None
+    winner_key = canonical_row_key(winner[0]) if replay_plan is None and winner is not None else None
+
+    def claimed(realization: dict) -> bool:
+        """Whether the current result (re)writes this realization below."""
+        if plan_key is not None:
+            return realization.get("replay_plan", {}).get("lowering", {}).get("terminal_key") == plan_key
+        if winner_key is not None:
+            return "knobs" in realization and canonical_row_key(realization["knobs"]) == winner_key
+        return (realization.get("ranking") or {}).get("status") == "no_exact_pin"
+
+    marker_path = None
+    for entry_path in target.entry_indexes:
+        realization = configs[entry_path[0]]["realizations"][entry_path[1]]
+        if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
+            continue
+        ranking = realization.get("ranking")
+        if not isinstance(ranking, dict) or ranking.get("source") != "tune":
+            continue
+        if claimed(realization):
+            if plan_key is None and winner_key is None and marker_path is None:
+                marker_path = entry_path
+            continue
+        if ranking.get("tune_winner") is True or ranking.get("status") == "no_exact_pin":
+            realization["ranking"] = {**ranking, "status": "superseded"}
+            realization["ranking"].pop("tune_winner", None)
+
     if replay_plan is not None:
-        plan_key = replay_plan["lowering"]["terminal_key"]
         ranking = {
             "status": "ok",
             "latency_us": replay_plan["total_us"],
@@ -907,6 +939,25 @@ def persist_tune_winner(
             seed["ranking"] = {**winner_ranking, "tune_winner": True}
             configs[config_index]["realizations"].append(seed)
             target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
+    else:
+        marker = {
+            "source": "tune",
+            "status": "no_exact_pin",
+            "compile_flags": compile_flags,
+            "latency_us": None,
+            "measured_knobs": None,
+            "error": "tune produced no exact replayable winner",
+        }
+        if marker_path is None:
+            config_index, realization_index = target.entry_indexes[0]
+            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
+            for key in ("knobs", "replay_plan", "measurements", "ranking"):
+                seed.pop(key, None)
+            seed["ranking"] = marker
+            configs[config_index]["realizations"].append(seed)
+            target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
+        else:
+            configs[marker_path[0]]["realizations"][marker_path[1]]["ranking"] = marker
     dump_golden_file(document, path, overwrite=True)
 
 

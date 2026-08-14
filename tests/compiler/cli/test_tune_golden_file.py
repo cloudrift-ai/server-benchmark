@@ -283,7 +283,7 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert "measurements" not in winner
 
 
-def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
+def test_tune_without_exact_winner_fails_closed_with_marker(tmp_path):
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm")), path)
     document, targets = load_working_targets(path)
@@ -293,8 +293,30 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
 
     got = load_golden_file(path)
     assert len(got["configs"]) == 1
-    assert got["configs"][0]["realizations"][0]["name"] == "mm"
-    assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+    realizations = got["configs"][0]["realizations"]
+    assert len(realizations) == 2
+    marker = realizations[1]["ranking"]
+    assert marker["status"] == "no_exact_pin"
+    assert marker["source"] == "tune"
+    assert "tune_winner" not in marker
+    assert "knobs" not in realizations[1]
+
+
+def test_new_tune_winner_supersedes_a_stale_one(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    document, targets = load_working_targets(path)
+    persist_tune_winner(path, document, targets[0], ({"TILE": "f2x2"}, 9.0), compile_flags="-O1")
+    document, targets = load_working_targets(path)
+    persist_tune_winner(path, document, targets[0], ({"TILE": "f4x2"}, 8.0), compile_flags="-O1")
+
+    got = load_golden_file(path)
+    realizations = got["configs"][0]["realizations"]
+    stale = next(r for r in realizations if r.get("knobs") == {"TILE": "f2x2"})
+    fresh = next(r for r in realizations if r.get("knobs") == {"TILE": "f4x2"})
+    assert stale["ranking"]["status"] == "superseded"
+    assert "tune_winner" not in stale["ranking"]
+    assert fresh["ranking"]["tune_winner"] is True
 
 
 def test_multi_kernel_tune_winner_persists_full_scoped_replay_plan(tmp_path):

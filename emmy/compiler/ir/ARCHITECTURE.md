@@ -74,6 +74,12 @@ keep working unchanged. `source` is excluded from
 `Graph.structural_key` and from `Op.cache_key` — kernels rendered
 along different lowering paths still dedup in the tuning cache.
 
+`Op.knobs` and `Op.decision_knobs` have distinct ownership. `knobs` is the realized configuration of this kernel and
+participates in its tuning/cache identity. `decision_knobs` records a structural fork that changed which kernels
+exist, such as `PLACE@a=cut`; the engine propagates it for decision replay, but graph serialization, structural keys,
+kernel cache keys, and per-kernel schedule evidence exclude it. Search still carries the structural row on the fork
+lineage, so an end-to-end measurement remains attributable to the placement decision.
+
 **Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
 / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
 `CpAsyncCopy`, `TmaDescriptor`, …) is immutable + hashable. `Body` is a `tuple[Stmt, ...]`
@@ -82,7 +88,7 @@ subclass, so a full body tree hashes structurally end-to-end. This makes
 without a try/except fallback for unhashable stmts. To "edit" a frozen
 Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
 `__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
-are NOT frozen — the engine mutates `op.source` / `op.knobs` / `op.inputs` /
+are NOT frozen — the engine mutates `op.source` / `op.knobs` / `op.decision_knobs` / `op.inputs` /
 `op.outputs` post-construction. Op fields stored inside Stmts (e.g.
 `Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`,
 not `ElementwiseOp`) so the surrounding Stmt's hashability isn't poisoned.
@@ -317,6 +323,9 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
 `lowering/tile/030_split_reduce`) — eligibility judgments stay in the rules, per `pipeline/passes/ARCHITECTURE.md`. The
+scope-sensitive companion `lexical_free_values` preserves statement order, nested value scope, and accumulator
+exports; placement and recognition use it when a global `reads - definitions` difference would incorrectly close an
+open term. The
 `classify_fragment_epilogue` walk (`ir/stmt/algebra.py`) deliberately does NOT use it: it is a single pass
 interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's
 any-dep taint.

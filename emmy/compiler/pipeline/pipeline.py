@@ -926,8 +926,8 @@ class Run:
 def _is_structural_option(option: object) -> bool:
     """Classify one raw rewrite option by its effect: a ``Graph`` splice
     changes which ops exist — **structural**; an ``Op`` rebind is in-place —
-    **op-variant**. The Op/Graph return type IS the classification; rules wrap
-    a Graph option in a leaf :class:`OptionFork` (no production rule emits one today),
+    **op-variant**. The Op/Graph return type IS the classification; rules may wrap
+    a Graph option in a leaf :class:`OptionFork` (placement does this to carry its decision row),
     whose ``option`` is readable without firing any thunk. A *branch* ``Fork``
     reads op-variant: the sole branch-Fork emitter today is the partition
     planner (all ``TileOp`` leaves), and typing it would require ``expand()`` —
@@ -946,7 +946,7 @@ def _concrete_option(option: object) -> object | None:
     return option
 
 
-def _option_decision(option: object, root_knobs: dict) -> dict | None:
+def _option_decision(option: object, root_metadata: dict) -> dict | None:
     """The decision-knob delta one raw structural-fork option would stamp vs
     the offer op: non-``S_*`` knob keys the option's op / fork knobs **add or
     change** vs the offer (a ``Graph`` option reads the union over its nodes'
@@ -959,9 +959,10 @@ def _option_decision(option: object, root_knobs: dict) -> dict | None:
         knobs: dict = {}
         for node in option.nodes.values():
             knobs.update(getattr(node.op, "knobs", None) or {})
+            knobs.update(getattr(node.op, "decision_knobs", None) or {})
     else:
-        knobs = getattr(option, "knobs", None) or {}
-    delta = {k: v for k, v in knobs.items() if root_knobs.get(k) != v and not k.startswith("S_")}
+        knobs = {**(getattr(option, "knobs", None) or {}), **(getattr(option, "decision_knobs", None) or {})}
+    delta = {k: v for k, v in knobs.items() if root_metadata.get(k) != v and not k.startswith("S_")}
     return delta or None
 
 
@@ -974,7 +975,8 @@ def _choice_knobs(choice: object, option: object, root_op) -> dict:
     if isinstance(choice, Fork) and choice.knobs:
         return dict(choice.knobs)
     if isinstance(option, Graph):
-        return _option_decision(option, root_op.knobs) or {}
+        root_metadata = {**root_op.knobs, **root_op.decision_knobs}
+        return _option_decision(option, root_metadata) or {}
     return dict(getattr(option, "knobs", None) or {})
 
 
@@ -989,7 +991,8 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     (the ``CUT`` considered-vs-declined idiom), and those ops chain to
     the pre-decision offer op via the engine-owned ``Op.source`` (stamped
     unconditionally on rebinds, stamped across loop-dialect splices,
-    preserved by ``_rename_buf_in_op``). So: find any op carrying every
+    preserved by ``_rename_buf_in_op``). Structural rows live in ``Op.decision_knobs`` so they
+    do not become per-kernel schedule evidence. So: find any op carrying every
     decision knob whose source chain contains an op structurally identical
     to this offer (same ``Op.cache_key``), and replay the option whose delta
     matches its stamped values. Matching by decision-knob agreement (not a
@@ -997,12 +1000,13 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     key = root_op.cache_key()
     if key is None:
         return None
-    deltas = [(opt, _option_decision(opt, root_op.knobs)) for opt in options]
+    root_metadata = {**root_op.knobs, **root_op.decision_knobs}
+    deltas = [(opt, _option_decision(opt, root_metadata)) for opt in options]
     decision_keys = {k for _, d in deltas if d for k in d}
     if not decision_keys:
         return None
     for node in graph.nodes.values():
-        knobs = getattr(node.op, "knobs", None)
+        knobs = {**(getattr(node.op, "knobs", None) or {}), **(getattr(node.op, "decision_knobs", None) or {})}
         if not knobs or not decision_keys <= set(knobs):
             continue  # undecided or unrelated op — the cheap pre-filter
         chain = node.op.source_chain()

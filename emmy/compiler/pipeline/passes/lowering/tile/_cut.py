@@ -1,15 +1,14 @@
-"""The placement CUT realizer (phase 4) — routing entries partition the recognized tree.
+"""The post-recognition placement fork and cut realizer.
 
 ``PLACE@<child-path> = cut`` on an in-tree parent↔child seam splits the kernel: the child
 subtree becomes its own graph node (a plain un-mapped ``LoopOp``, re-entering recognition as a
 fresh tree), the seam value materializes to a workspace buffer, and the parent consumes a plain
-``Load`` where the child was. Resolution is TWO-LEVEL and RECURSIVE: the ROUTING entry (a golden
-whose knobs are ``PLACE`` keys only — cuts, never schedules) or an authoritative ``PLACE`` pin
-decides the cut BEFORE any schedule fork is built; every resulting piece then re-recognizes on
-the pass-scan restart and resolves its OWN ``(kind, shape)`` entry through the full deploy
-hierarchy — a piece's entry may itself cut (the cone piece re-recognizes as the rms_norm shape
-and its routing entry cuts the statistic out). NO routing entry = fuse = the recognized form —
-the deployment-safety default, spelled as absence.
+``Load`` where the child was. With no authoritative pin or routing entry, every structurally legal
+seam is offered beside the maximal form as a structural ``PLACE`` fork. Outer search measures those choices;
+a cold deploy keeps the first, fused option, while trusted evidence can price the fragment as the sum
+of its independently scheduled kernels. This happens before ``020_schedule``. Resolution is recursive:
+every cut piece re-enters recognition
+and may offer its own placement fork.
 
 The realizer is seam-agnostic by design: the two seam shapes (a zero-axis ``Fold`` projection seam, a fold
 operand edge) fall out of the node kinds — the child's index space is DERIVED (the enclosing
@@ -24,6 +23,7 @@ construction); an open seam cannot be spelled because ``PLACE`` sites are tree c
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, replace
 
 from emmy import config
 from emmy.compiler.dtype import F32
@@ -32,20 +32,19 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write, lexical_free_values
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.ir import (
     Fold,
     _operand_result_names,
-    deep_defines,
-    deep_reads,
     effect_tail,
     is_contraction,
     operand_name,
 )
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
+from emmy.compiler.pipeline.fork import OptionFork
 from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
@@ -54,6 +53,17 @@ logger = logging.getLogger(__name__)
 
 #: The one value that routes a rewrite; ``fuse`` (or absence) is the recognized form.
 _CUT = "cut"
+_FUSE = "fuse"
+
+
+@dataclass(frozen=True)
+class _PlacementDecision:
+    """An authoritative placement result, or the undecided seam set to enumerate."""
+
+    decided: bool
+    seam: Site | None
+    seams: tuple[Site, ...]
+    knobs: dict
 
 
 def _place_pins() -> dict[str, str]:
@@ -84,19 +94,6 @@ def _schedule_pins_live() -> bool:
     if any(config.knob_raw(f) is not None for f in SCHEDULE_FAMILIES):
         return True
     return any(family_of(k) in SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
-
-
-def _card_has_routing(gpu_name, cap) -> bool:
-    """Whether ANY routing golden exists for this card — the cheap gate that keeps the per-kernel
-    seam scan off the common compile (no pins, no routing entries → recognition is untouched)."""
-    if not gpu_name:
-        return False
-    try:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-
-        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_RECORDS)
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def _has_computed_a(node) -> bool:
@@ -167,11 +164,7 @@ def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
     scope it captures from) — which is why that seam is not cuttable.
 
     Returned sorted, so callers can put it straight into an error message."""
-    stmts = list(root.lower())
-    defs: set[str] = set()
-    for s in stmts:
-        defs |= deep_defines(s)
-    return tuple(sorted(deep_reads(stmts) - defs - axes))
+    return tuple(sorted(lexical_free_values(root.lower(), bound=axes)))
 
 
 def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
@@ -209,39 +202,41 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     return True
 
 
-def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> Site | None:
-    """The routing resolution for a freshly-recognized kernel: the cut seam to realize, or
-    ``None`` (= fuse, the default — spelled as the ABSENCE of a routing entry). ``PLACE`` pins
-    are authoritative over the recorded routing entry (a ``fuse`` pin suppresses a recorded
-    cut), and so is any live schedule-family pin (a pinned re-record / ``--ab`` compile keeps
-    the recognized form so the pinned row can realize); a key that names no seam (or an uncuttable one) on this tree is skipped for a pin (a
-    whole-model pin targets one kernel shape) and falls through with a warning for an entry
-    (the drift case — deploy keeps the recognized form). A bare ``PLACE=cut`` pin takes the
-    shallowest CUTTABLE seam."""
+def _placement_decision(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> _PlacementDecision:
+    """Resolve authoritative placement evidence, otherwise expose every legal seam.
+
+    Pins and routing goldens decide one path before schedule enumeration. Without either, the
+    result is deliberately undecided so :func:`placement_options` can build the structural fork.
+    A schedule-family pin keeps the fused form because it is an exact re-record of that kernel.
+    """
     pins = _place_pins()
-    if not pins and not _card_has_routing(getattr(ctx, "gpu_name", None), tuple(getattr(ctx, "compute_capability", ()) or ())):
-        return None  # nothing could ever route — skip the seam scan (the common compile)
     all_sites = sites(root)
-    seams = [s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)]
+    seams = tuple(s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free))
     if not seams:
-        return None  # a bare fold / flat cell has no in-tree seam (or none is legal)
-    for key, value in pins.items():
-        if key == "PLACE":
-            if value == _CUT:
-                return min(seams, key=lambda s: s.depth)
-            return None  # bare fuse pin — authoritative
-        try:
-            site = resolve(root, key, all_sites=all_sites)
-        except ValueError:
-            continue  # the pin names no seam on THIS tree (a whole-model pin targets one kernel)
-        if site is None or site not in seams:
-            continue
-        return site if value == _CUT else None  # an explicit fuse pin suppresses any routing entry
+        return _PlacementDecision(True, None, (), {})
+    if pins:
+        bare = pins.get("PLACE")
+        if bare is not None:
+            seam = min(seams, key=lambda s: s.depth) if bare == _CUT else None
+            return _PlacementDecision(True, seam, seams, {"PLACE": bare})
+        matched: list[tuple[str, str, Site]] = []
+        for key, value in pins.items():
+            try:
+                site = resolve(root, key, all_sites=all_sites)
+            except ValueError:
+                continue  # a whole-model pin may name a seam on another kernel
+            if site is not None and site in seams:
+                matched.append((key, value, site))
+        cuts = [(key, site) for key, value, site in matched if value == _CUT]
+        if len(cuts) > 1:
+            raise NotImplementedError(f"placement pin: exactly one cut per recognized tree, got {[key for key, _ in cuts]}")
+        seam = cuts[0][1] if cuts else None
+        return _PlacementDecision(True, seam, seams, {key: value for key, value, _ in matched})
     if _schedule_pins_live():
-        return None  # a pinned compile: the pin decides the form — recorded routing entries do not fire
+        return _PlacementDecision(True, None, seams, {})
     entry = _routing_entry(ctx, knobs, root)
     if entry is None:
-        return None
+        return _PlacementDecision(False, None, seams, {})
     cuts = [k for k, v in entry.knobs.items() if str(v) == _CUT]
     if len(cuts) != 1:
         raise NotImplementedError(f"routing golden {entry.name!r}: exactly ONE cut per entry for now, got {sorted(cuts)}")
@@ -252,16 +247,61 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> S
         # warp-form tree a suffixed key was recorded against; the recursion reaches the same
         # cascade from whichever legal seam goes first, so the shallowest-cuttable rule is the
         # tree-robust reading of a bare entry (measured: the cone-cut A/Bs ran exactly this).
-        return min(seams, key=lambda s: s.depth)
+        return _PlacementDecision(True, min(seams, key=lambda s: s.depth), seams, dict(entry.knobs))
     try:
         site = resolve(root, cuts[0], all_sites=all_sites)
     except ValueError as e:
         logger.warning("routing golden %r: %s — the recorded cut no longer names a seam; deploying the recognized form", entry.name, e)
-        return None
+        return _PlacementDecision(True, None, seams, dict(entry.knobs))
     if site not in seams:
         logger.warning("routing golden %r: %s names an uncuttable seam — deploying the recognized form", entry.name, cuts[0])
-        return None
-    return site
+        return _PlacementDecision(True, None, seams, dict(entry.knobs))
+    return _PlacementDecision(True, site, seams, dict(entry.knobs))
+
+
+def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> Site | None:
+    """Compatibility view of authoritative placement: the selected cut seam, if any."""
+    return _placement_decision(ctx, knobs, root, stores, free).seam
+
+
+def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, stores: tuple, fused):
+    """Return the authoritative placement, or the fused-plus-every-cut structural fork.
+
+    The fork row carries the offer kernel's structural ``S_*`` features and gives every legal seam
+    an explicit ``cut``/``fuse`` value. Uniform keys make structural-decision replay independent of
+    option order. ``decision_knobs`` persists only the placement values across later lowering,
+    without mixing them with any individual kernel's schedule knobs.
+    """
+    decision = _placement_decision(ctx, knobs, tree, stores, free)
+    if decision.decided:
+        if decision.seam is not None:
+            return realize_cut(match, root, tree, free, stores, decision.seam, decision_knobs=decision.knobs)
+        return replace(fused, decision_knobs={**fused.decision_knobs, **decision.knobs}) if decision.knobs else fused
+
+    realized: list[tuple[Graph, str]] = []
+    for seam in decision.seams:
+        selected = spell(tree, "PLACE", seam.node, all_sites=sites(tree))
+        try:
+            cut = realize_cut(match, root, tree, free, stores, seam)
+        except (RuleSkipped, ValueError) as exc:
+            logger.debug("placement: seam %s is not realizable: %s", selected, exc)
+            continue
+        realized.append((cut, selected))
+    if not realized:
+        return fused
+
+    labeled = [selected for _, selected in realized]
+    structural = {key: value for key, value in knobs.items() if key.startswith("S_")}
+    fuse_row = {key: _FUSE for key in labeled}
+    fused = replace(fused, decision_knobs={**fused.decision_knobs, **fuse_row})
+    options = [OptionFork(option=fused, knobs={**structural, **fuse_row})]
+    for cut, selected in realized:
+        row = {key: (_CUT if key == selected else _FUSE) for key in labeled}
+        for node in cut.nodes.values():
+            if isinstance(node.op, LoopOp):
+                node.op.decision_knobs.update(row)
+        options.append(OptionFork(option=cut, knobs={**structural, **row}))
+    return options
 
 
 def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:
@@ -360,7 +400,7 @@ def _replace_edge(node, child, load: Load):
     return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, Fold) else e for e in node.operands))
 
 
-def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site) -> Graph:
+def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site, *, decision_knobs: dict | None = None) -> Graph:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
     the same tree with the seam edge replaced by a plain workspace ``Load``. Both pieces are
@@ -385,14 +425,14 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
     child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
     child_body = _nest(child_stmts, axes)
-    child_op = LoopOp(body=Body(tuple(child_body)))
+    child_op = LoopOp(body=Body(tuple(child_body)), decision_knobs=dict(decision_knobs or {}))
 
     # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
     load = Load(name=child_name, input=ws, index=ws_index)
     parent_tree = _replace_edge(tile_op, child, load)
     parent_cell = effect_tail(parent_tree.lower(), stores)
     parent_body = _nest(list(parent_cell), list(free))
-    parent_op = LoopOp(body=Body(tuple(parent_body)))
+    parent_op = LoopOp(body=Body(tuple(parent_body)), decision_knobs=dict(decision_knobs or {}))
 
     frag = Graph()
     for inp in root.inputs:
@@ -417,4 +457,4 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     return frag
 
 
-__all__ = ["realize_cut", "route_cut"]
+__all__ = ["placement_options", "realize_cut", "route_cut"]

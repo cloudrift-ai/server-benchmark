@@ -86,8 +86,12 @@ autotuning cache doesn't bust on cosmetic edits.
   implement `infer_output_shape(input_shapes)` and a numpy `forward()`.
 - **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp`'s
   `__post_init__` canonicalizes (`ir/stmt/normalize.py`) and simplifies
-  (`ir/stmt/passes.py`) its body.
-- **Layer 3** — backends are the only place GPU specifics live.
+  (`ir/stmt/passes.py`) its body. Fusion forms the maximal reasonable algebraic region without consulting hardware,
+  schedules, or profitability; kernel partitioning is the later `PLACE` structural fork.
+- **Layer 3** — hardware instruction spelling and launch mechanics live in Kernel IR and backends. Compiler passes
+  remain target-portable: they receive hardware facts through `Context`, recognize only structure, and gate schedule
+  or lowering choices on named primitive capabilities rather than GPU names or repeated SM-number thresholds. The
+  pass-authoring contract and its executable guardrail live in `pipeline/passes/ARCHITECTURE.md`.
 
 ## Shared invariants
 

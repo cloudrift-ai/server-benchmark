@@ -220,6 +220,19 @@ def stage_target(stage: Stage, ctx) -> str | None:
     return None
 
 
+def sync_stage_target(c: Fold, ctx) -> str | None:
+    """Whether the generic ``sync`` transport can fill every contraction edge on ``ctx``.
+
+    Computed edges are filled synchronously by ordinary CTA threads. Materialized peers use the
+    transport's vectorized ``cp.async`` copy lane, so any such edge requires that named primitive.
+    This is a property of the transport and edge inhabitants, not of a GPU product or workload.
+    """
+    materialized = isinstance(c.a, Load) or any(isinstance(ch.b, Load) for ch in c.channels)
+    if materialized and not ctx.has_cp_async:
+        return "the sync transport copies materialized contraction edges with cp.async, which requires sm_80 or newer"
+    return None
+
+
 def warp_atom_stage(atom, stage: Stage) -> str | None:
     """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
     if atom.materialized_edges_only and not (stage.transport == "sync" and atom.sync_copy_staging):
@@ -504,10 +517,12 @@ def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
 
 
 def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
-    """The ``sync`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
-    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
-    copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
-    and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
+    """The mandatory ``sync`` :class:`Stage` for a computed-operand or product contraction.
+
+    A computed edge needs the synchronous fill, while a multi-channel product needs the transport
+    that allocates and drains every B/C channel. Neither form has a gmem-direct or copy-transport
+    sibling, and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed
+    ``budget``: one A
     slab, one B slab per channel, and one fp32 row per bridged statistic (``ops.cone_seam``'s
     ``stats`` — the same node boundary the materializer fills through).
 

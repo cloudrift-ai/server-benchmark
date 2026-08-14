@@ -44,20 +44,29 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
+    assert "python3.12 -m venv" in run
+    assert "make setup" not in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.yaml --bench --strict" in run
     assert "scripts/" not in run
     assert recipe.command.stage == [
         "emmy",
+        "LICENSE",
+        "README.md",
         "pyproject.toml",
         "requirements.txt",
-        "Makefile",
         "experiments/golden-bench-2026/kernels/recipe.yaml",
     ]
     assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
     assert "pip freeze --all" in run
     assert "tar -C $task_dir" in run
+    command = render_command(
+        run,
+        build_substitution_map(tasks[0].variant, [0], "/repo", "/task"),
+    )
+    assert "archive_tmp=/task.artifacts.tar.gz" in command
+    assert "${task_dir}" not in command
 
 
 def test_native_fp8_kernel_corpus_is_separate_and_identical(project_root) -> None:

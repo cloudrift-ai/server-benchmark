@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write, lexical_free_values
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import SelectBranch
 
@@ -34,6 +34,37 @@ def _cell() -> Body:
             Accum(name="acc", value="p"),
         ]
     )
+
+
+# --- lexical free values ---------------------------------------------
+
+
+def test_lexical_free_values_respect_definition_order() -> None:
+    body = Body((_asn("use", "negative", "later"), _asn("later", "copy", "external")))
+    assert lexical_free_values(body, bound={"external"}) == frozenset({"later"})
+
+
+def test_lexical_free_values_do_not_export_nested_assignments() -> None:
+    body = Body(
+        (
+            Loop(axis=Axis("k", 4), body=Body((_ld("nested", "x", "k"),))),
+            _asn("use", "negative", "nested"),
+        )
+    )
+    assert lexical_free_values(body, bound={"k"}) == frozenset({"nested"})
+
+
+def test_lexical_free_values_export_and_preseed_accumulators() -> None:
+    body = Body(
+        (
+            Loop(
+                axis=Axis("k", 4),
+                body=Body((_ld("xv", "x", "k"), _asn("scaled", "multiply", "acc", "xv"), Accum("acc", "scaled"))),
+            ),
+            _asn("out", "negative", "acc"),
+        )
+    )
+    assert lexical_free_values(body) == frozenset()
 
 
 # --- backward_cone ----------------------------------------------------

@@ -189,6 +189,54 @@ def _fp16_matmul_graph() -> Graph:
     return g
 
 
+def _product_contraction_term():
+    """A fully materialized two-channel contraction over one shared A edge."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Load
+    from emmy.compiler.ir.tile import Channel, Fold, TileOp
+    from emmy.compiler.ir.tile.ir import Placement
+
+    node = Fold.contraction(
+        k_axis=Axis("k", 64),
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(
+            Channel(b=Load(name="b0_e", input="b0", index=(Var("k"), Var("n"))), acc="acc0"),
+            Channel(b=Load(name="b1_e", input="b1", index=(Var("k"), Var("n"))), acc="acc1"),
+        ),
+    )
+    inputs = {
+        "a": Tensor("a", (64, 64), "f16"),
+        "b0": Tensor("b0", (64, 64), "f16"),
+        "b1": Tensor("b1", (64, 64), "f16"),
+    }
+    return TileOp(op=node, place=Placement(free=(Axis("m", 64), Axis("n", 64))), inputs=inputs), node
+
+
+def test_product_contraction_offers_only_complete_sync_transport():
+    """A product row must carry every channel; direct and two-slab copy transports are ineligible."""
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    tile, node = _product_contraction_term()
+    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((9, 0)))
+    plans = [plan for group in term.tiles(node).values() for plan in group if plan.is_warp]
+    stages = [stage for plan in plans for stage in sch._stage_values(term, node, plan)]
+    assert plans and stages
+    assert all(stage is not None and stage.transport == "sync" for stage in stages)
+    assert any(stage.depth == 1 for stage in stages)
+
+
+def test_product_contraction_demotes_when_sync_copy_primitive_is_absent():
+    """The algebra remains schedulable on an older target through the general PLANAR reading."""
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    tile, _ = _product_contraction_term()
+    terms = sch._readings(tile, Context.from_target((7, 0)))
+    rows, _keys, _idents, origin = sch._enumerate(terms)
+    assert rows
+    assert {reading for reading, _ in origin} == {1}, "the sync product declines; its demoted reading remains"
+
+
 def test_warp_staged_rows_fit_the_smem_budget():
     """Every enumerated warp row with a non-empty ``STAGE`` fits its depth-1 operand slot in the
     ctx smem budget, and an over-budget tile still rides gmem-direct. The 256×256 ``w4x4/f4x8``
@@ -251,6 +299,8 @@ def test_bare_reduce_forks_the_coop_catalog():
 
     def decide(fp):
         leaves = flatten_leaves(fp.options)
+        if any(any(family_of(key) == "PLACE" for key in (getattr(leaf, "knobs", {}) or {})) for leaf in leaves):
+            return leaves[0]
         for leaf in leaves:
             rows.append(dict(getattr(leaf, "knobs", {}) or {}))
         return leaves[0]

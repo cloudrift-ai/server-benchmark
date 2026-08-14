@@ -26,8 +26,9 @@ Three groups:
 
 - **Structural placement knob** (``PLACE``) — the per-seam ``fuse`` / ``cut`` decision offered
   after algebra recognition. It changes which kernels exist, so it is measured and priced by the
-  structural fork; the offer kernel's ``S_*`` features plus pooled ``PLACE_sites`` / ``PLACE_cut``
-  features train only on whole-kernel-set rewards and never enter an individual resulting kernel's schedule row.
+  structural fork; the offer kernel's ``S_*`` features plus pooled ``PLACE_sites`` / ``PLACE_cut`` and selected
+  ``PLACE_cut_site_<path>`` features train only on whole-kernel-set rewards and never enter an individual resulting
+  kernel's schedule row.
 
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
@@ -51,9 +52,19 @@ from emmy.compiler.pipeline.search.domain import Bound, Dimension, Space
 logger = logging.getLogger(__name__)
 
 
-def _place_features(value) -> dict[str, float]:
-    """One scoped seam's contribution to a pooled placement row."""
-    return {"PLACE_sites": 1.0, "PLACE_cut": 1.0 if str(value) == "cut" else 0.0}
+def _place_features(name: str, value) -> dict[str, float]:
+    """One scoped seam's contribution to a pooled placement row.
+
+    A selected cut also preserves its canonical tree-path identity. Counts alone alias every
+    single-cut sibling, preventing the outer prior from learning which seam produced the faster
+    kernel set.
+    """
+    cut = str(value) == "cut"
+    features = {"PLACE_sites": 1.0, "PLACE_cut": 1.0 if cut else 0.0}
+    if cut:
+        _, scoped, suffix = name.partition("@")
+        features[f"PLACE_cut_site_{suffix if scoped else 'primary'}"] = 1.0
+    return features
 
 
 # Kernel placement is a structural decision, separate from every resulting kernel's schedule.
@@ -114,7 +125,7 @@ STAGE = Knob(
 # = the per-cell / pure-reduce forms' derived launch geometry.
 
 
-def _work_features(val) -> dict[str, float]:
+def _work_features(_name: str, val) -> dict[str, float]:
     """The ``WORK`` sub-features for the online prior — ONLY the ``+p`` producer band, as the
     same ``D_wspec_warps`` the retired per-row ``WSPEC`` key spelled (name/semantics preserved;
     a legacy row's ``WSPEC`` key writes the identical value). The inventory's tile geometry is
@@ -141,7 +152,7 @@ WORK = Knob(
 )
 
 
-def _raster_features(val) -> dict[str, float]:
+def _raster_features(_name: str, val) -> dict[str, float]:
     """The ``RASTER`` sub-features for the priors — the stripe group size (``0.0`` = the flat
     N-fastest order) and the orientation flag (``1.0`` = ``gn``, the transposed grouping)."""
     if not val:

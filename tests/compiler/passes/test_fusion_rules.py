@@ -16,7 +16,7 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
-from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
+from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp, SliceOp
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline import Pipeline
@@ -1127,3 +1127,49 @@ def test_product_reduction_fuses_before_upstream_activation():
         "r": rng.standard_normal((4, 6)).astype(np.float32),
     }
     _assert_close(_run(before, inputs), _run(fused, inputs))
+
+
+def _make_gated_mlp(m=4, k=16, n=12, k2=16):
+    """RMSNorm → merged gate/up linear → SiLU gate multiply → down projection.
+
+    The Qwen3-8B serving-trace shape: the activation cone reaching the down
+    projection's decomposed product already carries the gate/up contraction, so
+    an Accum-blind ordering guard lets the cone splice into the bare product
+    first; the reduction merge then exceeds the work-growth cap and strands the
+    full ``M x N x K2`` product (a 384 GiB arena at serving capacity).
+    """
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("rmsw", (k,)), node_id="rmsw")
+    g.add_node(RmsNormOp(), ["x", "rmsw"], Tensor("rms", (m, k)), node_id="rms")
+    g.add_node(InputOp(), [], Tensor("wgu", (2 * n, k)), node_id="wgu")
+    g.add_node(LinearOp(), ["rms", "wgu"], Tensor("gu", (m, 2 * n)), node_id="gu")
+    g.add_node(SliceOp(shape=(m, n), dim=-1, start=0), ["gu"], Tensor("gate", (m, n)), node_id="gate")
+    g.add_node(SliceOp(shape=(m, n), dim=-1, start=n), ["gu"], Tensor("up", (m, n)), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("act", (m, n)), node_id="act")
+    g.add_node(ElementwiseOp("multiply"), ["act", "up"], Tensor("h", (m, n)), node_id="h")
+    g.add_node(InputOp(), [], Tensor("wd", (k2, n)), node_id="wd")
+    g.add_node(LinearOp(), ["h", "wd"], Tensor("y", (m, k2)), node_id="y")
+    g.inputs, g.outputs = ["x", "rmsw", "wgu", "wd"], ["y"]
+    return g
+
+
+def test_product_reduction_fuses_before_contraction_bearing_activation_cone():
+    """A gated-MLP cone (activation fused with its gate/up contraction) must not strand
+    the down projection's M×N×K product — every kernel output stays at operand rank."""
+    fused = _decompose_and_fuse(_make_gated_mlp())
+    bare = [node.id for node in _kernel_nodes(fused) if len(node.output.shape) > 2]
+    assert bare == [], f"gated-MLP fusion stranded a product workspace: {bare}"
+
+
+def test_gated_mlp_fusion_correctness():
+    m, k, n, k2 = 4, 16, 12, 16
+    inputs = {
+        "x": rng.standard_normal((m, k)).astype(np.float32),
+        "rmsw": rng.standard_normal((k,)).astype(np.float32),
+        "wgu": rng.standard_normal((2 * n, k)).astype(np.float32),
+        "wd": rng.standard_normal((k2, n)).astype(np.float32),
+    }
+    before = _run(_make_gated_mlp(), inputs)
+    after = _run(_decompose_and_fuse(_make_gated_mlp()), inputs)
+    _assert_close(before, after, rtol=1e-4, atol=1e-4)

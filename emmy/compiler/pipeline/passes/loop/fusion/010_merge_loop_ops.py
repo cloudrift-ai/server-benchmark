@@ -183,11 +183,18 @@ def _merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     # first, after which the upstream cone can fuse into the complete contraction normally.
     # This is an ordering rule, not a shape specialization: it applies to an activation-bearing
     # producer cone feeding a multiplicative product whose sole Loop consumer add-reduces it.
-    # The activation condition keeps ordinary softmax/attention reduction order unchanged.
+    # The cone may already carry its own contractions (a gated-MLP activation fused with its
+    # gate/up projection reaches a down-projection product this way — splicing it first
+    # stranded the full ``M x K x N`` product on the Qwen3-8B serving trace, a device-memory
+    # overflow at capacity M). Only the max-shift online-softmax region is exempt, keeping
+    # ordinary softmax/attention reduction order unchanged.
     sink_users = list(graph.users(sink.id))
     sink_stmts = tuple(sink.op.body.iter())
     region_stmts = tuple(stmt for node_id in region - {sink.id} for stmt in graph.nodes[node_id].op.body.iter())
-    has_activation = not any(isinstance(stmt, Accum) for stmt in region_stmts) and any(
+    region_is_online_softmax = any(isinstance(stmt, Accum) and stmt.op.name == "maximum" for stmt in region_stmts) and any(
+        isinstance(stmt, Assign) and stmt.op.name == "exp" for stmt in region_stmts
+    )
+    has_activation = not region_is_online_softmax and any(
         isinstance(stmt, Assign) and stmt.op.name in {"exp", "silu", "tanh"} for stmt in region_stmts
     )
     is_product = any(isinstance(stmt, Assign) and stmt.op.name == "multiply" for stmt in sink_stmts)

@@ -238,7 +238,11 @@ coverage until that entire cone has been measured.
 
 Fusion also lets a decomposed contraction's pointwise product reunite with its sole sum-reduction consumer before an
 upstream activation-bearing cone is spliced into the product. Otherwise pass order can materialize the full M×K×N
-product, whose work-growth then prevents the reduction merge; ordinary softmax/attention reduction order is unchanged.
+product, whose work-growth then prevents the reduction merge and strands the product buffer (at serving capacity a
+device-memory overflow: the Qwen3-8B down projection's unreduced product is capacity × 12288 × 4096). The deferral
+holds even when the cone already carries its own contractions — a gated-MLP activation fused with its gate/up
+projection is the shape that reached the product first there — with only the max-shift online-softmax region exempt,
+so ordinary softmax/attention reduction order is unchanged.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 

@@ -582,9 +582,9 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
     (``S_ext_n_reduce_axis == 1``) and the rsqrt lives in the nested A-cone sub-body, so the
     histogram can't fire ``kind="fused"`` (which needs ``>= 2`` and a top-level ``S_pw_rsqrt``).
     Like flash, it is unmistakable from its OFFER: only a computed-A contraction enumerates the
-    mandatory ``sync`` compute-fill (``d*/sync`` STAGE rows — ``space.stage_moves`` offers only
-    gmem-direct / ``cp`` / ``tma``, and the ``sync`` transport is born in the computed-A resolvers
-    alone), so a fork whose rows carry a sync-STAGE candidate IS the cone form. (The earlier
+    mandatory smem compute fill, and the scheduler stamps that fact on every row of the fork as
+    ``S_computed_a`` — the transport token itself cannot carry the signal, because the byte-copy
+    staging spells the same ``smem`` rows on fully materialized edges. (The earlier
     mixed-dtype sniff — f16/bf16 operands + an f32 statistic constant over an add-reduce — fired on
     ANY plain-nest kernel with that stamp combination, e.g. a genuine mixed-dtype plain matmul,
     silently re-keying it out of its ``kind=""`` goldens; the offer signal cannot, and it also
@@ -604,10 +604,10 @@ def _fork_shape_key(rows: list[dict], base: dict | None = None):
         # producer was rebuilt to ``kind="fused"``, which both locked it out of the plain
         # reduce goldens and left it able to shadow a real cone of equal extents.
         and stamps.get("S_ext_n_free_axis", 0) >= 2
-        # The OFFER signal (exact, like flash's TILE@dd+TILE@pj): a ``d*/sync`` STAGE row
-        # exists only on a computed-A contraction fork. Segment-match so ``cp.async``'s
-        # substring can never false-positive.
-        and any("sync" in str(v).split("/") for row in rows for k, v in row.items() if k.startswith("STAGE"))
+        # The OFFER signal (exact): the scheduler stamps ``S_computed_a`` on every row of a
+        # fork that enumerates the mandatory compute fill; a stored golden row carries the
+        # same stamp in its knob dict.
+        and any(row.get("S_computed_a") for row in rows)
     ):
         # ``free_max`` carries through: the pre-split key was built ``kind=""``, which
         # preserves the stamped aspect, and the fused kind keeps it (a computed-A cone is a

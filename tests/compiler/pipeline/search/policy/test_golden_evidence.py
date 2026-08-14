@@ -71,7 +71,7 @@ def _record(name, shape_key, knobs, us, *, gpu=CARD, cap=CAP):
 
 
 def _golden(name="gemma4_12b.q_proj", knobs=None, us=78.0, *, dynamic=False, gpu=CARD, cap=CAP):
-    knobs = knobs or {"TILE": _STD_TILE, "STAGE": "d2/cp/p2", "REDUCE": "", "RASTER": ""}
+    knobs = knobs or {"TILE": _STD_TILE, "STAGE": "d2/smem-async/p2", "REDUCE": "", "RASTER": ""}
     return _record(name, ShapeKey.from_matmul(512, 4096, 3840, "fp16", dynamic=dynamic), knobs, us, gpu=gpu, cap=cap)
 
 
@@ -86,9 +86,9 @@ def _rows(*tunings: dict, base: dict = _BASE) -> list[dict]:
 
 # Candidate rows spell the axis-stamped realization (``TILE@a2``) — the golden's bare
 # spelling must match it through ``pin_key_matches`` + ``values_equal``.
-_ROW_W1X1 = {"TILE@a2": _W1X1_TILE, "STAGE@a2": "d2/cp", "REDUCE@a2": ""}
-_ROW_GOLD = {"TILE@a2": _STD_TILE, "STAGE@a2": "d2/cp/p2", "REDUCE@a2": ""}
-_ROW_FM = {"TILE@a2": _FM_TILE, "STAGE@a2": "d2/cp", "REDUCE@a2": "g2k"}
+_ROW_W1X1 = {"TILE@a2": _W1X1_TILE, "STAGE@a2": "d2/smem-async", "REDUCE@a2": ""}
+_ROW_GOLD = {"TILE@a2": _STD_TILE, "STAGE@a2": "d2/smem-async/p2", "REDUCE@a2": ""}
+_ROW_FM = {"TILE@a2": _FM_TILE, "STAGE@a2": "d2/smem-async", "REDUCE@a2": "g2k"}
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def test_fast_math_golden_self_excludes_when_atom_not_offered(monkeypatch):
     """The fm entry records a faster µs, but its f16-accumulate atom is only in the
     offer when the fm gate is on — canonical TILE comparison must NOT collapse the
     two atoms, so a gate-off deploy falls to the std entry."""
-    fm = _golden(knobs={"TILE": _FM_TILE, "STAGE": "d2/cp", "REDUCE": "g2k", "RASTER": ""}, us=61.5)
+    fm = _golden(knobs={"TILE": _FM_TILE, "STAGE": "d2/smem-async", "REDUCE": "g2k", "RASTER": ""}, us=61.5)
     index = _index(monkeypatch, [_golden(), fm])
     # Gate off: only f32-acc atoms offered -> the std golden decides despite fm being faster.
     assert _golden_pick(index, _rows(_ROW_W1X1, _ROW_GOLD), "n0") == (1, 78.0)
@@ -315,12 +315,12 @@ _PJ_SITE = "mma_m16n8k16_f16_f32/f1x32"
 _PJ_FM_SITE = "mma_m16n8k16_f16_f16/f1x32"
 
 
-def _flash_row(dd, pj, work, stage="d2/cp", base=None):
+def _flash_row(dd, pj, work, stage="d2/smem-async", base=None):
     return {**(base or _FLASH_SIG), "TILE@dd": dd, "TILE@pj": pj, "REDUCE@kv": "", "STAGE@kv": stage, "WORK": work}
 
 
 def _attention(name="gemma4_12b.attention.hd256", knobs=None, us=44.3, *, dynamic=False):
-    knobs = knobs or {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "WORK": "w4x1", "STAGE": "d2/cp"}
+    knobs = knobs or {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "WORK": "w4x1", "STAGE": "d2/smem-async"}
     return _record(
         name,
         ShapeKey(4096 if dynamic else 16 * 512 * 256, 0 if dynamic else 512, True, dynamic, "flash"),
@@ -352,7 +352,7 @@ def test_attention_dynM_bare_plan_golden_matches_axis_keyed_leaves(monkeypatch):
         name="attention.hd256.dynM",
         dynamic=True,
         us=40.4,
-        knobs={"TILE": "mma_m16n8k16_f16/f1x2/k16", "WORK": "w4x1", "STAGE": "d2/cp"},
+        knobs={"TILE": "mma_m16n8k16_f16/f1x2/k16", "WORK": "w4x1", "STAGE": "d2/smem-async"},
     )
     index = _index(monkeypatch, [gold])
     rows = [
@@ -372,9 +372,9 @@ def test_attention_fm_pv_plan_golden_self_excludes_gate_off(monkeypatch):
         name="attention.hd256.dynM",
         dynamic=True,
         us=44.3,
-        knobs={"TILE": "mma_m16n8k16_f16/f1x2/k16", "WORK": "w4x1", "STAGE": "d2/cp"},
+        knobs={"TILE": "mma_m16n8k16_f16/f1x2/k16", "WORK": "w4x1", "STAGE": "d2/smem-async"},
     )
-    fm = _attention(name="attention.hd256.dynM", dynamic=True, us=36.1, knobs={"TILE": _PJ_FM, "WORK": "w4x1", "STAGE": "d2/cp"})
+    fm = _attention(name="attention.hd256.dynM", dynamic=True, us=36.1, knobs={"TILE": _PJ_FM, "WORK": "w4x1", "STAGE": "d2/smem-async"})
     index = _index(monkeypatch, [std, fm])
     gate_off = [_flash_row(_DD_W4X1_SITE, _PJ_SITE, "w4x1", base=_FLASH_DYN_SIG)]
     assert _golden_pick(index, gate_off, "n0") == (0, 44.3)
@@ -410,10 +410,12 @@ _CONE_SIG = {
     "S_dtype_f32": 1.0,
     "H_opt": 3.0,
 }
-# The fork ROW additionally carries the cone's unmistakable OFFER: a ``d*/sync`` STAGE candidate —
-# the mandatory compute-fill only a computed-A contraction enumerates (``stage_moves`` spells only
-# gmem-direct / cp / tma). ``_fork_shape_key`` keys the rebuild on this, not on the dtype stamps.
-_CONE_ROW = {**_CONE_SIG, "STAGE@a2": "d1/sync"}
+# The fork ROW additionally carries the cone's unmistakable OFFER: the scheduler's
+# ``S_computed_a`` stamp — set on every row of a fork that enumerates the mandatory smem
+# compute fill. ``_fork_shape_key`` keys the rebuild on this, not on the dtype stamps (and not
+# on the ``smem`` transport token, which the Volta byte-copy staging spells on fully
+# materialized edges too).
+_CONE_ROW = {**_CONE_SIG, "STAGE@a2": "d1/smem", "S_computed_a": 1.0}
 
 
 def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
@@ -429,18 +431,19 @@ def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
     assert key == fused_key
     assert key.kind == "fused" and key.is_warp and key.free_max == 4096
     # A MIXED-DTYPE PLAIN MATMUL — the same stamp combination (f16 operands + an f32 bias/residual
-    # load over an add-reduce) but no ``d*/sync`` STAGE among its offers — is untouched: the offer
-    # signal cannot over-fire on dtype coincidences, so the kernel keeps joining its ``kind=""``
+    # load over an add-reduce) but no ``S_computed_a`` stamp — is untouched: the offer signal
+    # cannot over-fire on dtype coincidences, so the kernel keeps joining its ``kind=""``
     # goldens (the earlier dtype sniff silently re-keyed it out of them).
-    plain = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp"}])
+    plain = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/smem-async"}])
     assert plain.kind == "" and plain.free_max == 4096
-    # And ``cp.async``'s substring never false-positives the segment match.
-    plain_cp = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp.async"}])
-    assert plain_cp.kind == ""
+    # A Volta byte-copy row spells the same ``smem`` transport on fully materialized edges —
+    # the token itself never re-keys a plain matmul.
+    plain_copy = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d1/smem"}])
+    assert plain_copy.kind == ""
 
 
 def test_golden_shape_key_replays_offer_signals_without_serializing_kind():
-    fused = _golden_shape_key(_CONE_SIG, {"STAGE": "d1/sync", "TILE": _STD_TILE, "WORK": "w16x1"})
+    fused = _golden_shape_key(_CONE_SIG, {"STAGE": "d1/smem", "S_computed_a": 1.0, "TILE": _STD_TILE, "WORK": "w16x1"})
     assert fused == ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096)
 
     plain = _golden_shape_key(_CONE_SIG, {"STAGE": "", "TILE": _STD_TILE, "WORK": "w16x1"})
@@ -448,7 +451,7 @@ def test_golden_shape_key_replays_offer_signals_without_serializing_kind():
 
     flash = _golden_shape_key(
         _FLASH_SIG,
-        {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "STAGE@kv": "d2/cp", "WORK": "w4x1"},
+        {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "STAGE@kv": "d2/smem-async", "WORK": "w4x1"},
     )
     assert flash.kind == "flash"
 
@@ -493,8 +496,8 @@ def test_computed_a_cone_fork_deploys_the_fused_golden(monkeypatch):
     """End-to-end on the PRE-split fork: with the fused norm→linear golden in the index, cone rows
     (``n_reduce_axis == 1``, no top-level rsqrt) resolve it via the ``_fork_shape_key`` rebuild — a
     MATCH, not a DRIFT — where ``from_s_features`` alone would key them as a plain matmul and miss."""
-    index = _index(monkeypatch, [_norm_linear()])  # records _FUSED_TILE / d2/sync / g4k
-    row = {**_CONE_SIG, "TILE@a": _FUSED_TILE, "STAGE@a": "d2/sync", "REDUCE@a": "g4k"}
+    index = _index(monkeypatch, [_norm_linear()])  # records _FUSED_TILE / d2/smem / g4k
+    row = {**_CONE_SIG, "TILE@a": _FUSED_TILE, "STAGE@a": "d2/smem", "REDUCE@a": "g4k", "S_computed_a": 1.0}
     assert _golden_pick(index, [row], "n0") == (0, 34.8)
 
 
@@ -506,7 +509,7 @@ def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):
     collide = _record(
         "matmul.sq512ish",
         ShapeKey(2097152, 512, True),
-        {"TILE": _STD_TILE, "STAGE": "d2/cp"},
+        {"TILE": _STD_TILE, "STAGE": "d2/smem-async"},
         78.0,
     )
     index = _index(monkeypatch, [collide])
@@ -525,7 +528,7 @@ def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):
 # a sweep (S_loop_depth 3 < n_free 2 + n_reduce 2) with rsqrt AND a SECOND reduce axis (the
 # contraction) -> kind="fused". S_dtype_f32 present (the real 12B model's f32 statistic constants):
 # is_warp is FORCED True for the kind (a computed-A contraction is a warp mma). The fork leaves are
-# axis-keyed TILE@a3 + STAGE@a3 + REDUCE@a3 over the ``sync`` compute-fill (d1/d2/sync, not tma).
+# axis-keyed TILE@a3 + STAGE@a3 + REDUCE@a3 over the smem compute fill (d1/d2, never async).
 
 _FUSED_SIG = {
     "S_ext_free_prod": 131072.0,
@@ -544,12 +547,12 @@ _FUSED_SIG = {
 _FUSED_TILE = "mma_m16n8k16_f16_f32/f2x2/k2"
 
 
-def _fused_row(tile, stage="d2/sync", reduce="g4k"):
+def _fused_row(tile, stage="d2/smem", reduce="g4k"):
     return {**_FUSED_SIG, "TILE@a3": tile, "STAGE@a3": stage, "REDUCE@a3": reduce, "RASTER": ""}
 
 
 def _norm_linear(name="gemma4_12b.q_proj_fused", knobs=None, us=34.8):
-    knobs = knobs or {"TILE": _FUSED_TILE, "STAGE": "d2/sync", "REDUCE": "g4k", "RASTER": ""}
+    knobs = knobs or {"TILE": _FUSED_TILE, "STAGE": "d2/smem", "REDUCE": "g4k", "RASTER": ""}
     return _record(
         name,
         ShapeKey(32 * 4096, 3840, True, kind="fused", free_max=4096),
@@ -562,7 +565,7 @@ def test_fused_golden_decides_its_op_over_a_warp_sibling(monkeypatch):
     """The fused norm→linear golden decides its computed-A op: the recorded bare knobs match the
     axis-keyed warp leaf (``TILE@a3`` etc.) over an offered sibling on a different tile."""
     index = _index(monkeypatch, [_norm_linear()])
-    rows = [_fused_row("mma_m16n8k16_f16_f32/f1x1", stage="d1/sync", reduce=""), _fused_row(_FUSED_TILE)]
+    rows = [_fused_row("mma_m16n8k16_f16_f32/f1x1", stage="d1/smem", reduce=""), _fused_row(_FUSED_TILE)]
     assert _golden_pick(index, rows, "n0") == (1, 34.8)
 
 
@@ -653,7 +656,7 @@ def test_audit_sink_records_unrealized_pin_only_entries(monkeypatch):
     from emmy.compiler.pipeline.search.policy.greedy import golden_audit
 
     # A STAGE these leaves never offer, at the fastest µs → consulted first; must not decide.
-    pin_only = _golden(knobs={"TILE": _STD_TILE, "STAGE": "d4/tma"}, us=50.0)
+    pin_only = _golden(knobs={"TILE": _STD_TILE, "STAGE": "d4/smem-tma"}, us=50.0)
     leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1)), SimpleNamespace(knobs=dict(_ROW_GOLD))]
     records: list[dict] = []
     with golden_audit(records):

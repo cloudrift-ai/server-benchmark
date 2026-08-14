@@ -36,10 +36,10 @@ The smem operand-staging pipeline lives in ``_stage.py`` (the :class:`~...kernel
 strategy + the one :func:`~...kernel._stage.staged_kloop`); the ONE atom-agnostic driver
 (``_atom._staged``) builds the transport, the atom strategy supplying only the slab drain leaf.
 It is driven off the node's ``STAGE`` codec →
-:class:`~...schedule.Stage` (``d<depth>`` gmem→smem ring · ``sync``/``cp``/``tma`` transport ·
+:class:`~...schedule.Stage` (``d<depth>`` gmem→smem ring · ``smem``/``smem-async``/``smem-tma`` transport ·
 ``p<n>`` smem→register double-buffer). The **scalar** contraction tier stays gmem-direct. The fused
 norm→linear **shared-row** prologue is Stage-driven too: the schedule detects the reused input row
-and stamps a ``sync`` :class:`~...schedule.Stage` whose ``smem`` names it; :func:`_tile_reduce_axis` only
+and stamps an ``smem`` :class:`~...schedule.Stage` whose slab list names it; :func:`_tile_reduce_axis` only
 applies it (the 1-D ``sync_row_fill`` + the load rewrite). Leading ``_`` so the pass loader skips this
 module."""
 
@@ -579,7 +579,7 @@ def _tile_reduce_axis_transposed(
     the segment-indexed smem tree (``emit_combine(inner=…)`` — never a shuffle: adjacent lanes
     hold different outputs); the projection stores guard on ``k_co == 0``, each lane writing its
     own cell. Unsupported here (the enumeration must not offer ``t`` on them): shared-row
-    ``sync`` staging, distributed full-row projections (a ``Loop`` in the tail)."""
+    ``smem`` shared-row staging, distributed full-row projections (a ``Loop`` in the tail)."""
     grid = ctx.grid
     coop, reg = plan.coop, plan.reg
     lanes_n = 32
@@ -660,7 +660,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     start = Var(lane.name) if lane is not None else Literal(0, "int")
 
     # Shared-row staging (the fused norm→linear prologue): an input row folded by the cooperative
-    # reduce AND re-read per output column of a contraction tail rides a first-class ``sync``
+    # reduce AND re-read per output column of a contraction tail rides a first-class ``smem``
     # :class:`Stage` whose ``smem`` names the row — DETECTED scheduler-side (schedule-side)
     # and only APPLIED here: fill the row into smem once (cooperatively) and rewrite both readers to
     # the slab. Only the cooperative tier (coop > 1) is ever stamped; a contraction operand ``Stage``

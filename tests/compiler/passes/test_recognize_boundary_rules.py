@@ -276,7 +276,7 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     for r in warp:
         stat = [(k, v) for k, v in r.items() if "@" in k]
         assert stat and all(v == "" for _, v in stat), f"the compute fill realizes the statistic itself — its site stays empty: {r}"
-        assert r["STAGE"] in ("d1/sync", "d2/sync"), f"warp rows must ride the resolved sync compute-fill: {r}"
+        assert r["STAGE"] in ("d1/smem", "d2/smem"), f"warp rows must ride the resolved reg compute-fill: {r}"
         assert r["REDUCE"] == "" or (r["REDUCE"].startswith("g") and r["REDUCE"].endswith(("k", "a"))), (
             f"the computed-A form allows only the empty or split (g<w>k / g<w>a) K partition: {r}"
         )
@@ -286,7 +286,7 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     # B-only ring clamps back to d1 (nothing async to overlap) — d1 alone is correct here.
     # The canonical-B (constant-weight) shape class exercises d2 in
     # test_fused_cone_splitk_matches_reference.
-    assert "d1/sync" in stages_seen, f"the resolved sync compute-fill must be offered: {stages_seen}"
+    assert "d1/smem" in stages_seen, f"the resolved reg compute-fill must be offered: {stages_seen}"
     assert "" in reds_seen and any(v for v in reds_seen), f"both the serial and split K partitions must be offered: {reds_seen}"
 
 

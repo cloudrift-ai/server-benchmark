@@ -40,7 +40,7 @@ def impossible_staged_feats() -> dict:
         **{k: v for k, v in F16_MATMUL_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
         "S_ext_free_prod": 512.0,
         "S_ext_reduce_max": 512.0,
-        "STAGE@a2": "d1/cp",
+        "STAGE@a2": "d1/smem-async",
     }
 
 

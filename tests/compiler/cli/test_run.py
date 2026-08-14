@@ -71,9 +71,9 @@ def test_pinned_knobs_sets_and_restores_env(monkeypatch):
 
     monkeypatch.delenv("EMMY_TILE", raising=False)
     monkeypatch.setenv("EMMY_STAGE", "preexisting")
-    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
+    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/smem-async", "WARP_SPECIALIZE": False}):
         assert os.environ["EMMY_TILE"] == "f2x4"
-        assert os.environ["EMMY_STAGE"] == "d2/cp"
+        assert os.environ["EMMY_STAGE"] == "d2/smem-async"
         assert os.environ["EMMY_WARP_SPECIALIZE"] == "False"
     assert "EMMY_TILE" not in os.environ  # was unset → removed
     assert os.environ["EMMY_STAGE"] == "preexisting"  # restored
@@ -274,9 +274,9 @@ def test_ab_samples_parse_label_and_shape():
     cue to nest by kernel ``S_*`` signature instead of a golden matmul shape)."""
     from emmy.commands.run import _ab_samples
 
-    (s,) = _ab_samples(["tile=f2x4, STAGE=d2/cp"])
-    assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/cp"}  # names uppercased, whitespace tolerated
-    assert s.name == "ab tile=f2x4, STAGE=d2/cp"
+    (s,) = _ab_samples(["tile=f2x4, STAGE=d2/smem-async"])
+    assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/smem-async"}  # names uppercased, whitespace tolerated
+    assert s.name == "ab tile=f2x4, STAGE=d2/smem-async"
     assert s.shape is None
     assert s.dynamic is None
     # A --dynamic run stamps its specs on the pseudo-sample so the A/B re-trace
@@ -431,7 +431,7 @@ def test_unreproducible_pin_flag(monkeypatch):
     # sibling never pollutes the diagnostic...
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
-    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
+    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/smem-tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
     assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None

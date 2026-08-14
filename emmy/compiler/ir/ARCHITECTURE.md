@@ -489,7 +489,7 @@ or tuned. The single `REDUCE` codec knob decides the plan schedule-side; the com
 tree.
 
 **Every codec parses and spells by hand**, and they all read the same way: one `/`-separated token string, order-free,
-each field binding at most ONCE — a repeated token (`d2/cp/d3`, `sync/tma`) raises rather than letting the last one
+each field binding at most ONCE — a repeated token (`d2/smem-async/d3`, `smem/smem-tma`) raises rather than letting the last one
 win, since an order-free grammar gives a silent overwrite no reading the pin could have meant. No field is mandatory:
 an absent token takes its default, which is what lets a codec add a field without invalidating values spelled before
 it. Each parse error names its codec and offers the grammar, because the featurizers degrade on a `ValueError` and a

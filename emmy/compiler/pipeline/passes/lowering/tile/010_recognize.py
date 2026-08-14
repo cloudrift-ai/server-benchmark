@@ -320,7 +320,7 @@ def _nodify_contraction(node, free: tuple):
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
                 # A computed B is a closed zero-axis operand node. Unlike A's norm/activation
                 # cone it has no row-statistic seam to split; its whole generic MAP tree is
-                # evaluated at each (k, n) slab cell by the sync compute-fill.
+                # evaluated at each (k, n) slab cell by the smem compute fill.
                 channels=(Channel(b=b_load if isinstance(b_load, Load) else Fold.projection(body=Body(tuple(b_load))), acc=acc),),
             )
             # ONE home for the projection: the wrapping zero-axis fold's lift body, never a node field. The

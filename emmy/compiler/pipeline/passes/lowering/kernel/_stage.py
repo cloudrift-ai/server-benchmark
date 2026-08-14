@@ -2,7 +2,7 @@
 
 The single home for every operand-staging *transport*: the warp tier's cooperative gmem→smem
 2-D slab fills (synchronous copy / ``cp.async`` / TMA, off a :class:`~emmy.compiler.ir.schedule.Stage`) and
-the reduce tier's ``sync`` 1-D shared-row fill (:func:`sync_row_fill`, the fused norm→linear
+the reduce tier's synchronous 1-D shared-row fill (:func:`sync_row_fill`, the fused norm→linear
 prologue) both live here, indexed off the same linear-tid / thread-count seam. Assembles the
 surviving kernel-IR transport leaf nodes (``Smem`` / ``CpAsyncCopy`` / ``CpAsyncCommit`` /
 ``CpAsyncWait`` / ``Sync`` — and the TMA quartet ``TmaDescriptor`` / ``TmaLoad`` /
@@ -173,13 +173,13 @@ def slab_smem(name: str, rows: int, cols: int, dtype: str, *, align: int = 0) ->
 
 
 def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_tid: Expr, n_threads: int, dtype: str) -> list[Stmt]:
-    """The ``sync``-transport 1-D operand fill: cooperatively copy the CTA-shared row
+    """The synchronous ``smem`` 1-D operand fill: cooperatively copy the CTA-shared row
     ``src[grid…, 0:extent]`` into a length-``extent`` smem ``slab``, then a CTA barrier so
     every lane sees the filled row before the reader drains it. The ``n_threads`` cooperating
     lanes stripe it (``for k = linear_tid; k < extent; k += n_threads``), the same
     linear-tid / thread-count seam :func:`cp_async_fill` indexes off — so every transport's
     fill lives here. This is the scalar reduce tier's shared-row prologue (the fused
-    norm→linear input row), the single-buffer ``sync`` counterpart of the async 2-D slab
+    norm→linear input row), the single-buffer synchronous counterpart of the async 2-D slab
     fills above."""
     fe = Axis(name=f"_{slab}_f", extent=extent)
     val = f"_{slab}_v"
@@ -192,7 +192,7 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
 def sync_stat_fill(
     *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, stat=None, dtype: str = "float"
 ) -> list[Stmt]:
-    """The ``sync``-transport per-row STATISTIC prologue — the fused norm→linear warp edge's
+    """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
     row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
     stat reduce ``Loop`` (coalesced — consecutive lanes read consecutive elements) and close the
@@ -322,7 +322,7 @@ class Operand:
     # operand's own gmem orientation, K stride-1 in both) instead of the canonical K-major
     # ``bk × tile_n``. The mma drain reads it with the plain (no ``.trans``) ldmatrix — the
     # ``LdmatrixLoad(b_trans=True)`` staged path flash's K slab already drains through. Role
-    # "b" only, on every staged transport (cp.async / TMA / the sync transport's async B fills).
+    # "b" only, on every staged transport (cp.async / TMA / the ``smem`` fill's async B fills).
     trans: bool = False
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
     # dense). The pad breaks the same-bank stride of a power-of-two row — the flash K/V slabs'
@@ -362,7 +362,7 @@ class Operand:
 
 @dataclass(frozen=True)
 class SyncOperand:
-    """One ``sync``-transport slab operand — filled by plain per-thread COMPUTE, not an
+    """One ``smem`` compute-filled slab operand — filled by plain per-thread COMPUTE, not an
     async copy. ``value(k0, row, col)`` returns the stmts producing the cell's value at slab
     coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: the fused producer
     CONE (the fused-edge A operand — the computed tile materializes straight into the slab the
@@ -385,7 +385,7 @@ class SyncOperand:
     def slot_row(self, slot: Expr) -> Expr | None:  # noqa: ARG002
         """Always ``None`` — a sync-filled slab is SINGLE-BUFFER by construction: the compute /
         copy fill runs on the drain's own threads, so a prefetch slot for it buys no overlap
-        (the work is serial either way) while doubling the slab. The sync transport's ``depth``
+        (the work is serial either way) while doubling the slab. The synchronous fill's ``depth``
         rings its ``async_operands`` only (:class:`SyncTransport`)."""
         return None
 
@@ -447,8 +447,8 @@ class SyncCopyTransport:
 
 @dataclass(frozen=True)
 class SyncTransport:
-    """The ``sync`` producer — per-thread compute/copy fills closed by ONE CTA barrier. This is the
-    mma tier's ``sync`` transport: the fused-edge compute-fill (a producer cone materializing the A
+    """The synchronous ``smem`` producer — per-thread compute/copy fills closed by ONE CTA barrier. This is the
+    mma tier's ``smem`` compute fill: the fused-edge fill (a producer cone materializing the A
     tile) rides ``operands``; plain-copy operands (the fused edge's B weights) ride
     ``async_operands`` as vectorized ``cp.async`` fills issued BEFORE the compute fill, so the
     hardware copies fly underneath it — the same ``fill``/``commit``/``wait`` seam as the pure

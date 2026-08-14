@@ -116,9 +116,9 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
 
 @pytest.mark.parametrize("trans", [False, True])
 def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch, trans) -> None:
-    _pin(monkeypatch, VOLTA, stage="d1/sync")
+    _pin(monkeypatch, VOLTA, stage="d1/smem")
     src, knobs = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
-    assert knobs["STAGE"] == "d1/sync"
+    assert knobs["STAGE"] == "d1/smem"
     assert "__shared__ __half _a_smem[64]" in src
     assert "__shared__ __half _b_smem[64]" in src
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
@@ -130,10 +130,10 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
 
 
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
-    _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/sync/p2")
+    _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
     assert knobs["TILE"] == f"{VOLTA}/f1x1/k2"
-    assert knobs["STAGE"] == "d2/sync/p2"
+    assert knobs["STAGE"] == "d2/smem/p2"
     assert "__shared__ __half _a_smem[256]" in src
     assert "__shared__ __half _b_smem[256]" in src
     for fragment in ("_a0_s0", "_a0_s1", "_b0_s0", "_b0_s1"):
@@ -155,7 +155,7 @@ def test_sm70_rejects_a_pinned_modern_atom(monkeypatch) -> None:
         Pipeline.build(TILE_PASSES).run(_graph(k=16), ctx=Context(compute_capability=(7, 0)))
 
 
-@pytest.mark.parametrize(("stage", "message"), [("d1/cp", "cp.async requires sm_80"), ("d1/tma", "TMA requires sm_90")])
+@pytest.mark.parametrize(("stage", "message"), [("d1/smem-async", "cp.async requires sm_80"), ("d1/smem-tma", "TMA requires sm_90")])
 def test_sm70_rejects_a_pinned_newer_stage(monkeypatch, stage, message) -> None:
     _pin(monkeypatch, VOLTA, stage=stage)
     with pytest.raises(ValueError, match=message):

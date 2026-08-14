@@ -137,7 +137,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **candidate** | One in-flight compilation state (a graph snapshot part-way through the pipeline). |
 | **fork** | A rule returning multiple alternatives; the engine turns each option into a child candidate. |
 | **knob** | A named tuning dimension (e.g. `TILE`, `STAGE`). Every fork option is identified by the knob values it fixes. |
-| **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/cp`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
+| **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
 | **to stamp a value** | To write a value onto an op as metadata, where later passes and the prior can read it: the `S_*` shape/body features, knob values, scheduler facts. "The op's stamped `S_*` features" means the ones an earlier pass wrote onto it. |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
 | **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** regime, `-Xcicc -O1` the fast-compiling one a tune sweep uses — plus whether fast math is on. |
@@ -1447,10 +1447,10 @@ also owns the `EMMY_<KNOB>` env namespace (decode per `Knob` type; `config.py` r
 
 Two equivalent forms:
 
-- **Per-knob:** `EMMY_<NAME>=<value>` (e.g. `EMMY_STAGE=d2/cp`). Read by the rule that owns the knob via
+- **Per-knob:** `EMMY_<NAME>=<value>` (e.g. `EMMY_STAGE=d2/smem-async`). Read by the rule that owns the knob via
   `Knob.narrow`. The env-var key is built by `config.knob_var` and read via `config.knob_raw` / `config.int_env`.
 - **Aggregate:** `EMMY_KNOBS="K1=V1,K2=V2,..."` (e.g.
-  `EMMY_KNOBS="WORK=w2x2,TILE=mma_m16n8k16_f16_f32/f2x2/k2,STAGE=d2/cp"` — the worker widths ride `WORK`, so a
+  `EMMY_KNOBS="WORK=w2x2,TILE=mma_m16n8k16_f16_f32/f2x2/k2,STAGE=d2/smem-async"` — the worker widths ride `WORK`, so a
   `TILE` / `REDUCE` pin that embeds its own raises). Parsed once at `knob.py` import via
   `apply_knobs_env()`, which splats each entry into the corresponding `EMMY_<K>` var
   (`config.set_knob(..., overwrite=False)`). An explicit per-knob var wins over the aggregate.

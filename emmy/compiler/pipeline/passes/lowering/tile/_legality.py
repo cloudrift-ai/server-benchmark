@@ -19,7 +19,7 @@ What does NOT live here: anything that CHOOSES rather than checks. The conservat
 pick, the atom ladder and the stage catalog are the schedule's.
 
 **With ONE stated exception: the stage RESOLVERS** (``resolve_warp_stage`` / ``resolve_scalar_stage``
-/ ``resolve_sync_stage``). They return a SIZED :class:`Stage` rather
+/ ``resolve_fill_stage``). They return a SIZED :class:`Stage` rather
 than a reason, because for the smem budget the legal answer is a size and not a yes/no — the
 largest depth and slab chunk that fit. Handing back the largest legal stage is what keeps an
 over-budget row out of the fork instead of failing at materialization, and splitting "how big may
@@ -92,9 +92,9 @@ def producer_band(spec: WarpSpec, block_threads: int) -> str | None:
 
 def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
     """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
-    mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no
+    mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a smem compute fill has no
     async load half) on a kernel that is not split across CTAs."""
-    if stage is None or stage.transport != "tma":
+    if stage is None or stage.transport != "smem-tma":
         return "a producer band drives a resolved TMA stage; this row has none"
     if reduce.needs_split:
         return "a producer band and a cross-CTA split-K are not co-representable"
@@ -186,17 +186,17 @@ def warp_a_columns(node: Fold, tile: TilePlan, inputs) -> str | None:
 
 def stage_target(stage: Stage, ctx) -> str | None:
     """Whether ``stage`` names a copy instruction family present on ``ctx``."""
-    if stage.transport == "cp.async" and not ctx.has_cp_async:
+    if stage.transport == "smem-async" and not ctx.has_cp_async:
         return f"STAGE {stage.spell()}: cp.async requires sm_80 or newer"
-    if stage.transport == "tma" and not ctx.has_tma:
+    if stage.transport == "smem-tma" and not ctx.has_tma:
         return f"STAGE {stage.spell()}: TMA requires sm_90 or newer"
     return None
 
 
 def warp_atom_stage(atom, stage: Stage) -> str | None:
     """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
-    if atom.materialized_edges_only and not (stage.transport == "sync" and atom.sync_copy_staging):
-        return f"STAGE {stage.spell()}: atom {atom.name} supports only synchronous-copy staging"
+    if atom.materialized_edges_only and not (stage.transport == "smem" and atom.sync_copy_staging):
+        return f"STAGE {stage.spell()}: atom {atom.name} supports only the synchronous byte-copy staging"
     return None
 
 
@@ -340,7 +340,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     chunks and its cp.async row pad is 16 B (``_addr.BYTE_SLAB_PAD``), so its inner span — and,
     canonical-B, the gmem row stride N — must be 16-divisible."""
     atom = tile.atom
-    sync_copy = stage.transport == "sync" and atom.sync_copy_staging
+    sync_copy = stage.transport == "smem" and atom.sync_copy_staging
     if atom.materialized_edges_only and not sync_copy:
         return None
     bk_elems = tile.bk * atom.atom_k
@@ -375,13 +375,13 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
-        stage.transport == "tma"
+        stage.transport == "smem-tma"
         and rank_ok
         and box_ok
         and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.b_trans)
     )
     vector_copy_ok = _warp_vector_copy(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
-    cp_ok = stage.transport == "cp.async" and vector_copy_ok
+    cp_ok = stage.transport == "smem-async" and vector_copy_ok
     sync_ok = sync_copy and vector_copy_ok
     if not (tma_ok or cp_ok or sync_ok):
         return None
@@ -404,7 +404,7 @@ def clamp_depth(stage: Stage, slot_bytes: int, budget: int) -> int:
 def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     """A MATERIALIZED ``a`` edge must already carry the atom's own operand dtype: the transports that
     fill its fragment — gmem-direct ``ldmatrix``, cp.async, TMA — move raw BYTES and cannot convert.
-    Only the sync compute-fill converts (on the slab store), which is why a mixed pair reaches the
+    Only the smem compute fill converts (on the slab store), which is why a mixed pair reaches the
     warp tier through the mixed-A promotion's cone instead. A COMPUTED edge is exempt for exactly
     that reason."""
     if not isinstance(c.a, Load) or a_dtype == tile.atom.operand_dtype("a"):
@@ -412,12 +412,12 @@ def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     return (
         f"warp TILE: atom {tile.atom.name} takes a {tile.atom.operand_dtype('a')} A operand but this "
         f"contraction's A is {a_dtype} — a copy transport cannot convert it. The mma tier is reachable "
-        f"through the converting sync compute-fill (the mixed-A cone), or drop the atom for the scalar tier."
+        f"through the converting smem compute fill (the mixed-A cone), or drop the atom for the scalar tier."
     )
 
 
 def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
-    """Geometry required by a sync compute-filled contraction operand.
+    """Geometry required by a smem compute-filled contraction operand.
 
     Every compute-filled edge needs static K because the staged driver unrolls fixed K chunks. A
     computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
@@ -426,13 +426,13 @@ def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
     B's own per-cell fill clamps N before evaluating the generic producer cone.
     """
     if not c.axis.extent.is_static:
-        return "a computed contraction operand needs a static K — the sync compute-fill has no K mask"
+        return "a computed contraction operand needs a static K — the smem compute fill has no K mask"
     materialized_b = [isinstance(ch.b, Load) for ch in c.channels]
     if any(materialized_b) and not all(materialized_b):
-        return "sync compute-fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
+        return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
     if tile.n.mask and any(isinstance(ch.b, Load) for ch in c.channels):
         return (
-            f"a sync compute-fill with a materialized B needs a TILE whose N width exactly covers "
+            f"a smem compute fill with a materialized B needs a TILE whose N width exactly covers "
             f"the static output columns (N={tile.n.axis.extent}; copied inner-row chunks cannot "
             f"clamp individual N cells); pick a dividing tile."
         )
@@ -442,7 +442,7 @@ def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
 def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
     """A materialized edge beside a compute-filled operand must already have the atom dtype.
 
-    The ``sync`` stage evaluates computed cones into their typed shared-memory slabs, but it
+    The ``smem`` stage evaluates computed cones into their typed shared-memory slabs, but it
     *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore cannot feed an
     f16 ``ldmatrix`` fragment merely because another edge is computed; it must take the demoted
     scalar reading (or an explicitly converting producer cone).  Computed edges are exempt because
@@ -462,18 +462,18 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
             continue
         got = tensor.dtype
         return (
-            f"sync compute-fill: materialized {role.upper()} edge {edge.input!r} is {got}, but "
+            f"smem compute fill: materialized {role.upper()} edge {edge.input!r} is {got}, but "
             f"atom {tile.atom.name} copies it into a {want} slab without conversion; use the "
             "demoted scalar reading or an explicitly converting producer cone"
         )
     return None
 
 
-def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
-    """The ``sync`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
-    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
-    copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
-    and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
+def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
+    """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
+    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
+    cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it has no
+    gmem-direct ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
     slab, one B slab per channel, and one fp32 row per bridged statistic (``ops.cone_seam``'s
     ``stats`` — the same node boundary the materializer fills through).
 
@@ -511,7 +511,7 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     depth = want_depth if want_depth >= 2 and async_bytes and sync_bytes + want_depth * async_bytes <= budget else 1
     computed = [] if isinstance(c.a, Load) else [operand_name(c.a)]
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
-    return Stage(depth=depth, transport="sync", smem=tuple(computed), bk_elems=bk_elems)
+    return Stage(depth=depth, transport="smem", smem=tuple(computed), bk_elems=bk_elems)
 
 
 def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:
@@ -519,7 +519,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.transport not in ("tma", "cp.async") or not c.axis.extent.is_static:
+    if stage.transport not in ("smem-tma", "smem-async") or not c.axis.extent.is_static:
         return None
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages
@@ -533,7 +533,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
     if any(t is not None and t.dtype.nbytes < 2 for t in (inputs.get(c.a.input), inputs.get(c.b.input))):
         return None
-    if stage.transport == "tma" and not (
+    if stage.transport == "smem-tma" and not (
         _tma_operand_rank(c.a.index, tile.m.axis.name, c.axis.name) and _tma_operand_rank(c.b.index, tile.n.axis.name, c.axis.name)
     ):
         return None
@@ -541,7 +541,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     # contract). A register-only tile launches the scalar default block over unrelated cells.
     if tile.launch_threads is None:
         return None
-    if stage.transport == "tma" and max(tile.m.tile, tile.n.tile) > _TMA_MAX_BOX:
+    if stage.transport == "smem-tma" and max(tile.m.tile, tile.n.tile) > _TMA_MAX_BOX:
         return None
     k = c.axis.extent.as_static()
     elem_bytes = inputs[c.a.input].dtype.nbytes
@@ -570,7 +570,7 @@ __all__ = [
     "producer_band",
     "producer_transport",
     "resolve_scalar_stage",
-    "resolve_sync_stage",
+    "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
     "splitk_materialized_b",

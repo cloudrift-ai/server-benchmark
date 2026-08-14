@@ -188,7 +188,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   cold kernel-set choices.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
-  variable (`EMMY_STAGE=d2/cp`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
+  variable (`EMMY_STAGE=d2/smem-async`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
   forced configuration rather than the one the compiler would have chosen on its own.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
   the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the

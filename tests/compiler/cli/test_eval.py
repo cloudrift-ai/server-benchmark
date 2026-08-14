@@ -717,7 +717,7 @@ def test_knob_columns_names_in_header_values_in_cells():
     cols, cells = knob_columns(
         [
             {"TILE": ("n16", False), "REDUCE": ("b32", False)},
-            {"TILE": ("n32", False), "STAGE": ("d2/cp", False)},
+            {"TILE": ("n32", False), "STAGE": ("d2/smem-async", False)},
         ]
     )
     assert [c.name for c in cols] == ["TILE", "REDUCE", "STAGE"]  # canonical KNOB_ORDER
@@ -725,7 +725,7 @@ def test_knob_columns_names_in_header_values_in_cells():
     assert lines[0].split() == ["TILE", "REDUCE", "STAGE"]  # header row carries the names
     assert lines[1].split() == ["n16", "b32"]  # values only, no "TILE=" prefix; trailing STAGE blank stripped
     assert "TILE=" not in lines[1]
-    assert lines[2].split() == ["n32", "d2/cp"]  # REDUCE column blank between TILE and STAGE
+    assert lines[2].split() == ["n32", "d2/smem-async"]  # REDUCE column blank between TILE and STAGE
 
 
 def test_render_table_ansi_aware_width():
@@ -748,8 +748,8 @@ def test_bare_families_canonicalizes_axis_suffixed_knobs():
     rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
     from emmy.commands.eval import _bare_families
 
-    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/tma", "REDUCE@a2": "g2a"})
-    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/tma", "REDUCE": "g2a"}
+    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/smem-tma", "REDUCE@a2": "g2a"})
+    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/smem-tma", "REDUCE": "g2a"}
     # bare keys pass through; first key wins a family collision (single-node picks in practice)
     assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
 

@@ -142,9 +142,9 @@ def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
 
     Most targets classify completely from their stamped ``S_*`` histogram. Flash and
     pre-split computed-A forks are the exceptions: deployment recognizes them from an
-    unmistakable schedule offer. A reviewed record stores the selected schedule prefix,
-    so an axis pair or ``d*/sync`` compute-fill carries that same signal without
-    serializing a derived ShapeKey.
+    unmistakable schedule offer, stamped on every fork row as ``S_computed_a``. A reviewed
+    record keeps that stamp in its knob dict, so the same signal re-derives the key without
+    serializing a ShapeKey.
     """
     from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key  # noqa: PLC0415
 

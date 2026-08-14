@@ -284,7 +284,7 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
         return None
     if not tp.is_warp:
         return None
-    if st.transport != "cp.async":
+    if st.transport != "smem-async":
         return None
     from emmy import gpu  # noqa: PLC0415
 

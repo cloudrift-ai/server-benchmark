@@ -346,7 +346,7 @@ def canon_family_value(name: str, value) -> str:
     form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
     spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
     alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
-    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/cp`` instead of
+    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/smem-async`` instead of
     failing verification against its own value on the deploy path. Any other family — and any
     unparseable value — passes through untouched (the caller's own equality applies).
 
@@ -384,7 +384,7 @@ def values_equal(name: str, want, got) -> bool:
     their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
     (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
     pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
-    ``cp/d2`` matches the realized ``d2/cp``. ``WORK``
+    ``cp/d2`` matches the realized ``d2/smem-async``. ``WORK``
     compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
@@ -625,4 +625,9 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
         kn = getattr(_space, fam, None)
         if kn is not None and kn.off is not _UNSET:
             out[fam] = str(kn.off)
+    # The one structural stamp a RECORDING must keep: the deploy-time classifier re-derives a
+    # stored row's ShapeKey from its knob dict, and only ``S_computed_a`` distinguishes the smem
+    # compute fill from the byte-copy staging that spells the same transport token.
+    if knobs.get("S_computed_a"):
+        out["S_computed_a"] = "1.0"
     return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))

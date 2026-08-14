@@ -455,7 +455,7 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d1/sync", "d2/sync"])
+@pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
 def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     """Redundant-statistic split-K on a computed-A (norm→linear) cone: the contraction K is
     sliced across CTAs (``REDUCE=g4k``) while the k-invariant stat prologue stays FULL-ROW in
@@ -488,7 +488,7 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     got, srcs = _compile_run(g, ins)
     assert len(srcs) == 2, f"split-K must produce partial + finalize, got {len(srcs)} kernel(s)"
     assert any("emmy_mma" in s for s in srcs), "the mma tier must engage on the split partial"
-    if stage == "d2/sync":
+    if stage == "d2/smem":
         assert any("cp.async" in s for s in srcs), "the d2 B-only prefetch ring must issue cp.async on the canonical-B slab"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw

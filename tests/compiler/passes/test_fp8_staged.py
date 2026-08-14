@@ -39,7 +39,7 @@ def _tma_pins() -> tuple[str, ...]:
     import cupy
 
     cap = cupy.cuda.Device().compute_capability  # e.g. "89" / "120"
-    return ("d2/tma",) if int(cap) >= 90 else ()
+    return ("d2/smem-tma",) if int(cap) >= 90 else ()
 
 
 def _node(*, a_dtype: DataType = F16, b_dtype: DataType = F8E4M3, m=512, n=4096, k=4096, b_trans=False):
@@ -68,7 +68,7 @@ def test_fp8_b_under_k16_atom_resolves_every_transport():
     for b_trans in (False, True):
         node, inputs, mn = _node(b_trans=b_trans)
         tile = _tile(K16, "f4x1/k4", "w1x8", mn)
-        for spec in ("d1/cp", "d2/cp", "d2/tma", "d2/cp/p2"):
+        for spec in ("d1/smem-async", "d2/smem-async", "d2/smem-tma", "d2/smem-async/p2"):
             st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
             assert st is not None, (b_trans, spec)
             assert st.bk_elems == tile.bk * 16
@@ -82,9 +82,9 @@ def test_fp8_b_slot_bytes_include_the_row_pad():
     bk = tile.bk * 16
     a_slot = tile.m.tile * bk * 2
     b_slot_padded = tile.n.tile * (bk + BYTE_SLAB_PAD)
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 2 * (a_slot + b_slot_padded), inputs)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 2 * (a_slot + b_slot_padded), inputs)
     assert st is not None and st.depth == 2
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 2 * (a_slot + b_slot_padded) - 1, inputs)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 2 * (a_slot + b_slot_padded) - 1, inputs)
     assert st is not None and st.depth == 1
 
 
@@ -93,16 +93,16 @@ def test_byte_staging_declines_what_it_cannot_fill():
     byte-B whose tile_n or N is not 16-divisible (the 16 B chunk / row-pad rule)."""
     # f32-stored B under a 16-bit atom: not a byte slab, not the atom dtype — decline
     node, inputs, mn = _node(b_dtype=F32)
-    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
     # fp8-stored A under a 16-bit atom: only B has the convert drain — decline
     node, inputs, mn = _node(a_dtype=F8E4M3, b_dtype=F16)
-    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
     # canonical byte-B, tile_n = 8 (w1x1/f1x1): 16 does not divide the inner span — decline
     node, inputs, mn = _node(n=4096)
-    assert resolve_warp_stage(node, _tile(K16, "f1x1/k4", "w1x1", mn), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f1x1/k4", "w1x1", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
     # canonical byte-B whose gmem row stride N is 16-indivisible — decline
     node, inputs, mn = _node(n=4104)
-    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_k32_atoms_resolve_staged_byte_slabs():
@@ -110,7 +110,7 @@ def test_k32_atoms_resolve_staged_byte_slabs():
     symbolic K still declines (no masked-K byte fill)."""
     node, inputs, mn = _node(a_dtype=F8E4M3, b_dtype=F8E4M3, m=512, n=512, k=512)
     tile = _tile(K32, "f4x1/k4", "w1x8", mn)
-    for spec in ("d2/cp", "d2/tma"):
+    for spec in ("d2/smem-async", "d2/smem-tma"):
         st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
         assert st is not None and st.bk_elems == tile.bk * 32
     ka = Axis("k", Dim("seq"))
@@ -119,7 +119,7 @@ def test_k32_atoms_resolve_staged_byte_slabs():
         a=Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F8E4M3),
         channels=(Channel(b=Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), acc="acc"),),
     )
-    assert resolve_warp_stage(sym, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(sym, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_16bit_operands_resolve_exactly_as_without_dtype_info():
@@ -230,7 +230,7 @@ def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     backend = CudaBackend()
     base, base_src = _run_w8a16(backend, None, x, bits, scale, m, n, k)
     assert "_b_smem" not in base_src
-    for pin in ("d1/cp", "d2/cp", "d2/cp/p2", *_tma_pins()):
+    for pin in ("d1/smem-async", "d2/smem-async", "d2/smem-async/p2", *_tma_pins()):
         y, src = _run_w8a16(backend, pin, x, bits, scale, m, n, k)
         assert "__nv_fp8_e4m3 _b_smem" in src or "__nv_fp8_e4m3* _b_smem" in src, pin
         assert "emmy_mma_load_b_smem_trans_f8_f16" in src or "emmy_mma_load_b_gmem" in src, pin
@@ -276,7 +276,7 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
         return np.asarray(result.outputs["y"]).reshape(m, n), src
 
     bases: dict[str, np.ndarray] = {}
-    for stage, red in [("d2/cp", ""), ("d2/cp", "g4k"), *((s, r) for s in _tma_pins() for r in ("", "g4k"))]:
+    for stage, red in [("d2/smem-async", ""), ("d2/smem-async", "g4k"), *((s, r) for s in _tma_pins() for r in ("", "g4k"))]:
         if red not in bases:
             bases[red] = run("", red)[0]
         y, src = run(stage, red)
@@ -311,7 +311,7 @@ def test_k32_staged_bit_identical_to_gmem_direct_cuda():
 
     base, base_src = run(None)
     assert "_a_smem" not in base_src
-    for pin in ("d1/cp", "d2/cp", *_tma_pins()):
+    for pin in ("d1/smem-async", "d2/smem-async", *_tma_pins()):
         y, src = run(pin)
         assert "emmy_mma_load_a_smem_b8v" in src, pin
         assert np.array_equal(y.view(np.uint32), base.view(np.uint32)), pin

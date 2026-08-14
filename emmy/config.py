@@ -59,6 +59,7 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 READABLE = "EMMY_READABLE"
+RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -164,6 +165,17 @@ def _str(name: str, default: str = "") -> str:
 
 
 # --- Typed getters (read os.environ live) ----------------------------------
+
+
+def rental_tags() -> list[str]:
+    """Tags attached to cloud VM rentals: ``EMMY_RENTAL_TAGS`` (comma-separated)
+    → ``["emmy"]``. The env override lets a caller label a whole rental lane —
+    e.g. an experiment run or a GitHub workflow job — without plumbing a flag
+    through every provisioning path."""
+    raw = _str(RENTAL_TAGS)
+    if not raw:
+        return ["emmy"]
+    return [tag.strip() for tag in raw.split(",") if tag.strip()]
 
 
 def tune_db_path() -> Path:

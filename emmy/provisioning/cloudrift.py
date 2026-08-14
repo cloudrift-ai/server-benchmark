@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 
 import httpx
 
+from emmy import config
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
 from emmy.provisioning.ssh import wait_for_ssh
 from emmy.provisioning.types import VMConnectionInfo
@@ -83,6 +85,8 @@ async def _rent_instance(
     dry_run=False,
     billing_exempt=False,
     network=None,
+    node_id=None,
+    tags=None,
 ):
     """Rent a new CloudRift VM instance.
 
@@ -90,6 +94,9 @@ async def _rent_instance(
 
     Args:
         ssh_public_keys: list of public key strings (e.g. ["ssh-ed25519 AAAA..."])
+        node_id: optional node UUID; when set, rents on exactly that node via the
+            ``ByNodeId`` selector instead of letting the provider place the instance.
+        tags: optional list of free-form labels attached to the rental.
     """
     vm_config = {
         "ssh_key": {"PublicKeys": ssh_public_keys},
@@ -98,12 +105,12 @@ async def _rent_instance(
     }
     if ports:
         vm_config["ports"] = [str(p) for p in ports]
+    if node_id is not None:
+        selector = {"ByNodeId": {"node_id": node_id, "instance_type": instance_type}}
+    else:
+        selector = {"ByInstanceTypeAndLocation": {"instance_type": instance_type}}
     data = {
-        "selector": {
-            "ByInstanceTypeAndLocation": {
-                "instance_type": instance_type,
-            },
-        },
+        "selector": selector,
         "config": {
             "VirtualMachine": vm_config,
         },
@@ -113,7 +120,41 @@ async def _rent_instance(
         data["billing_exempt"] = True
     if network is not None:
         data["network"] = network
+    if tags:
+        data["tags"] = list(tags)
     return await _api_request("POST", "/api/v1/instances/rent", data, api_key, api_url, dry_run)
+
+
+async def resolve_node_id(api_key, node, api_url=DEFAULT_API_URL, dry_run=False):
+    """Resolve a node reference (UUID or hostname) to the node UUID used by the rent API.
+
+    A value that parses as a UUID is returned unchanged. Anything else is treated as a
+    hostname and looked up via POST /api/v1/nodes/list, which the API restricts to
+    operator accounts (admin or the node's provider); customers must pass the UUID.
+    """
+    try:
+        return str(uuid.UUID(node))
+    except ValueError:
+        pass
+    if dry_run:
+        logger.info(f"[dry-run] Would resolve node hostname {node!r} via /api/v1/nodes/list.")
+        return node
+    try:
+        result = await _api_request("POST", "/api/v1/nodes/list", {"selector": "All"}, api_key, api_url)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            raise TerminalProvisionError(
+                f"Node listing returned {exc.response.status_code}: resolving a hostname requires operator "
+                f"access — pass the node UUID instead of {node!r}."
+            ) from exc
+        raise
+    nodes = result.get("nodes", [])
+    matches = [entry["id"] for entry in nodes if entry.get("hostname") == node]
+    if not matches:
+        raise TerminalProvisionError(f"No node with hostname {node!r} among the {len(nodes)} nodes visible to this account.")
+    if len(matches) > 1:
+        raise TerminalProvisionError(f"Hostname {node!r} is ambiguous: nodes {matches}.")
+    return matches[0]
 
 
 async def _terminate_instance(api_key, instance_id, api_url=DEFAULT_API_URL, dry_run=False):
@@ -281,6 +322,21 @@ def _instance_fully_ready(info):
     return True
 
 
+def _vm_username(instance):
+    """VM login username from virtual_machines[].login_info, default "user".
+
+    login_info is a single-variant enum dict; every variant carries a username
+    (UsernameAndPassword, and HiddenPassword for callers without the
+    view-credentials permission), so read it variant-agnostically.
+    """
+    vms = instance.get("virtual_machines") or []
+    if not vms:
+        return "user"
+    login_info = vms[0].get("login_info") or {}
+    creds = next(iter(login_info.values()), None) or {}
+    return creds.get("username") or "user"
+
+
 def _extract_connection_info(instance, delete_info=()):
     """Extract connection info from an instance dict into a VMConnectionInfo.
 
@@ -289,14 +345,7 @@ def _extract_connection_info(instance, delete_info=()):
     """
     host = instance.get("host_address", "")
     port_mappings = instance.get("port_mappings", [])
-
-    # Extract login credentials from VM info
-    username = "user"
-    vms = instance.get("virtual_machines", [])
-    if vms:
-        login_info = vms[0].get("login_info", {})
-        creds = login_info.get("UsernameAndPassword", {})
-        username = creds.get("username", username)
+    username = _vm_username(instance)
 
     # Find SSH port mapping: each mapping is [internal_port, external_port]
     ssh_port = 22
@@ -322,14 +371,7 @@ def _log_connection_info(instance):
     """
     host = instance.get("host_address")
     port_mappings = instance.get("port_mappings", [])
-
-    # Extract login credentials from VM info
-    username = "user"
-    vms = instance.get("virtual_machines", [])
-    if vms:
-        login_info = vms[0].get("login_info", {})
-        creds = login_info.get("UsernameAndPassword", {})
-        username = creds.get("username", username)
+    username = _vm_username(instance)
 
     # Find SSH port mapping: each mapping is [internal_port, external_port]
     ssh_ext_port = None
@@ -368,6 +410,8 @@ async def create_instance(
     network=None,
     extra_public_keys=None,
     allocation_observer=None,
+    node=None,
+    tags=None,
 ):
     """Create a CloudRift VM instance.
 
@@ -375,6 +419,10 @@ async def create_instance(
         image_url: VM image URL. If ``None``, auto-picks ROCm for ``mi*`` instance
             types and NVIDIA otherwise via :func:`select_image_url`.
         ssh_key_path: path to the SSH **public** key file.
+        node: optional node UUID or hostname to pin the rental to (see
+            :func:`resolve_node_id`); placement fallback does not apply to a pinned node.
+        tags: rental labels; ``None`` resolves through :func:`emmy.config.rental_tags`
+            (``EMMY_RENTAL_TAGS`` override, default ``["emmy"]``).
         extra_public_keys: optional list of additional SSH public key strings to
             install in the VM's authorized_keys alongside the key from
             ``ssh_key_path`` (e.g. ["ssh-ed25519 AAAA bob@host"]).
@@ -394,6 +442,14 @@ async def create_instance(
         logger.info(f"Creating CloudRift instance (type={instance_type}, auto-selected image={image_url})...")
     else:
         logger.info(f"Creating CloudRift instance (type={instance_type}, image={image_url})...")
+
+    node_id = None
+    if node is not None:
+        node_id = await resolve_node_id(api_key, node, api_url=api_url, dry_run=dry_run)
+        logger.info(f"Pinning rental to node {node} (id={node_id}).")
+
+    if tags is None:
+        tags = config.rental_tags()
 
     ssh_key_path = os.path.expanduser(ssh_key_path)
     if dry_run and not os.path.exists(ssh_key_path):
@@ -415,6 +471,8 @@ async def create_instance(
             dry_run=dry_run,
             billing_exempt=billing_exempt,
             network=network,
+            node_id=node_id,
+            tags=tags,
         )
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code

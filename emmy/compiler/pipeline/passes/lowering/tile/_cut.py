@@ -1,15 +1,13 @@
-"""The placement CUT realizer (phase 4) — routing entries partition the recognized tree.
+"""The placement CUT realizer — a ``PLACE`` pin partitions the recognized tree.
 
 ``PLACE@<child-path> = cut`` on an in-tree parent↔child seam splits the kernel: the child
 subtree becomes its own graph node (a plain un-mapped ``LoopOp``, re-entering recognition as a
 fresh tree), the seam value materializes to a workspace buffer, and the parent consumes a plain
-``Load`` where the child was. Resolution is TWO-LEVEL and RECURSIVE: the ROUTING entry (a golden
-whose knobs are ``PLACE`` keys only — cuts, never schedules) or an authoritative ``PLACE`` pin
-decides the cut BEFORE any schedule fork is built; every resulting piece then re-recognizes on
-the pass-scan restart and resolves its OWN ``(kind, shape)`` entry through the full deploy
-hierarchy — a piece's entry may itself cut (the cone piece re-recognizes as the rms_norm shape
-and its routing entry cuts the statistic out). NO routing entry = fuse = the recognized form —
-the deployment-safety default, spelled as absence.
+``Load`` where the child was. Resolution is RECURSIVE: a pin decides the cut BEFORE any schedule
+fork is built; every resulting piece then re-recognizes on the pass-scan restart — a piece may
+itself be cut by a deeper pin key. NO pin = fuse = the recognized form, spelled as absence. Pins
+are the codec's exploration mechanism (``--ab`` and tune trajectories); a pass consults no
+deploy evidence.
 
 The realizer is seam-agnostic by design: the two seam shapes (a zero-axis ``Fold`` projection seam, a fold
 operand edge) fall out of the node kinds — the child's index space is DERIVED (the enclosing
@@ -41,12 +39,11 @@ from emmy.compiler.ir.tile.ir import (
     deep_defines,
     deep_reads,
     effect_tail,
-    is_contraction,
     operand_name,
 )
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
-from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of, parse_knob_spec
+from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
@@ -65,93 +62,6 @@ def _place_pins() -> dict[str, str]:
     if bare is not None and "PLACE" not in pins:
         pins["PLACE"] = bare
     return pins
-
-
-#: The schedule knob families a golden / ``--ab`` row pins. A live pin from any of them marks a
-#: pinned re-record compile, where the pin — not a recorded routing entry — must decide the form.
-#: ONE list (``knob.SCHEDULE_FAMILIES``): the retired ``WSPEC`` alias is gone from it because
-#: nothing reads that pin any more, so treating it as live suppressed routing for no decision.
-
-
-def _schedule_pins_live() -> bool:
-    """Whether any schedule-family knob pin is live (a bare ``EMMY_<KNOB>`` var or an
-    ``EMMY_KNOBS`` aggregate key). Pins are authoritative over every golden tier — a recorded
-    ROUTING entry must not reroute a pinned compile: the pinned fused row would silently compile
-    the cut's pieces and gate as ``realized (off)`` (the 2026-07-31 fused re-record dead end,
-    where every fused golden replay failed against its own recorded spelling as soon as a
-    same-shape ``.cut`` routing row landed). Bare schedule pins apply compile-wide, so this
-    suppression is compile-wide too — matching ``Knob.narrow``'s bare-pin scope."""
-    if any(config.knob_raw(f) is not None for f in SCHEDULE_FAMILIES):
-        return True
-    return any(family_of(k) in SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
-
-
-def _card_has_routing(gpu_name, cap) -> bool:
-    """Whether ANY routing golden exists for this card — the cheap gate that keeps the per-kernel
-    seam scan off the common compile (no pins, no routing entries → recognition is untouched)."""
-    if not gpu_name:
-        return False
-    try:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-
-        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_RECORDS)
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _has_computed_a(node) -> bool:
-    """Whether the tree carries a computed-A contraction — an ``a`` edge stored INLINE (a cone
-    node) rather than materialized (a gmem ``Load``). The structural twin of the offer signal
-    ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers enumerate
-    the ``sync`` compute-fill): at the routing consult no offer exists yet, but the routing
-    reference tree does, and the edge inhabitant is the same fact.
-
-    Walked through ``path.sites`` — the ONE node walk in the layer, already imported here — rather
-    than a private recursion over ``operands``."""
-    return any(is_contraction(s.node) and not isinstance(s.node.a, Load) for s in sites(node))
-
-
-def _routing_entry(ctx, knobs: dict, root=None):
-    """The live card's ROUTING golden for this kernel's ``(kind, shape)`` — fastest-first, or
-    ``None``. Gated like the schedule golden tier: goldens are -O3 truth, so a correctness-lane
-    (-O1) compile never consults them; off-GPU / unseeded cards read an empty set.
-
-    The consult key follows the FUSED-KIND CONVENTION ``greedy._fork_shape_key`` documents: a
-    computed-A cone's stamped histogram cannot always fire ``kind="fused"``: a stat-free cone
-    like the geglu→down edge has no statistic or second reduce axis. The fork-side rebuild reads
-    the offer's sync-STAGE signal; here no offer exists yet, so the TREE supplies the structural
-    computed-A fact (``_has_computed_a``). The golden builder reads ``PLACE@a`` as the same fact,
-    keeping this a single-key lookup without letting the plain key recursively match a cut piece.
-    Found live: the Laguna activation→down entry measured correctly under a pin but could not
-    deploy from its golden."""
-    from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
-
-    gpu_name = getattr(ctx, "gpu_name", None)
-    if not gpu_name:
-        return None
-    try:
-        h_opt = float(ctx.features().get("H_opt", _O3_OPT))
-    except Exception:  # noqa: BLE001
-        h_opt = _O3_OPT
-    if h_opt != _O3_OPT:
-        return None  # goldens are -O3 truth — the correctness lane never routes off an entry
-    try:
-        key = ShapeKey.from_s_features(knobs)
-        if key.kind == "" and root is not None and _has_computed_a(root):
-            from dataclasses import replace  # noqa: PLC0415
-
-            key = replace(key, kind="fused", is_warp=True)
-        cap = tuple(ctx.compute_capability)
-        entries = [
-            g for g in GOLDEN_RECORDS if g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap and key.joins(g.shape_key)
-        ]
-    except Exception:  # noqa: BLE001 — a routing consult failure must never break compile
-        return None
-    if not entries:
-        return None
-    return min(entries, key=lambda g: g.emmy_us or float("inf"))
 
 
 def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
@@ -209,18 +119,15 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     return True
 
 
-def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> Site | None:
-    """The routing resolution for a freshly-recognized kernel: the cut seam to realize, or
-    ``None`` (= fuse, the default — spelled as the ABSENCE of a routing entry). ``PLACE`` pins
-    are authoritative over the recorded routing entry (a ``fuse`` pin suppresses a recorded
-    cut), and so is any live schedule-family pin (a pinned re-record / ``--ab`` compile keeps
-    the recognized form so the pinned row can realize); a key that names no seam (or an uncuttable one) on this tree is skipped for a pin (a
-    whole-model pin targets one kernel shape) and falls through with a warning for an entry
-    (the drift case — deploy keeps the recognized form). A bare ``PLACE=cut`` pin takes the
-    shallowest CUTTABLE seam."""
+def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> Site | None:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
+    """The ``PLACE`` pin resolution for a freshly-recognized kernel: the cut seam to realize, or
+    ``None`` (= fuse, the default — spelled as the ABSENCE of a pin). Pins are the codec's
+    exploration mechanism and the only thing that decides a cut here; a key that names no seam
+    (or an uncuttable one) on this tree is skipped (a whole-model pin targets one kernel shape).
+    A bare ``PLACE=cut`` pin takes the shallowest CUTTABLE seam."""
     pins = _place_pins()
-    if not pins and not _card_has_routing(getattr(ctx, "gpu_name", None), tuple(getattr(ctx, "compute_capability", ()) or ())):
-        return None  # nothing could ever route — skip the seam scan (the common compile)
+    if not pins:
+        return None
     all_sites = sites(root)
     seams = [s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)]
     if not seams:
@@ -236,32 +143,8 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> S
             continue  # the pin names no seam on THIS tree (a whole-model pin targets one kernel)
         if site is None or site not in seams:
             continue
-        return site if value == _CUT else None  # an explicit fuse pin suppresses any routing entry
-    if _schedule_pins_live():
-        return None  # a pinned compile: the pin decides the form — recorded routing entries do not fire
-    entry = _routing_entry(ctx, knobs, root)
-    if entry is None:
-        return None
-    cuts = [k for k, v in entry.knobs.items() if str(v) == _CUT]
-    if len(cuts) != 1:
-        raise NotImplementedError(f"routing golden {entry.name!r}: exactly ONE cut per entry for now, got {sorted(cuts)}")
-    if cuts[0] == "PLACE":
-        # A bare routing cut takes the SHALLOWEST CUTTABLE seam — the same rule as the bare pin.
-        # The consult tree is the PRE-fork recognized form (the fused kinds' map form), whose
-        # canonical primary seam can be uncuttable (the fold) or spell differently than the
-        # warp-form tree a suffixed key was recorded against; the recursion reaches the same
-        # cascade from whichever legal seam goes first, so the shallowest-cuttable rule is the
-        # tree-robust reading of a bare entry (measured: the cone-cut A/Bs ran exactly this).
-        return min(seams, key=lambda s: s.depth)
-    try:
-        site = resolve(root, cuts[0], all_sites=all_sites)
-    except ValueError as e:
-        logger.warning("routing golden %r: %s — the recorded cut no longer names a seam; deploying the recognized form", entry.name, e)
-        return None
-    if site not in seams:
-        logger.warning("routing golden %r: %s names an uncuttable seam — deploying the recognized form", entry.name, cuts[0])
-        return None
-    return site
+        return site if value == _CUT else None
+    return None
 
 
 def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:

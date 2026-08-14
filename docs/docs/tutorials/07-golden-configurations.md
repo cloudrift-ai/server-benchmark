@@ -59,7 +59,7 @@ mean deploying one card's configuration on another.
 A golden is recorded from a side-by-side comparison run:
 
 ```bash
-emmy run --golden matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE=d2/cp"
+emmy run --golden matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async"
 ```
 
 To verify a target still living in a working YAML—including an exact Loop IR fallback—select both the file and row:

@@ -188,7 +188,7 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
             **ctx,
             "TILE@a1": "mma_m16n8k16_f16_f16/f2x2/k2",
             "REDUCE@a1": "g2k",
-            "STAGE@a1": "d3/tma/p2",
+            "STAGE@a1": "d3/smem-tma/p2",
             "WORK": "w4x2+p2",
             "RASTER": "gm8",
         }
@@ -230,8 +230,8 @@ def test_tma_interactions_fire_only_on_tma_stage():
     """The TMA-conditioned geometry terms are the one-weight-set stand-in for a per-arch split:
     they must mirror the geometry on a TMA-staged row and stay absent under cp.async, so
     pre-Hopper pools rank exactly as before."""
-    tma = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/tma"})
-    cp = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/cp"})
+    tma = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/smem-tma"})
+    cp = _warp_feats(("mma_m16n8k16_f16/f2x2", "w2x4"), **{"STAGE@a1": "d2/smem-async"})
     assert tma["D_tma_grid_m"] == tma["D_w_grid_m"]
     assert tma["D_tma_grid_n"] == tma["D_w_grid_n"]
     assert tma["D_tma_aspect"] == tma["D_aspect"]

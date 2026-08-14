@@ -213,7 +213,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     **lift** (the ``Assign`` the fold accumulates), B is its (n, k)-indexed ``Load``, and A is the
     lift's other argument — a plain ``Load`` (the clean gmem-direct contraction) or, when loop
     fusion has inlined an operand cone, the cone itself as a zero-axis ``Fold`` NODE (the computed-A form,
-    which rides the ``sync`` compute-fill; the caller shapes it into the inline cone node via
+    which rides the ``smem`` compute fill; the caller shapes it into the inline cone node via
     :func:`make_cone`, which also puts the K seam on the node). The fold accumulator is the loop
     body's ``Accum`` target.
 
@@ -240,7 +240,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     # ``linear_1_reduce`` as A and emitted ``linear_1_reduce @ W`` — a wrong kernel, cp.async-ing
     # the gate projection into the A slab with the gelu and the up projection gone. The lift names
     # the true operands: B is its (n, k)-indexed load, A is the other argument — a plain ``Load``
-    # (the clean gmem-direct contraction) or a computed cone (which rides the sync compute-fill,
+    # (the clean gmem-direct contraction) or a computed cone (which rides the smem compute fill,
     # exactly like the norm→linear cone, just with no statistic prologue).
     lift = next((s for s in body if isinstance(s, Assign) and s.name == fold.value), None)
     if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None:
@@ -252,7 +252,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             # binds through the mul-hoist FIRST (the raw storage-dtype A load — the W8A8
             # activation side; the fp8 warp tier needs the materialized bits, and the scalar
             # tier's per-element promote converts them identically); any other pure MAP cone is
-            # the computed-A form and rides the sync compute-fill.
+            # the computed-A form and rides the smem compute fill.
             hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
             if hoist is not None:
                 return hoist

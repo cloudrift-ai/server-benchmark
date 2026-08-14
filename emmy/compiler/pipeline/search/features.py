@@ -119,7 +119,7 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     ``STAGE`` (the gmem-direct baseline) contributes nothing (``{}``); a present codec emits
     the pipeline depth and a small transport one-hot so the model separates the synchronous
     smem copy from cp.async from TMA. Read schema-agnostically off the raw codec, exactly as
-    ``_reduce_decomp`` reads ``REDUCE`` — so a ``d2/cp`` stage featurizes identically on a
+    ``_reduce_decomp`` reads ``REDUCE`` — so a ``d2/smem-async`` stage featurizes identically on a
     scalar (``TILE``) and a warp (``WARP``) contraction (the cross-kind feature transfer)."""
     spec = family_value(knobs, "STAGE")
     if not spec:
@@ -142,11 +142,11 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         # no ``FEATURIZER_VERSION`` bump is owed for the addition itself.
         "D_stage_prefetch": 1.0 if st.depth >= 2 else 0.0,
         "D_stage_async": 1.0 if st.is_async else 0.0,
-        "D_stage_tma": 1.0 if st.transport == "tma" else 0.0,
+        "D_stage_tma": 1.0 if st.transport == "smem-tma" else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)
         # The per-edge transport split (``/split`` — the flash stream's FA-2 choreography, which
         # also stages Q): enumerated as a sibling of the paired ring on flash rows, so without
-        # this flag ``d1/tma/split`` featurizes byte-identically to plain ``d1/tma``.
+        # this flag ``d1/smem-tma/split`` featurizes byte-identically to plain ``d1/smem-tma``.
     }
 
 

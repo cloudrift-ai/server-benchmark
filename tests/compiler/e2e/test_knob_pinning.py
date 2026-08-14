@@ -117,7 +117,7 @@ def _assert_match(forced: np.ndarray, ref: np.ndarray) -> None:
 # ``CUDA_ERROR_MISALIGNED_ADDRESS`` → 1 s watchdog hang → bench_fail. The dtype-aware gate now
 # declines TMA for this slab (→ cp.async). The thread ``WORK`` inventory (no warp atom) forces the scalar
 # tier; the depth-2 ``STAGE`` ring double-buffers so the slot offset matters.
-_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/cp"}
+_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/smem-async"}
 _NORM_DIMS = {"S": 32, "H": 128, "I": 512}
 
 
@@ -237,7 +237,7 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
 # warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
 # has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
 # correct output rather than raise at descriptor-encode time.
-_OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/tma"}
+_OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/smem-tma"}
 
 
 @requires_cuda
@@ -308,7 +308,7 @@ def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     g, _, _ = _build_2d_matmul_graph(_ARTICLE_DIMS)
-    for k, v in {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/tma"}.items():
+    for k, v in {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/smem-tma"}.items():
         monkeypatch.setenv(f"EMMY_{k}", str(v))
     res = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(g, ctx=Context.from_target((12, 0)))
     src = "\n".join(n.op.kernel_source for n in res.nodes.values() if isinstance(n.op, CudaOp))
@@ -485,7 +485,7 @@ def test_unstaged_atom_mma_accuracy(monkeypatch):
 #   layout) must still produce correct output.
 #
 # NOTE: TMA (``cp.async.bulk.tensor``) on the scalar SGEMM tile is covered by the
-# ``*_tma`` rows below (which pin ``STAGE=d2/tma``): ``130_transport`` promotes the scalar
+# ``*_tma`` rows below (which pin ``STAGE=d2/smem-tma``): ``130_transport`` promotes the scalar
 # fp32 tier as well as the warp-tier MMA atom, depositing the slab unswizzled for the
 # plain-``Load`` consumer.
 
@@ -518,7 +518,7 @@ def _build_2d_matmul_graph(dims: dict):
 # (SYNC) here, so the small shape keeps comfortably inside it under parallel xdist.
 #
 # Every row is the SCALAR fp32 tier (no MMA atom is eligible for fp32). Most rows stage
-# via plain SYNC cooperative loads; the ``*_tma`` rows pin ``STAGE=d2/tma`` so the staged
+# via plain SYNC cooperative loads; the ``*_tma`` rows pin ``STAGE=d2/smem-tma`` so the staged
 # operands ride the ``cp.async.bulk.tensor`` double-buffer ring — ``130_transport`` now
 # promotes the scalar tier, depositing the slab unswizzled for the plain-``Load`` consumer.
 # The dead ``ASYNC_COPY`` / ``PIPELINE_STAGES`` knobs (whose
@@ -546,7 +546,7 @@ _MASKED_TILE_CONFIGS: tuple[tuple[str, dict, dict, dict], ...] = (
     ("fn26_masked_n", _SMALL_DIMS, {"TILE": "f26x4", "WORK": "t32x8"}, {}),
     # Scalar-tile TMA: the staged operands ride the cp.async.bulk.tensor ring (unswizzled
     # deposit, plain-Load consumer). A clean (f4x4) tile exercises the box copy.
-    ("tma_clean_fm4_fn4", _ARTICLE_DIMS, {"TILE": "f4x4", "WORK": "t32x8", "STAGE": "d2/tma"}, {}),
+    ("tma_clean_fm4_fn4", _ARTICLE_DIMS, {"TILE": "f4x4", "WORK": "t32x8", "STAGE": "d2/smem-tma"}, {}),
 )
 
 
@@ -586,7 +586,7 @@ def test_masked_tile_accuracy_configs(label: str, dims: dict, knobs: dict, env: 
 # watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
 # TMA-only) now covers cp.async too: the pinned stage resolver-declines and the kernel lowers
 # gmem-direct with correct output.
-_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/cp"}
+_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async"}
 
 
 @requires_cuda
@@ -619,7 +619,7 @@ def test_scalar_cpasync_declines_odd_stride(monkeypatch):
 # (``Operand.dtype``/``elem_bytes``; ``_ScalarOps.slab_elems``); the drain's fma converts like
 # the gmem-direct path. Strides here are 16 B-aligned (K=128, N=96 → 192 B fp16 rows), so the
 # inner-stride gate passes and the mixed-dtype fill itself is what's under test.
-_MIXED_DTYPE_STAGED_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d1/cp"}
+_MIXED_DTYPE_STAGED_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d1/smem-async"}
 
 
 @requires_cuda

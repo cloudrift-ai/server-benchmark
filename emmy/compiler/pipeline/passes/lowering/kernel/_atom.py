@@ -510,7 +510,7 @@ def _sync_operands(
     channels=(),
     seam: tuple = ((), (), ()),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
-    """The ``sync`` transport's drain-ordered, computed, copied, and prologue operands.
+    """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
     Either contraction role may be a generic inline producer cone. A computed A evaluates at
     absolute ``(m, k)`` and fills the canonical ``tile_m × bk`` slab; a computed B evaluates at
@@ -631,9 +631,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    if stage.transport == "sync" and tile.atom.sync_copy_staging:
-        assert isinstance(c.a, Load) and isinstance(c.b, Load), "sync-copy staging requires materialized A and B edges"
-        assert len(ops.channels) == 1, "sync-copy staging is single-fold"
+    # One ``smem`` token, two fills — picked by the TERM, not the value: fully materialized
+    # edges on a sync-copy atom byte-copy into their slabs; a computed edge is evaluated into
+    # its slab (the synchronous thread fill converts on the store when dtypes differ).
+    smem_byte_copy = stage.transport == "smem" and tile.atom.sync_copy_staging and isinstance(c.a, Load) and isinstance(c.b, Load)
+    if smem_byte_copy:
+        assert len(ops.channels) == 1, "byte-copy staging is single-fold"
         elems = ops.slab_elems()
         operands = _slab_operands(
             index_srcs=(c.a.index, c.b.index),
@@ -652,8 +655,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             elem_bytes=elem.nbytes,
             cta=cta,
         )
-    elif stage.transport == "sync":
-        # Generic computed-operand fill: every inline edge is evaluated into its canonical slab;
+    elif stage.transport == "smem":
+        # The synchronous compute fill: every inline edge is evaluated into its canonical slab;
         # every materialized counterpart is copied asynchronously underneath that work.
         operands, sync_ops, async_ops, stat_pro = _sync_operands(
             c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
@@ -667,12 +670,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             prologue_stmts=tuple(stat_pro),
         )
     else:
-        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
+        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
-        pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "cp.async" else 0 for e in elems)
+        pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
         operands = _slab_operands(
             index_srcs=(c.a.index, c.b.index),
             bufs=(c.a.input, c.b.input),
@@ -691,7 +694,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             elem_bytes=elem.nbytes,
             cta=cta,
         )
-        transport = TmaTransport(**common) if stage.transport == "tma" else CpAsyncTransport(**common)
+        transport = TmaTransport(**common) if stage.transport == "smem-tma" else CpAsyncTransport(**common)
 
     def drain(slot):  # the atom's slab-reading leaf, over ring `slot`
         return ops.staged_drain(operands, slot, cells, offset, mn)
@@ -1047,7 +1050,7 @@ class _MmaOps(_AtomOps):
         atom, (m, n) = self.tile.atom, mn
         k_axis = c.axis
         assert isinstance(c.a, Load), "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
-        assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
+        assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the smem compute fill"
         a_load, b_load, b_trans = c.a, c.b, c.b_trans
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
@@ -1207,7 +1210,7 @@ class _ScalarOps(_AtomOps):
         ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
         its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
         c = self.c
-        assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
+        assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp smem compute fill"
         k_axis = c.axis
         m, n = mn
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal

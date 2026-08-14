@@ -611,7 +611,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/smem":
                 return leaf
         return leaves[0]
 
@@ -663,7 +663,7 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if lane == "mma" and str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+            if lane == "mma" and str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/smem":
                 selected.append(row)
                 return leaf
             if lane == "coop" and row.get("WORK") == "t128" and row.get("REDUCE") == "coop":

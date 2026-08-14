@@ -45,7 +45,7 @@ What the walk covers:
   (mma) tiers, split-K rows routing through the structural ``Fold ⊃ Fold`` composition that
   ``030_split_reduce`` consumes;
 - a COMPUTED pointwise edge on either contraction operand (including fused norm→linear / gate⊗up
-  on A and an expanding pure producer on B): the warp tier over the mandatory ``sync``
+  on A and an expanding pure producer on B): the warp tier over the mandatory ``reg``
   compute-fill, with the cone's own statistic site under the same inventory — a
   ``_site_values`` entry plus legality, not an emitter of its own;
 - the STREAMING PAIR (flash): the hoisted score edge and the derived P@V each enumerate their half
@@ -278,7 +278,7 @@ def _shared_row_buf(carrier_loads, tail, grid_vars, raxis: Axis, inputs) -> str 
 
 def _row_stage(term: _Term, node) -> Stage | None:
     """The shared-row :class:`Stage` a COOPERATIVE reduce over ``node`` can drive, or ``None``. It
-    is a RESOLVER, not a choice: the row spells ``d1/sync`` exactly when the shape carries an
+    is a RESOLVER, not a choice: the row spells ``d1/smem`` exactly when the shape carries an
     operand the CTA can hold as a shared row across the reduce and its contraction tail, and the
     materializer re-resolves the same buffer off the same term."""
     tail = projection_tail(term.tile)
@@ -287,7 +287,7 @@ def _row_stage(term: _Term, node) -> Stage | None:
     grid_vars = tuple(Var(a.name) for a in term.place.grid)
     carrier_loads = [ld for ld in _node_loads(node) if ld.is_scalar]
     buf = _shared_row_buf(carrier_loads, tail, grid_vars, node.axis, term.tile.inputs)
-    return Stage(transport="sync", smem=(buf,)) if buf is not None else None
+    return Stage(transport="smem", smem=(buf,)) if buf is not None else None
 
 
 def _strippable(term: _Term) -> bool:
@@ -385,6 +385,10 @@ class _Term:
         #: Set when any site offers a tensor-core row — a structural fact about the KERNEL, stamped
         #: on EVERY row so the priors can price "a scalar tile where tensor cores were on offer".
         self.warp_eligible = False
+        #: Set when any contraction site offers the mandatory smem compute fill (a computed
+        #: operand cone) — the structural fact the deploy-time classifier keys the fused
+        #: convention on, stamped on every row as ``S_computed_a``.
+        self.computed_fill = False
 
     def key(self, family: str, node) -> str | None:
         """The canonical key ``family`` spells ``node`` with in the UNION's namespace — the
@@ -468,7 +472,7 @@ def _reading(tile: TileOp, op, ctx, *, free=None, stores=None, ref: Sched | None
 
 def _promoted(node, inputs, ctx):
     """A mixed-dtype contraction — a plain **f32** ``a`` ``Load`` against 16-bit channels — with its
-    ``a`` edge re-expressed as a one-``Load`` COMPUTED cone, so it rides the mandatory ``sync``
+    ``a`` edge re-expressed as a one-``Load`` COMPUTED cone, so it rides the mandatory ``reg``
     compute-fill whose slab store demotes the value to the atom dtype. The copy transports move raw
     bytes and cannot convert, which is why the warp tier is reachable only through the cone form.
     ``None`` when the term is not that shape.
@@ -540,7 +544,7 @@ def _rewrap(op, node):
 
 
 def _has_computed_operand(node) -> bool:
-    """Whether either role is an inline *pointwise cone* eligible for sync compute-fill.
+    """Whether either role is an inline *pointwise cone* eligible for smem compute fill.
 
     A nonzero-axis Fold is a nested scheduling site, not a scalar producer evaluated at each
     contraction cell.  Keeping that distinction preserves multi-site reduce enumeration while the
@@ -606,7 +610,7 @@ def _f8_mma_allowed(ctx) -> bool:
 def _a_dtype(node, inputs):
     """The ``a`` edge's element dtype — the value the mma fragment reads. A MATERIALIZED edge reads
     its gmem tensor's; a COMPUTED cone reads its K-indexed leaf ``Load``'s, which is the value the
-    sync compute-fill stores to the A slab."""
+    smem compute fill stores to the A slab."""
     ld = node.a
     if not isinstance(ld, Load):
         k = node.axis.name
@@ -617,7 +621,7 @@ def _a_dtype(node, inputs):
 
 def _channel_dtype(node, inputs):
     """The one element dtype every channel's B agrees on, or ``None`` — the dtype an f32 ``a`` still
-    rides when the sync compute-fill DEMOTES it on the slab store."""
+    rides when the smem compute fill DEMOTES it on the slab store."""
     bs = [ch.b for ch in node.channels]
     if not bs or not all(isinstance(b, Load) for b in bs):
         return None
@@ -794,7 +798,7 @@ def _reduce_values(term: _Term, node) -> list[dict]:
 
 def _fill_realized(parent: _Node | None, site: Site) -> bool:
     """Whether the PARENT form realizes this nested fold's partition ITSELF, leaving the site's own
-    value the decided empty. One form does today: the sync compute-fill's per-row statistic
+    value the decided empty. One form does today: the smem compute fill's per-row statistic
     prologue stripes a cone's statistic ONE ROW PER WARP, the warp's 32 lanes striding the fold and
     closing it on the shuffle butterfly (``lowering/kernel/_stage.sync_stat_fill``) — a single
     hardwired partition, so any value here would stamp a knob no kernel realizes."""
@@ -816,7 +820,7 @@ def _band_of(plan: ReducePlan) -> Workers | None:
 def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Stage | None:
     """The ONE transport-resolver dispatch — which operand edges and tier select.
 
-    Any COMPUTED contraction operand takes the sync compute-fill, which is MANDATORY (no copy
+    Any COMPUTED contraction operand takes the smem compute fill, which is MANDATORY (no byte
     transport can evaluate a cone), so ``want=None`` still resolves and only the DEPTH is ever
     free. Fully MATERIALIZED operands take the mma resolver on a warp tile and the scalar one
     otherwise, with ``want=None`` the gmem-direct baseline; TMA declines below sm_90 rather than
@@ -831,8 +835,12 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     if want is not None and tile.is_warp and legal.warp_atom_stage(tile.atom, want) is not None:
         return None
     if _has_computed_operand(node):
-        return legal.resolve_sync_stage(node, tile, budget, want.depth if want is not None else 1)
-    if want is None or (want.transport == "tma" and not term.ctx.has_tma):
+        # A computed edge takes only the ``smem`` compute fill — a want naming an asynchronous
+        # byte transport declines rather than silently resolving to the fill.
+        if want is not None and want.transport != "smem":
+            return None
+        return legal.resolve_fill_stage(node, tile, budget, want.depth if want is not None else 1)
+    if want is None or (want.transport == "smem-tma" and not term.ctx.has_tma):
         return None
     if tile.is_warp:
         return legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
@@ -858,12 +866,12 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
     return out
 
 
-def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
+def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     """The RESOLVED compute-fill stages a COMPUTED operand offers — its depths, and nothing else:
-    the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no copy transport can
+    the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no byte transport can
     evaluate a cone), so a ``STAGE`` pin can only choose the depth. ``d1`` and the asynchronous-peer
     prefetch ring ``d2`` are fork siblings — the ring is measured per shape (see
-    :func:`_legality.resolve_sync_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
+    :func:`_legality.resolve_fill_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row."""
     pin = term.pin("STAGE", node)
     depths = [Stage.parse(pin).depth] if pin else [1, 2]
@@ -871,7 +879,7 @@ def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     def resolve(st: Stage) -> Stage | None:
         r = _resolve_stage(term, node, tile, st)
         if r is None:  # per DECLINED depth, so a pin that fits no depth names its own budget
-            legal.enforce(f"the sync compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=pin is not None)
+            legal.enforce(f"the smem compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=pin is not None)
         return r
 
     return _resolved((Stage(depth=d) for d in depths), resolve, gmem_direct=False)
@@ -886,7 +894,8 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         return [None]  # per-cell / unbindable — no operand slab to stage
     tile = plan.placed_on(term.place)
     if plan.is_warp and _has_computed_operand(node):
-        return _sync_values(term, node, tile)
+        term.computed_fill = True
+        return _fill_values(term, node, tile)
 
     def resolve(st: Stage) -> Stage | None:
         return _resolve_stage(term, node, tile, st)
@@ -1327,6 +1336,13 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], list[tuple], 
         # prices "a scalar tile where tensor cores were on offer".
         for row in rows:
             row["S_warp_eligible"] = 1.0
+    if any(term.computed_fill for term in terms):
+        # The fork enumerates the mandatory smem compute fill — a computed-A contraction (or
+        # its mixed-A promotion sibling). The deploy classifier and the golden keying read this
+        # stamp; a transport token cannot carry it, because the byte-copy staging spells the
+        # same ``smem`` rows on fully materialized edges.
+        for row in rows:
+            row["S_computed_a"] = 1.0
     return rows, keys, idents, origin
 
 
@@ -1532,7 +1548,7 @@ def _splitk_option(
     stage = _resolve_stage(term, inner, placed, Stage.parse(stage_spec) if stage_spec else None)
     if not isinstance(node.a, Load):
         budget = term.ctx.max_dynamic_smem
-        legal.enforce(None if stage is not None else f"split-K: the sync slabs exceed the {budget} B smem budget", pinned=True)
+        legal.enforce(None if stage is not None else f"split-K: the reg slabs exceed the {budget} B smem budget", pinned=True)
     # ONE composition rule: the outer reduce is the IDENTITY lift over the sliced contraction
     # operand, its combine the componentwise additive ⊕ over the same accumulator names — the
     # reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``.

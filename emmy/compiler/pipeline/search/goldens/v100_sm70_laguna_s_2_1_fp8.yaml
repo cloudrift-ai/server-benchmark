@@ -3509,7 +3509,7 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:

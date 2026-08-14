@@ -640,7 +640,8 @@ class Placement:
 
 
 # --------------------------------------------------------------------------- #
-# The operand-transport + warp-split descriptors. ``Stage`` (sync / cp.async / TMA) is the operand
+# The operand-transport + warp-split descriptors. ``Stage`` (the operand's intermediate storage
+# and fill mechanism) is the operand
 # pipeline; ``WarpSpec`` (the WSPEC worker split) partitions the CTA's warps into producer /
 # compute bands over that fixed pipeline — both resolved scheduler-side and applied verbatim by
 # the materializer (the liveness-scheduled ``lowering/kernel/_stage.pipelined_kloop``, via its
@@ -648,12 +649,15 @@ class Placement:
 # --------------------------------------------------------------------------- #
 
 
-#: The codec transport token (``cp``) vs the canonical stored value (``cp.async``).
-_TRANSPORT_CODEC = {"sync": "sync", "cp": "cp.async", "tma": "tma"}
-_TRANSPORT_SPELL = {v: k for k, v in _TRANSPORT_CODEC.items()}
+#: The transport tokens: the shared-memory intermediate named by its fill mechanism — the
+#: synchronous thread fill (``smem``: a byte copy of materialized edges, or the compute fill
+#: evaluating a computed edge into its slab), ``cp.async`` (``smem-async``) and TMA
+#: (``smem-tma``). An EMPTY ``STAGE`` is no intermediate at all: gmem→register on a
+#: materialized operand, register-to-register on a computed one.
+_TRANSPORTS = ("smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
-_STAGE_EXPECT = "expect d<n> / sync|cp|tma / split / p<n>"
+_STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
 
 
 @dataclass(frozen=True)
@@ -681,7 +685,7 @@ class Stage:
     ``depth`` is the **gmem→smem** ring (a synchronous slot fill or the cp.async / TMA prefetch
     over the serial reduce loop), ``reg_depth`` is the **smem→register** double-buffer (the
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
-    orthogonal — ``d3/cp/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
+    orthogonal — ``d3/smem-async/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
     The slab K-*granularity* (how much K is resident) is ``TilePlan.bk``, NOT a third depth
     here — granularity and buffer depth are kept distinct.
@@ -691,14 +695,14 @@ class Stage:
     byte-identically with and without it."""
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
-    transport: str = "sync"  # sync | cp.async | tma (the gmem→smem producer)
+    transport: str = "smem"  # smem | smem-async | smem-tma (the intermediate and its fill mechanism)
     smem: tuple[str, ...] = ()  # operands staged through smem (derived at resolution; not in the codec)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
     bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
 
     def __post_init__(self) -> None:
-        if self.transport not in _TRANSPORT_SPELL:
-            raise ValueError(f"bad Stage transport {self.transport!r} (expect sync | cp.async | tma)")
+        if self.transport not in _TRANSPORTS:
+            raise ValueError(f"bad Stage transport {self.transport!r} (expect smem | smem-async | smem-tma)")
         if self.depth < 1:
             raise ValueError(f"Stage depth must be ≥ 1, got {self.depth}")
         if self.reg_depth < 1:
@@ -707,19 +711,23 @@ class Stage:
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
         """Decode the ``STAGE`` knob codec into a stage: ``/``-separated tokens —
-        ``d<depth>`` (gmem→smem ring depth), ``sync`` | ``cp`` | ``tma`` (the transport), and an
-        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``sync`` default (the
+        ``d<depth>`` (gmem→smem ring depth), ``smem`` | ``smem-async`` | ``smem-tma`` (the
+        intermediate and its fill mechanism: a synchronous thread fill — byte-copying a
+        materialized edge, evaluating a computed one, converting when the dtypes differ — the
+        cp.async ring, or TMA; the ABSENCE of a stage means no intermediate at all — gmem→register
+        for a materialized operand, register→register evaluation for a computed one), and an
+        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``smem`` default (the
         caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
         only reached on a non-empty spec). ``smem`` is filled in later by the scheduler.
 
         Binding is order-free, but each token binds at most ONCE: a repeat has no last-one-wins
-        reading a caller could have meant — ``d2/cp/d3`` would land ``d3/cp`` and ``sync/tma``
-        would land ``d1/tma``, each quietly deploying a kernel the pin did not name. Raises
+        reading a caller could have meant — ``d2/smem-async/d3`` would land ``d3/smem-async`` and ``smem/smem-tma``
+        would land ``d1/smem-tma``, each quietly deploying a kernel the pin did not name. Raises
         ``ValueError`` and only ``ValueError`` on any malformed input (the featurizers degrade on
         it), naming the codec so a bad pin names its knob."""
         s = (spec or "").strip()
         seen: set[str] = set()
-        depth, transport, reg_depth = 1, "sync", 1
+        depth, transport, reg_depth = 1, "smem", 1
 
         def once(field: str, tok: str) -> None:
             if field in seen:
@@ -727,9 +735,9 @@ class Stage:
             seen.add(field)
 
         for t in s.split("/") if s else ():
-            if t in _TRANSPORT_CODEC:
+            if t in _TRANSPORTS:
                 once("transport", t)
-                transport = _TRANSPORT_CODEC[t]
+                transport = t
             elif t.startswith("d"):
                 once("d", t)
                 depth = _codec_width(t[1:], tok=t, codec="STAGE")
@@ -744,7 +752,7 @@ class Stage:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
         derived, so it is not spelled; ``reg_depth`` is spelled only when ≥ 2 (the ``p1``
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
-        toks = [f"d{self.depth}", _TRANSPORT_SPELL[self.transport]]
+        toks = [f"d{self.depth}", self.transport]
         if self.reg_depth > 1:
             toks.append(f"p{self.reg_depth}")
         return "/".join(toks)
@@ -753,7 +761,7 @@ class Stage:
     def is_async(self) -> bool:
         """True for the asynchronous-copy transports (``cp.async`` / ``tma``) — the ones
         that issue a commit/wait or mbarrier handshake rather than a plain ``__syncthreads``."""
-        return self.transport in ("cp.async", "tma")
+        return self.transport in ("smem-async", "smem-tma")
 
 
 @dataclass(frozen=True)
@@ -771,7 +779,7 @@ class WarpSpec:
     is ``_legality.producer_transport``: a resolved TMA stage, un-split, on a kernel that is not
     split across CTAs. That is the whole legality rule — the box copy is issued by one elected
     thread onto a slot mbarrier any thread can parity-wait, so the fill moves warps freely, while
-    ``cp.async``'s wait-group is issuing-thread-scoped and a ``sync`` compute-fill has no async load
+    ``cp.async``'s wait-group is issuing-thread-scoped and an ``smem`` compute fill has no async load
     half.
 
     Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band

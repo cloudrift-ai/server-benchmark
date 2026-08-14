@@ -74,13 +74,14 @@ TILE = Knob(
 )
 
 # Operand staging — the reused gmem operands (matmul A/B, a fused prologue's read) ride a
-# shared-memory slab + double-buffered producer (``sync`` plain copy / ``cp.async`` / ``tma``) over
-# the serial reduce loop, instead of the gmem-direct register baseline. Resolved into the schedule's
-# :class:`Stage` (``None`` = gmem-direct). Composes with both fragments of the unified ``TILE`` knob.
+# shared-memory slab + double-buffered producer (``smem`` synchronous thread fill / ``smem-async``
+# cp.async / ``smem-tma`` TMA) over the serial reduce loop, instead of the no-intermediate baseline.
+# Resolved into the schedule's :class:`Stage` (``None`` = no intermediate). Composes with both
+# fragments of the unified ``TILE`` knob.
 STAGE = Knob(
     "STAGE",
     KnobType.STR,
-    help="Operand-staging codec (d<depth>/sync|cp|tma[/split][/p<reg_depth>]; empty=gmem-direct). "
+    help="Operand-staging codec (d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]; empty=no intermediate). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
@@ -415,18 +416,33 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
     double-buffer variants. Both tiers offer the asynchronous gmem→smem prefetch ring depths (the
     scalar ring lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived
-    by the scalar stage resolver). The warp tier additionally offers the synchronous-copy ring for
-    atoms that lack an asynchronous copy instruction. Its depths use the same slot schedule but do
-    not promise copy/compute overlap. The ``p2`` smem→register double-buffer is warp-only.
+    by the scalar stage resolver). The warp tier additionally offers ``smem`` (the synchronous
+    thread fill: a byte-copy of materialized edges on the atoms that lack an asynchronous copy
+    instruction, or the operand's values COMPUTED from a nested edge into the
+    slab — a computed edge's only staged transport, and a converting one for a materialized edge
+    whose dtype the atom cannot bind directly). The ``p2`` smem→register double-buffer is
+    warp-only.
 
     Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the enumeration
     leads with it as the conservative option-0. Emission is resolver-gated: a candidate is offered
     only when it RESOLVES against the built node, and the row carries the RESOLVED spelling."""
-    depths = [Stage.parse(s) for s in ("d1/cp", "d2/cp", "d3/cp", "d4/cp", "d1/tma", "d2/tma", "d3/tma", "d4/tma")]
+    depths = [
+        Stage.parse(s)
+        for s in (
+            "d1/smem-async",
+            "d2/smem-async",
+            "d3/smem-async",
+            "d4/smem-async",
+            "d1/smem-tma",
+            "d2/smem-tma",
+            "d3/smem-tma",
+            "d4/smem-tma",
+        )
+    ]
     if not warp:
         return depths
-    sync = [Stage.parse(s) for s in ("d1/sync", "d2/sync", "d3/sync", "d4/sync", "d1/sync/p2", "d2/sync/p2")]
-    return [*sync, *depths, Stage.parse("d2/cp/p2")]
+    smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
+    return [*smems, *depths, Stage.parse("d2/smem-async/p2")]
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is

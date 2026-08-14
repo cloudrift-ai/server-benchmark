@@ -142,7 +142,7 @@ def test_schedule_leaf_set_equals_catalog():
         if plan.units_n * plan.reg_n > 64:
             assert stages == {""}, f"{where}: masked-N must decline staging: {stages}"
         else:
-            assert {"", "d1/cp"} <= stages, f"{where}: missing the base resolved stages: {stages}"
+            assert {"", "d1/smem-async"} <= stages, f"{where}: missing the base resolved stages: {stages}"
         splits = {full_reduce(r) for r in tiled if full_reduce(r).stages}
         assert splits == set(splitk_moves()), f"{where}: {splits}"
         split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r).stages}

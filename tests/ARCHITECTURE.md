@@ -185,8 +185,8 @@ at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a war
 carry `requires_sm90` so they skip below sm_90 instead of faulting (a single warp-tier fault corrupts the shared `cuda`
 context and cascades `cudaErrorIllegalAddress` into every later test on the worker, CUDA or not). The warp-tier matmul
 coverage all lives in `test_matmul_coverage.py` — the scalar vs warp `TILE` accuracy/structure matrix, the
-masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic parity across the `STAGE=d2/cp` and
-`d2/tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/cp`) and the smem→register
+masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic parity across the `STAGE=d2/smem-async` and
+`d2/smem-tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/smem-async`) and the smem→register
 double-buffer (`/p<n>`), each asserted **bit-identical** to the single-buffer / gmem-direct baseline (a pure perf
 transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ sm_90); its GPU-less render / structure cases
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same

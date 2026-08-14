@@ -159,28 +159,30 @@ CTA-shared across the sibling, so a sibling var can only survive as a value-dead
 merged / reshaped weight row), and left unbound it would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
 `Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
 `bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
-shared `reduce` (which emits the loop) apply it verbatim. The `Stage` spells two buffering levels:
+shared `reduce` (which emits the loop) apply it verbatim. The `Stage` names the intermediate storage and its fill mechanism — `smem` (the synchronous
+thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
+a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
 prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a
 **pure perf transform** — an ineligible kernel (masked N, symbolic / non-divisible K; a
 transposed B stages N-major on every transport since the serving-layout work) silently falls back
 to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. A synchronous ring uses the same slot rotation and barriers, but the
-copy runs on the consumer threads and therefore cannot overlap the current drain; `/p<n>` remains the independent
-smem→register fragment pipeline. The Volta m8n8k4 atom enables only this copy transport for materialized f16 A/B
-edges and keeps computed edges and newer instruction families disabled. The **TMA** transport additionally
-requires **sm_90+**
-(Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/tma*` moves are
-never offered and a `tma` pin declines to cp.async / gmem-direct — Ada/Ampere have no `cp.async.bulk.tensor` and nvcc
-has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the schedule fork enumerates the
+**bit-identical** to its gmem-direct baseline. A synchronous `smem` ring uses the same slot rotation and barriers, but the
+fill runs on the consumer threads and therefore cannot overlap the current drain; `/p<n>` remains the independent
+smem→register fragment pipeline. The Volta m8n8k4 atom enables only the synchronous byte-copy fill for materialized
+f16 A/B edges and keeps computed edges and newer instruction families disabled. The **`smem-tma`** transport
+additionally requires **sm_90+**
+(Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
+are never offered and a `smem-tma` pin declines to `smem-async` / gmem-direct — Ada/Ampere have no
+`cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the schedule fork enumerates the
 resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves; a `EMMY_STAGE` pin stays
 authoritative.
 
-**Inline operands — the mma tier's `sync` transport.** A matmul with a pure producer cone on either operand reaches
+**Inline operands — the `smem` compute fill.** A matmul with a pure producer cone on either operand reaches
 the warp tier through a COMPUTED edge: recognition stores the producer tree inline on that edge
-(`_atomize.make_cone`), and the schedule offers a MANDATORY resolved `sync` `Stage` (there is no gmem-direct sibling —
-a copy transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
+(`_atomize.make_cone`), and the schedule offers a MANDATORY resolved `smem` `Stage` (there is no gmem-direct sibling —
+a byte transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
 ordinary scalar tensor algebra per shared-memory slab cell, feeding the unchanged `ldmatrix` drain. A is stored in
 canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Materialized peer operands use the
 same vectorized `cp.async` path as ordinary staged matmul, so a generic compact-storage B producer can be evaluated
@@ -200,7 +202,7 @@ IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the
 transport prologue
 (`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
 the stat fold's shuffle butterfly (`emit_combine` off the threaded `Reduction`), lane 0 writing the bridged stat into its smem row; one barrier);
-the per-cell compute-fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
+the per-cell compute fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
 the `RegStore` guard). A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE
 shared inline cone; `_AtomOps.channels` reads them off the node) fills one B slab per channel, drains N

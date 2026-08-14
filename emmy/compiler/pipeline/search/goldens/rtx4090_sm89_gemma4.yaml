@@ -2530,7 +2530,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 102.3
       reference_us: 104.0
@@ -2544,7 +2544,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 84.5
       reference_us: 104.0
@@ -2563,7 +2563,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 101.9
       reference_us: 103.0
@@ -2577,7 +2577,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 84.0
       reference_us: 103.0
@@ -2596,7 +2596,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 57.2
       reference_us: 49.0
@@ -2610,7 +2610,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 48.0
       reference_us: 49.0
@@ -2629,7 +2629,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 58.4
       reference_us: 49.0
@@ -2643,7 +2643,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 47.8
       reference_us: 49.0
@@ -2662,7 +2662,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 109.3
       reference_us: 115.0
@@ -2676,7 +2676,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 85.8
       reference_us: 115.0
@@ -2690,7 +2690,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 109.0
       reference_us: 115.0
@@ -2709,7 +2709,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 108.8
       reference_us: 115.0
@@ -2723,7 +2723,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 88.8
       reference_us: 115.0
@@ -2742,7 +2742,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x8/k2
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 810.0
       reference_us: 801.0
@@ -2756,7 +2756,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 719.9
       reference_us: 801.0
@@ -2775,7 +2775,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 879.6
       reference_us: 799.0
@@ -2789,7 +2789,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 718.8
       reference_us: 799.0
@@ -2808,7 +2808,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 395.3
       reference_us: 392.0
@@ -2822,7 +2822,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 291.7
       reference_us: 392.0
@@ -2890,7 +2890,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 430.1
       reference_us: 398.6
@@ -2905,7 +2905,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 277.7
       reference_us: 398.6
@@ -2925,7 +2925,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 225.0
       reference_us: 209.3
@@ -2940,7 +2940,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 171.2
       reference_us: 209.3
@@ -2960,7 +2960,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 455.7
       reference_us: 446.8
@@ -2975,7 +2975,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 325.6
       reference_us: 446.8
@@ -2995,7 +2995,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4347.0
       reference_us: 2945.0
@@ -3010,7 +3010,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2316.0
       reference_us: 2945.0
@@ -3030,7 +3030,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1580.0
       reference_us: 1493.7
@@ -3045,7 +3045,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1100.0
       reference_us: 1493.7
@@ -3064,7 +3064,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 220.8
       reference_us: 211.7
@@ -3078,7 +3078,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 144.2
       reference_us: 211.7
@@ -3097,7 +3097,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 19.6
       reference_us: 16.6
@@ -3111,7 +3111,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 17.9
       reference_us: 16.6
@@ -3130,7 +3130,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 223.5
       reference_us: 227.6
@@ -3144,7 +3144,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 162.1
       reference_us: 227.6
@@ -3179,7 +3179,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 222.9
       reference_us: 195.4
@@ -3193,7 +3193,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 144.5
       reference_us: 195.4
@@ -3212,7 +3212,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 19.7
       reference_us: 16.6
@@ -3226,7 +3226,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 18.3
       reference_us: 16.6
@@ -3245,7 +3245,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 233.7
       reference_us: 226.2
@@ -3259,7 +3259,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 168.1
       reference_us: 226.2
@@ -3279,7 +3279,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 801.8
       reference_us: 751.2
@@ -3294,7 +3294,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 583.2
       reference_us: 751.2
@@ -3314,7 +3314,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 57.9
       reference_us: 48.7
@@ -3329,7 +3329,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 47.9
       reference_us: 48.7
@@ -3349,7 +3349,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 831.5
       reference_us: 790.3
@@ -3364,7 +3364,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 589.3
       reference_us: 790.3
@@ -3384,7 +3384,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 912.4
       reference_us: 811.0
@@ -3399,7 +3399,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 591.9
       reference_us: 811.0
@@ -3419,7 +3419,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 912.4
       reference_us: 813.1
@@ -3434,7 +3434,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 580.1
       reference_us: 813.1
@@ -3454,7 +3454,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 467.5
       reference_us: 414.2
@@ -3469,7 +3469,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 300.4
       reference_us: 414.2
@@ -3489,7 +3489,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 466.9
       reference_us: 413.2
@@ -3504,7 +3504,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 294.6
       reference_us: 413.2
@@ -3524,7 +3524,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 915.5
       reference_us: 824.3
@@ -3539,7 +3539,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 638.0
       reference_us: 824.3
@@ -3559,7 +3559,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 912.4
       reference_us: 815.1
@@ -3574,7 +3574,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 622.1
       reference_us: 815.1
@@ -3594,7 +3594,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4230.1
       reference_us: 3006.5
@@ -3609,7 +3609,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2183.2
       reference_us: 3006.5
@@ -3629,7 +3629,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4910.1
       reference_us: 2888.7
@@ -3644,7 +3644,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2103.3
       reference_us: 2888.7
@@ -3664,7 +3664,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3638.3
       reference_us: 2915.3
@@ -3679,7 +3679,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2221.1
       reference_us: 2915.3
@@ -3694,7 +3694,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3324.9
       reference_us: 2915.3
@@ -3714,7 +3714,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3638.3
       reference_us: 2989.0
@@ -3729,7 +3729,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2154.5
       reference_us: 2922.5
@@ -3744,7 +3744,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3415.8
       reference_us: 2922.5
@@ -3764,7 +3764,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1795.1
       reference_us: 1609.8
@@ -3779,7 +3779,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1166.3
       reference_us: 1609.8
@@ -3799,7 +3799,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1798.1
       reference_us: 1610.8
@@ -3814,7 +3814,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1142.8
       reference_us: 1610.8
@@ -3829,7 +3829,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1720.3
       reference_us: 1549.3
@@ -3844,7 +3844,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1147.9
       reference_us: 1549.3
@@ -3864,7 +3864,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 133.0
       reference_us: 110.0
@@ -3879,7 +3879,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 91.0
       reference_us: 110.0
@@ -3899,7 +3899,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 132.2
       reference_us: 110.9
@@ -3914,7 +3914,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 86.7
       reference_us: 110.9
@@ -3934,7 +3934,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1801.2
       reference_us: 1613.8
@@ -3949,7 +3949,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1225.7
       reference_us: 1613.8
@@ -3969,7 +3969,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1792.0
       reference_us: 1604.6
@@ -3984,7 +3984,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1191.9
       reference_us: 1604.6
@@ -4088,7 +4088,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 12131.3
       reference_us: 6424.6
@@ -4112,7 +4113,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 16152.6
       reference_us: 6486.0
@@ -4130,7 +4132,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
       RASTER: ''
     measurements:
       emmy_us: 104.7
@@ -4144,7 +4146,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 80.8
@@ -4163,7 +4165,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 57.1
@@ -4177,7 +4179,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 44.7
@@ -4196,7 +4198,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
       RASTER: ''
     measurements:
       emmy_us: 111.0
@@ -4210,7 +4212,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 81.9
@@ -4229,7 +4231,7 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 225.5
@@ -4243,7 +4245,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 151.9
@@ -4262,7 +4264,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 21.0
@@ -4276,7 +4278,7 @@ configs:
       WORK: w2x4
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 17.8
@@ -4295,7 +4297,7 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 239.1
@@ -4309,7 +4311,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 195.3
@@ -4329,7 +4331,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.5
@@ -4344,7 +4346,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.5
@@ -4364,7 +4366,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 77.5
@@ -4379,7 +4381,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 58.3
@@ -4399,7 +4401,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 8.9
@@ -4414,7 +4416,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 7.8
@@ -4434,7 +4436,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 41.3
@@ -4454,7 +4456,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.8
@@ -4469,7 +4471,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.6
@@ -4489,7 +4491,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 80.7
@@ -4504,7 +4506,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 61.2
@@ -4524,7 +4526,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f4x1/k4
       REDUCE: g4a
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 137.9
@@ -4539,7 +4541,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f4x1/k4
       REDUCE: g4a
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 137.5
@@ -4559,7 +4561,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k8
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 130.2
@@ -4574,7 +4576,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k8
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 130.0
@@ -4594,7 +4596,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k4
       REDUCE: g4a
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 141.0
@@ -4614,7 +4616,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 310.3
@@ -4629,7 +4631,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 303.0
@@ -4649,7 +4651,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 25.9
@@ -4664,7 +4666,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 25.8
@@ -4684,7 +4686,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 127.0
@@ -4704,7 +4706,7 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f1x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 5.9
@@ -4719,7 +4721,7 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f16/f1x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 5.5
@@ -4739,7 +4741,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 16.9
@@ -4759,7 +4761,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 22.0
@@ -4774,7 +4776,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 21.9
@@ -4794,7 +4796,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 162.1
@@ -4809,7 +4811,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 107.3
@@ -5264,7 +5266,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/sync
+      STAGE: d2/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 26.4
       reference_us: 22.3
@@ -5285,7 +5288,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f1x1/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/sync
+      STAGE: d2/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 18.2
       reference_us: 16.4
@@ -5300,7 +5304,8 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f1x1/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/sync
+      STAGE: d2/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 17.2
       reference_us: 16.4
@@ -5321,7 +5326,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 40.7
       reference_us: 45.3
@@ -5336,7 +5342,8 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 36.3
       reference_us: 45.3
@@ -5357,7 +5364,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f1x1/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/sync
+      STAGE: d2/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 12.7
       reference_us: 9.0
@@ -5372,7 +5380,8 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f1x1/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/sync
+      STAGE: d2/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 12.6
       reference_us: 9.0
@@ -5396,7 +5405,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k8
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 285.0
       reference_us: 281.6
@@ -5467,7 +5477,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 219.7
@@ -5482,7 +5492,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 157.9
@@ -5501,7 +5511,7 @@ configs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 439.8
@@ -5515,7 +5525,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 312.0
@@ -5654,7 +5664,7 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 243.5
@@ -5673,7 +5683,7 @@ configs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 515.1
@@ -5687,7 +5697,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 513.0
@@ -5708,7 +5718,8 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 280.1
@@ -5729,7 +5740,8 @@ configs:
       WORK: w2x8
       TILE: mma_m16n8k16_f16_f32/f4x4/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 628.2
@@ -5749,7 +5761,8 @@ configs:
       WORK: w2x8
       TILE: mma_m16n8k16_f16_f32/f4x4/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 1212.4
@@ -5770,7 +5783,8 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 150.5
@@ -5790,7 +5804,8 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 287.1
@@ -5811,7 +5826,8 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 61.4
@@ -5832,7 +5848,8 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 254.5
@@ -5852,7 +5869,8 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 361.8
@@ -5873,7 +5891,8 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 147.4
@@ -5894,7 +5913,8 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 358.5
@@ -5993,7 +6013,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 70.8
       reference_us: 50.4
@@ -6014,7 +6035,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 78.3
       reference_us: 58.6
@@ -6035,7 +6057,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 400.8
       reference_us: 298.0
@@ -6055,7 +6078,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 44.7
       reference_us: 37.5
@@ -6075,7 +6098,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 54.5
       reference_us: 47.4
@@ -6095,7 +6118,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 512.5
       reference_us: 297.0
@@ -6110,7 +6133,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 492.0
       reference_us: 297.0
@@ -6131,7 +6154,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 3281.9
       reference_us: 1694.7
@@ -6146,7 +6170,8 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 2505.7
       reference_us: 1694.7
@@ -6167,7 +6192,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/sync
+      STAGE: d1/smem
+      S_computed_a: 1.0
     measurements:
       emmy_us: 17140.7
       reference_us: 5600.3
@@ -6187,7 +6213,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1837.1
       reference_us: 1639.4
@@ -6202,7 +6228,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1268.7
       reference_us: 1639.4
@@ -6222,7 +6248,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 15838.3
       reference_us: 5600.3
@@ -6237,7 +6263,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4754.4
       reference_us: 5600.3
@@ -6257,7 +6283,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 23.3
       reference_us: 19.0
@@ -6277,7 +6303,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 39.2
       reference_us: 37.4
@@ -6297,7 +6323,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 145.4
       reference_us: 146.0

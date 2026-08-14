@@ -382,8 +382,7 @@ def _verification_input_maps(graphs: tuple, *, seed: int) -> tuple[dict, ...]:
 
     def static(shape) -> tuple[int, ...]:
         return tuple(
-            (dim.as_static() if dim.is_static else int(dim.expr.eval(sym_env))) if isinstance(dim, Dim) else int(dim)
-            for dim in shape
+            (dim.as_static() if dim.is_static else int(dim.expr.eval(sym_env))) if isinstance(dim, Dim) else int(dim) for dim in shape
         )
 
     def spec(shape, dtype) -> tuple[tuple[int, ...], str]:

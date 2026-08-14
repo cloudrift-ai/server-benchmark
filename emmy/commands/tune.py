@@ -686,10 +686,7 @@ def handle_tune(args):
             logger.error("replay verification failed: %s", exc)
             sys.exit(1)
         for report in reports:
-            sys.stderr.write(
-                f"[verify] {report['label']}: exact={report['emmy_us']:.3f}us, "
-                f"emmy-greedy={report['reference_us']:.3f}us\n"
-            )
+            sys.stderr.write(f"[verify] {report['label']}: exact={report['emmy_us']:.3f}us, emmy-greedy={report['reference_us']:.3f}us\n")
         sys.stderr.write(f"[verify] atomically updated {len(reports)} whole/child measurement(s): {args.golden_file}\n")
         _exit_flushed(0)
 
